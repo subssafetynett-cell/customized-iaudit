@@ -1,0 +1,15 @@
+[dotenv@17.3.1] injecting env (6) from .env -- tip: ⚙️  specify custom .env file path with { path: '/custom/path/.env' }
+Testing password: Syndicate@005
+
+ID: 2, Email: athulyadasofficial@gmail.com, Status: trial
+  Bcrypt Match: true
+  Plain Match: false
+---
+ID: 4, Email: athulyadas005@gmail.com, Status: trial
+  Bcrypt Match: true
+  Plain Match: false
+---
+ID: 3, Email: sidhaasamad@gmail.com, Status: expired
+  Bcrypt Match: false
+  Plain Match: false
+---

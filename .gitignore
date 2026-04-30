@@ -1,0 +1,28 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Production
+dist/
+**/dist/
+build/
+.next/
+
+# Env files
+.env
+**/.env
+.env.*
+
+# IDE / System
+.DS_Store
+.vscode/
+.idea/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Vite temp files
+vite.config.ts.timestamp-*
