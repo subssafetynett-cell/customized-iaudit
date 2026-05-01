@@ -45,36 +45,36 @@ const PRICE_MAP: Record<string, Record<string, Record<string, { monthly: number;
 const STRIPE_PRICE_IDS: Record<string, Record<string, Record<string, Record<string, string>>>> = {
   usd: {
     Unos: {
-      "1year":  { monthly: "price_1TBbgbDIou8RJDFOps9CGeWz", yearly: "price_1TEUp6DIou8RJDFO6ePWTlwM" },
-      "3years": { monthly: "price_1TEUqvDIou8RJDFOqi2gBje2", yearly: "price_1TEUstDIou8RJDFO7GKvrHfU" },
-      "6years": { monthly: "price_1TEUtXDIou8RJDFOziAUTjvP", yearly: "price_1TEUuBDIou8RJDFOmU18PrHt" },
+      "1year":  { monthly: "price_1TR3C1DIou8RJDFOcbtlBsNJ", yearly: "price_1TR3C1DIou8RJDFOcbtlBsNJ" },
+      "3years": { monthly: "price_1TR3C1DIou8RJDFOgBHXHwLk", yearly: "price_1TR3C1DIou8RJDFOgBHXHwLk" },
+      "6years": { monthly: "price_1TR3C1DIou8RJDFOWMzu0Odd", yearly: "price_1TR3C1DIou8RJDFOWMzu0Odd" },
     },
     Dos: {
-      "1year":  { monthly: "price_1TEuM3DIou8RJDFOtlPkLh8j", yearly: "price_1TEuMnDIou8RJDFOpFMHasr9" },
-      "3years": { monthly: "price_1TEuUuDIou8RJDFOPkLADXmY", yearly: "price_1TEuWPDIou8RJDFOc5daRSEz" },
-      "6years": { monthly: "price_1TEuXyDIou8RJDFONJDQxx6M", yearly: "price_1TEuYyDIou8RJDFOnI9mFbak" },
+      "1year":  { monthly: "price_1TR3C8DIou8RJDFOb18x0jwU", yearly: "price_1TR3C8DIou8RJDFOb18x0jwU" },
+      "3years": { monthly: "price_1TR3C8DIou8RJDFO8fBRVYuT", yearly: "price_1TR3C8DIou8RJDFO8fBRVYuT" },
+      "6years": { monthly: "price_1TR3C8DIou8RJDFOPK5Wx5Fo", yearly: "price_1TR3C8DIou8RJDFOPK5Wx5Fo" },
     },
     Tres: {
-      "1year":  { monthly: "price_1TF62vDIou8RJDFOSPpVJtj1", yearly: "price_1TF63wDIou8RJDFOjF3kHmxX" },
-      "3years": { monthly: "price_1TF64jDIou8RJDFO1eXRE0GS", yearly: "price_1TF65eDIou8RJDFO2sCTCyzp" },
-      "6years": { monthly: "price_1TF66ODIou8RJDFOF2TP5BgV", yearly: "price_1TF676DIou8RJDFOCU46cmDw" },
+      "1year":  { monthly: "price_1TR3CCDIou8RJDFOb7BPrfsw", yearly: "price_1TR3CCDIou8RJDFOb7BPrfsw" },
+      "3years": { monthly: "price_1TR3CCDIou8RJDFOJXA3sImc", yearly: "price_1TR3CCDIou8RJDFOJXA3sImc" },
+      "6years": { monthly: "price_1TR3CCDIou8RJDFO1gAo8FvM", yearly: "price_1TR3CCDIou8RJDFO1gAo8FvM" },
     },
   },
   gbp: {
     Unos: {
-      "1year":  { monthly: "price_1TEqUEDIou8RJDFO5byPPSMV", yearly: "price_1TEqoJDIou8RJDFOjRgkr66M" },
-      "3years": { monthly: "price_1TEqt7DIou8RJDFOovMeWhHO", yearly: "price_1TEqwADIou8RJDFOmmjXaA7n" },
-      "6years": { monthly: "price_1TEqy6DIou8RJDFOSuHZmi1U", yearly: "price_1TEqztDIou8RJDFOi7thRy7a" },
+      "1year":  { monthly: "price_1TR3C1DIou8RJDFOr4v6AYfZ", yearly: "price_1TR3C1DIou8RJDFOr4v6AYfZ" },
+      "3years": { monthly: "price_1TR3C1DIou8RJDFOX1j0euCI", yearly: "price_1TR3C1DIou8RJDFOX1j0euCI" },
+      "6years": { monthly: "price_1TR3C1DIou8RJDFOehChO7ct", yearly: "price_1TR3C1DIou8RJDFOehChO7ct" },
     },
     Dos: {
-      "1year":  { monthly: "price_1TEucpDIou8RJDFOAr4MPbNn", yearly: "price_1TEujGDIou8RJDFOglqNsa1g" },
-      "3years": { monthly: "price_1TEukqDIou8RJDFOuUf9Lo6B", yearly: "price_1TEultDIou8RJDFOrenG6S7d" },
-      "6years": { monthly: "price_1TEunrDIou8RJDFOSegoiOdo", yearly: "price_1TEupFDIou8RJDFOhArGP80e" },
+      "1year":  { monthly: "price_1TR3C8DIou8RJDFOWdJTy184", yearly: "price_1TR3C8DIou8RJDFOWdJTy184" },
+      "3years": { monthly: "price_1TR3C8DIou8RJDFOpISOdAUX", yearly: "price_1TR3C8DIou8RJDFOpISOdAUX" },
+      "6years": { monthly: "price_1TR3C8DIou8RJDFO8apofHEz", yearly: "price_1TR3C8DIou8RJDFO8apofHEz" },
     },
     Tres: {
-      "1year":  { monthly: "price_1TF68ZDIou8RJDFOZEcy8Z64", yearly: "price_1TF69RDIou8RJDFOmJGvFoXQ" },
-      "3years": { monthly: "price_1TF6A2DIou8RJDFOHMMTzBla", yearly: "price_1TF6C6DIou8RJDFOveumydUb" },
-      "6years": { monthly: "price_1TF6ClDIou8RJDFOQdqVjCRp", yearly: "price_1TF6DQDIou8RJDFOeo8Qgmq2" },
+      "1year":  { monthly: "price_1TR3CCDIou8RJDFOjA6mRn54", yearly: "price_1TR3CCDIou8RJDFOjA6mRn54" },
+      "3years": { monthly: "price_1TR3CCDIou8RJDFO4HL1lu8G", yearly: "price_1TR3CCDIou8RJDFO4HL1lu8G" },
+      "6years": { monthly: "price_1TR3CCDIou8RJDFOOqVVWDsY", yearly: "price_1TR3CCDIou8RJDFOOqVVWDsY" },
     },
   },
 };

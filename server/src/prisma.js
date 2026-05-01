@@ -16,5 +16,9 @@ const pool = new Pool({
 const adapter = new PrismaPg(pool);
 const prisma = new PrismaClient({ adapter });
 
+export const handlePrismaError = (error, context) => {
+    console.error(`[Prisma Error] ${context}:`, error.message || error);
+};
+
 export { pool };
 export default prisma;
