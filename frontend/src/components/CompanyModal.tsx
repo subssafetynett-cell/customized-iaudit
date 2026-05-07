@@ -39,6 +39,44 @@ const INDUSTRIES = [
   "Other",
 ];
 
+const COUNTRIES = [
+  "India",
+  "United Arab Emirates",
+  "United States",
+  "United Kingdom",
+  "Australia",
+  "Canada",
+  "Saudi Arabia",
+  "Qatar",
+  "Oman",
+  "Kuwait",
+  "Bahrain",
+  "Singapore",
+  "Malaysia",
+  "Germany",
+  "France",
+];
+
+const STATES = {
+  "India": [
+    "Andhra Pradesh", "Arunachal Pradesh", "Assam", "Bihar", "Chhattisgarh", "Goa", "Gujarat", "Haryana", 
+    "Himachal Pradesh", "Jharkhand", "Karnataka", "Kerala", "Madhya Pradesh", "Maharashtra", "Manipur", 
+    "Meghalaya", "Mizoram", "Nagaland", "Odisha", "Punjab", "Rajasthan", "Sikkim", "Tamil Nadu", "Telangana", 
+    "Tripura", "Uttar Pradesh", "Uttarakhand", "West Bengal", "Andaman and Nicobar Islands", "Chandigarh", 
+    "Dadra and Nagar Haveli and Daman and Diu", "Delhi", "Jammu and Kashmir", "Ladakh", "Lakshadweep", "Puducherry"
+  ],
+  "United Arab Emirates": [
+    "Abu Dhabi", "Dubai", "Sharjah", "Ajman", "Umm Al Quwain", "Ras Al Khaimah", "Fujairah"
+  ],
+  "United States": [
+    "Alabama", "Alaska", "Arizona", "Arkansas", "California", "Colorado", "Connecticut", "Delaware", "Florida", "Georgia",
+    "Hawaii", "Idaho", "Illinois", "Indiana", "Iowa", "Kansas", "Kentucky", "Louisiana", "Maine", "Maryland",
+    "Massachusetts", "Michigan", "Minnesota", "Mississippi", "Missouri", "Montana", "Nebraska", "Nevada", "New Hampshire", "New Jersey",
+    "New Mexico", "New York", "North Carolina", "North Dakota", "Ohio", "Oklahoma", "Oregon", "Pennsylvania", "Rhode Island", "South Carolina",
+    "South Dakota", "Tennessee", "Texas", "Utah", "Vermont", "Virginia", "Washington", "West Virginia", "Wisconsin", "Wyoming"
+  ]
+};
+
 export default function CompanyModal({ open, onClose, onSubmit, initialData, mode = "create", hideCancel = false }: Props) {
   const [name, setName] = useState("");
   const [logo, setLogo] = useState<string | undefined>();
@@ -51,6 +89,7 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
   const [country, setCountry] = useState("");
   const [postalCode, setPostalCode] = useState("");
   const [error, setError] = useState("");
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
 
   useEffect(() => {
     if (open) {
@@ -65,6 +104,7 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
       setCountry(initialData?.country || "");
       setPostalCode(initialData?.postalCode || "");
       setError("");
+      setFieldErrors({});
     }
   }, [open, initialData]);
 
@@ -106,14 +146,22 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
 
   const handleSubmit = () => {
     const trimmedName = name.trim();
-    if (!trimmedName) {
-      setError("Company name is required");
-      return;
-    }
-
     const trimmedAddress = streetAddress.trim();
-    if (!trimmedAddress) {
-      setError("Street address is required");
+    const errors: Record<string, string> = {};
+
+    if (!name.trim()) errors.name = "Company name is required";
+    if (!industry) errors.industry = "Industry is required";
+    if (!contactNumber.trim()) errors.contactNumber = "Contact number is required";
+    if (!trimmedAddress) errors.streetAddress = "Street address is required";
+    if (!city.trim()) errors.city = "City is required";
+    if (!state) errors.state = "State is required";
+    if (!country) errors.country = "Country is required";
+    if (!postalCode.trim()) errors.postalCode = "Postal code is required";
+
+    setFieldErrors(errors);
+
+    if (Object.keys(errors).length > 0) {
+      setError("Please fill in all required fields.");
       return;
     }
 
@@ -208,17 +256,24 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
               <Input
                 id="company-name"
                 placeholder="Enter company name"
+                className={`h-11 bg-[#F9FAFB] border-[#E5E7EB] rounded-lg text-sm text-[#111827] placeholder:text-[#9CA3AF] focus:ring-1 focus:ring-[#00875B] ${fieldErrors.name ? "border-red-500 focus:ring-red-500" : ""}`}
                 value={name}
                 onChange={(e) => {
                   setName(e.target.value);
+                  if (fieldErrors.name) setFieldErrors(prev => ({ ...prev, name: "" }));
                   setError("");
                 }}
               />
+              {fieldErrors.name && <p className="text-[10px] text-red-500 mt-1 pl-1 font-medium">{fieldErrors.name}</p>}
             </div>
             <div className="space-y-2">
-              <Label htmlFor="company-industry" className="text-sm">Industry</Label>
-              <Select value={industry} onValueChange={setIndustry}>
-                <SelectTrigger id="company-industry">
+              <Label htmlFor="company-industry" className="text-sm">Industry *</Label>
+              <Select value={industry} onValueChange={(val) => {
+                setIndustry(val);
+                if (fieldErrors.industry) setFieldErrors(prev => ({ ...prev, industry: "" }));
+                setError("");
+              }}>
+                <SelectTrigger id="company-industry" className={`${fieldErrors.industry ? "border-red-500 focus:ring-red-500" : ""}`}>
                   <SelectValue placeholder="Select industry" />
                 </SelectTrigger>
                 <SelectContent>
@@ -227,22 +282,29 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
                   ))}
                 </SelectContent>
               </Select>
+              {fieldErrors.industry && <p className="text-[10px] text-red-500 mt-1 pl-1 font-medium">{fieldErrors.industry}</p>}
             </div>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="space-y-2 text-sm">
-              <Label htmlFor="company-contact" className="text-sm">Contact Number</Label>
+              <Label htmlFor="company-contact" className="text-sm">Contact Number *</Label>
               <div className="relative">
                 <Phone className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
                 <Input
                   id="company-contact"
                   placeholder="+1 234 567 8900"
-                  className="pl-9"
+                  className={`pl-9 ${fieldErrors.contactNumber ? "border-red-500 focus:ring-red-500" : ""}`}
                   value={contactNumber}
-                  onChange={(e) => setContactNumber(e.target.value)}
+                  onChange={(e) => {
+                    const value = e.target.value.replace(/\D/g, "");
+                    setContactNumber(value);
+                    if (fieldErrors.contactNumber) setFieldErrors(prev => ({ ...prev, contactNumber: "" }));
+                    setError("");
+                  }}
                 />
               </div>
+              {fieldErrors.contactNumber && <p className="text-[10px] text-red-500 mt-1 pl-1 font-medium">{fieldErrors.contactNumber}</p>}
             </div>
           </div>
 
@@ -269,53 +331,101 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
             <Input
               id="street-address"
               placeholder="Street address"
+              className={`${fieldErrors.streetAddress ? "border-red-500 focus:ring-red-500" : ""}`}
               value={streetAddress}
               onChange={(e) => {
                 setStreetAddress(e.target.value);
+                if (fieldErrors.streetAddress) setFieldErrors(prev => ({ ...prev, streetAddress: "" }));
                 setError("");
               }}
             />
+            {fieldErrors.streetAddress && <p className="text-[10px] text-red-500 mt-1 pl-1 font-medium">{fieldErrors.streetAddress}</p>}
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="space-y-2">
-              <Label htmlFor="city" className="text-sm">City</Label>
+              <Label htmlFor="country" className="text-sm">Country *</Label>
+              <Select value={country} onValueChange={(val) => {
+                setCountry(val);
+                setState(""); // Reset state when country changes
+                if (fieldErrors.country) setFieldErrors(prev => ({ ...prev, country: "" }));
+                setError("");
+              }}>
+                <SelectTrigger id="country" className={`${fieldErrors.country ? "border-red-500 focus:ring-red-500" : ""}`}>
+                  <SelectValue placeholder="Select country" />
+                </SelectTrigger>
+                <SelectContent>
+                  {COUNTRIES.map((c) => (
+                    <SelectItem key={c} value={c}>{c}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {fieldErrors.country && <p className="text-[10px] text-red-500 mt-1 pl-1 font-medium">{fieldErrors.country}</p>}
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="state" className="text-sm">State/Province *</Label>
+              {STATES[country as keyof typeof STATES] ? (
+                <Select value={state} onValueChange={(val) => {
+                  setState(val);
+                  if (fieldErrors.state) setFieldErrors(prev => ({ ...prev, state: "" }));
+                  setError("");
+                }}>
+                  <SelectTrigger id="state" className={`${fieldErrors.state ? "border-red-500 focus:ring-red-500" : ""}`}>
+                    <SelectValue placeholder="Select state" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {STATES[country as keyof typeof STATES].map((s: string) => (
+                      <SelectItem key={s} value={s}>{s}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              ) : (
+                <Input
+                  id="state"
+                  placeholder="State or Province"
+                  className={`${fieldErrors.state ? "border-red-500 focus:ring-red-500" : ""}`}
+                  value={state}
+                  onChange={(e) => {
+                    setState(e.target.value);
+                    if (fieldErrors.state) setFieldErrors(prev => ({ ...prev, state: "" }));
+                    setError("");
+                  }}
+                />
+              )}
+              {fieldErrors.state && <p className="text-[10px] text-red-500 mt-1 pl-1 font-medium">{fieldErrors.state}</p>}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="space-y-2">
+              <Label htmlFor="city" className="text-sm">City *</Label>
               <Input
                 id="city"
                 placeholder="City"
+                className={`${fieldErrors.city ? "border-red-500 focus:ring-red-500" : ""}`}
                 value={city}
-                onChange={(e) => setCity(e.target.value)}
+                onChange={(e) => {
+                  setCity(e.target.value);
+                  if (fieldErrors.city) setFieldErrors(prev => ({ ...prev, city: "" }));
+                  setError("");
+                }}
               />
+              {fieldErrors.city && <p className="text-[10px] text-red-500 mt-1 pl-1 font-medium">{fieldErrors.city}</p>}
             </div>
             <div className="space-y-2">
-              <Label htmlFor="state" className="text-sm">State/Province</Label>
-              <Input
-                id="state"
-                placeholder="State or Province"
-                value={state}
-                onChange={(e) => setState(e.target.value)}
-              />
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <Label htmlFor="country" className="text-sm">Country</Label>
-              <Input
-                id="country"
-                placeholder="Country"
-                value={country}
-                onChange={(e) => setCountry(e.target.value)}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="postal-code" className="text-sm">Postal Code</Label>
+              <Label htmlFor="postal-code" className="text-sm">Postal Code *</Label>
               <Input
                 id="postal-code"
                 placeholder="Postal/Zip code"
+                className={`${fieldErrors.postalCode ? "border-red-500 focus:ring-red-500" : ""}`}
                 value={postalCode}
-                onChange={(e) => setPostalCode(e.target.value)}
+                onChange={(e) => {
+                  setPostalCode(e.target.value);
+                  if (fieldErrors.postalCode) setFieldErrors(prev => ({ ...prev, postalCode: "" }));
+                  setError("");
+                }}
               />
+              {fieldErrors.postalCode && <p className="text-[10px] text-red-500 mt-1 pl-1 font-medium">{fieldErrors.postalCode}</p>}
             </div>
           </div>
         </div>

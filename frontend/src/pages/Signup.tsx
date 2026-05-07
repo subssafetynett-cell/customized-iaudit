@@ -104,7 +104,7 @@ export default function Signup() {
                                 <div className="relative">
                                     <Input
                                         type={showPassword ? "text" : "password"}
-                                        placeholder="8+ characters"
+                                        placeholder="6+ characters"
                                         value={password}
                                         onChange={(e) => setPassword(e.target.value)}
                                         className="h-11 bg-[#F9FAFB] border-[#E5E7EB] rounded-lg text-sm text-[#111827] placeholder:text-[#9CA3AF] pr-10 focus:ring-1 focus:ring-[#213847]"

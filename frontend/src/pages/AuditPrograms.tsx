@@ -19,6 +19,7 @@ import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, DropdownMenuCheckboxItem } from "@/components/ui/dropdown-menu";
+import { TourStepPopover } from "@/components/TourStepPopover";
 import {
     AlertDialog,
     AlertDialogAction,
@@ -746,7 +747,8 @@ const AuditPrograms = () => {
                                     setView("create");
                                     setShowOnboardingGuide(false);
                                 }}
-                                className={`bg-[#213847] hover:bg-[#213847]/90 text-white gap-2 rounded-xl h-11 px-5 shadow-sm font-semibold transition-all duration-300 ${showOnboardingGuide ? 'relative z-[60] ring-[6px] ring-emerald-500 ring-offset-2 scale-105 shadow-2xl' : ''}`}
+                                className={`bg-[#213847] hover:bg-[#213847]/90 text-white gap-2 rounded-xl h-11 px-5 shadow-sm font-semibold transition-all duration-300 ${showOnboardingGuide ? 'relative z-[60] scale-105 shadow-2xl' : ''}`}
+                                id="tour-step-create-program"
                             >
                                 <Plus className="w-4 h-4" /> Create Audit Program
                             </Button>
@@ -754,87 +756,51 @@ const AuditPrograms = () => {
 
                         {/* Onboarding Guide Tooltip */}
                         {showOnboardingGuide && (
-                            <>
-                                <div className="fixed inset-0 bg-slate-900/30 z-[50] animate-in fade-in duration-700" />
-                                <div className="fixed inset-x-4 top-1/2 -translate-y-1/2 md:translate-y-0 md:absolute md:inset-auto md:top-full md:mt-4 md:right-0 z-[60] animate-in fade-in slide-in-from-top-4 duration-500">
-                                    <div className="bg-white border-0 rounded-3xl shadow-[0_20px_60px_rgba(0,0,0,0.5)] p-5 md:p-6 w-full max-w-[720px] mx-auto md:mr-0 relative overflow-hidden group/modal">
-                                        <div className="absolute top-0 left-0 w-full h-1.5 bg-emerald-500" />
-                                        
-                                        <div className="flex flex-col gap-4 max-h-[60vh] overflow-y-auto pr-1">
-                                            <div className="flex items-center justify-between">
-                                                <span className="bg-slate-100 text-slate-600 text-xs font-bold px-3 py-1 rounded-full">
-                                                    Step 6 of 6
-                                                </span>
-                                            </div>
-                                            <div className="flex items-center gap-4">
-                                                <div className="w-12 h-12 rounded-2xl bg-emerald-50 flex items-center justify-center shrink-0">
-                                                    <Calendar className="w-6 h-6 text-emerald-600" />
-                                                </div>
-                                                <h4 className="font-black text-xl text-slate-900 tracking-tight whitespace-nowrap">Step 6: Audit Program</h4>
-                                            </div>
+                            <TourStepPopover
+                                targetId="tour-step-create-program"
+                                step={6}
+                                totalSteps={6}
+                                title="Audit Program"
+                                description="To conduct audits in line with ISO requirements, you need to create an Audit Program."
+                                onNext={async () => {
+                                    setShowOnboardingGuide(false);
+                                    
+                                    // Set completion flag for tour in localStorage
+                                    localStorage.setItem('iaudit_onboarding_tour_completed', 'true');
+                                    
+                                    // Update user's onboarding status in backend and local storage
+                                    const userJson = localStorage.getItem('user');
+                                    if (userJson) {
+                                        const user = JSON.parse(userJson);
+                                        try {
+                                            const response = await fetch(`${API_BASE_URL}/api/users/${user.id}`, {
+                                                method: 'PUT',
+                                                headers: { 'Content-Type': 'application/json' },
+                                                body: JSON.stringify({ onboardingCompleted: true })
+                                            });
+                                            
+                                            if (response.ok) {
+                                                const updatedUser = { ...user, onboardingCompleted: true };
+                                                localStorage.setItem('user', JSON.stringify(updatedUser));
+                                            }
+                                        } catch (error) {
+                                            console.error("Failed to update onboarding status:", error);
+                                        }
+                                    }
 
-                                        <div className="space-y-4">
-                                            <p className="text-sm font-medium text-slate-600 leading-relaxed px-1">
-                                                To conduct audits in line with ISO requirements, you need to create an Audit Program.
-                                            </p>
-                                        </div>
-
-                                        <div className="flex justify-between items-center pt-2">
-                                            <Button 
-                                                variant="ghost"
-                                                size="sm"
-                                                className="text-slate-500 hover:text-slate-900 hover:bg-slate-100 rounded-xl px-4 flex items-center gap-2 font-bold transition-colors"
-                                                onClick={() => {
-                                                    setShowOnboardingGuide(false);
-                                                    navigate("/gap-analysis?onboarding=true");
-                                                }}
-                                            >
-                                                <ArrowLeft className="w-4 h-4" /> Back
-                                            </Button>
-                                            <Button 
-                                                size="sm"
-                                                className="bg-emerald-600 hover:bg-emerald-700 text-white font-black rounded-xl px-8 shadow-lg shadow-emerald-200 transition-all active:scale-95 py-6 text-base"
-                                                onClick={async () => {
-                                                    setShowOnboardingGuide(false);
-                                                    
-                                                    // Set completion flag for tour in localStorage
-                                                    localStorage.setItem('iaudit_onboarding_tour_completed', 'true');
-                                                    
-                                                    // Update user's onboarding status in backend and local storage
-                                                    const userJson = localStorage.getItem('user');
-                                                    if (userJson) {
-                                                        const user = JSON.parse(userJson);
-                                                        try {
-                                                            const response = await fetch(`${API_BASE_URL}/api/users/${user.id}`, {
-                                                                method: 'PUT',
-                                                                headers: { 'Content-Type': 'application/json' },
-                                                                body: JSON.stringify({ onboardingCompleted: true })
-                                                            });
-                                                            
-                                                            if (response.ok) {
-                                                                const updatedUser = { ...user, onboardingCompleted: true };
-                                                                localStorage.setItem('user', JSON.stringify(updatedUser));
-                                                            }
-                                                        } catch (error) {
-                                                            console.error("Failed to update onboarding status:", error);
-                                                        }
-                                                    }
-
-                                                    const newParams = new URLSearchParams(searchParams);
-                                                    newParams.delete("onboarding");
-                                                    setSearchParams(newParams);
-                                                    
-                                                    // Redirect to dashboard where the trial modal will show up
-                                                    navigate("/");
-                                                }}
-                                            >
-                                                Finish Onboarding <Check className="ml-2 w-5 h-5" />
-                                            </Button>
-                                        </div>
-                                        </div>
-                                    </div>
-                                </div>
-                            </>
+                                    const newParams = new URLSearchParams(searchParams);
+                                    newParams.delete("onboarding");
+                                    setSearchParams(newParams);
+                                    
+                                    // Redirect to dashboard
+                                    navigate("/");
+                                }}
+                                onBack={() => {
+                                    setShowOnboardingGuide(false);
+                                    navigate("/gap-analysis?onboarding=true");
+                                }}
+                                onClose={() => setShowOnboardingGuide(false)}
+                            />
                         )}
                     </div>
                 )}

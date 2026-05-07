@@ -846,8 +846,8 @@ const transporterConfig = process.env.SMTP_HOST ? {
         pass: process.env.SMTP_PASS
     },
     tls: {
-        ciphers: 'SSLv3',
-        rejectUnauthorized: false
+        rejectUnauthorized: false,
+        minVersion: 'TLSv1.2'
     }
 } : {
     service: process.env.SMTP_SERVICE || 'gmail',
@@ -1337,6 +1337,9 @@ app.post('/auth/verify-otp-and-signup', async (req, res) => {
         return res.status(400).json({ error: 'Valid email and OTP are required' });
     }
     email = email.toLowerCase().trim();
+    if (password && password.length < 6) {
+        return res.status(400).json({ error: 'Password must be at least 6 characters' });
+    }
 
     const storedData = await prisma.otp.findFirst({ where: { email } });
 
@@ -1399,7 +1402,7 @@ app.post('/auth/login', async (req, res) => {
 
         if (!user) {
             console.log(`[AUTH] Login failed: User not found`);
-            return res.status(401).json({ error: 'Invalid credentials' });
+            return res.status(404).json({ error: "Email doesn't exist. Please create an account" });
         }
         console.log(`[AUTH] User found for login: ${user.id}`);
 
@@ -1537,6 +1540,9 @@ app.get('/users/:id/status', async (req, res) => {
 
 app.post('/users', async (req, res) => {
     const { firstName, lastName, email, mobile, role, customRoleName, password, creatorId, sendWelcomeEmail } = req.body;
+    if (password && password.length < 6) {
+        return res.status(400).json({ error: 'Password must be at least 6 characters' });
+    }
     try {
         const user = await prisma.user.create({
             data: {
@@ -1608,6 +1614,9 @@ app.put('/users/:id', async (req, res) => {
         };
 
         if (password) {
+            if (password.length < 6) {
+                return res.status(400).json({ error: 'Password must be at least 6 characters' });
+            }
             updateData.password = await bcrypt.hash(password, 10);
         }
 

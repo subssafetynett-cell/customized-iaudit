@@ -36,6 +36,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, Di
 import { Button } from "@/components/ui/button";
 import TrialModal from "@/components/TrialModal";
 import TrialBanner from "@/components/TrialBanner";
+import { TourStepPopover } from "@/components/TourStepPopover";
 
 const Index = () => {
     const navigate = useNavigate();
@@ -833,107 +834,79 @@ const Index = () => {
         if (!open && companies.length === 0) return;
         setShowWelcome(open);
       }}>
-        <DialogContent 
-          className="sm:max-w-md bg-white border-none shadow-2xl p-0 overflow-hidden max-h-[90vh] flex flex-col"
-          onPointerDownOutside={(e) => { if (companies.length === 0 || (companies.length > 0 && totalSites === 0)) e.preventDefault(); }}
-          onEscapeKeyDown={(e) => { if (companies.length === 0 || (companies.length > 0 && totalSites === 0)) e.preventDefault(); }}
-        >
-          <div className="flex-1 overflow-y-auto w-full">
-          <div className="bg-[#213847] p-8 text-white flex flex-col items-center text-center space-y-4 relative">
-            <Button 
-              variant="ghost" 
-              size="sm"
-              className="absolute top-4 right-4 text-white/40 hover:text-white hover:bg-white/10 rounded-lg text-[10px] font-bold uppercase tracking-wider h-7 px-2"
-              onClick={() => {
-                localStorage.removeItem('iaudit_onboarding_tour_completed');
-                toast.success("Onboarding tour reset!");
-                window.location.reload();
-              }}
-            >
-              Reset Tour
-            </Button>
-            <div className="w-16 h-16 bg-white/10 rounded-2xl flex items-center justify-center backdrop-blur-sm border border-white/20">
-              <Rocket className="w-8 h-8 text-emerald-400 animate-bounce" />
-            </div>
-            <div className="space-y-2">
-              <div className="flex items-center justify-center gap-2 mb-1">
-                <span className="bg-white/20 text-white text-xs font-bold px-3 py-1 rounded-full">
-                  Step {onboardingStep} of 6
-                </span>
+        {onboardingStep === 1 && (
+          <DialogContent 
+            hideClose
+            className="sm:max-w-md bg-white border-none shadow-2xl p-0 overflow-hidden max-h-[90vh] flex flex-col"
+            onPointerDownOutside={(e) => { if (companies.length === 0 || (companies.length > 0 && totalSites === 0)) e.preventDefault(); }}
+            onEscapeKeyDown={(e) => { if (companies.length === 0 || (companies.length > 0 && totalSites === 0)) e.preventDefault(); }}
+          >
+            <div className="flex-1 overflow-y-auto w-full">
+              <div className="bg-[#213847] p-8 text-white flex flex-col items-center text-center space-y-4 relative">
+                <div className="space-y-2">
+                  <div className="flex items-center justify-center gap-2 mb-1">
+                    <span className="bg-white/20 text-white text-xs font-bold px-3 py-1 rounded-full">
+                      Step {onboardingStep} of 6
+                    </span>
+                  </div>
+                  <h2 className="text-2xl font-bold tracking-tight">Welcome to iAudit!</h2>
+                  <p className="text-slate-300 text-sm max-w-[280px]">
+                    We're excited to help you streamline your compliance management journey.
+                  </p>
+                </div>
               </div>
-              <h2 className="text-2xl font-bold tracking-tight">Welcome to iAudit!</h2>
-              <p className="text-slate-300 text-sm max-w-[280px]">
-                {onboardingStep === 1 
-                  ? "We're excited to help you streamline your compliance management journey."
-                  : "Excellent! Your company is set up. Now let's define your operational structure."}
-              </p>
-            </div>
-          </div>
 
-          <div className="p-8 space-y-6 bg-white">
-            <div className="space-y-4">
-              {onboardingStep === 1 && (
-                <div className="flex flex-col gap-4 max-h-[60vh] overflow-y-auto pr-1">
-                  <div className="flex items-center gap-4">
-                    <div className="w-12 h-12 rounded-2xl bg-emerald-50 flex items-center justify-center shrink-0">
-                      <Building2 className="w-6 h-6 text-emerald-600" />
+              <div className="p-8 space-y-6 bg-white">
+                <div className="space-y-4">
+                  <div className="flex flex-col gap-4 max-h-[60vh] overflow-y-auto pr-1">
+                    <div className="flex items-center gap-4">
+                      <div className="w-12 h-12 rounded-2xl bg-emerald-50 flex items-center justify-center shrink-0">
+                        <Building2 className="w-6 h-6 text-emerald-600" />
+                      </div>
+                      <h4 className="font-black text-xl text-slate-900 tracking-tight whitespace-nowrap">Step 1: Create a Company</h4>
                     </div>
-                    <h4 className="font-black text-xl text-slate-900 tracking-tight whitespace-nowrap">Step 1: Create a Company</h4>
-                  </div>
-                  <div className="space-y-4">
-                    <p className="text-sm font-medium text-slate-600 leading-relaxed px-1">
-                      First you need to create a company by clicking the create company button.
-                    </p>
+                    <div className="space-y-4">
+                      <p className="text-sm font-medium text-slate-600 leading-relaxed px-1">
+                        First you need to create a company by clicking the create company button.
+                      </p>
+                    </div>
                   </div>
                 </div>
-              )}
 
-              {onboardingStep === 2 && (
-                <div className="flex flex-col gap-4 max-h-[60vh] overflow-y-auto pr-1">
-                  <div className="flex items-center gap-4">
-                    <div className="w-12 h-12 rounded-2xl bg-emerald-50 flex items-center justify-center shrink-0">
-                      <MapPin className="w-6 h-6 text-emerald-600" />
-                    </div>
-                    <h4 className="font-black text-xl text-slate-900 tracking-tight whitespace-nowrap">Step 2: Add Sites & Departments</h4>
-                  </div>
-                  <div className="space-y-4">
-                    <p className="text-sm font-medium text-slate-600 leading-relaxed px-1">
-                      Define your operational structure to track audits more effectively.
-                    </p>
-                  </div>
+                <div className="flex gap-3">
+                  <Button 
+                    className="w-full h-12 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl shadow-lg shadow-emerald-200 transition-all active:scale-95 group"
+                    onClick={() => {
+                      setShowWelcome(false);
+                      setShowCreateCompany(true);
+                    }}
+                  >
+                    Set Up My Company
+                  </Button>
                 </div>
-              )}
+              </div>
             </div>
-
-            <div className="flex gap-3">
-              {onboardingStep === 2 && (
-                <Button 
-                  variant="outline"
-                  className="w-1/3 h-12 text-slate-600 font-bold rounded-xl"
-                  onClick={() => setOnboardingStep(1)}
-                >
-                  Back
-                </Button>
-              )}
-              <Button 
-                className={`${onboardingStep === 2 ? 'w-2/3' : 'w-full'} h-12 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl shadow-lg shadow-emerald-200 transition-all active:scale-95 group`}
-                onClick={() => {
-                  setShowWelcome(false);
-                  if (onboardingStep === 1) {
-                    setShowCreateCompany(true);
-                  } else {
-                    setShowCreateSite(true);
-                  }
-                }}
-              >
-                {onboardingStep === 1 ? "Set Up My Company" : "Set Up My Site"}
-                <Sparkles className="ml-2 w-4 h-4 group-hover:rotate-12 transition-transform" />
-              </Button>
-            </div>
-          </div>
-        </div>
-      </DialogContent>
+          </DialogContent>
+        )}
       </Dialog>
+
+      {showWelcome && onboardingStep === 2 && (
+        <TourStepPopover
+          targetId="tour-step-companies"
+          step={2}
+          totalSteps={6}
+          title="Open a Company"
+          description="All your companies live here. Click any company card to manage its Sites and Departments."
+          onNext={() => {
+            setShowWelcome(false);
+            navigate("/users?onboarding=true");
+          }}
+          onBack={() => {
+            setOnboardingStep(1);
+          }}
+          onClose={() => setShowWelcome(false)}
+        />
+      )}
 
       <CompanyModal
         open={showCreateCompany}

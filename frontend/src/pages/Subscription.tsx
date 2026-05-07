@@ -30,8 +30,8 @@ const plans: PricingPlan[] = [
   {
     name: "Free",
     price: {
-      usd: { "1year": "1", "3years": "1", "6years": "1" },
-      gbp: { "1year": "1", "3years": "1", "6years": "1" },
+      usd: { "1year": "0", "3years": "0", "6years": "0" },
+      gbp: { "1year": "0", "3years": "0", "6years": "0" },
     },
     features: [
       "Gap Analysis",
@@ -220,7 +220,7 @@ export default function Subscription() {
   };
 
   return (
-    <div className="min-h-screen py-12 px-4 sm:px-6 lg:px-8 bg-transparent">
+    <div className="min-h-screen py-12 px-4 sm:px-6 lg:px-8 bg-white">
       <div className="max-w-7xl mx-auto flex flex-col items-center">
 
         {/* Plan Summary for Active Users */}

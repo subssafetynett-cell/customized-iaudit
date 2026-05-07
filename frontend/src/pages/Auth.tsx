@@ -38,6 +38,8 @@ export default function Auth() {
     const [errorMessage, setErrorMessage] = useState("");
     const [resendTimer, setResendTimer] = useState(0);
     const [signupErrors, setSignupErrors] = useState<Record<string, string>>({});
+    const [loginErrors, setLoginErrors] = useState<Record<string, string>>({});
+    const [isResending, setIsResending] = useState(false);
 
     const containerRef = useRef<HTMLDivElement>(null);
     const overlayRef = useRef<HTMLDivElement>(null);
@@ -49,6 +51,8 @@ export default function Auth() {
         setIsSignUp(!isSignUp);
         setShowOtpStep(false);
         setErrorMessage("");
+        setLoginErrors({});
+        setSignupErrors({});
     };
 
     useEffect(() => {
@@ -94,8 +98,20 @@ export default function Auth() {
     const handleLoginSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
 
-        if (!loginEmail || !loginPassword) {
-            setErrorMessage("Please enter both email and password.");
+        const errors: Record<string, string> = {};
+        if (!loginEmail.trim()) {
+            errors.email = "Email address is required";
+        } else if (!/\S+@\S+\.\S+/.test(loginEmail)) {
+            errors.email = "Please enter a valid email";
+        }
+        
+        if (!loginPassword) {
+            errors.password = "Password is required";
+        }
+
+        setLoginErrors(errors);
+
+        if (Object.keys(errors).length > 0) {
             return;
         }
 
@@ -112,6 +128,10 @@ export default function Auth() {
             const data = await response.json();
 
             if (!response.ok) {
+                if (data.error && data.error.includes("Email doesn't exist")) {
+                    setLoginErrors(prev => ({ ...prev, email: data.error }));
+                    return;
+                }
                 throw new Error(data.error || 'Login failed');
             }
 
@@ -139,11 +159,18 @@ export default function Auth() {
         } else if (!/\S+@\S+\.\S+/.test(signupEmail)) {
             errors.email = "Please enter a valid email";
         }
-        if (!signupPhone.trim()) errors.phone = "Phone number is required";
+        if (!signupPhone.trim()) {
+            errors.phone = "Phone number is required";
+        } else {
+            const digitCount = signupPhone.replace(/\D/g, '').length;
+            if (digitCount < 10 || digitCount > 15) {
+                errors.phone = "Please enter a valid phone number (10-15 digits)";
+            }
+        }
         if (!signupPassword) {
             errors.password = "Password is required";
-        } else if (signupPassword.length < 8) {
-            errors.password = "Password must be at least 8 characters";
+        } else if (signupPassword.length < 6) {
+            errors.password = "Password must be at least 6 characters";
         }
         if (!signupConfirmPassword) {
             errors.confirmPassword = "Please confirm your password";
@@ -191,7 +218,7 @@ export default function Auth() {
     };
 
     const handleResendOtp = async () => {
-        setIsSubmitting(true);
+        setIsResending(true);
         setErrorMessage("");
 
         try {
@@ -208,11 +235,12 @@ export default function Auth() {
             }
 
             setResendTimer(60);
+            setOtpCode(""); // Clear OTP field on resend
         } catch (error: any) {
             console.error('Resend OTP error:', error);
             setErrorMessage(error.message || "Failed to resend OTP. Please try again.");
         } finally {
-            setIsSubmitting(false);
+            setIsResending(false);
         }
     };
 
@@ -337,7 +365,8 @@ export default function Auth() {
                                             placeholder="+1 234 567 8900"
                                             value={signupPhone}
                                             onChange={(e) => {
-                                                setSignupPhone(e.target.value);
+                                                const value = e.target.value.replace(/\D/g, '');
+                                                setSignupPhone(value);
                                                 if (signupErrors.phone) setSignupErrors(prev => ({ ...prev, phone: "" }));
                                             }}
                                             className={`h-11 bg-[#F9FAFB] border-[#E5E7EB] rounded-lg text-sm text-[#111827] placeholder:text-[#9CA3AF] focus:ring-1 focus:ring-[#00875B] ${signupErrors.phone ? "border-red-500 focus:ring-red-500" : ""}`}
@@ -350,7 +379,7 @@ export default function Auth() {
                                         <div className="relative">
                                             <Input
                                                 type={showSignupPassword ? "text" : "password"}
-                                                placeholder="8+ characters"
+                                                placeholder="6+ characters"
                                                 value={signupPassword}
                                                 onChange={(e) => {
                                                     setSignupPassword(e.target.value);
@@ -394,12 +423,11 @@ export default function Auth() {
                                     <div className="space-y-1.5">
                                         <Label className="text-xs font-semibold text-[#4B5563]">Verification Code</Label>
                                         <Input
-                                            required
                                             type="text"
                                             maxLength={6}
                                             placeholder="123456"
                                             value={otpCode}
-                                            onChange={(e) => setOtpCode(e.target.value)}
+                                            onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, ""))}
                                             className="h-14 text-center text-2xl tracking-[0.5em] font-mono bg-[#F9FAFB] border-[#E5E7EB] rounded-lg text-[#111827] placeholder:text-[#9CA3AF] focus:ring-1 focus:ring-[#00875B]"
                                         />
                                         <p className="text-xs text-[#6B7280] mt-3 p-2 bg-yellow-50 border border-yellow-200 rounded text-center">
@@ -407,18 +435,22 @@ export default function Auth() {
                                         </p>
                                     </div>
 
-                                    <Button disabled={isSubmitting} type="submit" className="w-full h-12 text-base font-bold bg-[#00875B] text-white hover:bg-[#006E4A] rounded-lg shadow-sm transition-all mt-4">
+                                    <Button 
+                                        disabled={isSubmitting || isResending || otpCode.length !== 6} 
+                                        type="submit" 
+                                        className="w-full h-12 text-base font-bold bg-[#00875B] text-white hover:bg-[#006E4A] rounded-lg shadow-sm transition-all mt-4 disabled:bg-slate-300 disabled:cursor-not-allowed"
+                                    >
                                         {isSubmitting ? "Verifying..." : "Verify & Create Account"}
                                     </Button>
 
                                     <div className="flex flex-col items-center gap-3 mt-4">
                                         <button
                                             type="button"
-                                            disabled={resendTimer > 0 || isSubmitting}
+                                            disabled={resendTimer > 0 || isSubmitting || isResending}
                                             onClick={handleResendOtp}
                                             className="text-sm font-bold text-[#00875B] hover:text-[#006E4A] disabled:text-[#9CA3AF] disabled:hover:text-[#9CA3AF] transition-colors"
                                         >
-                                            {resendTimer > 0 ? `Resend OTP in ${resendTimer}s` : "Resend OTP"}
+                                            {isResending ? "Resending OTP..." : (resendTimer > 0 ? `Resend OTP in ${resendTimer}s` : "Resend OTP")}
                                         </button>
 
                                         <button
@@ -461,14 +493,17 @@ export default function Auth() {
                                 <div className="space-y-2">
                                     <Label className="text-xs font-semibold text-[#4B5563] uppercase tracking-wider">Email Address</Label>
                                     <Input
-                                        required
                                         type="email"
                                         placeholder="john@example.com"
                                         value={loginEmail}
-                                        onChange={(e) => setLoginEmail(e.target.value)}
+                                        onChange={(e) => {
+                                            setLoginEmail(e.target.value);
+                                            if (loginErrors.email) setLoginErrors(prev => ({ ...prev, email: "" }));
+                                        }}
                                         disabled={isSubmitting}
-                                        className="h-12 bg-[#F9FAFB] border-[#E5E7EB] rounded-xl text-sm text-[#111827] placeholder:text-[#9CA3AF] focus:ring-1 focus:ring-[#00875B]"
+                                        className={`h-12 bg-[#F9FAFB] border-[#E5E7EB] rounded-xl text-sm text-[#111827] placeholder:text-[#9CA3AF] focus:ring-1 focus:ring-[#00875B] ${loginErrors.email ? "border-red-500 focus:ring-red-500" : ""}`}
                                     />
+                                    {loginErrors.email && <p className="text-[10px] text-red-500 mt-1 pl-1 font-medium">{loginErrors.email}</p>}
                                 </div>
 
                                 <div className="space-y-2">
@@ -478,18 +513,21 @@ export default function Auth() {
                                     </div>
                                     <div className="relative">
                                         <Input
-                                            required
                                             type={showLoginPassword ? "text" : "password"}
                                             placeholder="Enter your password"
                                             value={loginPassword}
-                                            onChange={(e) => setLoginPassword(e.target.value)}
+                                            onChange={(e) => {
+                                                setLoginPassword(e.target.value);
+                                                if (loginErrors.password) setLoginErrors(prev => ({ ...prev, password: "" }));
+                                            }}
                                             disabled={isSubmitting}
-                                            className="h-12 bg-[#F9FAFB] border-[#E5E7EB] rounded-xl text-sm text-[#111827] placeholder:text-[#9CA3AF] pr-12 focus:ring-1 focus:ring-[#00875B]"
+                                            className={`h-12 bg-[#F9FAFB] border-[#E5E7EB] rounded-xl text-sm text-[#111827] placeholder:text-[#9CA3AF] pr-12 focus:ring-1 focus:ring-[#00875B] ${loginErrors.password ? "border-red-500 focus:ring-red-500" : ""}`}
                                         />
                                         <button type="button" onClick={() => setShowLoginPassword(!showLoginPassword)} className="absolute right-4 top-1/2 -translate-y-1/2 text-[#9CA3AF] hover:text-[#4B5563]">
                                             {showLoginPassword ? <EyeOff className="h-5 w-5" /> : <Eye className="h-5 w-5" />}
                                         </button>
                                     </div>
+                                    {loginErrors.password && <p className="text-[10px] text-red-500 mt-1 pl-1 font-medium">{loginErrors.password}</p>}
                                 </div>
 
                                 <div className="flex items-center space-x-2">

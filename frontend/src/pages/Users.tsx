@@ -21,6 +21,7 @@ import {
     ArrowRight,
     Users as UsersIcon
 } from "lucide-react";
+import { TourStepPopover } from "@/components/TourStepPopover";
 import UserModal from "@/components/UserModal";
 import ReusablePagination from "@/components/ReusablePagination";
 import { Badge } from "@/components/ui/badge";
@@ -268,71 +269,35 @@ export default function Users() {
                             <div className="absolute inset-0 -m-2 rounded-2xl ring-[8px] ring-blue-500/50 animate-pulse z-[-1]" />
                         )}
                         <Button 
+                            id="tour-step-create-user"
                             onClick={() => {
                                 openModal("create");
                                 setShowOnboardingGuide(false);
                             }} 
                             size="sm" 
-                            className={`w-full sm:w-auto gap-1.5 shadow-sm bg-[#213847] hover:bg-[#213847]/90 text-white rounded-xl px-5 h-11 transition-all ${showOnboardingGuide ? "relative z-[60] ring-[6px] ring-blue-500 ring-offset-2 scale-105 shadow-2xl" : ""}`}
+                            className={`w-full sm:w-auto gap-1.5 shadow-sm bg-[#213847] hover:bg-[#213847]/90 text-white rounded-xl px-5 h-11 transition-all ${showOnboardingGuide ? "relative z-[60] scale-105 shadow-2xl" : ""}`}
                         >
                             <UserPlus className="h-4 w-4" /> Create User
                         </Button>
                         {/* Step 3: Users Onboarding Guide */}
                         {showOnboardingGuide && (
-                            <>
-                                <div className="fixed inset-0 bg-slate-900/30 z-[50] animate-in fade-in duration-700" />
-                                <div className="fixed inset-x-4 top-1/2 -translate-y-1/2 md:translate-y-0 md:absolute md:inset-auto md:top-14 md:right-0 z-[60] animate-in fade-in slide-in-from-top-4 duration-500">
-                                    <div className="bg-white border-0 rounded-[28px] shadow-[0_20px_60px_rgba(0,0,0,0.5)] p-5 md:p-6 w-full max-w-[720px] mx-auto md:ml-0 relative overflow-hidden group/modal">
-                                        <div className="absolute top-0 left-0 w-full h-1.5 bg-blue-500" />
-                                        
-                                        <div className="flex flex-col gap-4 max-h-[60vh] overflow-y-auto pr-1">
-                                            <div className="flex items-center justify-between">
-                                                <span className="bg-slate-100 text-slate-600 text-xs font-bold px-3 py-1 rounded-full">
-                                                    Step 3 of 6
-                                                </span>
-                                            </div>
-                                            <div className="flex items-center gap-4">
-                                                <div className="w-12 h-12 rounded-2xl bg-blue-50 flex items-center justify-center shrink-0">
-                                                    <UsersIcon className="w-6 h-6 text-blue-600" />
-                                                </div>
-                                                <h4 className="font-black text-xl text-slate-900 tracking-tight whitespace-nowrap">Step 3: Add Users</h4>
-                                            </div>
-
-                                        <div className="space-y-4">
-                                            <p className="text-sm font-medium text-slate-600 leading-relaxed px-1">
-                                                Clicking here you can create new user like auditor auditee etc.
-                                            </p>
-                                        </div>
-
-                                        <div className="flex justify-between pt-2 gap-3">
-                                            <Button 
-                                                variant="outline"
-                                                size="sm"
-                                                className="w-1/3 text-slate-600 font-bold rounded-xl h-12"
-                                                onClick={() => {
-                                                    setShowOnboardingGuide(false);
-                                                    navigate("/");
-                                                }}
-                                            >
-                                                Back
-                                            </Button>
-                                            <Button 
-                                                size="sm"
-                                                className="w-2/3 bg-emerald-600 hover:bg-emerald-700 text-white font-black rounded-xl shadow-lg shadow-emerald-200 transition-all active:scale-95 h-12 text-base"
-                                                onClick={() => {
-                                                    setShowOnboardingGuide(false);
-                                                    // Transition to Step 4: Self Assessment
-                                                    navigate("/self-assessment?onboarding=true");
-                                                }}
-                                            >
-                                                Next <ArrowRight className="ml-2 w-5 h-5" />
-                                            </Button>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                        </>
-                    )}
+                            <TourStepPopover
+                                targetId="tour-step-create-user"
+                                step={3}
+                                totalSteps={6}
+                                title="Add Users"
+                                description="Clicking here you can create new users like auditors, auditees, etc."
+                                onNext={() => {
+                                    setShowOnboardingGuide(false);
+                                    navigate("/self-assessment?onboarding=true");
+                                }}
+                                onBack={() => {
+                                    setShowOnboardingGuide(false);
+                                    navigate("/");
+                                }}
+                                onClose={() => setShowOnboardingGuide(false)}
+                            />
+                        )}
                     </div>
                 </div>
 

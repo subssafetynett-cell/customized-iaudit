@@ -124,7 +124,11 @@ export function AppSidebar() {
                               : "rounded-lg"
                           )}
                         >
-                          <NavLink to={item.url} className="flex items-center gap-3">
+                          <NavLink 
+                            id={item.title === "Company" ? "tour-step-companies" : undefined}
+                            to={item.url} 
+                            className="flex items-center gap-3"
+                          >
                             <div className={cn(
                               "flex items-center justify-center rounded-lg p-1.5 transition-all duration-200",
                               active
