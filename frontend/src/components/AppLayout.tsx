@@ -2,10 +2,10 @@ import { SidebarProvider } from "@/components/ui/sidebar";
 import { AppSidebar } from "@/components/AppSidebar";
 import { TopNav } from "@/components/TopNav";
 import TrialExpiredModal from "@/components/TrialExpiredModal";
-import { useLocation } from "react-router-dom";
+import { useLocation, Outlet } from "react-router-dom";
 import { useState, useEffect } from "react";
 
-export function AppLayout({ children }: { children: React.ReactNode }) {
+export function AppLayout() {
   const location = useLocation();
   const userData = localStorage.getItem("user");
   const user = userData ? JSON.parse(userData) : null;
@@ -39,7 +39,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
         <div className="flex-1 flex flex-col min-w-0">
           <TopNav />
           <main className="flex-1 overflow-hidden">
-            {children}
+            <Outlet />
           </main>
         </div>
       </div>

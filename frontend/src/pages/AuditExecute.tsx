@@ -64,7 +64,7 @@ import { saveAs } from "file-saver";
 
 import { CLAUSE_MATRIX, ClauseMatrixRow } from "@/data/clauseMapping";
 
-const calculatePeriods = (frequency: string, duration: number) => {
+const calculatePeriods = (frequency: string, duration: number, startDate?: string | Date) => {
   const count =
     frequency === "Monthly"
       ? duration * 12
@@ -74,7 +74,8 @@ const calculatePeriods = (frequency: string, duration: number) => {
           ? duration * 2
           : duration;
   const result = [];
-  const currentDate = new Date(2026, 0, 1); // Start in January 2026
+  const currentDate = startDate ? new Date(startDate) : new Date();
+  currentDate.setDate(1); // Start from the beginning of the month
   for (let i = 0; i < count; i++) {
     const monthLabel = currentDate
       .toLocaleString("default", { month: "short" })
@@ -123,9 +124,11 @@ const AuditExecute = () => {
       string,
       boolean
     >;
+    const loadData = plan.auditProgram.scheduleData || {};
     const programPeriods = calculatePeriods(
       plan.auditProgram.frequency,
       plan.auditProgram.duration,
+      loadData.startDate || plan.auditProgram.createdAt
     );
     colIndex = programPeriods.indexOf(periodLabel);
 
@@ -170,6 +173,8 @@ const AuditExecute = () => {
         actionBy?: string;
         closeDate?: string;
         assignTo?: string;
+        assignToName?: string;
+        assignToEmail?: string;
         clause?: string;
       }
     >
@@ -549,6 +554,8 @@ const AuditExecute = () => {
       actionBy: string;
       closeDate: string;
       assignTo: string;
+      assignToName: string;
+      assignToEmail: string;
     }[] = [];
 
     if (template?.type === "clause-checklist") {
@@ -563,6 +570,8 @@ const AuditExecute = () => {
             actionBy: data.actionBy || "",
             closeDate: data.closeDate || "",
             assignTo: data.assignTo || "",
+            assignToName: data.assignToName || "",
+            assignToEmail: data.assignToEmail || "",
           });
         }
       });
@@ -584,6 +593,8 @@ const AuditExecute = () => {
             actionBy: data.actionBy || "",
             closeDate: data.closeDate || "",
             assignTo: data.assignTo || "",
+            assignToName: data.assignToName || "",
+            assignToEmail: data.assignToEmail || "",
           });
         }
       });
@@ -601,6 +612,8 @@ const AuditExecute = () => {
             actionBy: audit.actionBy || "",
             closeDate: audit.closeDate || "",
             assignTo: audit.assignTo || "",
+            assignToName: audit.assignToName || "",
+            assignToEmail: audit.assignToEmail || "",
           });
         }
       });
@@ -2505,11 +2518,12 @@ const AuditExecute = () => {
                     <TableHead className="w-12 text-center font-bold text-slate-700">#</TableHead>
                     <TableHead className="w-[15%] font-bold text-slate-700">Clause / Ref</TableHead>
                     <TableHead className="w-[10%] font-bold text-slate-700">Type</TableHead>
-                    <TableHead className="w-[45%] font-bold text-slate-700">
-                      <div className="grid grid-cols-3 gap-4">
+                    <TableHead className="w-[50%] font-bold text-slate-700">
+                      <div className="grid grid-cols-4 gap-4">
                         <span>Action By</span>
                         <span>Close Date</span>
-                        <span>Assign To</span>
+                        <span>Assign (Name)</span>
+                        <span>Assign (Email)</span>
                       </div>
                     </TableHead>
                     <TableHead className="w-12 text-center font-bold text-slate-700">Go</TableHead>
@@ -2527,7 +2541,7 @@ const AuditExecute = () => {
                         </span>
                       </TableCell>
                       <TableCell className="p-0">
-                        <div className="grid grid-cols-3 divide-x divide-slate-100">
+                        <div className="grid grid-cols-4 divide-x divide-slate-100">
                           <Input
                             className="border-0 focus-visible:ring-0 rounded-none bg-transparent h-12 px-4 shadow-none text-sm"
                             placeholder="Action By..."
@@ -2549,13 +2563,25 @@ const AuditExecute = () => {
                             }}
                           />
                           <Input
+                            type="text"
                             className="border-0 focus-visible:ring-0 rounded-none bg-transparent h-12 px-4 shadow-none text-sm"
-                            placeholder="Assign To..."
-                            value={f.assignTo}
+                            placeholder="Name..."
+                            value={f.assignToName}
                             onChange={(e) => {
-                              if (f.source === 'clause') handleClauseChange(f.id, 'assignTo', e.target.value);
-                              else if (f.source === 'checklist') handleChecklistChange(Number(f.id), 'assignTo', e.target.value);
-                              else if (f.source === 'process') updateProcessAudit(Number(f.id), 'assignTo', e.target.value);
+                              if (f.source === 'clause') handleClauseChange(f.id, 'assignToName', e.target.value);
+                              else if (f.source === 'checklist') handleChecklistChange(Number(f.id), 'assignToName', e.target.value);
+                              else if (f.source === 'process') updateProcessAudit(Number(f.id), 'assignToName', e.target.value);
+                            }}
+                          />
+                          <Input
+                            type="email"
+                            className={`border-0 focus-visible:ring-0 rounded-none bg-transparent h-12 px-4 shadow-none text-sm ${f.assignToEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(f.assignToEmail) ? 'text-red-500 bg-red-50/50' : ''}`}
+                            placeholder="Email..."
+                            value={f.assignToEmail}
+                            onChange={(e) => {
+                              if (f.source === 'clause') handleClauseChange(f.id, 'assignToEmail', e.target.value);
+                              else if (f.source === 'checklist') handleChecklistChange(Number(f.id), 'assignToEmail', e.target.value);
+                              else if (f.source === 'process') updateProcessAudit(Number(f.id), 'assignToEmail', e.target.value);
                             }}
                           />
                         </div>
@@ -2908,7 +2934,7 @@ const AuditExecute = () => {
                         </div>
 
                         {/* Action By / Close Date / Assign To row for Clause Checklist */}
-                        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 pt-2">
+                        <div className="grid grid-cols-1 md:grid-cols-4 gap-6 pt-2">
                           <div className="space-y-2">
                             <Label className="text-sm font-bold text-slate-700">
                               Action By
@@ -2936,17 +2962,27 @@ const AuditExecute = () => {
                             />
                           </div>
                           <div className="space-y-2">
-                            <Label className="text-sm font-bold text-slate-700">
-                              Assign To
-                            </Label>
+                            <Label className="text-sm font-bold text-slate-700">Assign To (Name)</Label>
                             <Input
+                              type="text"
                               className="bg-white border-slate-200 text-slate-900"
-                              placeholder="Department or Person..."
-                              value={currentData.assignTo || ""}
-                              onChange={(e) =>
-                                handleClauseChange(clause.id, "assignTo", e.target.value)
-                              }
+                              placeholder="Name..."
+                              value={currentData.assignToName || ""}
+                              onChange={(e) => handleClauseChange(clause.id, "assignToName", e.target.value)}
                             />
+                          </div>
+                          <div className="space-y-2">
+                            <Label className="text-sm font-bold text-slate-700">Assign To (Email)</Label>
+                            <Input
+                              type="email"
+                              className={`bg-white border-slate-200 text-slate-900 ${currentData.assignToEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(currentData.assignToEmail) ? 'border-red-500 focus-visible:ring-red-500' : ''}`}
+                              placeholder="Email..."
+                              value={currentData.assignToEmail || ""}
+                              onChange={(e) => handleClauseChange(clause.id, "assignToEmail", e.target.value)}
+                            />
+                            {currentData.assignToEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(currentData.assignToEmail) && (
+                              <p className="text-[10px] text-red-500 font-bold mt-1">Please enter a valid email address</p>
+                            )}
                           </div>
                         </div>
                       </div>
@@ -3681,7 +3717,7 @@ const AuditExecute = () => {
                           </div>
 
                           {/* Action By / Close Date / Assign To row for Process Audit */}
-                          <div className="grid grid-cols-1 md:grid-cols-3 gap-6 pt-2 pb-6 px-6 bg-white rounded-b-xl border-t border-slate-100">
+                          <div className="grid grid-cols-1 md:grid-cols-4 gap-6 pt-2 pb-6 px-6 bg-white rounded-b-xl border-t border-slate-100">
                             <div className="space-y-2">
                               <Label className="text-sm font-bold text-slate-700">
                                 Action By
@@ -3709,17 +3745,27 @@ const AuditExecute = () => {
                               />
                             </div>
                             <div className="space-y-2">
-                              <Label className="text-sm font-bold text-slate-700">
-                                Assign To
-                              </Label>
+                              <Label className="text-sm font-bold text-slate-700">Assign To (Name)</Label>
                               <Input
+                                type="text"
                                 className="bg-slate-50 border-slate-200 text-slate-900 focus:bg-white"
-                                placeholder="Department or Person..."
-                                value={audit.assignTo || ""}
-                                onChange={(e) =>
-                                  updateProcessAudit(index, "assignTo", e.target.value)
-                                }
+                                placeholder="Name..."
+                                value={audit.assignToName || ""}
+                                onChange={(e) => updateProcessAudit(index, "assignToName", e.target.value)}
                               />
+                            </div>
+                            <div className="space-y-2">
+                              <Label className="text-sm font-bold text-slate-700">Assign To (Email)</Label>
+                              <Input
+                                type="email"
+                                className={`bg-slate-50 border-slate-200 text-slate-900 focus:bg-white ${audit.assignToEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(audit.assignToEmail) ? 'border-red-500 focus-visible:ring-red-500' : ''}`}
+                                placeholder="Email..."
+                                value={audit.assignToEmail || ""}
+                                onChange={(e) => updateProcessAudit(index, "assignToEmail", e.target.value)}
+                              />
+                              {audit.assignToEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(audit.assignToEmail) && (
+                                <p className="text-[10px] text-red-500 font-bold mt-1">Please enter a valid email address</p>
+                              )}
                             </div>
                           </div>
                         </div>
@@ -4353,7 +4399,7 @@ const AuditExecute = () => {
                                   </div>
 
                                   {/* Action By / Close Date / Assign To row for Checklist */}
-                                  <div className="grid grid-cols-1 md:grid-cols-3 gap-6 pt-4 border-t border-slate-100 mt-4">
+                                  <div className="grid grid-cols-1 md:grid-cols-4 gap-6 pt-4 border-t border-slate-100 mt-4">
                                     <div className="space-y-2">
                                       <Label className="text-sm font-bold text-slate-700">
                                         Action By
@@ -4381,17 +4427,27 @@ const AuditExecute = () => {
                                       />
                                     </div>
                                     <div className="space-y-2">
-                                      <Label className="text-sm font-bold text-slate-700">
-                                        Assign To
-                                      </Label>
+                                      <Label className="text-sm font-bold text-slate-700">Assign To (Name)</Label>
                                       <Input
+                                        type="text"
                                         className="bg-slate-50 border-slate-200 text-slate-900 focus:bg-white"
-                                        placeholder="Department or Person..."
-                                        value={checklistData[index]?.assignTo || ""}
-                                        onChange={(e) =>
-                                          handleChecklistChange(index, "assignTo", e.target.value)
-                                        }
+                                        placeholder="Name..."
+                                        value={checklistData[index]?.assignToName || ""}
+                                        onChange={(e) => handleChecklistChange(index, "assignToName", e.target.value)}
                                       />
+                                    </div>
+                                    <div className="space-y-2">
+                                      <Label className="text-sm font-bold text-slate-700">Assign To (Email)</Label>
+                                      <Input
+                                        type="email"
+                                        className={`bg-slate-50 border-slate-200 text-slate-900 focus:bg-white ${checklistData[index]?.assignToEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(checklistData[index]?.assignToEmail) ? 'border-red-500 focus-visible:ring-red-500' : ''}`}
+                                        placeholder="Email..."
+                                        value={checklistData[index]?.assignToEmail || ""}
+                                        onChange={(e) => handleChecklistChange(index, "assignToEmail", e.target.value)}
+                                      />
+                                      {checklistData[index]?.assignToEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(checklistData[index]?.assignToEmail) && (
+                                        <p className="text-[10px] text-red-500 font-bold mt-1">Please enter a valid email address</p>
+                                      )}
                                     </div>
                                   </div>
                                 </div>

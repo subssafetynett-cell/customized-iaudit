@@ -14,9 +14,10 @@ interface Props {
     onSubmit: (data: any) => Promise<void>;
     mode?: "create" | "edit" | "view";
     initialData?: any;
+    hideOverlay?: boolean;
 }
 
-export default function UserModal({ open, onClose, onSubmit, mode = "create", initialData }: Props) {
+export default function UserModal({ open, onClose, onSubmit, mode = "create", initialData, hideOverlay = false }: Props) {
     const [firstName, setFirstName] = useState("");
     const [lastName, setLastName] = useState("");
     const [email, setEmail] = useState("");
@@ -144,7 +145,7 @@ export default function UserModal({ open, onClose, onSubmit, mode = "create", in
 
     return (
         <Dialog open={open} onOpenChange={onClose}>
-            <DialogContent className="sm:max-w-xl max-h-[90vh] flex flex-col p-0 overflow-hidden">
+            <DialogContent id="tour-step-user-modal" hideOverlay={hideOverlay} className="sm:max-w-xl max-h-[90vh] flex flex-col p-0 overflow-hidden">
                 <DialogHeader className="p-6 pb-2">
                     <DialogTitle className="flex items-center gap-2 text-xl">
                         {getIcon()}
@@ -173,20 +174,26 @@ export default function UserModal({ open, onClose, onSubmit, mode = "create", in
                         <div className="space-y-2">
                             <Label htmlFor="first-name">First Name *</Label>
                             <Input
-                                id="first-name"
+                                id="modal-first-name"
                                 placeholder="First Name"
                                 value={firstName}
-                                onChange={(e) => setFirstName(e.target.value)}
+                                onChange={(e) => {
+                                    e.stopPropagation();
+                                    setFirstName(e.target.value);
+                                }}
                                 disabled={isViewMode}
                             />
                         </div>
                         <div className="space-y-2">
                             <Label htmlFor="last-name">Last Name *</Label>
                             <Input
-                                id="last-name"
+                                id="modal-last-name"
                                 placeholder="Last Name"
                                 value={lastName}
-                                onChange={(e) => setLastName(e.target.value)}
+                                onChange={(e) => {
+                                    e.stopPropagation();
+                                    setLastName(e.target.value);
+                                }}
                                 disabled={isViewMode}
                             />
                         </div>
@@ -197,12 +204,15 @@ export default function UserModal({ open, onClose, onSubmit, mode = "create", in
                         <div className="relative">
                             <Mail className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
                             <Input
-                                id="email"
+                                id="modal-email"
                                 type="email"
                                 placeholder="Email address"
                                 className="pl-9"
                                 value={email}
-                                onChange={(e) => setEmail(e.target.value)}
+                                onChange={(e) => {
+                                    e.stopPropagation();
+                                    setEmail(e.target.value);
+                                }}
                                 disabled={isViewMode}
                             />
                         </div>
@@ -214,11 +224,14 @@ export default function UserModal({ open, onClose, onSubmit, mode = "create", in
                             <div className="relative">
                                 <Phone className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
                                 <Input
-                                    id="mobile"
+                                    id="modal-mobile"
                                     placeholder="Mobile number"
                                     className="pl-9"
                                     value={mobile}
-                                    onChange={(e) => setMobile(e.target.value)}
+                                    onChange={(e) => {
+                                        e.stopPropagation();
+                                        setMobile(e.target.value);
+                                    }}
                                     disabled={isViewMode}
                                 />
                             </div>
@@ -245,11 +258,14 @@ export default function UserModal({ open, onClose, onSubmit, mode = "create", in
                             <div className="relative">
                                 <Shield className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
                                 <Input
-                                    id="custom-role-name"
+                                    id="modal-custom-role-name"
                                     placeholder="Enter custom role name"
                                     className="pl-9"
                                     value={customRoleName}
-                                    onChange={(e) => setCustomRoleName(e.target.value)}
+                                    onChange={(e) => {
+                                        e.stopPropagation();
+                                        setCustomRoleName(e.target.value);
+                                    }}
                                     disabled={isViewMode}
                                 />
                             </div>
@@ -278,12 +294,15 @@ export default function UserModal({ open, onClose, onSubmit, mode = "create", in
                                 <div className="relative">
                                     <Lock className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
                                     <Input
-                                        id="password"
+                                        id="modal-password"
                                         type="password"
                                         placeholder="Password"
                                         className="pl-9"
                                         value={password}
-                                        onChange={(e) => setPassword(e.target.value)}
+                                        onChange={(e) => {
+                                            e.stopPropagation();
+                                            setPassword(e.target.value);
+                                        }}
                                     />
                                 </div>
                             </div>
@@ -294,12 +313,15 @@ export default function UserModal({ open, onClose, onSubmit, mode = "create", in
                                 <div className="relative">
                                     <Lock className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
                                     <Input
-                                        id="confirm-password"
+                                        id="modal-confirm-password"
                                         type="password"
                                         placeholder="Confirm Password"
                                         className="pl-9"
                                         value={confirmPassword}
-                                        onChange={(e) => setConfirmPassword(e.target.value)}
+                                        onChange={(e) => {
+                                            e.stopPropagation();
+                                            setConfirmPassword(e.target.value);
+                                        }}
                                     />
                                 </div>
                             </div>

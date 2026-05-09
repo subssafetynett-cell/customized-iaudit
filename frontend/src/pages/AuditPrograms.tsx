@@ -42,6 +42,13 @@ const FREQUENCIES = ["Monthly", "Quarterly", "Bi-annually", "Annually"];
 
 import { CLAUSE_MATRIX, ClauseMatrixRow } from "@/data/clauseMapping";
 
+const MONTHS = [
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December"
+];
+
+const YEARS = Array.from({ length: 10 }, (_, i) => (new Date().getFullYear() + i));
+
 const AuditPrograms = () => {
     const navigate = useNavigate();
     const [searchParams, setSearchParams] = useSearchParams();
@@ -80,6 +87,7 @@ const AuditPrograms = () => {
     const [leadAuditorId, setLeadAuditorId] = useState<string | null>(null);
     const [selectedCells, setSelectedCells] = useState<Record<string, boolean>>({});
     const [customRows, setCustomRows] = useState<{ id: string, text: string }[]>([]);
+    const [programStartDate, setProgramStartDate] = useState<Date>(new Date());
 
     // Pagination
     const [currentPage, setCurrentPage] = useState(1);
@@ -157,15 +165,15 @@ const AuditPrograms = () => {
         setCurrentPage(1);
     }, [searchQuery, standardFilter, siteFilter]);
 
-    // Dynamic period generation based on duration and frequency
-    const calculatePeriods = (frequencyVal = frequency, durationVal = duration) => {
+    const calculatePeriods = (frequencyVal = frequency, durationVal = duration, startDate = programStartDate) => {
         const count = frequencyVal === "Monthly" ? durationVal * 12 :
             frequencyVal === "Quarterly" ? durationVal * 4 :
                 frequencyVal === "Bi-annually" ? durationVal * 2 :
                     durationVal; // Annually
 
         const result = [];
-        const currentDate = new Date(2026, 0, 1); // Start from Jan 2026
+        const currentDate = startDate ? new Date(startDate) : new Date();
+        currentDate.setDate(1); // Ensure we start at the beginning of the current month
 
         for (let i = 0; i < count; i++) {
             const monthLabel = currentDate.toLocaleString('default', { month: 'short' }).toUpperCase();
@@ -227,7 +235,7 @@ const AuditPrograms = () => {
                     siteId: selectedSite,
                     auditorIds: selectedAuditors,
                     leadAuditorId: leadAuditorId,
-                    scheduleData: { ...selectedCells, customRows },
+                    scheduleData: { ...selectedCells, customRows, startDate: programStartDate.toISOString() },
                     userId: user.id
                 })
             });
@@ -250,8 +258,12 @@ const AuditPrograms = () => {
 
     const handleDeleteProgram = async () => {
         if (!deleteId) return;
+        const user = JSON.parse(localStorage.getItem('user') || '{}');
         try {
-            const res = await fetch(`${API_BASE_URL}/api/audit-programs/${deleteId}`, { method: "DELETE" });
+            const res = await fetch(`${API_BASE_URL}/api/audit-programs/${deleteId}`, { 
+                method: "DELETE",
+                headers: { 'x-user-id': user.id?.toString() || '' }
+            });
             if (res.ok) {
                 toast.success("Program deleted");
                 await fetchPrograms();
@@ -266,8 +278,11 @@ const AuditPrograms = () => {
 
     const handleEditProgram = async (program: any) => {
         const loadingToast = toast.loading("Fetching program details...");
+        const user = JSON.parse(localStorage.getItem('user') || '{}');
         try {
-            const res = await fetch(`${API_BASE_URL}/api/audit-programs/${program.id}`);
+            const res = await fetch(`${API_BASE_URL}/api/audit-programs/${program.id}`, {
+                headers: { 'x-user-id': user.id?.toString() || '' }
+            });
             if (!res.ok) throw new Error("Failed to fetch details");
             const fullProgram = await res.json();
 
@@ -279,11 +294,11 @@ const AuditPrograms = () => {
             setSelectedSite(fullProgram.siteId.toString());
             setSelectedAuditors(fullProgram.auditors?.map((a: any) => a.id.toString()) || []);
             setLeadAuditorId(fullProgram.leadAuditorId?.toString() || null);
-
             const loadData = fullProgram.scheduleData || {};
-            const { customRows: loadedCustomRows, ...restCells } = loadData;
+            const { customRows: loadedCustomRows, startDate: loadedStartDate, ...restCells } = loadData;
             setSelectedCells(restCells);
             setCustomRows(loadedCustomRows || []);
+            setProgramStartDate(loadedStartDate ? new Date(loadedStartDate) : (fullProgram.createdAt ? new Date(fullProgram.createdAt) : new Date()));
             setShowSchedule(true);
             setView("edit");
             toast.dismiss(loadingToast);
@@ -296,8 +311,11 @@ const AuditPrograms = () => {
 
     const handleViewProgram = async (program: any) => {
         const loadingToast = toast.loading("Loading program details...");
+        const user = JSON.parse(localStorage.getItem('user') || '{}');
         try {
-            const res = await fetch(`${API_BASE_URL}/api/audit-programs/${program.id}`);
+            const res = await fetch(`${API_BASE_URL}/api/audit-programs/${program.id}`, {
+                headers: { 'x-user-id': user.id?.toString() || '' }
+            });
             if (!res.ok) throw new Error("Failed to fetch details");
             const fullProgram = await res.json();
 
@@ -309,11 +327,11 @@ const AuditPrograms = () => {
             setSelectedSite(fullProgram.siteId.toString());
             setSelectedAuditors(fullProgram.auditors?.map((a: any) => a.id.toString()) || []);
             setLeadAuditorId(fullProgram.leadAuditorId?.toString() || null);
-
             const loadData = fullProgram.scheduleData || {};
-            const { customRows: loadedCustomRows, ...restCells } = loadData;
+            const { customRows: loadedCustomRows, startDate: loadedStartDate, ...restCells } = loadData;
             setSelectedCells(restCells);
             setCustomRows(loadedCustomRows || []);
+            setProgramStartDate(loadedStartDate ? new Date(loadedStartDate) : (fullProgram.createdAt ? new Date(fullProgram.createdAt) : new Date()));
             setShowSchedule(true);
             setView("view");
             toast.dismiss(loadingToast);
@@ -335,6 +353,7 @@ const AuditPrograms = () => {
         setLeadAuditorId(null);
         setSelectedCells({});
         setCustomRows([]);
+        setProgramStartDate(new Date());
         setShowSchedule(false);
     };
 
@@ -380,18 +399,22 @@ const AuditPrograms = () => {
     const selectedClausesList = getSelectedClausesList();
 
     const handleDownloadPDF = async (program: any) => {
+        const user = JSON.parse(localStorage.getItem('user') || '{}');
         // Fetch full program details to ensure scheduleData is available
         let fullProgram = program;
         if (!program.scheduleData) {
             try {
-                const res = await fetch(`${API_BASE_URL}/api/audit-programs/${program.id}`);
+                const res = await fetch(`${API_BASE_URL}/api/audit-programs/${program.id}`, {
+                headers: { 'x-user-id': user.id?.toString() || '' }
+            });
                 if (res.ok) fullProgram = await res.json();
             } catch (e) {
                 console.error("Failed to fetch full program details for PDF", e);
             }
         }
         const doc = new jsPDF({ orientation: 'landscape' });
-        const programPeriods = calculatePeriods(fullProgram.frequency, fullProgram.duration);
+        const loadData = fullProgram.scheduleData || {};
+        const programPeriods = calculatePeriods(fullProgram.frequency, fullProgram.duration, loadData.startDate || fullProgram.createdAt);
         // Reassign program to fullProgram for the rest of the function
         program = fullProgram;
 
@@ -530,18 +553,22 @@ const AuditPrograms = () => {
     };
 
     const handleDownloadWord = async (program: any) => {
+        const user = JSON.parse(localStorage.getItem('user') || '{}');
         // Fetch full program details to ensure scheduleData is available
         let fullProgram = program;
         if (!program.scheduleData) {
             try {
-                const res = await fetch(`${API_BASE_URL}/api/audit-programs/${program.id}`);
+                const res = await fetch(`${API_BASE_URL}/api/audit-programs/${program.id}`, {
+                headers: { 'x-user-id': user.id?.toString() || '' }
+            });
                 if (res.ok) fullProgram = await res.json();
             } catch (e) {
                 console.error("Failed to fetch full program details for Word", e);
             }
         }
         program = fullProgram;
-        const programPeriods = calculatePeriods(program.frequency, program.duration);
+        const loadData = program.scheduleData || {};
+        const programPeriods = calculatePeriods(program.frequency, program.duration, loadData.startDate || program.createdAt);
         // Fetch logo image for Docx - compressed via canvas to prevent huge file sizes
         let logoBuffer: ArrayBuffer | null = null;
         try {
@@ -728,8 +755,8 @@ const AuditPrograms = () => {
                 <div className="fixed inset-0 bg-slate-900/10 z-[40] transition-all duration-500" />
             )}
 
-            <div className="flex items-center justify-between">
-                <div>
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
+                <div className="text-center sm:text-left">
                     <h2 className="text-2xl font-bold tracking-tight text-foreground">Audit Program</h2>
                     <p className="text-sm text-muted-foreground mt-1">
                         Plan and schedule your ISO audits across multiple periods.
@@ -843,8 +870,8 @@ const AuditPrograms = () => {
                     </div>
 
                     <Card className="border border-muted shadow-sm overflow-hidden bg-white rounded-xl">
-                        <CardContent className="p-0 bg-white">
-                            <Table>
+                        <CardContent className="p-0 bg-white overflow-x-auto">
+                            <Table className="min-w-[800px]">
                                 <TableHeader className="bg-[#213847]">
                                     <TableRow className="hover:bg-transparent border-none">
                                         <TableHead className="w-[80px] font-bold text-xs uppercase tracking-wider text-white pl-6 text-center">Sl No.</TableHead>
@@ -1033,6 +1060,51 @@ const AuditPrograms = () => {
                                 </Select>
                             </div>
 
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div className="space-y-2">
+                                    <Label>Start Month</Label>
+                                    <Select 
+                                        onValueChange={(val) => {
+                                            const newDate = new Date(programStartDate);
+                                            newDate.setMonth(MONTHS.indexOf(val));
+                                            setProgramStartDate(newDate);
+                                        }} 
+                                        value={MONTHS[programStartDate.getMonth()]} 
+                                        disabled={view === "view"}
+                                    >
+                                        <SelectTrigger className="bg-white border-slate-200">
+                                            <SelectValue placeholder="Select month" />
+                                        </SelectTrigger>
+                                        <SelectContent>
+                                            {MONTHS.map((m) => (
+                                                <SelectItem key={m} value={m}>{m}</SelectItem>
+                                            ))}
+                                        </SelectContent>
+                                    </Select>
+                                </div>
+                                <div className="space-y-2">
+                                    <Label>Start Year</Label>
+                                    <Select 
+                                        onValueChange={(val) => {
+                                            const newDate = new Date(programStartDate);
+                                            newDate.setFullYear(parseInt(val));
+                                            setProgramStartDate(newDate);
+                                        }} 
+                                        value={programStartDate.getFullYear().toString()} 
+                                        disabled={view === "view"}
+                                    >
+                                        <SelectTrigger className="bg-white border-slate-200">
+                                            <SelectValue placeholder="Select year" />
+                                        </SelectTrigger>
+                                        <SelectContent>
+                                            {YEARS.map((y) => (
+                                                <SelectItem key={y} value={y.toString()}>{y}</SelectItem>
+                                            ))}
+                                        </SelectContent>
+                                    </Select>
+                                </div>
+                            </div>
+
                             <div className="space-y-2">
                                 <Label htmlFor="duration">Duration (Years)</Label>
                                 <Input
@@ -1115,19 +1187,18 @@ const AuditPrograms = () => {
                                         ) : null;
                                     })}
                                 </div>
-
-                                {selectedAuditors.length > 1 && (
-                                    <div className="mt-4 p-4 bg-slate-50/50 rounded-xl border border-dashed border-slate-300">
+                                 {selectedAuditors.length > 1 && (
+                                    <div className="mt-4 p-3 sm:p-4 bg-slate-50/50 rounded-xl border border-dashed border-slate-300">
                                         <div className="flex items-center gap-2 mb-2">
-                                            <div className="w-8 h-8 rounded-full bg-amber-100 flex items-center justify-center">
-                                                <Star className="w-4 h-4 text-amber-600 fill-amber-600" />
+                                            <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-amber-100 flex items-center justify-center">
+                                                <Star className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-amber-600 fill-amber-600" />
                                             </div>
                                             <div>
                                                 <h4 className="text-sm font-bold text-slate-800">Designate Lead Auditor</h4>
-                                                <p className="text-[11px] text-slate-500">Pick the main auditor in charge for this program</p>
+                                                <p className="text-[10px] sm:text-[11px] text-slate-500">Pick the main auditor in charge</p>
                                             </div>
                                         </div>
-                                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-3">
+                                        <div className="grid grid-cols-1 xs:grid-cols-2 gap-2 mt-3">
                                             {selectedAuditors.map(id => {
                                                 const auditor = auditors.find(a => a.id.toString() === id);
                                                 const isLead = leadAuditorId === id;
@@ -1189,13 +1260,13 @@ const AuditPrograms = () => {
                         <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
                             {/* Program Timeline */}
                             <Card className="border-none shadow-sm overflow-hidden bg-white">
-                                <CardHeader className="flex flex-row items-center gap-4 pb-2">
-                                    <div className="p-2.5 bg-emerald-50 rounded-xl">
-                                        <Calendar className="w-5 h-5 text-emerald-600" />
+                                <CardHeader className="flex flex-row items-center gap-3 sm:gap-4 pb-2 p-4 sm:p-6">
+                                    <div className="p-2 sm:p-2.5 bg-emerald-50 rounded-xl">
+                                        <Calendar className="w-4 h-4 sm:w-5 sm:h-5 text-emerald-600" />
                                     </div>
                                     <div>
-                                        <CardTitle className="text-lg font-bold text-slate-800">Program Timeline</CardTitle>
-                                        <div className="text-[11px] font-medium text-slate-500 flex items-center gap-2 mt-0.5">
+                                        <CardTitle className="text-base sm:text-lg font-bold text-slate-800">Program Timeline</CardTitle>
+                                        <div className="text-[10px] sm:text-[11px] font-medium text-slate-500 flex items-center gap-1 sm:gap-2 mt-0.5">
                                             <span>{duration} Years</span> • <span>{frequency} Frequency</span> • <span>{periods.length} Periods</span>
                                         </div>
                                     </div>
@@ -1208,14 +1279,14 @@ const AuditPrograms = () => {
                                                 {periods.map((period, idx) => {
                                                     const dotActive = isPeriodActive(idx);
                                                     return (
-                                                        <div key={idx} className="flex flex-col items-center gap-4 shrink-0">
+                                                        <div key={idx} className="flex flex-col items-center gap-3 sm:gap-4 shrink-0">
                                                             <div className={cn(
-                                                                "w-[18px] h-[18px] rounded-full border-[3px] border-white shadow-md ring-[6px] transition-all duration-300",
+                                                                "w-3.5 h-3.5 sm:w-[18px] sm:h-[18px] rounded-full border-[2px] sm:border-[3px] border-white shadow-md ring-[4px] sm:ring-[6px] transition-all duration-300",
                                                                 dotActive ? "bg-emerald-500 ring-emerald-50" : "bg-slate-300 ring-slate-50"
                                                             )} />
                                                             <div className="flex flex-col items-center">
                                                                 <span className={cn(
-                                                                    "text-[10px] font-bold uppercase tracking-widest whitespace-nowrap",
+                                                                    "text-[9px] sm:text-[10px] font-bold uppercase tracking-widest whitespace-nowrap",
                                                                     dotActive ? "text-emerald-600" : "text-slate-400"
                                                                 )}>{period.label}</span>
                                                                 <div className={cn(
@@ -1253,7 +1324,7 @@ const AuditPrograms = () => {
                                                     return (
                                                         <th key={std}
                                                             className={cn(
-                                                                "bg-slate-100 h-10 px-4 text-[11px] font-black tracking-widest text-[#213847] border-b border-r border-slate-200 uppercase align-middle",
+                                                                "bg-slate-100 h-10 px-3 sm:px-4 text-[10px] sm:text-[11px] font-black tracking-widest text-[#213847] border-b border-r border-slate-200 uppercase align-middle",
                                                                 !isMobile && "sticky z-20"
                                                             )}
                                                             style={{ left: !isMobile ? `${leftOffset}px` : undefined, width: colWidth, minWidth: colWidth, maxWidth: colWidth }}

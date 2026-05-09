@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { Bell, Search, User, LogOut, Settings, UserCircle, ChevronRight, GraduationCap, X, Info, GraduationCap as GraduationCapIcon } from "lucide-react";
+import { Bell, Search, User, LogOut, Settings, UserCircle, ChevronRight, GraduationCap, X, Info, HelpCircle, GraduationCap as GraduationCapIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { SidebarTrigger } from "@/components/ui/sidebar";
 import { Separator } from "@/components/ui/separator";
@@ -91,6 +91,23 @@ export function TopNav() {
         <SidebarTrigger className="lg:hidden h-10 w-10 text-muted-foreground mr-2" />
       </div>
       <div className="flex items-center gap-4">
+        {/* Tour Button */}
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => {
+            if (window.location.pathname === '/') {
+              window.dispatchEvent(new CustomEvent('restart-onboarding', { detail: { step: 2 } }));
+            } else {
+              navigate('/?restartOnboarding=true&step=2');
+            }
+          }}
+          className="flex items-center gap-2 text-slate-600 border-slate-200 hover:text-primary hover:border-primary/30 hover:bg-primary/5 rounded-xl px-4 h-11 transition-all duration-300 group"
+        >
+          <HelpCircle className="h-4 w-4 text-slate-500 group-hover:text-primary" />
+          <span className="font-bold text-sm tracking-tight">Tour</span>
+        </Button>
+
         {/* Learn Option */}
         <Button
           variant="ghost"

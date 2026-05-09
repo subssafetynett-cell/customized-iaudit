@@ -14,6 +14,16 @@ import {
     DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
+    AlertDialog,
+    AlertDialogAction,
+    AlertDialogCancel,
+    AlertDialogContent,
+    AlertDialogDescription,
+    AlertDialogFooter,
+    AlertDialogHeader,
+    AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import {
     Calendar, ClipboardCheck, Sparkles, ArrowRight, LayoutDashboard,
     Globe, LayoutGrid, List, MoreVertical, FileText, Trash2, Download, Eye, Edit
 } from "lucide-react";
@@ -48,6 +58,10 @@ const AuditProgramPage = () => {
     const [searchParams] = useSearchParams();
     const [showOnboardingGuide, setShowOnboardingGuide] = useState(searchParams.get("onboarding") === "true");
     const [isFinishing, setIsFinishing] = useState(false);
+    
+    // Deletion State
+    const [planToDelete, setPlanToDelete] = useState<any>(null);
+    const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
 
     useEffect(() => {
         const fetchData = async () => {
@@ -84,14 +98,15 @@ const AuditProgramPage = () => {
         fetchData();
     }, []);
 
-    const calculatePeriods = (frequency: string, duration: number) => {
+    const calculatePeriods = (frequency: string, duration: number, startDate?: string | Date) => {
         const count = frequency === "Monthly" ? duration * 12 :
             frequency === "Quarterly" ? duration * 4 :
                 frequency === "Bi-annually" ? duration * 2 :
                     duration;
 
         const result = [];
-        const currentDate = new Date(2026, 0, 1); // Start in January 2026
+        const currentDate = startDate ? new Date(startDate) : new Date();
+        currentDate.setDate(1); // Start from the beginning of the month
 
         for (let i = 0; i < count; i++) {
             const monthLabel = currentDate.toLocaleString('default', { month: 'short' }).toUpperCase();
@@ -107,7 +122,8 @@ const AuditProgramPage = () => {
     };
 
     const getAuditExecutions = (program: any) => {
-        const programPeriods = calculatePeriods(program.frequency, program.duration);
+        const loadData = program.scheduleData || {};
+        const programPeriods = calculatePeriods(program.frequency, program.duration, loadData.startDate || program.createdAt);
         const executions: any[] = [];
         const isoStandard = program.isoStandard || "";
         const is9001 = isoStandard.includes("9001");
@@ -178,7 +194,6 @@ const AuditProgramPage = () => {
     };
 
     const handleDeletePlan = async (planId: number) => {
-        if (!confirm("Are you sure you want to delete this audit plan?")) return;
         try {
             const res = await fetch(`${API_BASE_URL}/api/audit-plans/${planId}`, {
                 method: "DELETE"
@@ -806,7 +821,13 @@ const AuditProgramPage = () => {
                                                                 <DropdownMenuItem onClick={() => handleDownloadDocx(plan, exec.title, siteProgram)}>
                                                                     <FileText className="mr-2 h-4 w-4" /> Download DOCX
                                                                 </DropdownMenuItem>
-                                                                <DropdownMenuItem onClick={() => handleDeletePlan(plan.id)} className="text-red-600 focus:text-red-600 focus:bg-red-50">
+                                                                <DropdownMenuItem 
+                                                                    className="text-red-600 focus:text-red-600 focus:bg-red-50"
+                                                                    onClick={() => {
+                                                                        setPlanToDelete(plan);
+                                                                        setIsDeleteDialogOpen(true);
+                                                                    }}
+                                                                >
                                                                     <Trash2 className="mr-2 h-4 w-4" /> Delete Plan
                                                                 </DropdownMenuItem>
                                                             </DropdownMenuContent>
@@ -832,6 +853,26 @@ const AuditProgramPage = () => {
                     </div>
                 ))}
             </div>
+            {/* Delete Confirmation Dialog */}
+            <AlertDialog open={isDeleteDialogOpen} onOpenChange={setIsDeleteDialogOpen}>
+                <AlertDialogContent className="rounded-2xl border-slate-200">
+                    <AlertDialogHeader>
+                        <AlertDialogTitle className="text-xl font-bold text-slate-800">Delete Audit Plan?</AlertDialogTitle>
+                        <AlertDialogDescription className="text-slate-500">
+                            This will permanently remove the audit plan for <span className="font-bold text-slate-700">{planToDelete?.auditName || planToDelete?.auditType}</span>. This action cannot be undone.
+                        </AlertDialogDescription>
+                    </AlertDialogHeader>
+                    <AlertDialogFooter className="gap-2">
+                        <AlertDialogCancel className="rounded-xl border-slate-200 font-semibold">Cancel</AlertDialogCancel>
+                        <AlertDialogAction
+                            onClick={() => planToDelete && handleDeletePlan(planToDelete.id)}
+                            className="bg-red-600 hover:bg-red-700 text-white rounded-xl font-bold"
+                        >
+                            Delete Plan
+                        </AlertDialogAction>
+                    </AlertDialogFooter>
+                </AlertDialogContent>
+            </AlertDialog>
         </div>
     );
 };

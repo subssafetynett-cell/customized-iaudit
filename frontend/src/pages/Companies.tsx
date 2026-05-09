@@ -45,17 +45,34 @@ import { DeleteConfirmationDialog } from "@/components/DeleteConfirmationDialog"
 import ReusablePagination from "@/components/ReusablePagination";
 import { Company, Site, Department } from "@/types/company";
 import { useEffect } from "react";
+import { useSearchParams } from "react-router-dom";
+import { TourStepPopover } from "@/components/TourStepPopover";
 
 const CompaniesPage = () => {
   const {
     companies, addCompany, addSite, addDepartment, deleteSite,
-    deleteDepartment, updateCompany, updateSite, updateDepartment, deleteCompany
+    deleteDepartment, updateCompany, updateSite, updateDepartment, deleteCompany, isLoading
   } = useCompanyStore();
   const navigate = useNavigate();
 
   // Navigation and Selection state
   const [selectedCompanyId, setSelectedCompanyId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
+  const [searchParams] = useSearchParams();
+  const [showOnboardingGuide, setShowOnboardingGuide] = useState(false);
+  const [onboardingStep, setOnboardingStep] = useState<number | null>(null);
+
+  useEffect(() => {
+    const onboarding = searchParams.get("onboarding") === "true";
+    const step = parseInt(searchParams.get("step") || "3");
+    if (onboarding) {
+      setShowOnboardingGuide(true);
+      setOnboardingStep(step);
+      if (step === 4) {
+        setShowAddSite(true);
+      }
+    }
+  }, [searchParams]);
 
   // Pagination state
   const [currentPage, setCurrentPage] = useState(1);
@@ -120,7 +137,20 @@ const CompaniesPage = () => {
     return (
       <div className="h-full bg-white overflow-auto pb-10">
         <div className="max-w-7xl mx-auto px-6 lg:px-12 pt-8 relative z-10 transition-all duration-500 ease-in-out">
-          {/* 2. Company Info Card */}
+          {/* Header Section */}
+          <div className="flex flex-col md:flex-row md:items-end justify-between gap-4 mb-8">
+            <div>
+              <h1 className="text-2xl font-bold tracking-tight text-foreground">Company Details</h1>
+              <p className="text-sm text-muted-foreground mt-1">Manage your company profile, sites, and departments</p>
+            </div>
+            {!isLoading && companies.length === 0 && !selectedCompanyId && (
+              <Button onClick={() => setShowCreateCompany(true)} className="gap-2 shadow-sm font-semibold bg-[#213847] hover:bg-[#213847]/90 text-white rounded-xl px-5 h-11">
+                <Plus className="h-4 w-4" /> Create Company
+              </Button>
+            )}
+          </div>
+
+          {/* Company Info Card */}
           <Card className="bg-white border border-slate-200 shadow-xl shadow-slate-200/50 rounded-[2.5rem] overflow-hidden mb-8">
             <CardContent className="p-8 md:p-12">
               <div className="flex flex-col lg:flex-row gap-10 items-start">
@@ -172,7 +202,7 @@ const CompaniesPage = () => {
             </CardContent>
           </Card>
 
-          {/* 3. Stats Bar */}
+          {/* Stats Bar */}
           <Card className="border-none shadow-sm mb-8 overflow-hidden rounded-xl bg-white/80">
             <CardContent className="p-0">
               <div className="grid grid-cols-2 divide-x divide-slate-100">
@@ -188,7 +218,7 @@ const CompaniesPage = () => {
             </CardContent>
           </Card>
 
-          {/* 4. Tabs Section */}
+          {/* Tabs Section */}
           <Tabs defaultValue="sites" className="w-full">
             <TabsList className="w-full justify-start bg-white border border-slate-100 shadow-sm h-14 p-0 mb-8 overflow-x-auto rounded-xl">
               <TabsTrigger
@@ -207,14 +237,43 @@ const CompaniesPage = () => {
 
             <TabsContent value="sites">
               <Card className="border border-slate-100 shadow-md rounded-2xl overflow-hidden bg-white">
-                <div className="p-6 flex justify-between items-center border-b border-slate-100 text-foreground">
+                <div className="relative p-6 flex justify-between items-center border-b border-slate-100 text-foreground">
                   <h2 className="text-xl font-bold">Sites</h2>
-                  <Button
-                    onClick={() => setShowAddSite(true)}
-                    className="bg-[#213847] hover:bg-[#213847]/90 text-white gap-2 px-6 rounded-lg font-bold"
-                  >
-                    <Plus className="h-4 w-4" /> Add Site
-                  </Button>
+                  <div className={`relative ${showOnboardingGuide ? "z-[60]" : ""}`}>
+                    {showOnboardingGuide && (
+                      <div className="absolute inset-0 -m-2 rounded-2xl ring-[8px] ring-blue-500/50 animate-pulse z-[-1]" />
+                    )}
+                    <Button
+                      id="tour-step-add-site"
+                      onClick={() => {
+                        setShowAddSite(true);
+                        setShowOnboardingGuide(false);
+                      }}
+                      className={`bg-[#213847] hover:bg-[#213847]/90 text-white gap-2 px-6 rounded-lg font-bold transition-all ${showOnboardingGuide ? "relative z-[60] scale-105 shadow-2xl" : ""}`}
+                    >
+                      <Plus className="h-4 w-4" /> Add Site
+                    </Button>
+                    {showOnboardingGuide && onboardingStep === 3 && (
+                      <TourStepPopover
+                        targetId="tour-step-add-site"
+                        step={3}
+                        totalSteps={7}
+                        title="Create Sites"
+                        description="Click this add site button and fill the fields to create sites."
+                        onNext={() => {
+                          setShowAddSite(true);
+                          setOnboardingStep(4);
+                        }}
+                        onBack={() => {
+                          setShowOnboardingGuide(false);
+                          navigate("/?restartOnboarding=true&step=2");
+                        }}
+                        onClose={() => setShowOnboardingGuide(false)}
+                        position="left"
+                        disableShadow={false}
+                      />
+                    )}
+                  </div>
                 </div>
                 <Table>
                   <TableHeader className="bg-slate-50/50">
@@ -346,62 +405,111 @@ const CompaniesPage = () => {
                 </Table>
               </Card>
             </TabsContent>
-
           </Tabs>
 
-
-          {/* Modal Definitions inside drill-down */}
+          {/* ------------------------------------------------------------------ */}
+          {/* SITE MODAL — used during onboarding step 4                         */}
+          {/* ------------------------------------------------------------------ */}
           <SiteModal
             open={showAddSite}
-            onClose={() => setShowAddSite(false)}
-            onSubmit={(data) => addSite(selectedCompany.id, data)}
+            hideOverlay={false}
+            onClose={() => {
+              // ✅ FIXED: Removed the erroneous setOnboardingStep(3) that was here.
+              // That caused the popover to jump back to step 3 whenever the modal
+              // was dismissed. Back-navigation is handled by the popover's onBack.
+              setShowAddSite(false);
+            }}
+            onSubmit={async (data) => {
+              const res = await addSite(selectedCompany.id, data);
+              if (res?.success) {
+                // ✅ FIXED: Navigate with step=5 so the Users page shows step 5 popover.
+                setShowAddSite(false);
+                setOnboardingStep(5);
+                navigate("/users?onboarding=true&step=5");
+              }
+            }}
             mode="create"
           />
 
-          {
-            activeSite && (
-              <DepartmentModal
-                open={!!addDeptSiteId}
-                onClose={() => setAddDeptSiteId(null)}
-                onSubmit={(data) => addDepartment(selectedCompany.id, activeSite.id, data.name, data)}
-                siteName={activeSite.name}
-                mode="create"
-              />
-            )
-          }
+          {/* ------------------------------------------------------------------ */}
+          {/* STEP 4 TOUR POPOVER — shown while the Add Site modal is open       */}
+          {/* ------------------------------------------------------------------ */}
+          {showOnboardingGuide && onboardingStep === 4 && showAddSite && (
+            <TourStepPopover
+              targetId="tour-step-site-modal"
+              step={4}
+              totalSteps={7}
+              title="Add Site Details"
+              description="Please fill in the site details. You must at least provide a Site Name to continue. Click 'Add Site' when ready."
+              onNext={() => {
+                // ✅ FIXED: Close the modal, set step 5, then navigate.
+                // Previously this called setShowOnboardingGuide(false) which lost
+                // the onboarding state before the Users page could pick it up.
+                setShowAddSite(false);
+                setOnboardingStep(5);
+                navigate("/users?onboarding=true&step=5");
+              }}
+              onBack={() => {
+                setShowAddSite(false);
+                setOnboardingStep(3);
+                setShowOnboardingGuide(true);
+              }}
+              onClose={() => {
+                setShowOnboardingGuide(false);
+                setShowAddSite(false);
+              }}
+              position="right"
+              hideNext={false}
+              // ✅ FIXED: disableShadow=true means NO black overlay covers the page.
+              // The TourStepPopover now correctly guards both the overlay div AND
+              // the spotlight cutout inside the same !disableShadow block.
+              disableShadow={true}
+            />
+          )}
 
-          {
-            showEditCompany && (
-              <CompanyModal
-                open={!!showEditCompany}
-                onClose={() => setShowEditCompany(null)}
-                onSubmit={(data) => updateCompany(selectedCompany.id, data)}
-                initialData={showEditCompany}
-                mode="edit"
-              />
-            )
-          }
+          {activeSite && (
+            <DepartmentModal
+              open={!!addDeptSiteId}
+              onClose={() => setAddDeptSiteId(null)}
+              onSubmit={(data) => addDepartment(selectedCompany.id, activeSite.id, data.name, data)}
+              siteName={activeSite.name}
+              mode="create"
+            />
+          )}
+
+          {showEditCompany && (
+            <CompanyModal
+              open={!!showEditCompany}
+              onClose={() => setShowEditCompany(null)}
+              onSubmit={(data) => updateCompany(selectedCompany.id, data)}
+              initialData={showEditCompany}
+              mode="edit"
+            />
+          )}
 
           <SiteModal
             open={!!editSite}
             onClose={() => setEditSite(null)}
-            onSubmit={(data) => editSite && updateSite(selectedCompany.id, editSite.id, data)}
+            onSubmit={(data) => {
+              if (editSite) {
+                updateSite(selectedCompany.id, editSite.id, data);
+                setEditSite(null);
+              }
+            }}
             initialData={editSite || undefined}
             mode="edit"
           />
 
-          {
-            editDept && (
-              <DepartmentModal
-                open={!!editDept}
-                onClose={() => setEditDept(null)}
-                onSubmit={(data) => updateDepartment(selectedCompany.id, editDept.siteId, editDept.dept.id, data)}
-                mode="edit"
-              />
-            )
-          }
+          {editDept && (
+            <DepartmentModal
+              open={!!editDept}
+              onClose={() => setEditDept(null)}
+              onSubmit={(data) => updateDepartment(selectedCompany.id, editDept.siteId, editDept.dept.id, data)}
+              mode="edit"
+            />
+          )}
 
-          {/* Shared Delete Dialogs (Site/Dept) */}
+          {/* Shared Delete Dialogs */}
           <DeleteConfirmationDialog
             open={!!siteToDelete}
             onOpenChange={(open) => !open && setSiteToDelete(null)}
@@ -443,7 +551,7 @@ const CompaniesPage = () => {
                 await deleteCompany(companyToDelete.id);
                 setIsDeleting(false);
                 setCompanyToDelete(null);
-                setSelectedCompanyId(null); // Return to list after deletion
+                setSelectedCompanyId(null);
               }
             }}
             isLoading={isDeleting}
@@ -462,23 +570,23 @@ const CompaniesPage = () => {
         {/* Title row */}
         <div className="flex flex-col md:flex-row md:items-end justify-between gap-4 mb-8">
           <div>
-            <h1 className="text-2xl font-bold tracking-tight text-foreground">Company</h1>
-            <div className="flex items-center gap-2 text-sm mt-1">
-              <span className="text-black font-medium">Dashboard</span>
-            </div>
+            <h1 className="text-2xl font-bold tracking-tight text-foreground">Company Details</h1>
+            <p className="text-sm text-muted-foreground mt-1">Manage your company profile, sites, and departments</p>
           </div>
-          {/* Create Company explicitly hidden if user already has a company registered */}
-          {companies.length === 0 && (
+          {!isLoading && companies.length === 0 && !selectedCompanyId && (
             <Button onClick={() => setShowCreateCompany(true)} className="gap-2 shadow-sm font-semibold bg-[#213847] hover:bg-[#213847]/90 text-white rounded-xl px-5 h-11">
               <Plus className="h-4 w-4" /> Create Company
             </Button>
           )}
         </div>
 
-
-
         {/* Companies Table or Empty State */}
-        {filteredCompanies.length === 0 && !searchQuery ? (
+        {isLoading ? (
+          <div className="bg-white/40 rounded-[2rem] border-2 border-dashed border-slate-200 p-20 flex flex-col items-center justify-center text-center space-y-6">
+            <div className="w-12 h-12 border-4 border-emerald-100 border-t-emerald-600 rounded-full animate-spin" />
+            <p className="text-slate-500 font-medium">Loading companies...</p>
+          </div>
+        ) : filteredCompanies.length === 0 && !searchQuery && !selectedCompanyId ? (
           <div className="bg-white/40 rounded-[2rem] border-2 border-dashed border-slate-200 p-20 flex flex-col items-center justify-center text-center space-y-6">
             <div className="w-24 h-24 bg-slate-100 rounded-[2rem] flex items-center justify-center text-slate-400">
               <Building2 className="w-12 h-12" />

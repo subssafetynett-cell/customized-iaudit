@@ -10,6 +10,16 @@ import {
     DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
+    AlertDialog,
+    AlertDialogAction,
+    AlertDialogCancel,
+    AlertDialogContent,
+    AlertDialogDescription,
+    AlertDialogFooter,
+    AlertDialogHeader,
+    AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import {
     LayoutList, MoreVertical, FileText, Trash2, Eye, Calendar, Clock, Search, Edit, Download, Sheet, FileDown, MapPin
 } from "lucide-react";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
@@ -33,6 +43,10 @@ const AuditList = () => {
     const [selectedSite, setSelectedSite] = useState("all");
     const [loading, setLoading] = useState(true);
     const navigate = useNavigate();
+    
+    // Deletion State
+    const [planToDelete, setPlanToDelete] = useState<any>(null);
+    const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
 
     // Pagination
     const [currentPage, setCurrentPage] = useState(1);
@@ -56,7 +70,6 @@ const AuditList = () => {
     }, []);
 
     const handleDeletePlan = async (planId: number) => {
-        if (!confirm("Are you sure you want to delete this audit plan?")) return;
         try {
             const res = await fetch(`${API_BASE_URL}/api/audit-plans/${planId}`, {
                 method: "DELETE"
@@ -609,6 +622,15 @@ const AuditList = () => {
                                                                 <DropdownMenuItem onClick={() => handleDownloadExcel(plan)} className="gap-2 cursor-pointer">
                                                                     <FileText className="w-4 h-4 text-emerald-500" /> Download Excel
                                                                 </DropdownMenuItem>
+                                                                <DropdownMenuItem 
+                                                                    className="text-red-600 focus:text-red-600 focus:bg-red-50 gap-2 cursor-pointer"
+                                                                    onClick={() => {
+                                                                        setPlanToDelete(plan);
+                                                                        setIsDeleteDialogOpen(true);
+                                                                    }}
+                                                                >
+                                                                    <Trash2 className="w-4 h-4" /> Delete Plan
+                                                                </DropdownMenuItem>
                                                             </DropdownMenuContent>
                                                         </DropdownMenu>
                                                     </div>
@@ -630,6 +652,26 @@ const AuditList = () => {
                     />
                 </Tabs>
             </div>
+            {/* Delete Confirmation Dialog */}
+            <AlertDialog open={isDeleteDialogOpen} onOpenChange={setIsDeleteDialogOpen}>
+                <AlertDialogContent className="rounded-2xl border-slate-200">
+                    <AlertDialogHeader>
+                        <AlertDialogTitle className="text-xl font-bold text-slate-800">Delete Audit Plan?</AlertDialogTitle>
+                        <AlertDialogDescription className="text-slate-500">
+                            This will permanently remove the audit plan for <span className="font-bold text-slate-700">{planToDelete?.auditName || planToDelete?.auditType}</span>. This action cannot be undone.
+                        </AlertDialogDescription>
+                    </AlertDialogHeader>
+                    <AlertDialogFooter className="gap-2">
+                        <AlertDialogCancel className="rounded-xl border-slate-200 font-semibold">Cancel</AlertDialogCancel>
+                        <AlertDialogAction
+                            onClick={() => planToDelete && handleDeletePlan(planToDelete.id)}
+                            className="bg-red-600 hover:bg-red-700 text-white rounded-xl font-bold"
+                        >
+                            Delete Plan
+                        </AlertDialogAction>
+                    </AlertDialogFooter>
+                </AlertDialogContent>
+            </AlertDialog>
         </div>
     );
 };

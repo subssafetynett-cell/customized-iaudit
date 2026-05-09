@@ -22,7 +22,7 @@ const dashboardNav = [
 ];
 
 const managementNav = [
-  { title: "Company", url: "/companies", icon: Building2 },
+  { title: "Companies", url: "/companies", icon: Building2 },
   { title: "Users", url: "/users", icon: Users },
   { title: "Self Assessment", url: "/self-assessment", icon: ClipboardCheck },
   { title: "Gap Analysis", url: "/gap-analysis", icon: ClipboardList },
@@ -125,7 +125,7 @@ export function AppSidebar() {
                           )}
                         >
                           <NavLink 
-                            id={item.title === "Company" ? "tour-step-companies" : undefined}
+                            id={item.title === "Companies" ? "tour-step-companies" : item.title === "Users" ? "tour-step-users" : undefined}
                             to={item.url} 
                             className="flex items-center gap-3"
                           >

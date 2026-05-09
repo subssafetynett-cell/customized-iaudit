@@ -66,6 +66,14 @@ export default function Auth() {
     }, [resendTimer]);
 
     useEffect(() => {
+        // If already logged in, redirect to home
+        const user = localStorage.getItem("user");
+        if (user) {
+            navigate("/", { replace: true });
+        }
+    }, [navigate]);
+
+    useEffect(() => {
         const ctx = gsap.context(() => {
             const tl = gsap.timeline({ defaults: { duration: 1.0, ease: "power3.inOut" } });
 

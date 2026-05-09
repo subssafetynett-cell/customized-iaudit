@@ -71,6 +71,7 @@ export default function Users() {
     const [users, setUsers] = useState<any[]>([]);
     const [isLoading, setIsLoading] = useState(true);
     const [showOnboardingGuide, setShowOnboardingGuide] = useState(searchParams.get("onboarding") === "true");
+    const [onboardingStep, setOnboardingStep] = useState(5);
 
     // Search and Filter States
     const [searchQuery, setSearchQuery] = useState("");
@@ -101,9 +102,17 @@ export default function Users() {
     // Sync onboarding guide state with URL parameter
     useEffect(() => {
         const onboarding = searchParams.get("onboarding") === "true";
+        const step = parseInt(searchParams.get("step") || "5");
+        
         if (onboarding) {
-            console.log("Onboarding mode detected in Users page");
             setShowOnboardingGuide(true);
+            setOnboardingStep(step);
+            if (step === 5) {
+                // Use a slight delay to ensure the page is ready
+                setTimeout(() => {
+                    openModal("create");
+                }, 100);
+            }
         }
     }, [searchParams]);
 
@@ -259,15 +268,12 @@ export default function Users() {
         <div className="h-full bg-white">
             <div className="max-w-7xl mx-auto px-6 lg:px-8 py-8">
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between mb-8 gap-4 px-4 sm:px-0">
-                    <div>
+                    <div id="tour-step-users">
                         <h1 className="text-2xl font-semibold tracking-tight text-foreground">Users</h1>
                         <p className="text-sm text-muted-foreground mt-0.5">Manage system users, their roles and access status</p>
                     </div>
 
-                    <div className={`relative ${showOnboardingGuide ? "z-[60]" : ""}`}>
-                        {showOnboardingGuide && (
-                            <div className="absolute inset-0 -m-2 rounded-2xl ring-[8px] ring-blue-500/50 animate-pulse z-[-1]" />
-                        )}
+                    <div>
                         <Button 
                             id="tour-step-create-user"
                             onClick={() => {
@@ -275,29 +281,10 @@ export default function Users() {
                                 setShowOnboardingGuide(false);
                             }} 
                             size="sm" 
-                            className={`w-full sm:w-auto gap-1.5 shadow-sm bg-[#213847] hover:bg-[#213847]/90 text-white rounded-xl px-5 h-11 transition-all ${showOnboardingGuide ? "relative z-[60] scale-105 shadow-2xl" : ""}`}
+                            className="w-full sm:w-auto gap-1.5 shadow-sm bg-[#213847] hover:bg-[#213847]/90 text-white rounded-xl px-5 h-11 transition-all"
                         >
                             <UserPlus className="h-4 w-4" /> Create User
                         </Button>
-                        {/* Step 3: Users Onboarding Guide */}
-                        {showOnboardingGuide && (
-                            <TourStepPopover
-                                targetId="tour-step-create-user"
-                                step={3}
-                                totalSteps={6}
-                                title="Add Users"
-                                description="Clicking here you can create new users like auditors, auditees, etc."
-                                onNext={() => {
-                                    setShowOnboardingGuide(false);
-                                    navigate("/self-assessment?onboarding=true");
-                                }}
-                                onBack={() => {
-                                    setShowOnboardingGuide(false);
-                                    navigate("/");
-                                }}
-                                onClose={() => setShowOnboardingGuide(false)}
-                            />
-                        )}
                     </div>
                 </div>
 
@@ -306,6 +293,8 @@ export default function Users() {
                     <div className="relative flex-1">
                         <Search className="absolute left-4 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                         <Input
+                            id="users-page-search"
+                            name="users-page-search"
                             placeholder="Search by name or email..."
                             className="pl-11 h-12 rounded-2xl border-slate-200 bg-white shadow-sm hover:border-slate-300 focus-visible:ring-1 focus-visible:ring-[#213847]/40 w-full"
                             value={searchQuery}
@@ -465,6 +454,7 @@ export default function Users() {
 
             <UserModal
                 open={showCreate}
+                hideOverlay={false}
                 onClose={() => {
                     setShowCreate(false);
                     setSelectedUser(null);
@@ -473,6 +463,32 @@ export default function Users() {
                 mode={modalMode}
                 initialData={selectedUser}
             />
+
+            {showOnboardingGuide && onboardingStep === 5 && showCreate && (
+                <TourStepPopover
+                    targetId="tour-step-user-modal"
+                    step={5}
+                    totalSteps={7}
+                    title="User Management"
+                    description="Fill in the user details here. You can assign roles like Auditor or Auditee. Click 'Create User' to continue."
+                    onNext={() => {
+                        setShowCreate(false);
+                        setShowOnboardingGuide(false);
+                        navigate("/self-assessment?onboarding=true");
+                    }}
+                    onBack={() => {
+                        setShowCreate(false);
+                        setShowOnboardingGuide(true);
+                        navigate("/companies?onboarding=true&step=4");
+                    }}
+                    onClose={() => {
+                        setShowOnboardingGuide(false);
+                        setShowCreate(false);
+                    }}
+                    position="right"
+                    disableShadow={true}
+                />
+            )}
 
             <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
                 <AlertDialogContent className="max-w-[400px]">

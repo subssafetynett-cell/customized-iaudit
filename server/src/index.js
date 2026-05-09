@@ -24,7 +24,7 @@ app.use((req, res, next) => {
 app.use(cors({
     origin: ['https://iaudit.global', 'https://api.iaudit.global', 'https://apps.iaudit.global', 'http://localhost:5173', 'http://localhost:5174', 'http://localhost:8080', 'http://localhost:8081'], // Allow production and local development
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'Cache-Control', 'Pragma', 'Expires']
+    allowedHeaders: ['Content-Type', 'Authorization', 'Cache-Control', 'Pragma', 'Expires', 'x-user-id']
 }));
 
 // --- Stripe Webhook Route (MUST BE BEFORE express.json()) ---
@@ -769,8 +769,11 @@ app.use('/', (req, res, next) => {
 
 // Middleware to check if a user's trial has expired
 const checkTrialExpiration = async (req, res, next) => {
-    // Get userId from query, body, or params
-    const userId = req.query.userId || req.body.userId || req.params.userId || req.headers['x-user-id'];
+    // Get userId from query, body, or params with safety checks
+    const userId = (req.query && req.query.userId) || 
+                   (req.body && req.body.userId) || 
+                   (req.params && req.params.userId) || 
+                   (req.headers && req.headers['x-user-id']);
 
     if (!userId || userId === 'undefined' || userId === 'null') {
         return next();
@@ -1445,7 +1448,22 @@ app.post('/auth/login', async (req, res) => {
 app.get('/users', async (req, res) => {
     const { creatorId } = req.query;
     try {
-        const whereClause = creatorId ? { creatorId: Number.parseInt(creatorId) } : {};
+        const uId = creatorId ? Number.parseInt(creatorId) : null;
+        let whereClause = {};
+
+        if (uId) {
+            // Fetch the current user to find their creator
+            const currentUser = await prisma.user.findUnique({ where: { id: uId } });
+            const effectiveCreatorId = currentUser?.creatorId || uId;
+
+            whereClause = {
+                OR: [
+                    { id: effectiveCreatorId }, // The Admin
+                    { creatorId: effectiveCreatorId } // All teammates created by that Admin
+                ]
+            };
+        }
+
         const users = await prisma.user.findMany({
             where: whereClause,
             select: {
@@ -1691,12 +1709,21 @@ app.get('/audit-programs', checkTrialExpiration, async (req, res) => {
             return res.json([]);
         }
 
+        // Fetch the user to check their creatorId for broader visibility
+        const user = await prisma.user.findUnique({ where: { id: parsedUserId } });
+
+        const effectiveAdminId = user?.creatorId || parsedUserId;
+        console.log(`[DEBUG] Fetching audit programs for parsedUserId: ${parsedUserId}, effectiveAdminId: ${effectiveAdminId}`);
+
         const programs = await prisma.auditProgram.findMany({
             where: {
                 OR: [
                     { userId: parsedUserId },
                     { leadAuditorId: parsedUserId },
-                    { auditors: { some: { id: parsedUserId } } }
+                    { auditors: { some: { id: parsedUserId } } },
+                    { user: { is: { creatorId: parsedUserId } } }, // My sub-users
+                    { user: { is: { id: effectiveAdminId } } }, // My admin's programs
+                    { user: { is: { creatorId: effectiveAdminId } } } // My teammates' programs
                 ]
             },
             orderBy: { createdAt: 'desc' },
@@ -1882,10 +1909,22 @@ app.get('/audit-plans', checkTrialExpiration, async (req, res) => {
         if (programId) whereClause.auditProgramId = Number.parseInt(programId);
         if (userId) {
             const uId = Number.parseInt(userId);
+            // Fetch the user to check their creatorId for broader visibility
+            const user = await prisma.user.findUnique({ where: { id: uId } });
+            
+            const effectiveAdminId = user?.creatorId || uId;
+            console.log(`[DEBUG] Fetching audit plans for uId: ${uId}, effectiveAdminId: ${effectiveAdminId}`);
+            
             whereClause.OR = [
                 { userId: uId },
                 { leadAuditorId: uId },
-                { auditors: { some: { id: uId } } }
+                { auditors: { some: { id: uId } } },
+                { user: { is: { creatorId: uId } } }, // My sub-users
+                { user: { is: { id: effectiveAdminId } } }, // My admin's plans
+                { user: { is: { creatorId: effectiveAdminId } } }, // My teammates' plans
+                { auditProgram: { is: { userId: uId } } },
+                { auditProgram: { is: { leadAuditorId: uId } } },
+                { auditProgram: { is: { auditors: { some: { id: uId } } } } }
             ];
         }
         const plans = await prisma.auditPlan.findMany({

@@ -225,7 +225,17 @@ const CreateAuditPlanPage = () => {
                     if (!isNaN(monthIndex)) {
                         let fullYear = parseInt(yearStr);
                         if (fullYear < 100) fullYear += 2000; // Handle 2-digit year "26" -> 2026
-                        initialDate = new Date(fullYear, monthIndex, 1);
+                        
+                        const today = new Date();
+                        // If the month/year matches today, use the full current date (today)
+                        if (fullYear === today.getFullYear() && monthIndex === today.getMonth()) {
+                            initialDate = today;
+                        } else {
+                            // Use today's day of the month, but ensure it doesn't exceed the last day of the target month
+                            const lastDayOfTargetMonth = new Date(fullYear, monthIndex + 1, 0).getDate();
+                            const dayToUse = Math.min(today.getDate(), lastDayOfTargetMonth);
+                            initialDate = new Date(fullYear, monthIndex, dayToUse);
+                        }
                     }
                 }
             }
@@ -512,7 +522,10 @@ const CreateAuditPlanPage = () => {
 
 
                             <div className="space-y-2">
-                                <Label className="text-xs font-bold text-slate-500 uppercase">Date</Label>
+                                <div className="flex items-center justify-between">
+                                    <Label className="text-xs font-bold text-slate-500 uppercase">Date</Label>
+                                    {!auditDate && <span className="bg-red-50 text-red-600 text-[9px] font-black uppercase px-1.5 py-0.5 rounded-sm">Required</span>}
+                                </div>
                                 <Popover>
                                     <PopoverTrigger asChild>
                                         <Button
@@ -535,8 +548,9 @@ const CreateAuditPlanPage = () => {
                                             mode="single"
                                             selected={auditDate}
                                             onSelect={setAuditDate}
+                                            defaultMonth={auditDate}
                                             disabled={(date) =>
-                                                date < new Date("1900-01-01")
+                                                date < new Date(new Date().setHours(0, 0, 0, 0))
                                             }
                                             initialFocus
                                         />

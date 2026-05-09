@@ -72,6 +72,26 @@ const Index = () => {
   }, [isLoading, companies.length, totalSites]);
 
   useEffect(() => {
+    const handleRestart = (e: any) => {
+      const step = e.detail?.step || 2;
+      setShowWelcome(true);
+      setOnboardingStep(step);
+    };
+
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('restartOnboarding') === 'true') {
+      const step = Number(params.get('step')) || 2;
+      setShowWelcome(true);
+      setOnboardingStep(step);
+      // Clean up URL
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+
+    window.addEventListener('restart-onboarding', handleRestart);
+    return () => window.removeEventListener('restart-onboarding', handleRestart);
+  }, []);
+
+  useEffect(() => {
     const userJson = localStorage.getItem('user');
     if (userJson) {
       const user = JSON.parse(userJson);
@@ -841,6 +861,10 @@ const Index = () => {
             onPointerDownOutside={(e) => { if (companies.length === 0 || (companies.length > 0 && totalSites === 0)) e.preventDefault(); }}
             onEscapeKeyDown={(e) => { if (companies.length === 0 || (companies.length > 0 && totalSites === 0)) e.preventDefault(); }}
           >
+            <DialogHeader className="sr-only">
+              <DialogTitle>Welcome to iAudit</DialogTitle>
+              <DialogDescription>Get started with your compliance management journey.</DialogDescription>
+            </DialogHeader>
             <div className="flex-1 overflow-y-auto w-full">
               <div className="bg-[#213847] p-8 text-white flex flex-col items-center text-center space-y-4 relative">
                 <div className="space-y-2">
@@ -896,10 +920,10 @@ const Index = () => {
           step={2}
           totalSteps={6}
           title="Open a Company"
-          description="All your companies live here. Click any company card to manage its Sites and Departments."
+          description="Your company will be live here. Inside this page you can create sites and departments."
           onNext={() => {
             setShowWelcome(false);
-            navigate("/users?onboarding=true");
+            navigate("/companies?onboarding=true");
           }}
           onBack={() => {
             setOnboardingStep(1);
