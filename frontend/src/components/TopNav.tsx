@@ -34,7 +34,7 @@ import auditPlanFormGuide from "@/assets/audit_plan_form_guide.png";
 import auditExecuteGuide from "@/assets/audit_execute_guide.png";
 import auditProgressGuide from "@/assets/audit_progress_guide.png";
 import auditFindingsGuide from "@/assets/audit_findings_guide.png";
-import { apiFetch } from "@/lib/api";
+import { apiFetch, clearClientSession } from "@/lib/api";
 
 export function TopNav() {
   const navigate = useNavigate();
@@ -85,8 +85,7 @@ export function TopNav() {
     } catch {
       /* still clear client state */
     }
-    localStorage.removeItem("token");
-    localStorage.removeItem("user");
+    clearClientSession();
     window.location.href = "/login";
   };
 

@@ -1,6 +1,6 @@
 import { useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { apiFetch } from "@/lib/api";
+import { apiFetch, clearClientSession, clearSessionAndRedirectToLogin } from "@/lib/api";
 
 const CHECK_INTERVAL_MS = 15000; // Check every 15 seconds
 
@@ -20,7 +20,7 @@ export function useUserStatus() {
             userId = JSON.parse(storedUser)?.id;
         } catch {
             // Corrupt data — log them out
-            localStorage.removeItem("user");
+            clearClientSession();
             window.location.href = '/login';
             return;
         }
@@ -35,8 +35,7 @@ export function useUserStatus() {
 
             // If user was deleted OR deactivated, log them out
             if (!data.exists || !data.isActive) {
-                localStorage.removeItem("user");
-                window.location.href = '/login';
+                clearSessionAndRedirectToLogin();
             } else {
                 // Update localStorage with latest status (trial expiration, etc.)
                 const storedUserData = JSON.parse(storedUser);

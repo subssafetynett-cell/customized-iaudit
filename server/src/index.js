@@ -70,6 +70,7 @@ function loginIpRateLimit(req, res, next) {
     next();
 }
 
+/** @returns {{ token: string, sessionExpiresAt: string }} ISO time when the DB session row expires */
 async function createSessionTokenForUser(userId) {
     await prisma.session.deleteMany({
         where: { expiresAt: { lt: new Date() } }
@@ -79,7 +80,7 @@ async function createSessionTokenForUser(userId) {
     await prisma.session.create({
         data: { token, userId, expiresAt }
     });
-    return token;
+    return { token, sessionExpiresAt: expiresAt.toISOString() };
 }
 
 /** Same for unknown email and wrong password — never reveal whether an address is registered. */
@@ -1981,9 +1982,9 @@ app.post('/auth/verify-otp-and-signup', async (req, res) => {
             return res.status(500).json({ error: 'Account creation could not be completed' });
         }
 
-        const token = await createSessionTokenForUser(profile.id);
+        const { token, sessionExpiresAt } = await createSessionTokenForUser(profile.id);
 
-        res.status(201).json({ ...profile, token });
+        res.status(201).json({ ...profile, token, sessionExpiresAt });
     } catch (error) {
         console.error('Error creating user during OTP verification:', error);
         if (error.code === 'P2002') {
@@ -2087,10 +2088,10 @@ app.post('/auth/login', loginIpRateLimit, async (req, res) => {
             return res.status(500).json({ error: 'Login could not be completed' });
         }
 
-        const token = await createSessionTokenForUser(profile.id);
+        const { token, sessionExpiresAt } = await createSessionTokenForUser(profile.id);
 
         console.log(`[AUTH] Login successful for user: ${profile.id}, onboardingCompleted: ${profile.onboardingCompleted}`);
-        res.status(200).json({ ...profile, token });
+        res.status(200).json({ ...profile, token, sessionExpiresAt });
 
     } catch (error) {
         handlePrismaError(error, 'login');

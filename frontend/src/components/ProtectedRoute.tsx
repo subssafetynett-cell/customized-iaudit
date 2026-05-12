@@ -1,6 +1,7 @@
 import React from "react";
 import { Navigate, useLocation } from "react-router-dom";
 import { useUserStatus } from "@/hooks/useUserStatus";
+import { useSessionExpiry } from "@/hooks/useSessionExpiry";
 
 export function ProtectedRoute({ children }: { children: React.ReactNode }) {
     const location = useLocation();
@@ -8,6 +9,8 @@ export function ProtectedRoute({ children }: { children: React.ReactNode }) {
     // Periodically verify the user's status on the server.
     // This hook handles logout if the user is deleted or set to inactive.
     useUserStatus();
+    // Log out when server session lifetime elapses (client clock), without waiting for an API error.
+    useSessionExpiry();
 
     // Check auth synchronously to prevent flash of unauthenticated content
     const userData = localStorage.getItem("user");

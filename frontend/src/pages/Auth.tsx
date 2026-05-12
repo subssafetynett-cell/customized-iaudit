@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
-import { apiFetch } from "@/lib/api";
+import { apiFetch, SESSION_EXPIRES_AT_KEY } from "@/lib/api";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -328,9 +328,16 @@ export default function Auth() {
             }
 
             // Success! Save user to local storage and navigate to dashboard
-            localStorage.setItem('user', JSON.stringify(data));
-            if (data.token) {
-                localStorage.setItem('token', data.token);
+            const { sessionExpiresAt, token, ...profile } = data as Record<string, unknown> & {
+                sessionExpiresAt?: string;
+                token?: string;
+            };
+            localStorage.setItem("user", JSON.stringify(profile));
+            if (token) {
+                localStorage.setItem("token", token);
+            }
+            if (sessionExpiresAt && typeof sessionExpiresAt === "string") {
+                localStorage.setItem(SESSION_EXPIRES_AT_KEY, sessionExpiresAt);
             }
             navigate("/");
 
@@ -477,9 +484,16 @@ export default function Auth() {
             }
 
             // Success! Save user and token to local storage and navigate to dashboard
-            localStorage.setItem('user', JSON.stringify(data));
-            if (data.token) {
-                localStorage.setItem('token', data.token);
+            const { sessionExpiresAt, token, ...profile } = data as Record<string, unknown> & {
+                sessionExpiresAt?: string;
+                token?: string;
+            };
+            localStorage.setItem("user", JSON.stringify(profile));
+            if (token) {
+                localStorage.setItem("token", token);
+            }
+            if (sessionExpiresAt && typeof sessionExpiresAt === "string") {
+                localStorage.setItem(SESSION_EXPIRES_AT_KEY, sessionExpiresAt);
             }
             navigate("/");
 

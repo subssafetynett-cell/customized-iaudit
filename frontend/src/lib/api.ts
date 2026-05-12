@@ -7,13 +7,26 @@ export function resolveApiUrl(endpoint: string): string {
     return `${API_BASE_URL}/api${path}`;
 }
 
-function clearSessionAndRedirectToLogin() {
+/** ISO timestamp from server — when reached, client should clear session (matches DB session expiry). */
+export const SESSION_EXPIRES_AT_KEY = "sessionExpiresAt";
+
+export function clearClientSession() {
     localStorage.removeItem("token");
     localStorage.removeItem("user");
+    localStorage.removeItem(SESSION_EXPIRES_AT_KEY);
+}
+
+function redirectToLoginIfNeeded() {
     const path = window.location.pathname;
     if (!/^\/(login|signup|auth)(\/|$)/.test(path)) {
         window.location.href = "/login";
     }
+}
+
+/** Clears stored auth and sends the user to login when not already on a public auth route. */
+export function clearSessionAndRedirectToLogin() {
+    clearClientSession();
+    redirectToLoginIfNeeded();
 }
 
 export async function apiFetch(endpoint: string, options: RequestInit = {}) {
