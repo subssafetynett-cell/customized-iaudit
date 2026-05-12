@@ -126,7 +126,7 @@ const CompaniesPage = () => {
   };
 
   // Auto-select first company if exists
-  useMemo(() => {
+  useEffect(() => {
     if (companies.length > 0 && !selectedCompanyId) {
       setSelectedCompanyId(companies[0].id);
     }
@@ -408,21 +408,19 @@ const CompaniesPage = () => {
           </Tabs>
 
           {/* ------------------------------------------------------------------ */}
-          {/* SITE MODAL — used during onboarding step 4                         */}
+          {/* SITE MODAL                                                          */}
+          {/* During step 4 the modal renders without its own overlay (the tour  */}
+          {/* CSS in TourStepPopover raises [role="dialog"] above everything).   */}
           {/* ------------------------------------------------------------------ */}
           <SiteModal
             open={showAddSite}
-            hideOverlay={false}
+            hideOverlay={showOnboardingGuide && onboardingStep === 4}
             onClose={() => {
-              // ✅ FIXED: Removed the erroneous setOnboardingStep(3) that was here.
-              // That caused the popover to jump back to step 3 whenever the modal
-              // was dismissed. Back-navigation is handled by the popover's onBack.
               setShowAddSite(false);
             }}
             onSubmit={async (data) => {
               const res = await addSite(selectedCompany.id, data);
               if (res?.success) {
-                // ✅ FIXED: Navigate with step=5 so the Users page shows step 5 popover.
                 setShowAddSite(false);
                 setOnboardingStep(5);
                 navigate("/users?onboarding=true&step=5");
@@ -432,19 +430,22 @@ const CompaniesPage = () => {
           />
 
           {/* ------------------------------------------------------------------ */}
-          {/* STEP 4 TOUR POPOVER — shown while the Add Site modal is open       */}
+          {/* STEP 4 TOUR POPOVER                                                 */}
+          {/*                                                                     */}
+          {/* targetId="tour-step-site-modal" points to the invisible fixed       */}
+          {/* anchor div rendered at the top of this component when step === 4.   */}
+          {/* The popover appears to the right of the modal dialog.               */}
+          {/*                                                                     */}
+          {/* disableShadow={true} → no dark overlay, modal fully visible.        */}
           {/* ------------------------------------------------------------------ */}
           {showOnboardingGuide && onboardingStep === 4 && showAddSite && (
             <TourStepPopover
-              targetId="tour-step-site-modal"
+              targetId="viewport"
               step={4}
               totalSteps={7}
               title="Add Site Details"
-              description="Please fill in the site details. You must at least provide a Site Name to continue. Click 'Add Site' when ready."
+              description="Fill in the site details. Provide at least a Site Name to continue. Click 'Add Site' when ready."
               onNext={() => {
-                // ✅ FIXED: Close the modal, set step 5, then navigate.
-                // Previously this called setShowOnboardingGuide(false) which lost
-                // the onboarding state before the Users page could pick it up.
                 setShowAddSite(false);
                 setOnboardingStep(5);
                 navigate("/users?onboarding=true&step=5");
@@ -458,11 +459,8 @@ const CompaniesPage = () => {
                 setShowOnboardingGuide(false);
                 setShowAddSite(false);
               }}
-              position="right"
+              position="center"
               hideNext={false}
-              // ✅ FIXED: disableShadow=true means NO black overlay covers the page.
-              // The TourStepPopover now correctly guards both the overlay div AND
-              // the spotlight cutout inside the same !disableShadow block.
               disableShadow={true}
             />
           )}

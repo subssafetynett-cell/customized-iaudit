@@ -2,7 +2,7 @@ import React, { useState, useEffect } from "react";
 import { Check, CheckCircle2, Loader2, Calendar, Shield } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
-import { API_BASE_URL } from "@/config";
+import { apiFetch } from "@/lib/api";
 import { useToast } from "@/components/ui/use-toast";
 import { useSearchParams, useNavigate } from "react-router-dom";
 import BillingModal from "@/components/BillingModal";
@@ -188,21 +188,17 @@ export default function Subscription() {
     setIsProcessing(selectedPlan.name);
 
     try {
-      const response = await fetch(
-        `${API_BASE_URL}/api/payments/create-checkout-session`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            userId: user.id || user._id,
-            planId: selectedPlan.name,
-            billingType,
-            currency: currency.toUpperCase(),
-            duration,
-            priceId,
-          }),
-        }
-      );
+      const response = await apiFetch("/payments/create-checkout-session", {
+        method: "POST",
+        body: JSON.stringify({
+          userId: user.id || user._id,
+          planId: selectedPlan.name,
+          billingType,
+          currency: currency.toUpperCase(),
+          duration,
+          priceId,
+        }),
+      });
 
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "Failed to start checkout");

@@ -2,30 +2,203 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import nodemailer from 'nodemailer';
+import crypto from 'node:crypto';
 import prisma, { handlePrismaError } from './prisma.js';
 import bcrypt from 'bcrypt';
 import Stripe from 'stripe';
 import { STRIPE_CONFIG } from './stripe-config.js';
+import {
+    COMPANY_TEXT_LIMITS,
+    DEPT_TEXT_LIMITS,
+    PERSON_NAME_MAX,
+    PHONE_DIGITS_LENGTH,
+    SITE_TEXT_LIMITS,
+    sanitizeLogoField,
+    sanitizeOrganizationText,
+    sanitizePersonName,
+    sanitizePhoneField,
+    sanitizePlainText,
+    sanitizeShortLabel,
+    sanitizeStringArray
+} from './textSanitize.js';
 
 dotenv.config();
+
+const PASSWORD_REGEX = /^(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*(),.?":{}|<>_+=\-\[\]\\\/~^]).{8,}$/;
+
+/** Server-side session lifetime (opaque token stored in DB, sent as Bearer token). */
+const SESSION_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+/** Consecutive wrong passwords before login is blocked until password reset (env `LOGIN_MAX_FAILED_ATTEMPTS`, default 15, clamped 5–50). */
+const LOGIN_MAX_FAILED_ATTEMPTS = Math.min(
+    50,
+    Math.max(5, Number.parseInt(process.env.LOGIN_MAX_FAILED_ATTEMPTS || '15', 10) || 15)
+);
+
+/** Sliding window (ms) for per-IP login attempt cap (default 15 minutes). */
+const LOGIN_IP_WINDOW_MS = Math.max(
+    60_000,
+    Number.parseInt(process.env.LOGIN_IP_WINDOW_MS || String(15 * 60 * 1000), 10) || 15 * 60 * 1000
+);
+
+/** Max POST /auth/login per IP per window (default 120). */
+const LOGIN_IP_MAX_IN_WINDOW = Math.min(
+    500,
+    Math.max(20, Number.parseInt(process.env.LOGIN_IP_MAX_IN_WINDOW || '120', 10) || 120)
+);
+
+const loginIpBuckets = new Map();
+
+function loginIpRateLimit(req, res, next) {
+    const forwarded = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+    const ip = forwarded || req.socket?.remoteAddress || 'unknown';
+    const now = Date.now();
+    let b = loginIpBuckets.get(ip);
+    if (!b || now > b.resetAt) {
+        b = { n: 0, resetAt: now + LOGIN_IP_WINDOW_MS };
+        loginIpBuckets.set(ip, b);
+    }
+    b.n += 1;
+    if (b.n > LOGIN_IP_MAX_IN_WINDOW) {
+        const retryAfterSeconds = Math.max(1, Math.ceil((b.resetAt - now) / 1000));
+        res.setHeader('Retry-After', String(retryAfterSeconds));
+        return res.status(429).json({
+            error: 'Too many login attempts from this network. Please try again later.',
+            retryAfterSeconds
+        });
+    }
+    next();
+}
+
+async function createSessionTokenForUser(userId) {
+    await prisma.session.deleteMany({
+        where: { expiresAt: { lt: new Date() } }
+    }).catch(() => {});
+    const token = crypto.randomBytes(48).toString('base64url');
+    const expiresAt = new Date(Date.now() + SESSION_MAX_AGE_MS);
+    await prisma.session.create({
+        data: { token, userId, expiresAt }
+    });
+    return token;
+}
+
+/** Same for unknown email and wrong password — never reveal whether an address is registered. */
+const LOGIN_INVALID_CREDENTIALS_MESSAGE = 'Invalid credentials';
+
+/** Login JSON must use only these keys (no client-supplied id / role / profile). */
+const LOGIN_ALLOWED_BODY_KEYS = new Set(['email', 'password']);
+
+/** Signup-complete JSON must use only these keys (no client-supplied user id or token). */
+const SIGNUP_COMPLETE_ALLOWED_BODY_KEYS = new Set([
+    'email', 'otp', 'firstName', 'lastName', 'mobile', 'password', 'role', 'customRoleName', 'isActive'
+]);
+
+const FORGOT_PASSWORD_ALLOWED_BODY_KEYS = new Set(['email']);
+const RESET_PASSWORD_ALLOWED_BODY_KEYS = new Set(['email', 'otp', 'newPassword']);
+
+function getDisallowedExtraKeysError(body, allowedSet) {
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+        return 'Invalid request body';
+    }
+    for (const key of Object.keys(body)) {
+        if (!allowedSet.has(key)) {
+            return 'Invalid request';
+        }
+    }
+    return null;
+}
+
+/** Public user profile after login — always loaded from DB by verified user id (not from request). */
+const LOGIN_SUCCESS_USER_SELECT = {
+    id: true,
+    firstName: true,
+    lastName: true,
+    email: true,
+    mobile: true,
+    role: true,
+    customRoleName: true,
+    isActive: true,
+    creatorId: true,
+    createdAt: true,
+    updatedAt: true,
+    trialStartDate: true,
+    trialEndDate: true,
+    subscriptionStatus: true,
+    subscriptionPlan: true,
+    planStartDate: true,
+    planExpiryDate: true,
+    nextBillingDate: true,
+    stripeCustomerId: true,
+    stripeSubscriptionId: true,
+    stripePriceId: true,
+    stripeInvoiceId: true,
+    stripePaymentIntentId: true,
+    renewalType: true,
+    autopayConsent: true,
+    onboardingCompleted: true
+};
+
+// Email Transporter Configuration
+const transporterConfig = process.env.SMTP_HOST ? {
+    host: process.env.SMTP_HOST,
+    port: Number.parseInt(process.env.SMTP_PORT || '587'),
+    secure: process.env.SMTP_PORT === '465',
+    auth: {
+        user: process.env.SMTP_USER,
+        pass: process.env.SMTP_PASS
+    },
+    tls: {
+        rejectUnauthorized: false,
+        minVersion: 'TLSv1.2'
+    }
+} : {
+    service: process.env.SMTP_SERVICE || 'gmail',
+    auth: {
+        user: process.env.SMTP_USER,
+        pass: process.env.SMTP_PASS
+    }
+};
+
+const transporter = nodemailer.createTransport({
+    ...transporterConfig,
+    connectionTimeout: 5000, // 5 seconds
+    greetingTimeout: 5000    // 5 seconds
+});
+
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
-// Compatibility Middleware: Strips /api prefix for local development
-app.use((req, res, next) => {
-    if (req.url.startsWith('/api')) {
-        req.url = req.url.replace('/api', '');
-    }
-    next();
-});
+/** Routes registered here run while the URL still starts with `/api/` (before the strip below). */
+const mountedApiRouter = express.Router();
 
 app.use(cors({
     origin: ['https://iaudit.global', 'https://api.iaudit.global', 'https://apps.iaudit.global', 'http://localhost:5173', 'http://localhost:5174', 'http://localhost:8080', 'http://localhost:8081'], // Allow production and local development
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'Cache-Control', 'Pragma', 'Expires', 'x-user-id']
 }));
+
+// Full `/api/auth/...` paths must be registered before `app.use('/api', mountedApiRouter)` so they are
+// not lost when the sub-router has no match (and so they work even if `/auth/...` aliases are missing).
+app.post('/api/auth/forgot-password', express.json({ limit: '50mb' }), handleForgotPassword);
+app.post('/api/auth/reset-password', express.json({ limit: '50mb' }), handleResetPassword);
+
+app.use('/api', mountedApiRouter);
+
+// Strip `/api` so existing handlers stay registered as `/users`, `/companies`, etc.
+app.use((req, res, next) => {
+    const raw = req.url;
+    const q = raw.indexOf('?');
+    const pathname = q === -1 ? raw : raw.slice(0, q);
+    const search = q === -1 ? '' : raw.slice(q);
+    if (pathname === '/api' || pathname.startsWith('/api/')) {
+        const rest = pathname === '/api' ? '/' : pathname.slice(4) || '/';
+        req.url = (rest.startsWith('/') ? rest : `/${rest}`) + search;
+        delete req._parsedUrl;
+    }
+    next();
+});
 
 // --- Stripe Webhook Route (MUST BE BEFORE express.json()) ---
 app.post('/stripe/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
@@ -536,6 +709,12 @@ app.post('/stripe/webhook', express.raw({ type: 'application/json' }), async (re
                     console.error("CRITICAL DB UPDATE ERROR in invoice handler:", dbErr);
                 }
 
+                try {
+                    // Fetch the invoice with deep expansion to get receipt URL (same as billing history)
+                    const fullInvoice = await stripe.invoices.retrieve(invoice.id, {
+                        expand: ['charge', 'payment_intent.latest_charge', 'subscription']
+                    });
+
                     // Also update stripePaymentIntentId on the Payment record for this subscription
                     if (invoice.payment_intent) {
                         // Find the payment by matching the customer's latest pending/paid payment
@@ -572,12 +751,6 @@ app.post('/stripe/webhook', express.raw({ type: 'application/json' }), async (re
 
                     console.log('Subscription renewed via invoice.paid:', invoice.subscription);
 
-                // Send invoice + receipt email to user
-                try {
-                    // Fetch the invoice with deep expansion to get receipt URL (same as billing history)
-                    const fullInvoice = await stripe.invoices.retrieve(invoice.id, {
-                        expand: ['charge', 'payment_intent.latest_charge']
-                    });
 
                     const invoiceUser = await prisma.user.findFirst({
                         where: { 
@@ -769,18 +942,39 @@ app.use('/', (req, res, next) => {
 
 // Middleware to check if a user's trial has expired
 const checkTrialExpiration = async (req, res, next) => {
-    // Get userId from query, body, or params with safety checks
-    const userId = (req.query && req.query.userId) || 
-                   (req.body && req.body.userId) || 
-                   (req.params && req.params.userId) || 
-                   (req.headers && req.headers['x-user-id']);
+    let userId;
 
-    if (!userId || userId === 'undefined' || userId === 'null') {
+    if (req.user != null && req.user.id != null) {
+        const jwtId = Number.parseInt(String(req.user.id), 10);
+        const spoof =
+            (req.query && req.query.userId) ||
+            (req.body && req.body.userId) ||
+            (req.params && req.params.userId) ||
+            (req.headers && req.headers['x-user-id']);
+        if (spoof != null && spoof !== undefined && String(spoof) !== 'undefined' && String(spoof) !== 'null') {
+            const alt = Number.parseInt(String(spoof), 10);
+            if (!Number.isNaN(alt) && alt !== jwtId) {
+                return res.status(403).json({
+                    error: 'Forbidden',
+                    message: 'User scope does not match your session.'
+                });
+            }
+        }
+        userId = jwtId;
+    } else {
+        userId =
+            (req.query && req.query.userId) ||
+            (req.body && req.body.userId) ||
+            (req.params && req.params.userId) ||
+            (req.headers && req.headers['x-user-id']);
+    }
+
+    if (userId === undefined || userId === null || userId === 'undefined' || userId === 'null') {
         return next();
     }
 
     try {
-        const parsedUserId = Number.parseInt(userId);
+        const parsedUserId = typeof userId === 'number' ? userId : Number.parseInt(String(userId), 10);
         if (Number.isNaN(parsedUserId)) return next();
 
         const user = await prisma.user.findUnique({
@@ -837,34 +1031,54 @@ const checkTrialExpiration = async (req, res, next) => {
     }
 };
 
-const router = express.Router();
+// Middleware: validate server-side session (DB row); each request must present a valid session token.
+const authenticateToken = async (req, res, next) => {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
 
-// Email Transporter Configuration
-const transporterConfig = process.env.SMTP_HOST ? {
-    host: process.env.SMTP_HOST,
-    port: Number.parseInt(process.env.SMTP_PORT || '587'),
-    secure: process.env.SMTP_PORT === '465',
-    auth: {
-        user: process.env.SMTP_USER,
-        pass: process.env.SMTP_PASS
-    },
-    tls: {
-        rejectUnauthorized: false,
-        minVersion: 'TLSv1.2'
+    if (!token) {
+        console.warn(`[SECURITY] Access denied to ${req.path}. No session token provided.`);
+        return res.status(401).json({ error: 'Access denied. Please log in.' });
     }
-} : {
-    service: process.env.SMTP_SERVICE || 'gmail',
-    auth: {
-        user: process.env.SMTP_USER,
-        pass: process.env.SMTP_PASS
+
+    try {
+        const session = await prisma.session.findFirst({
+            where: {
+                token,
+                expiresAt: { gt: new Date() }
+            },
+            include: {
+                user: {
+                    select: { id: true, email: true, role: true, isActive: true }
+                }
+            }
+        });
+
+        if (!session?.user) {
+            return res.status(401).json({ error: 'Session expired or invalid. Please log in again.' });
+        }
+
+        if (!session.user.isActive) {
+            await prisma.session.deleteMany({ where: { userId: session.user.id } });
+            return res.status(403).json({ error: 'Account is deactivated' });
+        }
+
+        req.sessionToken = token;
+        req.user = {
+            id: session.user.id,
+            email: session.user.email,
+            role: session.user.role
+        };
+        next();
+    } catch (err) {
+        console.error(`[SECURITY] Session lookup failed for ${req.path}:`, err.message);
+        return res.status(401).json({ error: 'Session expired or invalid. Please log in again.' });
     }
 };
 
-const transporter = nodemailer.createTransport({
-    ...transporterConfig,
-    connectionTimeout: 5000, // 5 seconds
-    greetingTimeout: 5000    // 5 seconds
-});
+const router = express.Router();
+
+// Email Transporter is defined near the top for safety
 
 // Temporary in-memory store for OTPs - REMOVED for AWS scalability
 // const otpStore = new Map();
@@ -873,6 +1087,108 @@ const transporter = nodemailer.createTransport({
 const generateOTP = () => {
     return Math.floor(100000 + Math.random() * 900000).toString();
 };
+
+const OTP_RESEND_COOLDOWN_MS = 60 * 1000;
+
+/** In-memory cooldown for authenticated assessment report emails (per user id). */
+const assessmentReportEmailLastSent = new Map();
+
+const ORG_ROOT_WALK_MAX_DEPTH = 32;
+
+/** Walk creatorId chain to the account root (user with creatorId null). */
+async function getOrgRootUserId(userId) {
+    let currentId = userId;
+    for (let depth = 0; depth < ORG_ROOT_WALK_MAX_DEPTH; depth++) {
+        const row = await prisma.user.findUnique({
+            where: { id: currentId },
+            select: { id: true, creatorId: true }
+        });
+        if (!row) return null;
+        if (row.creatorId == null) return row.id;
+        currentId = row.creatorId;
+    }
+    return null;
+}
+
+/** All user ids in the same org (account root + every user created under that tree). */
+async function collectOrgSubtreeUserIds(orgRootId) {
+    if (orgRootId == null || !Number.isInteger(orgRootId) || orgRootId < 1) {
+        return [];
+    }
+    const rows = await prisma.$queryRaw`
+        WITH RECURSIVE subtree AS (
+            SELECT id FROM "User" WHERE id = ${orgRootId}
+            UNION
+            SELECT u.id FROM "User" u
+            INNER JOIN subtree t ON u."creatorId" = t.id
+        )
+        SELECT id FROM subtree
+    `;
+    return rows.map((r) => Number(r.id));
+}
+
+async function actorCanAccessTargetUser(actorId, targetUserId) {
+    if (actorId === targetUserId) return true;
+    const [actor, target] = await Promise.all([
+        prisma.user.findUnique({ where: { id: actorId }, select: { role: true, creatorId: true } }),
+        prisma.user.findUnique({ where: { id: targetUserId }, select: { id: true, creatorId: true } })
+    ]);
+    if (!actor || !target) return false;
+    if (actor.role === 'superadmin') return true;
+    // Account root (creatorId null): may manage anyone in the same org tree (e.g. users created by subordinates).
+    const actorRootId = await getOrgRootUserId(actorId);
+    if (actorRootId != null && actorId === actorRootId) {
+        const targetRootId = await getOrgRootUserId(targetUserId);
+        if (actorRootId === targetRootId) return true;
+    }
+    const actorOrgRoot = actor.creatorId != null ? actor.creatorId : actorId;
+    if (target.id === actorOrgRoot) return true;
+    if (target.creatorId === actorOrgRoot) return true;
+    if (target.creatorId === actorId) return true;
+    return false;
+}
+
+/**
+ * Subscription / billing status (PII + Stripe fields): lock down horizontal IDOR.
+ * Allowed: self; superadmin; org billing root (same org); user directly created by actor.
+ * NOT allowed: sibling teammates reading each other's billing by swapping :id.
+ */
+async function actorCanViewUserBillingStatus(actorId, targetUserId) {
+    if (actorId === targetUserId) return true;
+    const [actor, target] = await Promise.all([
+        prisma.user.findUnique({ where: { id: actorId }, select: { id: true, role: true } }),
+        prisma.user.findUnique({ where: { id: targetUserId }, select: { id: true, creatorId: true } })
+    ]);
+    if (!actor || !target) return false;
+    if (actor.role === 'superadmin') return true;
+
+    const actorRoot = await getOrgRootUserId(actor.id);
+    const targetRoot = await getOrgRootUserId(target.id);
+    if (actorRoot != null && targetRoot != null && actorRoot === targetRoot && actor.id === actorRoot) {
+        return true;
+    }
+    if (target.creatorId === actorId) {
+        return true;
+    }
+    return false;
+}
+
+async function actorCanAccessAuditProgram(actorId, program) {
+    if (!program) return false;
+    if (await actorCanAccessTargetUser(actorId, program.userId)) return true;
+    if (program.leadAuditorId === actorId) return true;
+    if (Array.isArray(program.auditors) && program.auditors.some((a) => a.id === actorId)) return true;
+    return false;
+}
+
+async function actorCanAccessAuditPlan(actorId, plan) {
+    if (!plan) return false;
+    if (plan.userId === actorId) return true;
+    if (plan.leadAuditorId === actorId) return true;
+    if (Array.isArray(plan.auditors) && plan.auditors.some((a) => a.id === actorId)) return true;
+    if (plan.auditProgram && await actorCanAccessAuditProgram(actorId, plan.auditProgram)) return true;
+    return false;
+}
 
 // Basic health check endpoint
 app.get('/health', (req, res) => {
@@ -905,12 +1221,42 @@ app.get('/admin/upgrade-db', (req, res) => {
 });
 
 // Example route to get all companies (including sites and departments)
-app.get('/companies', checkTrialExpiration, async (req, res) => {
-    const { userId, admin } = req.query;
-    console.log(`[DEBUG] GET /companies called with userId: ${userId}, admin: ${admin}`);
+app.get('/companies', authenticateToken, checkTrialExpiration, async (req, res) => {
+    const actorId = Number(req.user?.id);
+    if (!Number.isInteger(actorId) || actorId < 1) {
+        return res.status(401).json({ error: 'Invalid session. Please log in again.' });
+    }
+
+    const { admin } = req.query;
+    const rawQueryUserId = req.query.userId;
+
+    console.log(`[DEBUG] GET /companies called for actor: ${actorId}, admin: ${admin}`);
 
     try {
+        const viewer = await prisma.user.findUnique({
+            where: { id: actorId },
+            select: { role: true }
+        });
+        if (!viewer) {
+            return res.status(401).json({ error: 'User not found.' });
+        }
+
+        // Reject cross-tenant ?userId= probing unless platform superadmin.
+        let explicitOwnerId = null;
+        if (rawQueryUserId !== undefined && rawQueryUserId !== null && String(rawQueryUserId).trim() !== '') {
+            explicitOwnerId = Number.parseInt(String(rawQueryUserId), 10);
+            if (Number.isNaN(explicitOwnerId) || explicitOwnerId < 1) {
+                return res.status(400).json({ error: 'Invalid userId' });
+            }
+            if (explicitOwnerId !== actorId && viewer.role !== 'superadmin') {
+                return res.status(403).json({ error: 'Forbidden' });
+            }
+        }
+
         if (admin === 'true') {
+            if (viewer.role !== 'superadmin') {
+                return res.status(403).json({ error: 'Forbidden' });
+            }
             const companies = await prisma.company.findMany({
                 include: {
                     sites: {
@@ -918,36 +1264,33 @@ app.get('/companies', checkTrialExpiration, async (req, res) => {
                     }
                 }
             });
-            console.log(`[DEBUG] Fetched ${companies.length} companies for Admin.`);
+            console.log(`[DEBUG] Fetched ${companies.length} companies for superadmin (admin=all).`);
             return res.json(companies);
         }
 
-        // SECURITY: Enforce strict userId filtering. Do not return all companies if userId is missing.
-        if (!userId || userId === 'undefined' || userId === 'null') {
-            console.warn(`[SECURITY] GET /companies called without valid userId. Returning empty list.`);
-            return res.json([]);
-        }
-        const parsedUserId = Number.parseInt(userId);
-        if (Number.isNaN(parsedUserId)) {
-            return res.json([]);
+        let ownerUserIds;
+        if (viewer.role === 'superadmin' && explicitOwnerId != null) {
+            ownerUserIds = [explicitOwnerId];
+        } else {
+            const orgRootId = await getOrgRootUserId(actorId);
+            ownerUserIds =
+                orgRootId != null ? await collectOrgSubtreeUserIds(orgRootId) : [actorId];
         }
 
-        const whereClause = { userId: parsedUserId };
-        console.log(`[DEBUG] Querying companies with whereClause:`, whereClause);
+        if (ownerUserIds.length === 0) {
+            return res.json([]);
+        }
 
         const companies = await prisma.company.findMany({
-            where: whereClause,
+            where: { userId: { in: ownerUserIds } },
             include: {
                 sites: {
-                    where: { userId: parsedUserId },
-                    include: {
-                        departments: true
-                    }
+                    include: { departments: true }
                 }
             }
         });
 
-        console.log(`[DEBUG] Successfully fetched ${companies.length} companies for userId ${parsedUserId}.`);
+        console.log(`[DEBUG] Successfully fetched ${companies.length} companies for allowed owners.`);
         res.json(companies);
     } catch (error) {
         console.error('Failed to fetch companies:', error);
@@ -956,34 +1299,59 @@ app.get('/companies', checkTrialExpiration, async (req, res) => {
 });
 
 // Create a site
-app.post('/companies/:companyId/sites', checkTrialExpiration, async (req, res) => {
+app.post('/companies/:companyId/sites', authenticateToken, checkTrialExpiration, async (req, res) => {
     const { companyId } = req.params;
+    const actorId = Number(req.user.id);
     const {
         name, description, siteType, status,
         address, city, state, country, postalCode,
         latitude, longitude, contactName, contactPosition,
-        contactNumber, email, userId
+        contactNumber, email
     } = req.body;
     try {
+        const cid = Number.parseInt(companyId, 10);
+        if (Number.isNaN(cid)) {
+            return res.status(400).json({ error: 'Invalid company id' });
+        }
+        const company = await prisma.company.findUnique({ where: { id: cid }, select: { userId: true } });
+        if (!company || company.userId == null) {
+            return res.status(404).json({ error: 'Company not found' });
+        }
+        if (!(await actorCanAccessTargetUser(actorId, company.userId))) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
+
+        const sName = sanitizeOrganizationText(name, SITE_TEXT_LIMITS.name);
+        if (!sName) {
+            return res.status(400).json({ error: 'Site name is required' });
+        }
+
+        const sitePhone = sanitizePhoneField(contactNumber);
+        if (!sitePhone) {
+            return res.status(400).json({
+                error: `Contact number must be exactly ${PHONE_DIGITS_LENGTH} digits (no letters or extra characters).`
+            });
+        }
+
         const site = await prisma.site.create({
             data: {
-                name,
-                description,
-                siteType,
-                status: status || 'Active',
-                address,
-                city,
-                state,
-                country,
-                postalCode,
+                name: sName,
+                description: sanitizePlainText(description, SITE_TEXT_LIMITS.description, { preserveNewlines: true }),
+                siteType: sanitizePlainText(siteType, SITE_TEXT_LIMITS.siteType),
+                status: sanitizePlainText(status, SITE_TEXT_LIMITS.status) || 'Active',
+                address: sanitizeOrganizationText(address, SITE_TEXT_LIMITS.address),
+                city: sanitizePlainText(city, SITE_TEXT_LIMITS.city),
+                state: sanitizePlainText(state, SITE_TEXT_LIMITS.state),
+                country: sanitizePlainText(country, SITE_TEXT_LIMITS.country),
+                postalCode: sanitizePlainText(postalCode, SITE_TEXT_LIMITS.postalCode),
                 latitude: latitude != null && String(latitude).trim() !== '' && !Number.isNaN(parseFloat(latitude)) ? parseFloat(latitude) : null,
                 longitude: longitude != null && String(longitude).trim() !== '' && !Number.isNaN(parseFloat(longitude)) ? parseFloat(longitude) : null,
-                contactName,
-                contactPosition,
-                contactNumber,
-                email,
-                companyId: Number.parseInt(companyId),
-                userId: userId ? Number.parseInt(userId) : null
+                contactName: sanitizePlainText(contactName, SITE_TEXT_LIMITS.contactName),
+                contactPosition: sanitizePlainText(contactPosition, SITE_TEXT_LIMITS.contactPosition),
+                contactNumber: sitePhone,
+                email: sanitizePlainText(email, SITE_TEXT_LIMITS.email),
+                companyId: cid,
+                userId: actorId ? Number.parseInt(String(actorId), 10) : null
             }
         });
         res.status(201).json(site);
@@ -994,8 +1362,8 @@ app.post('/companies/:companyId/sites', checkTrialExpiration, async (req, res) =
 });
 
 // Get all sites (with strict user filtering for security)
-app.get('/sites', checkTrialExpiration, async (req, res) => {
-    const { userId } = req.query;
+app.get('/sites', authenticateToken, checkTrialExpiration, async (req, res) => {
+    const userId = req.user.id;
 
     // SECURITY: Enforce strict userId filtering. Do not return all sites if userId is missing.
     if (!userId || userId === 'undefined' || userId === 'null') {
@@ -1022,7 +1390,7 @@ app.get('/sites', checkTrialExpiration, async (req, res) => {
 });
 
 // Update a site
-app.put('/sites/:id', checkTrialExpiration, async (req, res) => {
+app.put('/sites/:id', authenticateToken, checkTrialExpiration, async (req, res) => {
     const { id } = req.params;
     const {
         name, description, siteType, status,
@@ -1031,25 +1399,74 @@ app.put('/sites/:id', checkTrialExpiration, async (req, res) => {
         contactNumber, email
     } = req.body;
     try {
+        const data = {};
+        if (name !== undefined) {
+            const sName = sanitizeOrganizationText(name, SITE_TEXT_LIMITS.name);
+            if (!sName) {
+                return res.status(400).json({ error: 'Site name is required' });
+            }
+            data.name = sName;
+        }
+        if (description !== undefined) {
+            data.description = sanitizePlainText(description, SITE_TEXT_LIMITS.description, { preserveNewlines: true });
+        }
+        if (siteType !== undefined) {
+            data.siteType = sanitizePlainText(siteType, SITE_TEXT_LIMITS.siteType);
+        }
+        if (status !== undefined) {
+            data.status = sanitizePlainText(status, SITE_TEXT_LIMITS.status);
+        }
+        if (address !== undefined) {
+            data.address = sanitizeOrganizationText(address, SITE_TEXT_LIMITS.address);
+        }
+        if (city !== undefined) {
+            data.city = sanitizePlainText(city, SITE_TEXT_LIMITS.city);
+        }
+        if (state !== undefined) {
+            data.state = sanitizePlainText(state, SITE_TEXT_LIMITS.state);
+        }
+        if (country !== undefined) {
+            data.country = sanitizePlainText(country, SITE_TEXT_LIMITS.country);
+        }
+        if (postalCode !== undefined) {
+            data.postalCode = sanitizePlainText(postalCode, SITE_TEXT_LIMITS.postalCode);
+        }
+        if (latitude !== undefined || longitude !== undefined) {
+            data.latitude =
+                latitude != null && String(latitude).trim() !== '' && !Number.isNaN(parseFloat(latitude))
+                    ? parseFloat(latitude)
+                    : null;
+            data.longitude =
+                longitude != null && String(longitude).trim() !== '' && !Number.isNaN(parseFloat(longitude))
+                    ? parseFloat(longitude)
+                    : null;
+        }
+        if (contactName !== undefined) {
+            data.contactName = sanitizePlainText(contactName, SITE_TEXT_LIMITS.contactName);
+        }
+        if (contactPosition !== undefined) {
+            data.contactPosition = sanitizePlainText(contactPosition, SITE_TEXT_LIMITS.contactPosition);
+        }
+        if (contactNumber !== undefined) {
+            const cn = sanitizePhoneField(contactNumber);
+            if (!cn) {
+                return res.status(400).json({
+                    error: `Contact number must be exactly ${PHONE_DIGITS_LENGTH} digits (no letters or extra characters).`
+                });
+            }
+            data.contactNumber = cn;
+        }
+        if (email !== undefined) {
+            data.email = sanitizePlainText(email, SITE_TEXT_LIMITS.email);
+        }
+
+        if (Object.keys(data).length === 0) {
+            return res.status(400).json({ error: 'No valid fields to update' });
+        }
+
         const site = await prisma.site.update({
             where: { id: Number.parseInt(id) },
-            data: {
-                name,
-                description,
-                siteType,
-                status,
-                address,
-                city,
-                state,
-                country,
-                postalCode,
-                latitude: latitude != null && String(latitude).trim() !== '' && !Number.isNaN(parseFloat(latitude)) ? parseFloat(latitude) : null,
-                longitude: longitude != null && String(longitude).trim() !== '' && !Number.isNaN(parseFloat(longitude)) ? parseFloat(longitude) : null,
-                contactName,
-                contactPosition,
-                contactNumber,
-                email
-            }
+            data
         });
         res.json(site);
     } catch (error) {
@@ -1059,7 +1476,7 @@ app.put('/sites/:id', checkTrialExpiration, async (req, res) => {
 });
 
 // Delete a site
-app.delete('/sites/:id', checkTrialExpiration, async (req, res) => {
+app.delete('/sites/:id', authenticateToken, checkTrialExpiration, async (req, res) => {
     const { id } = req.params;
     try {
         await prisma.site.delete({
@@ -1073,17 +1490,22 @@ app.delete('/sites/:id', checkTrialExpiration, async (req, res) => {
 });
 
 // Create a department
-app.post('/sites/:siteId/departments', checkTrialExpiration, async (req, res) => {
+app.post('/sites/:siteId/departments', authenticateToken, checkTrialExpiration, async (req, res) => {
     const { siteId } = req.params;
     const { name, code, status, manager, description } = req.body;
     try {
+        const dName = sanitizeOrganizationText(name, DEPT_TEXT_LIMITS.name);
+        if (!dName) {
+            return res.status(400).json({ error: 'Department name is required' });
+        }
+
         const department = await prisma.department.create({
             data: {
-                name,
-                code,
-                status: status || 'Active',
-                manager,
-                description,
+                name: dName,
+                code: sanitizePlainText(code, DEPT_TEXT_LIMITS.code),
+                status: sanitizePlainText(status, DEPT_TEXT_LIMITS.status) || 'Active',
+                manager: sanitizePlainText(manager, DEPT_TEXT_LIMITS.manager),
+                description: sanitizePlainText(description, DEPT_TEXT_LIMITS.description, { preserveNewlines: true }),
                 siteId: Number.parseInt(siteId)
             }
         });
@@ -1095,13 +1517,38 @@ app.post('/sites/:siteId/departments', checkTrialExpiration, async (req, res) =>
 });
 
 // Update a department
-app.put('/departments/:id', checkTrialExpiration, async (req, res) => {
+app.put('/departments/:id', authenticateToken, checkTrialExpiration, async (req, res) => {
     const { id } = req.params;
     const { name, code, status, manager, description } = req.body;
     try {
+        const data = {};
+        if (name !== undefined) {
+            const dName = sanitizeOrganizationText(name, DEPT_TEXT_LIMITS.name);
+            if (!dName) {
+                return res.status(400).json({ error: 'Department name is required' });
+            }
+            data.name = dName;
+        }
+        if (code !== undefined) {
+            data.code = sanitizePlainText(code, DEPT_TEXT_LIMITS.code);
+        }
+        if (status !== undefined) {
+            data.status = sanitizePlainText(status, DEPT_TEXT_LIMITS.status);
+        }
+        if (manager !== undefined) {
+            data.manager = sanitizePlainText(manager, DEPT_TEXT_LIMITS.manager);
+        }
+        if (description !== undefined) {
+            data.description = sanitizePlainText(description, DEPT_TEXT_LIMITS.description, { preserveNewlines: true });
+        }
+
+        if (Object.keys(data).length === 0) {
+            return res.status(400).json({ error: 'No valid fields to update' });
+        }
+
         const department = await prisma.department.update({
             where: { id: Number.parseInt(id) },
-            data: { name, code, status, manager, description }
+            data
         });
         res.json(department);
     } catch (error) {
@@ -1111,7 +1558,7 @@ app.put('/departments/:id', checkTrialExpiration, async (req, res) => {
 });
 
 // Delete a department
-app.delete('/departments/:id', checkTrialExpiration, async (req, res) => {
+app.delete('/departments/:id', authenticateToken, checkTrialExpiration, async (req, res) => {
     const { id } = req.params;
     try {
         await prisma.department.delete({
@@ -1125,14 +1572,15 @@ app.delete('/departments/:id', checkTrialExpiration, async (req, res) => {
 });
 
 // Example route to create a company
-app.post('/companies', checkTrialExpiration, async (req, res) => {
+app.post('/companies', authenticateToken, checkTrialExpiration, async (req, res) => {
+    const userId = req.user.id;
     const {
         name, industry, description, logo,
         contactNumber, streetAddress, city,
-        state, country, postalCode, standards, userId
+        state, country, postalCode, standards
     } = req.body;
     try {
-        const parsedUserId = userId ? Number.parseInt(userId) : null;
+        const parsedUserId = userId;
 
         // Enforce One Company Per User Rule
         if (parsedUserId) {
@@ -1144,22 +1592,37 @@ app.post('/companies', checkTrialExpiration, async (req, res) => {
             }
         }
 
+        const sName = sanitizeOrganizationText(name, COMPANY_TEXT_LIMITS.name);
+        if (!sName) {
+            return res.status(400).json({ error: 'Company name is required' });
+        }
+
+        const sCity = sanitizePlainText(city, COMPANY_TEXT_LIMITS.city);
+        const sCountry = sanitizePlainText(country, COMPANY_TEXT_LIMITS.country);
+
+        const companyPhone = sanitizePhoneField(contactNumber);
+        if (!companyPhone) {
+            return res.status(400).json({
+                error: `Contact number must be exactly ${PHONE_DIGITS_LENGTH} digits (no letters or extra characters).`
+            });
+        }
+
         const company = await prisma.company.create({
             data: {
-                name,
-                industry,
-                description,
-                logo,
-                contactNumber,
-                streetAddress,
-                city,
-                state,
-                country,
-                postalCode,
-                isoStandards: standards || [],
+                name: sName,
+                industry: sanitizePlainText(industry, COMPANY_TEXT_LIMITS.industry),
+                description: sanitizePlainText(description, COMPANY_TEXT_LIMITS.description, { preserveNewlines: true }),
+                logo: sanitizeLogoField(logo, COMPANY_TEXT_LIMITS.logo),
+                contactNumber: companyPhone,
+                streetAddress: sanitizeOrganizationText(streetAddress, COMPANY_TEXT_LIMITS.streetAddress),
+                city: sCity,
+                state: sanitizePlainText(state, COMPANY_TEXT_LIMITS.state),
+                country: sCountry,
+                postalCode: sanitizePlainText(postalCode, COMPANY_TEXT_LIMITS.postalCode),
+                isoStandards: sanitizeStringArray(standards),
                 // Automatically set legacy fields for compatibility
-                location: `${city || ''}, ${country || ''}`.trim().replace(/^, |,$/, ''),
-                contactDetails: contactNumber,
+                location: `${sCity || ''}, ${sCountry || ''}`.trim().replace(/^, |,$/, ''),
+                contactDetails: companyPhone,
                 userId: parsedUserId
             },
         });
@@ -1171,31 +1634,88 @@ app.post('/companies', checkTrialExpiration, async (req, res) => {
 });
 
 // Update a company
-app.put('/companies/:id', checkTrialExpiration, async (req, res) => {
+app.put('/companies/:id', authenticateToken, checkTrialExpiration, async (req, res) => {
     const { id } = req.params;
+    const actorId = Number(req.user.id);
     const {
         name, industry, description, logo,
         contactNumber, streetAddress, city,
         state, country, postalCode, standards
     } = req.body;
     try {
+        const companyIdNum = Number.parseInt(id, 10);
+        if (Number.isNaN(companyIdNum)) {
+            return res.status(400).json({ error: 'Invalid company id' });
+        }
+        const existing = await prisma.company.findUnique({
+            where: { id: companyIdNum },
+            select: { userId: true, city: true, country: true, contactNumber: true }
+        });
+        if (!existing || existing.userId == null) {
+            return res.status(404).json({ error: 'Company not found' });
+        }
+        if (!(await actorCanAccessTargetUser(actorId, existing.userId))) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
+
+        const data = {};
+        if (name !== undefined) {
+            const s = sanitizeOrganizationText(name, COMPANY_TEXT_LIMITS.name);
+            if (!s) {
+                return res.status(400).json({ error: 'Company name is required' });
+            }
+            data.name = s;
+        }
+        if (industry !== undefined) {
+            data.industry = sanitizePlainText(industry, COMPANY_TEXT_LIMITS.industry);
+        }
+        if (description !== undefined) {
+            data.description = sanitizePlainText(description, COMPANY_TEXT_LIMITS.description, { preserveNewlines: true });
+        }
+        if (logo !== undefined) {
+            data.logo = sanitizeLogoField(logo, COMPANY_TEXT_LIMITS.logo);
+        }
+        if (streetAddress !== undefined) {
+            data.streetAddress = sanitizeOrganizationText(streetAddress, COMPANY_TEXT_LIMITS.streetAddress);
+        }
+        if (state !== undefined) {
+            data.state = sanitizePlainText(state, COMPANY_TEXT_LIMITS.state);
+        }
+        if (postalCode !== undefined) {
+            data.postalCode = sanitizePlainText(postalCode, COMPANY_TEXT_LIMITS.postalCode);
+        }
+        if (standards !== undefined) {
+            data.isoStandards = sanitizeStringArray(standards);
+        }
+        if (contactNumber !== undefined) {
+            const cn = sanitizePhoneField(contactNumber);
+            if (!cn) {
+                return res.status(400).json({
+                    error: `Contact number must be exactly ${PHONE_DIGITS_LENGTH} digits (no letters or extra characters).`
+                });
+            }
+            data.contactNumber = cn;
+            data.contactDetails = cn;
+        }
+        if (city !== undefined) {
+            data.city = sanitizePlainText(city, COMPANY_TEXT_LIMITS.city);
+        }
+        if (country !== undefined) {
+            data.country = sanitizePlainText(country, COMPANY_TEXT_LIMITS.country);
+        }
+        if (city !== undefined || country !== undefined) {
+            const effCity = data.city !== undefined ? data.city : existing.city;
+            const effCountry = data.country !== undefined ? data.country : existing.country;
+            data.location = `${effCity || ''}, ${effCountry || ''}`.trim().replace(/^, |,$/, '');
+        }
+
+        if (Object.keys(data).length === 0) {
+            return res.status(400).json({ error: 'No valid fields to update' });
+        }
+
         const company = await prisma.company.update({
             where: { id: Number.parseInt(id) },
-            data: {
-                name,
-                industry,
-                description,
-                logo,
-                contactNumber,
-                streetAddress,
-                city,
-                state,
-                country,
-                postalCode,
-                isoStandards: standards || [],
-                location: `${city || ''}, ${country || ''}`.trim().replace(/^, |,$/, ''),
-                contactDetails: contactNumber
-            },
+            data
         });
         res.json(company);
     } catch (error) {
@@ -1205,11 +1725,27 @@ app.put('/companies/:id', checkTrialExpiration, async (req, res) => {
 });
 
 // Delete a company
-app.delete('/companies/:id', checkTrialExpiration, async (req, res) => {
+app.delete('/companies/:id', authenticateToken, checkTrialExpiration, async (req, res) => {
     const { id } = req.params;
+    const actorId = Number(req.user.id);
     try {
+        const companyIdNum = Number.parseInt(id, 10);
+        if (Number.isNaN(companyIdNum)) {
+            return res.status(400).json({ error: 'Invalid company id' });
+        }
+        const existing = await prisma.company.findUnique({
+            where: { id: companyIdNum },
+            select: { userId: true }
+        });
+        if (!existing || existing.userId == null) {
+            return res.status(404).json({ error: 'Company not found' });
+        }
+        if (!(await actorCanAccessTargetUser(actorId, existing.userId))) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
+
         await prisma.company.delete({
-            where: { id: Number.parseInt(id) },
+            where: { id: companyIdNum },
         });
         res.status(204).send();
     } catch (error) {
@@ -1222,8 +1758,112 @@ app.delete('/companies/:id', checkTrialExpiration, async (req, res) => {
 // Auth & OTP Routes
 // -------------------------
 
+/** normalizedEmail: lowercased + trimmed. purpose: signup | email_change | password_reset */
+async function sendOtpToEmailAddress(normalizedEmail, purpose) {
+    const lastOtp = await prisma.otp.findFirst({ where: { email: normalizedEmail } });
+    if (lastOtp) {
+        const lastSendAt = new Date(lastOtp.updatedAt || lastOtp.createdAt).getTime();
+        const timeSinceLastOtp = Date.now() - lastSendAt;
+        if (timeSinceLastOtp < OTP_RESEND_COOLDOWN_MS) {
+            const remainingSeconds = Math.ceil((OTP_RESEND_COOLDOWN_MS - timeSinceLastOtp) / 1000);
+            const err = new Error('OTP_COOLDOWN');
+            err.retryAfterSeconds = remainingSeconds;
+            throw err;
+        }
+    }
+
+    const otp = generateOTP();
+    const expiresAt = new Date(Date.now() + 1 * 60 * 1000);
+
+    await prisma.otp.upsert({
+        where: { email: normalizedEmail },
+        update: { code: otp, expiresAt },
+        create: { email: normalizedEmail, code: otp, expiresAt }
+    });
+
+    const isPasswordReset = purpose === 'password_reset';
+    const isEmailChange = purpose === 'email_change';
+    const subject = isPasswordReset
+        ? 'Reset your iAudit Global password'
+        : isEmailChange
+          ? 'Verify your new iAudit email'
+          : 'Your Account Verification Code';
+    const titleHtml = isPasswordReset
+        ? 'Password reset'
+        : isEmailChange
+          ? 'Confirm your email'
+          : 'Welcome to iAudit Global';
+    const introHtml = isPasswordReset
+        ? 'You requested to reset your password. Use the verification code below to continue. If you did not request this, you can ignore this email.'
+        : isEmailChange
+          ? 'Use the verification code below to confirm you can receive email at this address. An administrator requested this address for your account.'
+          : 'Please use the verification code below to confirm your email address and complete your signup securely:';
+
+    const mailOptions = {
+        from: {
+            name: 'iAudit Global',
+            address: process.env.SMTP_USER
+        },
+        to: normalizedEmail,
+        subject,
+        headers: { 'X-Entity-Ref-ID': otp },
+        text: isPasswordReset
+            ? `Your password reset code is: ${otp}. This code expires in 1 minute.`
+            : isEmailChange
+              ? `Your email verification code is: ${otp}. This code expires in 1 minute.`
+              : `Your verification code is: ${otp}. This code will expire in 1 minute.`,
+        html: `
+                <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 24px; border: 1px solid #e5e7eb; border-radius: 12px; background-color: #ffffff;">
+                    <div style="text-align: center; margin-bottom: 24px;">
+                        <h1 style="color: #00875b; font-size: 28px; margin: 0;">${titleHtml}</h1>
+                    </div>
+                    <p style="color: #374151; font-size: 16px; line-height: 1.5; margin-bottom: 24px;">
+                        Hello!<br><br>
+                        ${introHtml}
+                    </p>
+                    <div style="background-color: #f3f4f6; padding: 24px; border-radius: 8px; text-align: center; margin-bottom: 32px;">
+                        <p style="text-transform: uppercase; font-size: 14px; font-weight: 600; color: #6b7280; margin: 0 0 12px 0; letter-spacing: 1px;">Verification code</p>
+                        <h2 style="font-size: 42px; font-weight: 800; color: #111827; letter-spacing: 8px; margin: 0;">${otp}</h2>
+                    </div>
+                    <p style="color: #4b5563; font-size: 14px; line-height: 1.5;">
+                        This code will expire in <strong>1 minute</strong>. If you did not request this, you can ignore this email.
+                    </p>
+                    <hr style="border: 0; border-top: 1px solid #e5e7eb; margin: 32px 0;" />
+                    <div style="text-align: center; color: #9ca3af; font-size: 12px;">
+                        <p style="margin: 0;">&copy; ${new Date().getFullYear()} iAudit Global. All rights reserved.</p>
+                        <p style="margin: 4px 0 0 0;">This email was sent to ${normalizedEmail}. Please do not reply to this automated message.</p>
+                    </div>
+                </div>
+            `
+    };
+
+    try {
+        await transporter.sendMail(mailOptions);
+        console.log(`OTP successfully sent to ${normalizedEmail}`);
+    } catch (emailError) {
+        console.error('Email sending failed, but continuing for development/test:', emailError.message);
+        if (emailError.message.includes('5.7.139')) {
+            console.error('\n====================================================================');
+            console.error('     🚨 CRITICAL: MICROSOFT 365 SECURITY BLOCK DETECTED 🚨');
+            console.error('====================================================================');
+            console.error('Exact Issue: Microsoft Office 365 has disabled Basic Authentication');
+            console.error('             (SMTP AUTH) for the account "noreply@iaudit.global".');
+            console.error('');
+            console.error('HOW TO FIX THIS (Required Admin Action):');
+            console.error('  1. Log in to admin.microsoft.com as a Global Administrator.');
+            console.error('  2. Go to Users > Active users.');
+            console.error('  3. Click on the user: noreply@iaudit.global');
+            console.error('  4. Click the "Mail" tab on the right side window.');
+            console.error('  5. Click "Manage email apps".');
+            console.error('  6. Check the box for "Authenticated SMTP" and save changes.');
+            console.error('  7. Wait 15-30 minutes for Microsoft to apply the policy.');
+            console.error('====================================================================\n');
+        }
+        console.log(`Bypassed Email - OTP for ${normalizedEmail} is: ${otp}`);
+    }
+}
+
 // Alias for signup if frontend calls /auth/signup directly
-// Refactored Send OTP logic to be reusable
 const sendOtpLogic = async (req, res) => {
     let { email } = req.body;
     if (!email || typeof email !== 'string') {
@@ -1234,92 +1874,23 @@ const sendOtpLogic = async (req, res) => {
     let step = 'Lookup existing user';
     try {
         console.log(`[AUTH] Signup attempt`);
-        // 1. Prevent signup if user already exists
         const existingUser = await prisma.user.findFirst({ where: { email } });
         console.log(`[AUTH] User lookup result:`, existingUser ? 'Found' : 'Not Found');
         if (existingUser) {
             return res.status(400).json({ error: 'Email already registered' });
         }
 
-        step = 'Generate and Store OTP';
-        const otp = generateOTP();
-        const expiresAt = new Date(Date.now() + 1 * 60 * 1000); // 1 minute expiration
-
-        // Store OTP in database
-        await prisma.otp.upsert({
-            where: { email },
-            update: { code: otp, expiresAt },
-            create: { email, code: otp, expiresAt }
-        });
-
-        const mailOptions = {
-            from: {
-                name: 'iAudit Global',
-                address: process.env.SMTP_USER
-            },
-            to: email,
-            subject: 'Your Account Verification Code',
-            headers: {
-                'X-Entity-Ref-ID': otp,
-            },
-            text: `Your verification code is: ${otp}. This code will expire in 1 minute.`,
-            html: `
-                <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 24px; border: 1px solid #e5e7eb; border-radius: 12px; background-color: #ffffff;">
-                    <div style="text-align: center; margin-bottom: 24px;">
-                        <h1 style="color: #00875b; font-size: 28px; margin: 0;">Welcome to iAudit Global</h1>
-                    </div>
-                    
-                    <p style="color: #374151; font-size: 16px; line-height: 1.5; margin-bottom: 24px;">
-                        Hello!<br><br>
-                        Please use the verification code below to confirm your email address and complete your signup securely:
-                    </p>
-                    
-                    <div style="background-color: #f3f4f6; padding: 24px; border-radius: 8px; text-align: center; margin-bottom: 32px;">
-                        <p style="text-transform: uppercase; font-size: 14px; font-weight: 600; color: #6b7280; margin: 0 0 12px 0; letter-spacing: 1px;">Secure Verification Code</p>
-                        <h2 style="font-size: 42px; font-weight: 800; color: #111827; letter-spacing: 8px; margin: 0;">${otp}</h2>
-                    </div>
-                    
-                    <p style="color: #4b5563; font-size: 14px; line-height: 1.5;">
-                        This code will expire in <strong>1 minute</strong>. If you did not request this verification, your account is safe, and you can safely ignore this email.
-                    </p>
-                    
-                    <hr style="border: 0; border-top: 1px solid #e5e7eb; margin: 32px 0;" />
-                    
-                    <div style="text-align: center; color: #9ca3af; font-size: 12px;">
-                        <p style="margin: 0;">&copy; ${new Date().getFullYear()} iAudit Global. All rights reserved.</p>
-                        <p style="margin: 4px 0 0 0;">This email was sent to ${email}. Please do not reply to this automated message.</p>
-                    </div>
-                </div>
-            `
-        };
-
-        try {
-            await transporter.sendMail(mailOptions);
-            console.log(`OTP successfully sent to ${email}`);
-        } catch (emailError) {
-            console.error('Email sending failed, but continuing for development/test:', emailError.message);
-            if (emailError.message.includes('5.7.139')) {
-                console.error('\n====================================================================');
-                console.error('     🚨 CRITICAL: MICROSOFT 365 SECURITY BLOCK DETECTED 🚨');
-                console.error('====================================================================');
-                console.error('Exact Issue: Microsoft Office 365 has disabled Basic Authentication');
-                console.error('             (SMTP AUTH) for the account "noreply@iaudit.global".');
-                console.error('');
-                console.error('HOW TO FIX THIS (Required Admin Action):');
-                console.error('  1. Log in to admin.microsoft.com as a Global Administrator.');
-                console.error('  2. Go to Users > Active users.');
-                console.error('  3. Click on the user: noreply@iaudit.global');
-                console.error('  4. Click the "Mail" tab on the right side window.');
-                console.error('  5. Click "Manage email apps".');
-                console.error('  6. Check the box for "Authenticated SMTP" and save changes.');
-                console.error('  7. Wait 15-30 minutes for Microsoft to apply the policy.');
-                console.error('====================================================================\n');
-            }
-            console.log(`Bypassed Email - OTP for ${email} is: ${otp}`);
-        }
+        step = 'Send OTP';
+        await sendOtpToEmailAddress(email, 'signup');
         res.status(200).json({ message: 'OTP sent successfully (Bypassed if email failed)' });
-
     } catch (error) {
+        if (error.message === 'OTP_COOLDOWN') {
+            res.setHeader('Retry-After', String(error.retryAfterSeconds));
+            return res.status(429).json({
+                error: `Please wait ${error.retryAfterSeconds} seconds before requesting another code.`,
+                retryAfterSeconds: error.retryAfterSeconds
+            });
+        }
         handlePrismaError(error, `sendOtpLogic at step: ${step}`);
         res.status(500).json({
             error: `Failed during: ${step}`,
@@ -1334,14 +1905,38 @@ app.post('/auth/send-otp', sendOtpLogic);
 app.post('/auth/signup', sendOtpLogic);
 
 app.post('/auth/verify-otp-and-signup', async (req, res) => {
+    const badKeys = getDisallowedExtraKeysError(req.body, SIGNUP_COMPLETE_ALLOWED_BODY_KEYS);
+    if (badKeys) {
+        return res.status(400).json({ error: badKeys });
+    }
+
     let { email, otp, firstName, lastName, mobile, password, role, customRoleName, isActive } = req.body;
+    console.log(`[AUTH] Signup attempt for ${email}, password length: ${password?.length}`);
 
     if (!email || !otp || typeof email !== 'string') {
         return res.status(400).json({ error: 'Valid email and OTP are required' });
     }
     email = email.toLowerCase().trim();
-    if (password && password.length < 6) {
-        return res.status(400).json({ error: 'Password must be at least 6 characters' });
+
+    if (!password) {
+        return res.status(400).json({ error: 'Password is required' });
+    }
+
+    if (!PASSWORD_REGEX.test(password)) {
+        return res.status(400).json({ error: 'Password must be at least 8 characters long and include at least one uppercase letter, one number, and one special character.' });
+    }
+
+    const fn = sanitizePersonName(firstName, PERSON_NAME_MAX);
+    const ln = sanitizePersonName(lastName, PERSON_NAME_MAX);
+    if (!fn || !ln) {
+        return res.status(400).json({ error: 'Valid first name and last name are required (letters and common punctuation only).' });
+    }
+
+    const mobileDigits = sanitizePhoneField(mobile);
+    if (!mobileDigits) {
+        return res.status(400).json({
+            error: `Mobile number is required and must be exactly ${PHONE_DIGITS_LENGTH} digits.`
+        });
     }
 
     const storedData = await prisma.otp.findFirst({ where: { email } });
@@ -1364,12 +1959,12 @@ app.post('/auth/verify-otp-and-signup', async (req, res) => {
         const hashedPassword = await bcrypt.hash(password, 10);
         const user = await prisma.user.create({
             data: {
-                firstName,
-                lastName,
+                firstName: fn,
+                lastName: ln,
                 email,
-                mobile,
-                role: role || 'Admin',
-                customRoleName,
+                mobile: mobileDigits,
+                role: sanitizeShortLabel(role, 80) || 'Admin',
+                customRoleName: sanitizeShortLabel(customRoleName, 120),
                 isActive: isActive !== undefined ? isActive : true,
                 password: hashedPassword
             }
@@ -1378,8 +1973,17 @@ app.post('/auth/verify-otp-and-signup', async (req, res) => {
         // Clean up OTP from database
         await prisma.otp.delete({ where: { email } });
 
-        const { password: _, ...userWithoutPassword } = user;
-        res.status(201).json(userWithoutPassword);
+        const profile = await prisma.user.findUnique({
+            where: { id: user.id },
+            select: LOGIN_SUCCESS_USER_SELECT
+        });
+        if (!profile || profile.email.toLowerCase().trim() !== email) {
+            return res.status(500).json({ error: 'Account creation could not be completed' });
+        }
+
+        const token = await createSessionTokenForUser(profile.id);
+
+        res.status(201).json({ ...profile, token });
     } catch (error) {
         console.error('Error creating user during OTP verification:', error);
         if (error.code === 'P2002') {
@@ -1389,25 +1993,51 @@ app.post('/auth/verify-otp-and-signup', async (req, res) => {
     }
 });
 
-app.post('/auth/login', async (req, res) => {
+app.post('/auth/login', loginIpRateLimit, async (req, res) => {
+    const badKeys = getDisallowedExtraKeysError(req.body, LOGIN_ALLOWED_BODY_KEYS);
+    if (badKeys) {
+        return res.status(400).json({ error: badKeys });
+    }
+
     let { email, password } = req.body;
 
-    if (!email || !password || typeof email !== 'string') {
+    if (!email || !password || typeof email !== 'string' || typeof password !== 'string') {
         return res.status(400).json({ error: 'Valid email and password are required' });
     }
+    if (email.length > 254 || password.length > 256) {
+        return res.status(401).json({ error: LOGIN_INVALID_CREDENTIALS_MESSAGE });
+    }
     email = email.toLowerCase().trim();
+
+    const invalidCredentials = () => res.status(401).json({ error: LOGIN_INVALID_CREDENTIALS_MESSAGE });
+    const accountLockedResponse = () =>
+        res.status(403).json({
+            error: `Too many failed login attempts. Use "Forgot password" to reset your password and unlock your account (limit: ${LOGIN_MAX_FAILED_ATTEMPTS} attempts).`,
+            code: 'ACCOUNT_LOCKED_PASSWORD_RESET_REQUIRED'
+        });
 
     try {
         console.log(`[AUTH] Login attempt`);
         const user = await prisma.user.findFirst({
-            where: { email: email }
+            where: { email: email },
+            select: {
+                id: true,
+                email: true,
+                password: true,
+                isActive: true,
+                failedLoginAttempts: true
+            }
         });
 
         if (!user) {
             console.log(`[AUTH] Login failed: User not found`);
-            return res.status(404).json({ error: "Email doesn't exist. Please create an account" });
+            return invalidCredentials();
         }
         console.log(`[AUTH] User found for login: ${user.id}`);
+
+        if ((user.failedLoginAttempts ?? 0) >= LOGIN_MAX_FAILED_ATTEMPTS) {
+            return accountLockedResponse();
+        }
 
         // Use bcrypt to compare the provided password with the hashed password in DB
         let isPasswordMatch = false;
@@ -1422,10 +2052,21 @@ app.post('/auth/login', async (req, res) => {
             if (user.password === password) {
                 // Migration: hash and save the password for future logins
                 const hashedPassword = await bcrypt.hash(password, 10);
-                await prisma.user.update({ where: { id: user.id }, data: { password: hashedPassword } });
+                await prisma.user.update({
+                    where: { id: user.id },
+                    data: { password: hashedPassword, failedLoginAttempts: 0 }
+                });
                 isPasswordMatch = true;
             } else {
-                return res.status(401).json({ error: 'Invalid credentials' });
+                const afterFail = await prisma.user.update({
+                    where: { id: user.id },
+                    data: { failedLoginAttempts: { increment: 1 } },
+                    select: { failedLoginAttempts: true }
+                });
+                if (afterFail.failedLoginAttempts >= LOGIN_MAX_FAILED_ATTEMPTS) {
+                    return accountLockedResponse();
+                }
+                return invalidCredentials();
             }
         }
 
@@ -1433,39 +2074,195 @@ app.post('/auth/login', async (req, res) => {
             return res.status(403).json({ error: 'Account is deactivated' });
         }
 
-        // Return the full user object (including trial/subscription status) to the frontend
-        const { password: _, ...userWithoutPassword } = user;
-        console.log(`[AUTH] Login successful for user: ${user.id}, onboardingCompleted: ${user.onboardingCompleted}`);
-        res.status(200).json(userWithoutPassword);
+        await prisma.user.update({
+            where: { id: user.id },
+            data: { failedLoginAttempts: 0 }
+        }).catch(() => {});
+
+        const profile = await prisma.user.findUnique({
+            where: { id: user.id },
+            select: LOGIN_SUCCESS_USER_SELECT
+        });
+        if (!profile || profile.email.toLowerCase().trim() !== email) {
+            return res.status(500).json({ error: 'Login could not be completed' });
+        }
+
+        const token = await createSessionTokenForUser(profile.id);
+
+        console.log(`[AUTH] Login successful for user: ${profile.id}, onboardingCompleted: ${profile.onboardingCompleted}`);
+        res.status(200).json({ ...profile, token });
 
     } catch (error) {
         handlePrismaError(error, 'login');
-        res.status(500).json({ error: 'An error occurred during login', details: error.message });
+        res.status(500).json({ error: 'An error occurred during login' });
     }
 });
 
-// User routes
-app.get('/users', async (req, res) => {
-    const { creatorId } = req.query;
+async function handleForgotPassword(req, res) {
+    const badKeys = getDisallowedExtraKeysError(req.body, FORGOT_PASSWORD_ALLOWED_BODY_KEYS);
+    if (badKeys) {
+        return res.status(400).json({ error: badKeys });
+    }
+    let { email } = req.body;
+    if (!email || typeof email !== 'string') {
+        return res.status(400).json({ error: 'Valid email is required' });
+    }
+    email = email.toLowerCase().trim();
+    const emailFmt = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailFmt.test(email) || email.length > 254) {
+        return res.status(400).json({ error: 'Please enter a valid email address' });
+    }
+
+    const sent = { message: 'A verification code has been sent to your email.' };
+
     try {
-        const uId = creatorId ? Number.parseInt(creatorId) : null;
-        let whereClause = {};
+        const user = await prisma.user.findFirst({ where: { email }, select: { id: true, isActive: true } });
+        if (!user) {
+            // Same response as success so callers cannot enumerate registered emails.
+            return res.status(200).json(sent);
+        }
+        if (!user.isActive) {
+            return res.status(200).json(sent);
+        }
+        await sendOtpToEmailAddress(email, 'password_reset');
+        return res.status(200).json(sent);
+    } catch (error) {
+        if (error.message === 'OTP_COOLDOWN') {
+            res.setHeader('Retry-After', String(error.retryAfterSeconds));
+            return res.status(429).json({
+                error: `Please wait ${error.retryAfterSeconds} seconds before requesting another code.`,
+                retryAfterSeconds: error.retryAfterSeconds
+            });
+        }
+        console.error('forgot-password error:', error);
+        return res.status(500).json({ error: 'Could not process request' });
+    }
+}
 
-        if (uId) {
-            // Fetch the current user to find their creator
-            const currentUser = await prisma.user.findUnique({ where: { id: uId } });
-            const effectiveCreatorId = currentUser?.creatorId || uId;
+async function handleResetPassword(req, res) {
+    const badKeys = getDisallowedExtraKeysError(req.body, RESET_PASSWORD_ALLOWED_BODY_KEYS);
+    if (badKeys) {
+        return res.status(400).json({ error: badKeys });
+    }
+    let { email, otp, newPassword } = req.body;
+    if (!email || typeof email !== 'string' || !otp || !newPassword) {
+        return res.status(400).json({ error: 'Email, verification code, and new password are required' });
+    }
+    if (typeof otp !== 'string' || typeof newPassword !== 'string') {
+        return res.status(400).json({ error: 'Invalid request' });
+    }
+    email = email.toLowerCase().trim();
+    const otpTrim = String(otp).trim();
+    if (!PASSWORD_REGEX.test(newPassword)) {
+        return res.status(400).json({
+            error: 'Password must be at least 8 characters long and include at least one uppercase letter, one number, and one special character.'
+        });
+    }
 
-            whereClause = {
-                OR: [
-                    { id: effectiveCreatorId }, // The Admin
-                    { creatorId: effectiveCreatorId } // All teammates created by that Admin
-                ]
-            };
+    try {
+        const user = await prisma.user.findFirst({ where: { email }, select: { id: true, isActive: true } });
+        if (!user || !user.isActive) {
+            return res.status(400).json({ error: 'Invalid or expired verification code' });
         }
 
+        const storedData = await prisma.otp.findFirst({ where: { email } });
+        if (!storedData) {
+            return res.status(400).json({ error: 'Invalid or expired verification code' });
+        }
+        if (new Date(storedData.expiresAt) < new Date()) {
+            await prisma.otp.delete({ where: { email } }).catch(() => {});
+            return res.status(400).json({ error: 'Verification code has expired. Request a new code.' });
+        }
+        if (storedData.code !== otpTrim) {
+            return res.status(400).json({ error: 'Invalid verification code' });
+        }
+
+        const hashedPassword = await bcrypt.hash(newPassword, 10);
+        await prisma.$transaction([
+            prisma.user.update({
+                where: { id: user.id },
+                data: { password: hashedPassword, failedLoginAttempts: 0 }
+            }),
+            prisma.otp.delete({ where: { email } }),
+            prisma.session.deleteMany({ where: { userId: user.id } })
+        ]);
+
+        return res.status(200).json({ message: 'Password has been reset. You can sign in with your new password.' });
+    } catch (error) {
+        console.error('reset-password error:', error);
+        return res.status(500).json({ error: 'Could not reset password' });
+    }
+}
+
+app.post('/auth/forgot-password', handleForgotPassword);
+app.post('/auth/reset-password', handleResetPassword);
+
+app.post('/auth/logout', authenticateToken, async (req, res) => {
+    try {
+        const t = req.sessionToken;
+        if (t) {
+            await prisma.session.delete({ where: { token: t } }).catch(() => {});
+        }
+        res.status(204).send();
+    } catch (error) {
+        console.error('[AUTH] Logout error:', error);
+        res.status(500).json({ error: 'Failed to log out' });
+    }
+});
+
+// User routes — never return the whole user table; scope to org or explicit superadmin ?scope=all.
+// `?creatorId=` may only narrow results; it cannot be used to read another tenant's users (IDOR).
+app.get('/users', authenticateToken, async (req, res) => {
+    const actorId = Number(req.user?.id);
+    if (!Number.isInteger(actorId) || actorId < 1) {
+        return res.status(401).json({ error: 'Invalid session. Please log in again.' });
+    }
+    try {
+        const viewer = await prisma.user.findUnique({
+            where: { id: actorId },
+            select: { id: true, role: true }
+        });
+        if (!viewer) {
+            return res.status(401).json({ error: 'User not found.' });
+        }
+
+        const scopeAll = viewer.role === 'superadmin' && String(req.query.scope || '') === 'all';
+
+        let filterCreatorId = null;
+        const rawCreator = req.query.creatorId;
+        if (rawCreator !== undefined && rawCreator !== null && String(rawCreator).trim() !== '') {
+            const c = Number.parseInt(String(rawCreator), 10);
+            if (Number.isNaN(c) || c < 1) {
+                return res.status(400).json({ error: 'Invalid creatorId' });
+            }
+            // Only self, users you may administer, or platform superadmin (scope=all) may scope by creator.
+            const mayUseCreatorFilter =
+                scopeAll || c === actorId || (await actorCanAccessTargetUser(actorId, c));
+            if (!mayUseCreatorFilter) {
+                return res.status(403).json({ error: 'Forbidden' });
+            }
+            filterCreatorId = c;
+        }
+
+        let allowedIds;
+        if (scopeAll) {
+            const all = await prisma.user.findMany({ select: { id: true } });
+            allowedIds = all.map((u) => u.id);
+        } else {
+            const orgRootId = await getOrgRootUserId(actorId);
+            allowedIds = await collectOrgSubtreeUserIds(orgRootId);
+        }
+
+        if (allowedIds.length === 0) {
+            return res.json([]);
+        }
+
+        const whereBase = { id: { in: allowedIds } };
+        const where =
+            filterCreatorId != null ? { ...whereBase, creatorId: filterCreatorId } : whereBase;
+
         const users = await prisma.user.findMany({
-            where: whereClause,
+            where,
             select: {
                 id: true,
                 firstName: true,
@@ -1476,7 +2273,8 @@ app.get('/users', async (req, res) => {
                 customRoleName: true,
                 isActive: true,
                 createdAt: true
-            }
+            },
+            orderBy: { id: 'asc' }
         });
         res.json(users);
     } catch (error) {
@@ -1485,52 +2283,71 @@ app.get('/users', async (req, res) => {
     }
 });
 
-// Get single user status quickly
-app.get('/users/:id/status', async (req, res) => {
+// Get single user status quickly (never return PII or raw Stripe price IDs)
+app.get('/users/:id/status', authenticateToken, async (req, res) => {
     const { id } = req.params;
+    const targetId = Number.parseInt(id, 10);
+    if (Number.isNaN(targetId)) {
+        return res.status(400).json({ error: 'Invalid user id' });
+    }
+    const actorId = Number(req.user.id);
     try {
-        const user = await prisma.user.findUnique({
-            where: { id: Number.parseInt(id) },
-            select: {
-                id: true,
-                isActive: true,
-                trialStartDate: true,
-                trialEndDate: true,
-                subscriptionStatus: true,
-                subscriptionPlan: true,
-                planStartDate: true,
-                planExpiryDate: true,
-                nextBillingDate: true,
-                stripeSubscriptionId: true,
-                stripePriceId: true,
-                email: true,
-                firstName: true,
-                lastName: true,
-                renewalType: true,
-                autopayConsent: true,
-                onboardingCompleted: true
-            }
-        });
+        if (!(await actorCanViewUserBillingStatus(actorId, targetId))) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
+
+        const [viewer, user] = await Promise.all([
+            prisma.user.findUnique({ where: { id: actorId }, select: { role: true } }),
+            prisma.user.findUnique({
+                where: { id: targetId },
+                select: {
+                    id: true,
+                    isActive: true,
+                    trialStartDate: true,
+                    trialEndDate: true,
+                    subscriptionStatus: true,
+                    subscriptionPlan: true,
+                    planStartDate: true,
+                    planExpiryDate: true,
+                    nextBillingDate: true,
+                    stripePriceId: true,
+                    renewalType: true,
+                    autopayConsent: true,
+                    onboardingCompleted: true
+                }
+            })
+        ]);
 
         if (!user) {
             return res.json({ exists: false, isActive: false });
         }
 
-        // Fetch duration from the latest successful payment
+        let currentStatus = user.subscriptionStatus;
+        if (currentStatus === 'trial' && user.trialEndDate && new Date(user.trialEndDate) < new Date()) {
+            currentStatus = 'expired';
+        }
+
+        const viewingSelf = actorId === targetId;
+        const fullBilling = viewingSelf || viewer?.role === 'superadmin';
+
+        // Org admin / delegate: only coarse flags — no billing internals, payment history, or plan details
+        if (!fullBilling) {
+            return res.json({
+                exists: true,
+                isActive: user.isActive,
+                subscriptionStatus: currentStatus,
+                onboardingCompleted: user.onboardingCompleted
+            });
+        }
+
         const latestPayment = await prisma.payment.findFirst({
             where: { userId: user.id, status: 'paid' },
             orderBy: { createdAt: 'desc' },
             select: { duration: true }
         });
 
-        // --- Authoritative next billing date: Return from User model directly as requested ---
-        console.log("DB nextBillingDate:", user.nextBillingDate);
-
-        // Logic to determine if expired for frontend use
-        let currentStatus = user.subscriptionStatus;
-        if (currentStatus === 'trial' && user.trialEndDate && new Date(user.trialEndDate) < new Date()) {
-            currentStatus = 'expired';
-        }
+        const priceIdLower = user.stripePriceId ? String(user.stripePriceId).toLowerCase() : '';
+        const isMonthlyPlan = priceIdLower.includes('month') || user.nextBillingDate != null;
 
         res.json({
             exists: true,
@@ -1541,12 +2358,10 @@ app.get('/users/:id/status', async (req, res) => {
             subscriptionPlan: user.subscriptionPlan,
             planStartDate: user.planStartDate,
             planExpiryDate: user.planExpiryDate,
-            nextBillingDate: user.nextBillingDate, // Read directly from User table
-            stripePriceId: user.stripePriceId,
-            email: user.email,
-            firstName: user.firstName,
-            lastName: user.lastName,
+            nextBillingDate: user.nextBillingDate,
+            isMonthlyPlan,
             renewalType: user.renewalType,
+            autopayConsent: user.autopayConsent,
             onboardingCompleted: user.onboardingCompleted,
             duration: latestPayment?.duration || null
         });
@@ -1556,20 +2371,45 @@ app.get('/users/:id/status', async (req, res) => {
     }
 });
 
-app.post('/users', async (req, res) => {
-    const { firstName, lastName, email, mobile, role, customRoleName, password, creatorId, sendWelcomeEmail } = req.body;
-    if (password && password.length < 6) {
-        return res.status(400).json({ error: 'Password must be at least 6 characters' });
+app.post('/users', authenticateToken, async (req, res) => {
+    const { firstName, lastName, email, mobile, role, customRoleName, password, sendWelcomeEmail } = req.body;
+    const creatorId = req.user.id;
+    if (!password) {
+        return res.status(400).json({ error: 'Password is required' });
     }
+    if (!PASSWORD_REGEX.test(password)) {
+        return res.status(400).json({ error: 'Password must be at least 8 characters long and include at least one uppercase letter, one number, and one special character.' });
+    }
+
+    const fn = sanitizePersonName(firstName, PERSON_NAME_MAX);
+    const ln = sanitizePersonName(lastName, PERSON_NAME_MAX);
+    if (!fn || !ln) {
+        return res.status(400).json({ error: 'First name and last name are required' });
+    }
+
+    const emailNorm =
+        typeof email === 'string' ? (sanitizePlainText(email.trim().toLowerCase(), 254) || '') : '';
+    const emailFmt = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailFmt.test(emailNorm)) {
+        return res.status(400).json({ error: 'Please enter a valid email address' });
+    }
+
+    const userMobile = sanitizePhoneField(mobile);
+    if (!userMobile) {
+        return res.status(400).json({
+            error: `Mobile number is required and must be exactly ${PHONE_DIGITS_LENGTH} digits.`
+        });
+    }
+
     try {
         const user = await prisma.user.create({
             data: {
-                firstName,
-                lastName,
-                email,
-                mobile,
-                role,
-                customRoleName,
+                firstName: fn,
+                lastName: ln,
+                email: emailNorm,
+                mobile: userMobile,
+                role: sanitizeShortLabel(role, 80) || 'Admin',
+                customRoleName: sanitizeShortLabel(customRoleName, 120),
                 isActive: req.body.isActive !== undefined ? req.body.isActive : true,
                 password: await bcrypt.hash(password, 10),
                 creatorId: creatorId ? Number.parseInt(creatorId) : null
@@ -1580,15 +2420,15 @@ app.post('/users', async (req, res) => {
         if (sendWelcomeEmail) {
             const mailOptions = {
                 from: process.env.SMTP_USER,
-                to: email,
+                to: emailNorm,
                 subject: 'Welcome to iAudit Global!',
                 html: `
                         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 24px;">
-                            <h2 style="color: #213847;">Welcome to iAudit Global, ${firstName} ${lastName}!</h2>
+                            <h2 style="color: #213847;">Welcome to iAudit Global, ${fn} ${ln}!</h2>
                             <p style="color: #4B5563;">Your account has been created successfully. Here are your login details:</p>
                             <div style="background: #F3F4F6; border-radius: 8px; padding: 16px; margin: 20px 0;">
-                                <p style="margin: 0; color: #111827;"><strong>Name:</strong> ${firstName} ${lastName}</p>
-                                <p style="margin: 8px 0 0; color: #111827;"><strong>Email:</strong> ${email}</p>
+                                <p style="margin: 0; color: #111827;"><strong>Name:</strong> ${fn} ${ln}</p>
+                                <p style="margin: 8px 0 0; color: #111827;"><strong>Email:</strong> ${emailNorm}</p>
                                 <p style="margin: 8px 0 0; color: #111827;"><strong>Password:</strong> ${password}</p>
                             </div>
                             <p style="color: #4B5563;">You can log in to iAudit Global using your email address and password above.</p>
@@ -1600,7 +2440,7 @@ app.post('/users', async (req, res) => {
             };
             // Non-blocking: email sends in background, user creation returns immediately
             transporter.sendMail(mailOptions)
-                .then(() => console.log(`Welcome email sent to ${email}`))
+                .then(() => console.log(`Welcome email sent to ${emailNorm}`))
                 .catch((emailError) => console.error('Failed to send welcome email:', emailError));
         }
 
@@ -1616,30 +2456,186 @@ app.post('/users', async (req, res) => {
 });
 
 
-app.put('/users/:id', async (req, res) => {
-    const { id } = req.params;
-    const { firstName, lastName, email, mobile, role, customRoleName, isActive, password, onboardingCompleted } = req.body;
+async function postUserEmailChangeSendOtp(req, res) {
+    const targetId = Number.parseInt(req.params.id, 10);
+    if (Number.isNaN(targetId)) {
+        return res.status(400).json({ error: 'Invalid user id' });
+    }
+    const actorId = Number(req.user?.id);
+    if (Number.isNaN(actorId)) {
+        return res.status(401).json({ error: 'Invalid session. Please log in again.' });
+    }
+    let { newEmail } = req.body;
+    if (!newEmail || typeof newEmail !== 'string') {
+        return res.status(400).json({ error: 'Valid new email is required' });
+    }
+    newEmail = newEmail.toLowerCase().trim();
+    const emailFmt = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailFmt.test(newEmail)) {
+        return res.status(400).json({ error: 'Please enter a valid email address' });
+    }
     try {
+        if (!(await actorCanAccessTargetUser(actorId, targetId))) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
+        const target = await prisma.user.findUnique({ where: { id: targetId } });
+        if (!target) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+        const currentNorm = (target.email || '').toLowerCase().trim();
+        if (currentNorm === newEmail) {
+            return res.status(400).json({ error: 'This is already the user\'s current email' });
+        }
+        const taken = await prisma.user.findFirst({
+            where: { email: newEmail, NOT: { id: targetId } }
+        });
+        if (taken) {
+            return res.status(400).json({ error: 'Email already exists' });
+        }
+
+        await sendOtpToEmailAddress(newEmail, 'email_change');
+        res.status(200).json({ message: 'Verification code sent' });
+    } catch (error) {
+        if (error.message === 'OTP_COOLDOWN') {
+            res.setHeader('Retry-After', String(error.retryAfterSeconds));
+            return res.status(429).json({
+                error: `Please wait ${error.retryAfterSeconds} seconds before requesting another code.`,
+                retryAfterSeconds: error.retryAfterSeconds
+            });
+        }
+        console.error('email-change send-otp error:', error);
+        const hint =
+            /updatedAt|Otp|does not exist|Unknown column|P2022/i.test(String(error?.message || ''))
+                ? 'Database may be out of date. Run: npx prisma migrate deploy (or rebuild the server container).'
+                : undefined;
+        res.status(500).json({
+            error: 'Failed to send verification code',
+            detail: error?.message || String(error),
+            hint
+        });
+    }
+}
+
+// Under `/api` before strip (see `mountedApiRouter` at top). JSON body: this stack runs before global `express.json`.
+mountedApiRouter.post(
+    '/users/:id/email-change/send-otp',
+    express.json({ limit: '50mb' }),
+    authenticateToken,
+    postUserEmailChangeSendOtp
+);
+app.post('/users/:id/email-change/send-otp', authenticateToken, postUserEmailChangeSendOtp);
+
+app.put('/users/:id', authenticateToken, async (req, res) => {
+    const { id } = req.params;
+    const targetId = Number.parseInt(id, 10);
+    if (Number.isNaN(targetId)) {
+        return res.status(400).json({ error: 'Invalid user id' });
+    }
+    const { firstName, lastName, email, mobile, role, customRoleName, isActive, password, onboardingCompleted, emailChangeOtp } = req.body;
+    try {
+        if (!(await actorCanAccessTargetUser(req.user.id, targetId))) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
+
+        const targetUser = await prisma.user.findUnique({ where: { id: targetId }, select: { email: true } });
+        if (!targetUser) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+
+        const oldNorm = targetUser.email.toLowerCase().trim();
+        const incomingNorm =
+            email != null && typeof email === 'string'
+                ? (sanitizePlainText(email.trim().toLowerCase(), 254) || oldNorm)
+                : oldNorm;
+        const emailFmt = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        if (!emailFmt.test(incomingNorm)) {
+            return res.status(400).json({ error: 'Please enter a valid email address' });
+        }
+
+        if (incomingNorm !== oldNorm) {
+            const otpRaw = emailChangeOtp != null ? String(emailChangeOtp).trim() : '';
+            if (!otpRaw) {
+                return res.status(400).json({ error: 'Verification code required to change email address' });
+            }
+            const storedData = await prisma.otp.findFirst({ where: { email: incomingNorm } });
+            if (!storedData) {
+                return res.status(400).json({ error: 'No verification code for this email. Send a new code first.' });
+            }
+            if (new Date(storedData.expiresAt) < new Date()) {
+                await prisma.otp.delete({ where: { email: incomingNorm } }).catch(() => {});
+                return res.status(400).json({ error: 'Verification code has expired. Send a new code.' });
+            }
+            if (storedData.code !== otpRaw) {
+                return res.status(400).json({ error: 'Invalid verification code' });
+            }
+            await prisma.otp.delete({ where: { email: incomingNorm } });
+            const emailTaken = await prisma.user.findFirst({
+                where: { email: incomingNorm, NOT: { id: targetId } }
+            });
+            if (emailTaken) {
+                return res.status(400).json({ error: 'Email already exists' });
+            }
+        }
+
         const updateData = {
-            firstName,
-            lastName,
-            email,
-            mobile,
-            role,
-            customRoleName,
-            isActive,
+            email: incomingNorm,
             onboardingCompleted: onboardingCompleted !== undefined ? onboardingCompleted : undefined
         };
 
+        if (isActive !== undefined) {
+            updateData.isActive = isActive;
+        }
+
+        if (firstName !== undefined) {
+            const fn = sanitizePersonName(firstName, PERSON_NAME_MAX);
+            if (!fn) {
+                return res.status(400).json({ error: 'Invalid first name' });
+            }
+            updateData.firstName = fn;
+        }
+        if (lastName !== undefined) {
+            const ln = sanitizePersonName(lastName, PERSON_NAME_MAX);
+            if (!ln) {
+                return res.status(400).json({ error: 'Invalid last name' });
+            }
+            updateData.lastName = ln;
+        }
+        if (mobile !== undefined) {
+            const raw = typeof mobile === 'string' ? mobile.trim() : '';
+            if (raw === '') {
+                updateData.mobile = null;
+            } else {
+                const m = sanitizePhoneField(mobile);
+                if (!m) {
+                    return res.status(400).json({
+                        error: `Mobile number must be exactly ${PHONE_DIGITS_LENGTH} digits.`
+                    });
+                }
+                updateData.mobile = m;
+            }
+        }
+        if (role !== undefined && role !== null) {
+            const r = sanitizeShortLabel(role, 80);
+            if (!r) {
+                return res.status(400).json({ error: 'Invalid role' });
+            }
+            updateData.role = r;
+        }
+        if (customRoleName !== undefined) {
+            updateData.customRoleName =
+                customRoleName === null ? null : sanitizeShortLabel(customRoleName, 120);
+        }
+
         if (password) {
-            if (password.length < 6) {
-                return res.status(400).json({ error: 'Password must be at least 6 characters' });
+            if (!PASSWORD_REGEX.test(password)) {
+                return res.status(400).json({ error: 'Password must be at least 8 characters long and include at least one uppercase letter, one number, and one special character.' });
             }
             updateData.password = await bcrypt.hash(password, 10);
+            updateData.failedLoginAttempts = 0;
         }
 
         const user = await prisma.user.update({
-            where: { id: Number.parseInt(id) },
+            where: { id: targetId },
             data: updateData
         });
 
@@ -1654,11 +2650,19 @@ app.put('/users/:id', async (req, res) => {
     }
 });
 
-app.delete('/users/:id', async (req, res) => {
+app.delete('/users/:id', authenticateToken, async (req, res) => {
     const { id } = req.params;
+    const targetId = Number.parseInt(id, 10);
+    if (Number.isNaN(targetId)) {
+        return res.status(400).json({ error: 'Invalid user id' });
+    }
     try {
+        if (!(await actorCanAccessTargetUser(req.user.id, targetId))) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
+
         await prisma.user.delete({
-            where: { id: Number.parseInt(id) }
+            where: { id: targetId }
         });
         res.status(204).send();
     } catch (error) {
@@ -1668,15 +2672,27 @@ app.delete('/users/:id', async (req, res) => {
 });
 
 // Audit Program routes
-app.post('/users/:id/start-trial', async (req, res) => {
+app.post('/users/:id/start-trial', authenticateToken, async (req, res) => {
     const { id } = req.params;
+    const targetId = Number.parseInt(id, 10);
+    if (Number.isNaN(targetId)) {
+        return res.status(400).json({ error: 'Invalid user id' });
+    }
     try {
+        const actor = await prisma.user.findUnique({
+            where: { id: req.user.id },
+            select: { role: true }
+        });
+        if (actor?.role !== 'superadmin' && req.user.id !== targetId) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
+
         const trialStartDate = new Date();
         const trialEndDate = new Date();
         trialEndDate.setDate(trialStartDate.getDate() + 14);
 
         const user = await prisma.user.update({
-            where: { id: Number.parseInt(id) },
+            where: { id: targetId },
             data: {
                 trialStartDate,
                 trialEndDate,
@@ -1693,21 +2709,26 @@ app.post('/users/:id/start-trial', async (req, res) => {
 });
 
 // Audit Program routes
-app.get('/audit-programs', checkTrialExpiration, async (req, res) => {
+app.get('/audit-programs', authenticateToken, checkTrialExpiration, async (req, res) => {
     const { userId, full } = req.query;
 
-    // SECURITY: Enforce strict userId filtering. Do not return all programs if userId is missing.
-    if (!userId || userId === 'undefined' || userId === 'null') {
-        return res.json([]);
-    }
-
     try {
-        const parsedUserId = Number.parseInt(userId);
-        console.log(`[DEBUG] Fetching audit programs for parsedUserId: ${parsedUserId}`);
-        if (Number.isNaN(parsedUserId)) {
-            console.warn(`[DEBUG] parsedUserId is NaN for userId: ${userId}`);
-            return res.json([]);
+        const actorId = req.user.id;
+        let scopeUserId;
+        if (userId && userId !== 'undefined' && userId !== 'null') {
+            scopeUserId = Number.parseInt(String(userId), 10);
+        } else {
+            scopeUserId = actorId;
         }
+        if (Number.isNaN(scopeUserId)) {
+            return res.status(400).json({ error: 'Invalid userId' });
+        }
+        if (!(await actorCanAccessTargetUser(actorId, scopeUserId))) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
+
+        const parsedUserId = scopeUserId;
+        console.log(`[DEBUG] Fetching audit programs for parsedUserId: ${parsedUserId}`);
 
         // Fetch the user to check their creatorId for broader visibility
         const user = await prisma.user.findUnique({ where: { id: parsedUserId } });
@@ -1785,7 +2806,7 @@ app.get('/audit-programs', checkTrialExpiration, async (req, res) => {
 });
 
 // Get single Audit Program (Full Details)
-app.get('/audit-programs/:id', checkTrialExpiration, async (req, res) => {
+app.get('/audit-programs/:id', authenticateToken, checkTrialExpiration, async (req, res) => {
     const { id } = req.params;
     try {
         const program = await prisma.auditProgram.findUnique({
@@ -1797,6 +2818,9 @@ app.get('/audit-programs/:id', checkTrialExpiration, async (req, res) => {
             }
         });
         if (!program) return res.status(404).json({ error: 'Audit program not found' });
+        if (!(await actorCanAccessAuditProgram(req.user.id, program))) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
         res.json(program);
     } catch (error) {
         console.error('Failed to fetch audit program details:', error);
@@ -1804,9 +2828,18 @@ app.get('/audit-programs/:id', checkTrialExpiration, async (req, res) => {
     }
 });
 
-app.post('/audit-programs', checkTrialExpiration, async (req, res) => {
+app.post('/audit-programs', authenticateToken, checkTrialExpiration, async (req, res) => {
     const { name, isoStandard, frequency, duration, siteId, auditorIds, leadAuditorId, scheduleData, userId } = req.body;
     try {
+        const actorId = req.user.id;
+        const ownerId = userId != null ? Number.parseInt(String(userId), 10) : actorId;
+        if (Number.isNaN(ownerId)) {
+            return res.status(400).json({ error: 'Invalid userId' });
+        }
+        if (!(await actorCanAccessTargetUser(actorId, ownerId))) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
+
         const program = await prisma.auditProgram.create({
             data: {
                 name,
@@ -1820,7 +2853,7 @@ app.post('/audit-programs', checkTrialExpiration, async (req, res) => {
                 leadAuditorId: leadAuditorId ? Number.parseInt(leadAuditorId) : null,
                 scheduleData: scheduleData || {},
                 status: 'Draft',
-                userId: userId ? Number.parseInt(userId) : null
+                userId: ownerId
             },
             include: {
                 site: true,
@@ -1835,10 +2868,19 @@ app.post('/audit-programs', checkTrialExpiration, async (req, res) => {
     }
 });
 
-app.put('/audit-programs/:id', checkTrialExpiration, async (req, res) => {
+app.put('/audit-programs/:id', authenticateToken, checkTrialExpiration, async (req, res) => {
     const { id } = req.params;
     const { name, isoStandard, frequency, duration, siteId, auditorIds, leadAuditorId, scheduleData, status } = req.body;
     try {
+        const existing = await prisma.auditProgram.findUnique({
+            where: { id: Number.parseInt(id) },
+            include: { auditors: true, leadAuditor: true }
+        });
+        if (!existing) return res.status(404).json({ error: 'Audit program not found' });
+        if (!(await actorCanAccessAuditProgram(req.user.id, existing))) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
+
         // Disconnect all current auditors first before connecting new ones to ensure clean update
         await prisma.auditProgram.update({
             where: { id: Number.parseInt(id) },
@@ -1877,10 +2919,19 @@ app.put('/audit-programs/:id', checkTrialExpiration, async (req, res) => {
     }
 });
 
-app.delete('/audit-programs/:id', checkTrialExpiration, async (req, res) => {
+app.delete('/audit-programs/:id', authenticateToken, checkTrialExpiration, async (req, res) => {
     const { id } = req.params;
     const programId = Number.parseInt(id);
     try {
+        const existing = await prisma.auditProgram.findUnique({
+            where: { id: programId },
+            include: { auditors: true, leadAuditor: true }
+        });
+        if (!existing) return res.status(404).json({ error: 'Audit program not found' });
+        if (!(await actorCanAccessAuditProgram(req.user.id, existing))) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
+
         await prisma.$transaction(async (tx) => {
             // Delete all associated audit plans first
             await tx.auditPlan.deleteMany({
@@ -1902,31 +2953,47 @@ app.delete('/audit-programs/:id', checkTrialExpiration, async (req, res) => {
 // Audit Plan Routes
 
 // Get all audit plans (optionally filter by programId)
-app.get('/audit-plans', checkTrialExpiration, async (req, res) => {
+app.get('/audit-plans', authenticateToken, checkTrialExpiration, async (req, res) => {
     const { programId, userId } = req.query;
     try {
         const whereClause = {};
         if (programId) whereClause.auditProgramId = Number.parseInt(programId);
-        if (userId) {
-            const uId = Number.parseInt(userId);
-            // Fetch the user to check their creatorId for broader visibility
+
+        const superAll = req.user.role === 'superadmin' && String(req.query.scope || '') === 'all';
+
+        if (!superAll) {
+            const actorId = req.user.id;
+            let scopeUserId;
+            if (userId && userId !== 'undefined' && userId !== 'null') {
+                scopeUserId = Number.parseInt(String(userId), 10);
+            } else {
+                scopeUserId = actorId;
+            }
+            if (Number.isNaN(scopeUserId)) {
+                return res.status(400).json({ error: 'Invalid userId' });
+            }
+            if (!(await actorCanAccessTargetUser(actorId, scopeUserId))) {
+                return res.status(403).json({ error: 'Forbidden' });
+            }
+
+            const uId = scopeUserId;
             const user = await prisma.user.findUnique({ where: { id: uId } });
-            
             const effectiveAdminId = user?.creatorId || uId;
             console.log(`[DEBUG] Fetching audit plans for uId: ${uId}, effectiveAdminId: ${effectiveAdminId}`);
-            
+
             whereClause.OR = [
                 { userId: uId },
                 { leadAuditorId: uId },
                 { auditors: { some: { id: uId } } },
-                { user: { is: { creatorId: uId } } }, // My sub-users
-                { user: { is: { id: effectiveAdminId } } }, // My admin's plans
-                { user: { is: { creatorId: effectiveAdminId } } }, // My teammates' plans
+                { user: { is: { creatorId: uId } } },
+                { user: { is: { id: effectiveAdminId } } },
+                { user: { is: { creatorId: effectiveAdminId } } },
                 { auditProgram: { is: { userId: uId } } },
                 { auditProgram: { is: { leadAuditorId: uId } } },
                 { auditProgram: { is: { auditors: { some: { id: uId } } } } }
             ];
         }
+
         const plans = await prisma.auditPlan.findMany({
             where: whereClause,
             orderBy: { createdAt: 'desc' },
@@ -2009,7 +3076,7 @@ app.get('/audit-plans', checkTrialExpiration, async (req, res) => {
 });
 
 // Get single Audit Plan (Full Details)
-app.get('/audit-plans/:id', checkTrialExpiration, async (req, res) => {
+app.get('/audit-plans/:id', authenticateToken, checkTrialExpiration, async (req, res) => {
     const { id } = req.params;
     try {
         const plan = await prisma.auditPlan.findUnique({
@@ -2019,12 +3086,17 @@ app.get('/audit-plans/:id', checkTrialExpiration, async (req, res) => {
                 auditors: true,
                 auditProgram: {
                     include: {
-                        site: true
+                        site: true,
+                        auditors: true,
+                        leadAuditor: true
                     }
                 }
             }
         });
         if (!plan) return res.status(404).json({ error: 'Audit plan not found' });
+        if (!(await actorCanAccessAuditPlan(req.user.id, plan))) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
         res.json(plan);
     } catch (error) {
         console.error('Failed to fetch audit plan details:', error);
@@ -2033,7 +3105,7 @@ app.get('/audit-plans/:id', checkTrialExpiration, async (req, res) => {
 });
 
 // Create Audit Plan
-app.post('/audit-plans', checkTrialExpiration, async (req, res) => {
+app.post('/audit-plans', authenticateToken, checkTrialExpiration, async (req, res) => {
     const {
         auditProgramId, executionId, auditType, auditName, templateId, date, location,
         scope, objective, criteria,
@@ -2046,6 +3118,21 @@ app.post('/audit-plans', checkTrialExpiration, async (req, res) => {
     }
 
     try {
+        const program = await prisma.auditProgram.findUnique({
+            where: { id: Number.parseInt(auditProgramId, 10) },
+            include: { auditors: true, leadAuditor: true }
+        });
+        if (!program) return res.status(404).json({ error: 'Audit program not found' });
+        if (!(await actorCanAccessAuditProgram(req.user.id, program))) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
+
+        const actorId = req.user.id;
+        const planOwnerId = userId != null ? Number.parseInt(String(userId), 10) : actorId;
+        if (Number.isNaN(planOwnerId) || !(await actorCanAccessTargetUser(actorId, planOwnerId))) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
+
         const plan = await prisma.auditPlan.create({
             data: {
                 auditProgramId: Number.parseInt(auditProgramId, 10),
@@ -2063,7 +3150,7 @@ app.post('/audit-plans', checkTrialExpiration, async (req, res) => {
                     connect: auditorIds ? auditorIds.map(id => ({ id: Number.parseInt(id) })) : []
                 },
                 itinerary: itinerary || [],
-                userId: userId ? Number.parseInt(userId) : null
+                userId: planOwnerId
             }
         });
         res.status(201).json(plan);
@@ -2078,7 +3165,7 @@ app.post('/audit-plans', checkTrialExpiration, async (req, res) => {
 });
 
 // Update Audit Plan
-app.put('/audit-plans/:id', checkTrialExpiration, async (req, res) => {
+app.put('/audit-plans/:id', authenticateToken, checkTrialExpiration, async (req, res) => {
     const { id } = req.params;
     const {
         auditType, auditName, templateId, date, location,
@@ -2087,6 +3174,18 @@ app.put('/audit-plans/:id', checkTrialExpiration, async (req, res) => {
     } = req.body;
 
     try {
+        const existing = await prisma.auditPlan.findUnique({
+            where: { id: Number.parseInt(id) },
+            include: {
+                auditors: true,
+                auditProgram: { include: { auditors: true, leadAuditor: true } }
+            }
+        });
+        if (!existing) return res.status(404).json({ error: 'Audit plan not found' });
+        if (!(await actorCanAccessAuditPlan(req.user.id, existing))) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
+
         const updateData = {};
         if (auditType !== undefined) updateData.auditType = auditType;
         if (auditName !== undefined) updateData.auditName = auditName;
@@ -2120,9 +3219,21 @@ app.put('/audit-plans/:id', checkTrialExpiration, async (req, res) => {
 });
 
 // Delete Audit Plan
-app.delete('/audit-plans/:id', checkTrialExpiration, async (req, res) => {
+app.delete('/audit-plans/:id', authenticateToken, checkTrialExpiration, async (req, res) => {
     const { id } = req.params;
     try {
+        const existing = await prisma.auditPlan.findUnique({
+            where: { id: Number.parseInt(id) },
+            include: {
+                auditors: true,
+                auditProgram: { include: { auditors: true, leadAuditor: true } }
+            }
+        });
+        if (!existing) return res.status(404).json({ error: 'Audit plan not found' });
+        if (!(await actorCanAccessAuditPlan(req.user.id, existing))) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
+
         await prisma.auditPlan.delete({
             where: { id: Number.parseInt(id) }
         });
@@ -2135,12 +3246,24 @@ app.delete('/audit-plans/:id', checkTrialExpiration, async (req, res) => {
 
 
 // Send Self Assessment Report by email
-app.post('/send-assessment-report', async (req, res) => {
+app.post('/send-assessment-report', authenticateToken, async (req, res) => {
     const { to, companyName, auditorName, auditCompany, standard, score, date, questions } = req.body;
 
     if (!to || !companyName || !standard) {
         return res.status(400).json({ error: 'Missing required fields' });
     }
+
+    const uid = req.user.id;
+    const last = assessmentReportEmailLastSent.get(uid) || 0;
+    if (Date.now() - last < OTP_RESEND_COOLDOWN_MS) {
+        const remainingSeconds = Math.ceil((OTP_RESEND_COOLDOWN_MS - (Date.now() - last)) / 1000);
+        res.setHeader('Retry-After', String(remainingSeconds));
+        return res.status(429).json({
+            error: `Please wait ${remainingSeconds} seconds before sending another report email.`,
+            retryAfterSeconds: remainingSeconds
+        });
+    }
+    assessmentReportEmailLastSent.set(uid, Date.now());
 
     try {
         const total = questions?.length || 0;
@@ -2346,7 +3469,7 @@ app.get('/stripe/session/:sessionId', async (req, res) => {
 
 // --- Stripe Payment Routes ---
 
-app.post('/payments/create-checkout-session', async (req, res) => {
+app.post('/payments/create-checkout-session', authenticateToken, async (req, res) => {
     const { userId, planId, billingType, currency, priceId: directPriceId, duration } = req.body;
 
     if (!userId || !planId || !billingType || !currency) {
@@ -2354,7 +3477,12 @@ app.post('/payments/create-checkout-session', async (req, res) => {
     }
 
     try {
-        const user = await prisma.user.findUnique({ where: { id: Number.parseInt(userId) } });
+        const requestedId = Number.parseInt(String(userId), 10);
+        if (Number.isNaN(requestedId) || requestedId !== req.user.id) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
+
+        const user = await prisma.user.findUnique({ where: { id: requestedId } });
         if (!user) return res.status(404).json({ error: 'User not found' });
 
         // Duplicate subscription check: block if user already has active subscription
@@ -2463,10 +3591,15 @@ app.post('/payments/create-checkout-session', async (req, res) => {
     }
 });
 
-app.post('/payments/portal', async (req, res) => {
+app.post('/payments/portal', authenticateToken, async (req, res) => {
     const { userId } = req.body;
     try {
-        const user = await prisma.user.findUnique({ where: { id: Number.parseInt(userId) } });
+        const requestedId = Number.parseInt(String(userId), 10);
+        if (Number.isNaN(requestedId) || requestedId !== req.user.id) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
+
+        const user = await prisma.user.findUnique({ where: { id: requestedId } });
         if (!user || !user.stripeCustomerId) {
             return res.status(400).json({ error: 'Stripe customer not found' });
         }
@@ -2484,10 +3617,15 @@ app.post('/payments/portal', async (req, res) => {
 });
 
 // --- Subscription Invoices Endpoint ---
-app.get('/subscription/invoices/:userId', async (req, res) => {
+app.get('/subscription/invoices/:userId', authenticateToken, async (req, res) => {
     const { userId } = req.params;
     try {
-        const user = await prisma.user.findUnique({ where: { id: Number.parseInt(userId) } });
+        const targetId = Number.parseInt(String(userId), 10);
+        if (Number.isNaN(targetId) || !(await actorCanViewUserBillingStatus(req.user.id, targetId))) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
+
+        const user = await prisma.user.findUnique({ where: { id: targetId } });
         if (!user || !user.stripeCustomerId) {
             return res.json([]); // Return empty if no customer exists yet
         }
@@ -2501,7 +3639,7 @@ app.get('/subscription/invoices/:userId', async (req, res) => {
 
         // 2. Fetch local payment records to fill gaps (especially for one-time payments without invoices)
         const localPayments = await prisma.payment.findMany({
-            where: { userId: Number.parseInt(userId), status: 'paid' },
+            where: { userId: targetId, status: 'paid' },
             orderBy: { createdAt: 'desc' }
         });
 
@@ -2590,7 +3728,7 @@ app.get('/subscription/invoices/:userId', async (req, res) => {
 });
 
 // --- Update Renewal Preference ---
-app.patch('/users/:userId/subscription-preference', async (req, res) => {
+app.patch('/users/:userId/subscription-preference', authenticateToken, async (req, res) => {
     const { userId } = req.params;
     const { renewalType, autopayConsent, subscriptionId } = req.body;
 
@@ -2604,6 +3742,10 @@ app.patch('/users/:userId/subscription-preference', async (req, res) => {
         const targetUserId = Number.parseInt(userId);
         if (Number.isNaN(targetUserId)) {
              return res.status(400).json({ error: 'Invalid User ID' });
+        }
+
+        if (!(await actorCanViewUserBillingStatus(req.user.id, targetUserId))) {
+            return res.status(403).json({ error: 'Forbidden' });
         }
 
         const user = await prisma.user.update({
@@ -2640,7 +3782,7 @@ app.patch('/users/:userId/subscription-preference', async (req, res) => {
 });
 
 // --- Subscription Cancellation Request ---
-app.post('/subscription/cancel-request', async (req, res) => {
+app.post('/subscription/cancel-request', authenticateToken, async (req, res) => {
     const { userId, reason, description } = req.body;
 
     console.log('Cancellation Request Received:', { userId, reason });
@@ -2656,6 +3798,14 @@ app.post('/subscription/cancel-request', async (req, res) => {
     }
 
     try {
+        const actor = await prisma.user.findUnique({
+            where: { id: req.user.id },
+            select: { role: true }
+        });
+        if (actor?.role !== 'superadmin' && parsedId !== req.user.id) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
+
         const user = await prisma.user.findUnique({ where: { id: parsedId } });
         if (!user) {
             console.error('User not found for cancellation request:', parsedId);
@@ -2707,7 +3857,7 @@ app.post('/subscription/cancel-request', async (req, res) => {
 });
 
 // --- Subscription Upgrade Request ---
-app.post('/subscription/upgrade-request', async (req, res) => {
+app.post('/subscription/upgrade-request', authenticateToken, async (req, res) => {
     const { userId, targetPlan, description } = req.body;
 
     console.log('Upgrade Request Received:', { userId, targetPlan });
@@ -2723,6 +3873,14 @@ app.post('/subscription/upgrade-request', async (req, res) => {
     }
 
     try {
+        const actor = await prisma.user.findUnique({
+            where: { id: req.user.id },
+            select: { role: true }
+        });
+        if (actor?.role !== 'superadmin' && parsedId !== req.user.id) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
+
         const user = await prisma.user.findUnique({ where: { id: parsedId } });
         if (!user) {
             console.error('User not found for upgrade request:', parsedId);

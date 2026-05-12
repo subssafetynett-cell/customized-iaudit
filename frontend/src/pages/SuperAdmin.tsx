@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { API_BASE_URL } from "@/config";
+import { apiFetch } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -57,8 +57,6 @@ import {
 import UserModal from "@/components/UserModal";
 import ReusablePagination from "@/components/ReusablePagination";
 
-const API_URL = `${API_BASE_URL}/api`;
-
 export default function SuperAdmin() {
     const navigate = useNavigate();
     const [users, setUsers] = useState<any[]>([]);
@@ -99,8 +97,8 @@ export default function SuperAdmin() {
         try {
             setIsLoading(true);
             const [usersRes, companiesRes] = await Promise.all([
-                fetch(`${API_URL}/users`),
-                fetch(`${API_URL}/companies?admin=true`)
+                apiFetch(`/users?scope=all`),
+                apiFetch(`/companies?admin=true`)
             ]);
 
             if (usersRes.ok && companiesRes.ok) {
@@ -121,9 +119,8 @@ export default function SuperAdmin() {
 
     const handleToggleStatus = async (user: any) => {
         try {
-            const response = await fetch(`${API_URL}/users/${user.id}`, {
+            const response = await apiFetch(`/users/${user.id}`, {
                 method: "PUT",
-                headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ ...user, isActive: !user.isActive }),
             });
 
@@ -142,12 +139,11 @@ export default function SuperAdmin() {
 
     const handleAddUser = async (userData: any) => {
         try {
-            const endpoint = modalMode === "create" ? `${API_URL}/users` : `${API_URL}/users/${selectedUser.id}`;
+            const endpoint = modalMode === "create" ? `/users` : `/users/${selectedUser.id}`;
             const method = modalMode === "create" ? "POST" : "PUT";
             
-            const response = await fetch(endpoint, {
+            const response = await apiFetch(endpoint, {
                 method: method,
-                headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(userData),
             });
 
@@ -183,7 +179,7 @@ export default function SuperAdmin() {
 
         try {
             setIsDeleting(true);
-            const response = await fetch(`${API_URL}/users/${selectedUser.id}`, {
+            const response = await apiFetch(`/users/${selectedUser.id}`, {
                 method: "DELETE",
             });
 

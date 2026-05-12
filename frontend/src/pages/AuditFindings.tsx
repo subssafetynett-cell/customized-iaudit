@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { API_BASE_URL } from "@/config";
+import { apiFetch } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -392,11 +392,11 @@ export default function AuditFindings() {
 
             // If superadmin, fetch all plans (omit userId)
             const isSuperAdmin = user.role === 'superadmin';
-            const url = isSuperAdmin
-                ? `${API_BASE_URL}/api/audit-plans?includeData=true`
-                : `${API_BASE_URL}/api/audit-plans?userId=${user.id || user._id}&includeData=true`;
+            const path = isSuperAdmin
+                ? `/audit-plans?scope=all&includeData=true`
+                : `/audit-plans?userId=${user.id || user._id}&includeData=true`;
 
-            const res = await fetch(url);
+            const res = await apiFetch(path);
             if (!res.ok) throw new Error("API call failed");
 
             const plans: any[] = await res.json();
@@ -473,7 +473,7 @@ export default function AuditFindings() {
         setIsSaving(true);
         try {
             // Fetch the specific plan to update its findingsData
-            const resPlan = await fetch(`${API_BASE_URL}/api/audit-plans/${updated.auditId}`);
+            const resPlan = await apiFetch(`/audit-plans/${updated.auditId}`);
             if (!resPlan.ok) throw new Error("Plan not found");
             const plan = await resPlan.json();
             if (!plan) throw new Error("Plan not found");
@@ -491,9 +491,8 @@ export default function AuditFindings() {
                 }
             };
 
-            const resUpdate = await fetch(`${API_BASE_URL}/api/audit-plans/${updated.auditId}`, {
+            const resUpdate = await apiFetch(`/audit-plans/${updated.auditId}`, {
                 method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ findingsData: newOverrides })
             });
 

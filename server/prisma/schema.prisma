@@ -110,6 +110,8 @@ model User {
   leadAuditPrograms AuditProgram[] @relation("LeadAuditor")
   createdPrograms   AuditProgram[] @relation("UserAuditPrograms")
   onboardingCompleted Boolean    @default(false)
+  /// Wrong-password streak; cleared on successful login or password reset. At LOGIN_MAX_FAILED_ATTEMPTS, login is blocked until reset.
+  failedLoginAttempts Int          @default(0)
   companies         Company[]      @relation("UserCompanies")
   sites             Site[]         @relation("UserSites")
   creator           User?          @relation("UserCreator", fields: [creatorId], references: [id])
@@ -120,6 +122,19 @@ model User {
   // Payment relations
   subscriptions     Subscription[]
   payments          Payment[]
+  sessions          Session[]
+}
+
+/// Server-side session (opaque bearer token). Replaces stateless JWT for request authentication.
+model Session {
+  token     String   @id
+  userId    Int
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
 }
 
 model Subscription {
@@ -217,4 +232,5 @@ model Otp {
   code      String
   expiresAt DateTime
   createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }

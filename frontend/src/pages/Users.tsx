@@ -60,9 +60,7 @@ import {
     AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 
-import { API_BASE_URL } from "@/config";
-
-const API_URL = `${API_BASE_URL}/api`;
+import { apiFetch } from "@/lib/api";
 
 export default function Users() {
     const navigate = useNavigate();
@@ -119,17 +117,22 @@ export default function Users() {
     const fetchUsers = async () => {
         try {
             setIsLoading(true);
-            const user = JSON.parse(localStorage.getItem('user') || '{}');
-            const response = await fetch(`${API_URL}/users?creatorId=${user.id}`);
+            const response = await apiFetch(`/users`);
             if (response.ok) {
                 const responseData = await response.json();
                 const data = Array.isArray(responseData) ? responseData : [];
 
-                // Add the currently logged in user to the list if they aren't already there
-                if (user && user.id) {
-                    const isCurrentUserInList = data.some((u: any) => u.id === user.id);
+                // Add the currently logged-in user to the list if they aren't already there
+                let loggedInUser: { id?: number } | null = null;
+                try {
+                    loggedInUser = JSON.parse(localStorage.getItem("user") || "null");
+                } catch {
+                    loggedInUser = null;
+                }
+                if (loggedInUser?.id != null) {
+                    const isCurrentUserInList = data.some((u: any) => u.id === loggedInUser!.id);
                     if (!isCurrentUserInList) {
-                        data.unshift(user);
+                        data.unshift(loggedInUser as any);
                     }
                 }
 
@@ -145,15 +148,14 @@ export default function Users() {
 
     const handleAddUser = async (userData: any) => {
         try {
-            const endpoint = modalMode === "create" ? `${API_URL}/users` : `${API_URL}/users/${selectedUser.id}`;
+            const endpoint = modalMode === "create" ? `/users` : `/users/${selectedUser.id}`;
             const method = modalMode === "create" ? "POST" : "PUT";
             const user = JSON.parse(localStorage.getItem('user') || '{}');
 
             const payload = modalMode === "create" ? { ...userData, creatorId: user.id } : userData;
 
-            const response = await fetch(endpoint, {
+            const response = await apiFetch(endpoint, {
                 method: method,
-                headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(payload),
             });
 
@@ -189,9 +191,8 @@ export default function Users() {
 
     const handleToggleStatus = async (user: any) => {
         try {
-            const response = await fetch(`${API_URL}/users/${user.id}`, {
+            const response = await apiFetch(`/users/${user.id}`, {
                 method: "PUT",
-                headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ ...user, isActive: !user.isActive }),
             });
 
@@ -219,7 +220,7 @@ export default function Users() {
         if (!userToDelete) return;
 
         try {
-            const response = await fetch(`${API_URL}/users/${userToDelete.id}`, {
+            const response = await apiFetch(`/users/${userToDelete.id}`, {
                 method: "DELETE",
             });
             if (response.ok) {
@@ -454,7 +455,7 @@ export default function Users() {
 
             <UserModal
                 open={showCreate}
-                hideOverlay={false}
+                hideOverlay={showOnboardingGuide && onboardingStep === 5}
                 onClose={() => {
                     setShowCreate(false);
                     setSelectedUser(null);
@@ -466,7 +467,7 @@ export default function Users() {
 
             {showOnboardingGuide && onboardingStep === 5 && showCreate && (
                 <TourStepPopover
-                    targetId="tour-step-user-modal"
+                    targetId="viewport"
                     step={5}
                     totalSteps={7}
                     title="User Management"
@@ -485,7 +486,7 @@ export default function Users() {
                         setShowOnboardingGuide(false);
                         setShowCreate(false);
                     }}
-                    position="right"
+                    position="center"
                     disableShadow={true}
                 />
             )}

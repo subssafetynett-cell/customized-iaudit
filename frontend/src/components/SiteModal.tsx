@@ -7,6 +7,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { MapPin, Info, Contact, Pencil, Globe, Navigation } from "lucide-react";
 import { Site, SiteType } from "@/types/company";
 import { Country, State as StateCity } from "country-state-city";
+import { isTenDigitPhone, normalizePhone10Digits, PHONE_10_ERROR_MESSAGE } from "@/lib/validation";
 
 interface Props {
     open: boolean;
@@ -75,6 +76,7 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
         const trimmedContactName = contactName.trim();
         const trimmedContactPosition = contactPosition.trim();
         const trimmedContactNumber = contactNumber.trim();
+        const contactDigits = normalizePhone10Digits(trimmedContactNumber);
         const trimmedEmail = email.trim();
 
         const countryName = Country.getCountryByCode(countryIso)?.name || "";
@@ -93,9 +95,8 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
             return;
         }
 
-        const phoneRegex = /^\+?[\d\s\-\(\)]{7,20}$/;
-        if (!phoneRegex.test(trimmedContactNumber)) {
-            setError("Please enter a valid phone number.");
+        if (!isTenDigitPhone(trimmedContactNumber)) {
+            setError(PHONE_10_ERROR_MESSAGE);
             return;
         }
 
@@ -118,7 +119,7 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
             postalCode: trimmedPostalCode,
             contactName: trimmedContactName,
             contactPosition: trimmedContactPosition,
-            contactNumber: trimmedContactNumber,
+            contactNumber: contactDigits,
             email: trimmedEmail,
         });
     };
@@ -310,9 +311,15 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
                                 <Label htmlFor="contact-num">Contact Number *</Label>
                                 <Input
                                     id="contact-num"
-                                    placeholder="+1 234 567 8900"
+                                    type="tel"
+                                    inputMode="numeric"
+                                    maxLength={10}
+                                    placeholder="10-digit number"
                                     value={contactNumber}
-                                    onChange={(e) => { setContactNumber(e.target.value); setError(""); }}
+                                    onChange={(e) => {
+                                        setContactNumber(e.target.value.replace(/\D/g, "").slice(0, 10));
+                                        setError("");
+                                    }}
                                 />
                             </div>
                             <div className="space-y-2">

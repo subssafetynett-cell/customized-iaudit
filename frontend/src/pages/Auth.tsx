@@ -1,12 +1,13 @@
 import { useState, useRef, useEffect } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
-import { API_BASE_URL } from "@/config";
+import { apiFetch } from "@/lib/api";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import { Eye, EyeOff } from "lucide-react";
 import gsap from "gsap";
+import { PASSWORD_REGEX, PASSWORD_ERROR_MESSAGE, isTenDigitPhone, normalizePhone10Digits, PHONE_10_ERROR_MESSAGE } from "@/lib/validation";
 
 export default function Auth() {
     const navigate = useNavigate();
@@ -41,6 +42,18 @@ export default function Auth() {
     const [loginErrors, setLoginErrors] = useState<Record<string, string>>({});
     const [isResending, setIsResending] = useState(false);
 
+    const [showForgotPassword, setShowForgotPassword] = useState(false);
+    const [forgotStep, setForgotStep] = useState<"email" | "code">("email");
+    const [resetEmail, setResetEmail] = useState("");
+    const [forgotOtp, setForgotOtp] = useState("");
+    const [forgotNewPassword, setForgotNewPassword] = useState("");
+    const [forgotConfirmPassword, setForgotConfirmPassword] = useState("");
+    const [forgotResendTimer, setForgotResendTimer] = useState(0);
+    const [isForgotResending, setIsForgotResending] = useState(false);
+    const [postResetMessage, setPostResetMessage] = useState("");
+    const [showForgotNewPassword, setShowForgotNewPassword] = useState(false);
+    const [showForgotConfirmPassword, setShowForgotConfirmPassword] = useState(false);
+
     const containerRef = useRef<HTMLDivElement>(null);
     const overlayRef = useRef<HTMLDivElement>(null);
     const overlayContentRef = useRef<HTMLDivElement>(null);
@@ -53,6 +66,13 @@ export default function Auth() {
         setErrorMessage("");
         setLoginErrors({});
         setSignupErrors({});
+        setShowForgotPassword(false);
+        setForgotStep("email");
+        setForgotOtp("");
+        setForgotNewPassword("");
+        setForgotConfirmPassword("");
+        setForgotResendTimer(0);
+        setPostResetMessage("");
     };
 
     useEffect(() => {
@@ -66,12 +86,163 @@ export default function Auth() {
     }, [resendTimer]);
 
     useEffect(() => {
+        let interval: NodeJS.Timeout;
+        if (forgotResendTimer > 0) {
+            interval = setTimeout(() => {
+                setForgotResendTimer((prev) => Math.max(0, prev - 1));
+            }, 1000);
+        }
+        return () => clearTimeout(interval);
+    }, [forgotResendTimer]);
+
+    const openForgotPassword = () => {
+        setErrorMessage("");
+        setPostResetMessage("");
+        setResetEmail(loginEmail.trim());
+        setForgotStep("email");
+        setForgotOtp("");
+        setForgotNewPassword("");
+        setForgotConfirmPassword("");
+        setForgotResendTimer(0);
+        setShowForgotPassword(true);
+    };
+
+    const closeForgotPassword = () => {
+        setShowForgotPassword(false);
+        setForgotStep("email");
+        setForgotOtp("");
+        setForgotNewPassword("");
+        setForgotConfirmPassword("");
+        setForgotResendTimer(0);
+        setErrorMessage("");
+    };
+
+    const handleForgotPasswordSendCode = async (e: React.FormEvent) => {
+        e.preventDefault();
+        setErrorMessage("");
+        const em = resetEmail.trim();
+        if (!em) {
+            setErrorMessage("Enter the email address for your account.");
+            return;
+        }
+        if (!/\S+@\S+\.\S+/.test(em)) {
+            setErrorMessage("Please enter a valid email address.");
+            return;
+        }
+        setIsSubmitting(true);
+        try {
+            const response = await apiFetch("/auth/forgot-password", {
+                method: "POST",
+                body: JSON.stringify({ email: em.toLowerCase() }),
+            });
+            const data = await response.json().catch(() => ({}));
+            if (response.status === 429 && typeof data.retryAfterSeconds === "number") {
+                setForgotResendTimer(data.retryAfterSeconds);
+                setErrorMessage(data.error || "Please wait before requesting another code.");
+                return;
+            }
+            if (!response.ok) {
+                throw new Error(data.error || "Could not send reset code.");
+            }
+            setResetEmail(em.toLowerCase());
+            setForgotStep("code");
+            setForgotResendTimer(60);
+            setForgotOtp("");
+        } catch (err: any) {
+            setErrorMessage(err.message || "Could not send reset code.");
+        } finally {
+            setIsSubmitting(false);
+        }
+    };
+
+    const handleForgotResendCode = async () => {
+        if (!resetEmail.trim()) return;
+        setIsForgotResending(true);
+        setErrorMessage("");
+        try {
+            const response = await apiFetch("/auth/forgot-password", {
+                method: "POST",
+                body: JSON.stringify({ email: resetEmail.trim().toLowerCase() }),
+            });
+            const data = await response.json().catch(() => ({}));
+            if (response.status === 429 && typeof data.retryAfterSeconds === "number") {
+                setForgotResendTimer(data.retryAfterSeconds);
+                setErrorMessage(data.error || "Please wait before requesting another code.");
+                return;
+            }
+            if (!response.ok) {
+                throw new Error(data.error || "Could not resend code.");
+            }
+            setForgotResendTimer(60);
+            setForgotOtp("");
+        } catch (err: any) {
+            setErrorMessage(err.message || "Could not resend code.");
+        } finally {
+            setIsForgotResending(false);
+        }
+    };
+
+    const handleResetPasswordSubmit = async (e: React.FormEvent) => {
+        e.preventDefault();
+        setErrorMessage("");
+        if (forgotOtp.trim().length < 6) {
+            setErrorMessage("Enter the 6-digit code from your email.");
+            return;
+        }
+        if (!PASSWORD_REGEX.test(forgotNewPassword)) {
+            setErrorMessage(PASSWORD_ERROR_MESSAGE);
+            return;
+        }
+        if (forgotNewPassword !== forgotConfirmPassword) {
+            setErrorMessage("Passwords do not match.");
+            return;
+        }
+        setIsSubmitting(true);
+        try {
+            const response = await apiFetch("/auth/reset-password", {
+                method: "POST",
+                body: JSON.stringify({
+                    email: resetEmail.trim().toLowerCase(),
+                    otp: forgotOtp.trim(),
+                    newPassword: forgotNewPassword,
+                }),
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                throw new Error(data.error || "Could not reset password.");
+            }
+            setPostResetMessage(data.message || "Password has been reset. You can sign in with your new password.");
+            closeForgotPassword();
+        } catch (err: any) {
+            setErrorMessage(err.message || "Could not reset password.");
+        } finally {
+            setIsSubmitting(false);
+        }
+    };
+
+    useEffect(() => {
         // If already logged in, redirect to home
         const user = localStorage.getItem("user");
         if (user) {
             navigate("/", { replace: true });
         }
     }, [navigate]);
+
+    useEffect(() => {
+        const st = location.state as { openForgotPassword?: boolean } | null;
+        if (st?.openForgotPassword) {
+            setIsSignUp(false);
+            setShowForgotPassword(true);
+            setForgotStep("email");
+            setResetEmail("");
+            setForgotOtp("");
+            setForgotNewPassword("");
+            setForgotConfirmPassword("");
+            setForgotResendTimer(0);
+            setErrorMessage("");
+            navigate(location.pathname, { replace: true, state: {} });
+        }
+    }, [location.state, location.pathname, navigate]);
 
     useEffect(() => {
         const ctx = gsap.context(() => {
@@ -125,26 +296,42 @@ export default function Auth() {
 
         setIsSubmitting(true);
         setErrorMessage("");
+        setPostResetMessage("");
 
         try {
-            const response = await fetch(`${API_BASE_URL}/api/auth/login`, {
+            const response = await apiFetch('/auth/login', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ email: loginEmail, password: loginPassword })
             });
 
-            const data = await response.json();
+            const data = await response.json().catch(() => ({}));
 
             if (!response.ok) {
-                if (data.error && data.error.includes("Email doesn't exist")) {
-                    setLoginErrors(prev => ({ ...prev, email: data.error }));
-                    return;
+                if (response.status === 403 && data.code === 'ACCOUNT_LOCKED_PASSWORD_RESET_REQUIRED') {
+                    throw new Error(
+                        data.error ||
+                            'Too many failed login attempts. Use "Forgot password" to reset your password and unlock your account.'
+                    );
                 }
-                throw new Error(data.error || 'Login failed');
+                if (response.status === 429) {
+                    throw new Error(
+                        data.error || 'Too many login attempts from this network. Please try again later.'
+                    );
+                }
+                if (response.status === 400 && typeof data.error === 'string') {
+                    throw new Error(data.error);
+                }
+                if (response.status >= 500) {
+                    throw new Error('Unable to sign in. Please try again later.');
+                }
+                throw new Error('Invalid credentials');
             }
 
             // Success! Save user to local storage and navigate to dashboard
             localStorage.setItem('user', JSON.stringify(data));
+            if (data.token) {
+                localStorage.setItem('token', data.token);
+            }
             navigate("/");
 
         } catch (error: any) {
@@ -157,7 +344,7 @@ export default function Auth() {
 
     const handleSignupSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
-        
+
         // Comprehensive field-level validation
         const errors: Record<string, string> = {};
         if (!signupFirstName.trim()) errors.firstName = "First name is required";
@@ -169,16 +356,13 @@ export default function Auth() {
         }
         if (!signupPhone.trim()) {
             errors.phone = "Phone number is required";
-        } else {
-            const digitCount = signupPhone.replace(/\D/g, '').length;
-            if (digitCount < 10 || digitCount > 15) {
-                errors.phone = "Please enter a valid phone number (10-15 digits)";
-            }
+        } else if (!isTenDigitPhone(signupPhone)) {
+            errors.phone = PHONE_10_ERROR_MESSAGE;
         }
         if (!signupPassword) {
             errors.password = "Password is required";
-        } else if (signupPassword.length < 6) {
-            errors.password = "Password must be at least 6 characters";
+        } else if (!PASSWORD_REGEX.test(signupPassword)) {
+            errors.password = PASSWORD_ERROR_MESSAGE;
         }
         if (!signupConfirmPassword) {
             errors.confirmPassword = "Please confirm your password";
@@ -197,15 +381,18 @@ export default function Auth() {
         setErrorMessage("");
 
         try {
-            const response = await fetch(`${API_BASE_URL}/api/auth/send-otp`, {
+            const response = await apiFetch('/auth/send-otp', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ email: signupEmail })
             });
 
             const data = await response.json();
 
             if (!response.ok) {
+                if (response.status === 429 && typeof data.retryAfterSeconds === "number") {
+                    setResendTimer(data.retryAfterSeconds);
+                    throw new Error(data.error || "Please wait before requesting another code.");
+                }
                 // If backend returns a 400 with 'Email already registered', this will be caught
                 throw new Error(data.error || 'Failed to send OTP');
             }
@@ -230,15 +417,17 @@ export default function Auth() {
         setErrorMessage("");
 
         try {
-            const response = await fetch(`${API_BASE_URL}/api/auth/send-otp`, {
+            const response = await apiFetch('/auth/send-otp', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ email: signupEmail })
             });
 
             const data = await response.json();
 
             if (!response.ok) {
+                if (response.status === 429 && typeof data.retryAfterSeconds === "number") {
+                    setResendTimer(data.retryAfterSeconds);
+                }
                 throw new Error(data.error || 'Failed to resend OTP');
             }
 
@@ -255,19 +444,26 @@ export default function Auth() {
     // Step 2: Verify OTP & Create Account
     const handleVerifyOtp = async (e: React.FormEvent) => {
         e.preventDefault();
+        
+        // Final password validation check (in case state was lost or manipulated)
+        if (!signupPassword || !PASSWORD_REGEX.test(signupPassword)) {
+            setErrorMessage("Password session expired or invalid. Please go back and re-enter your password.");
+            setIsSubmitting(false);
+            return;
+        }
+
         setIsSubmitting(true);
         setErrorMessage("");
 
         try {
-            const response = await fetch(`${API_BASE_URL}/api/auth/verify-otp-and-signup`, {
+            const response = await apiFetch('/auth/verify-otp-and-signup', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     email: signupEmail,
                     otp: otpCode,
                     firstName: signupFirstName,
                     lastName: signupLastName,
-                    mobile: signupPhone,
+                    mobile: normalizePhone10Digits(signupPhone),
                     password: signupPassword,
                     role: 'auditor', // Default role
                     isActive: true
@@ -280,8 +476,11 @@ export default function Auth() {
                 throw new Error(data.error || 'Failed to verify OTP');
             }
 
-            // Success! Save user to local storage and navigate to dashboard
+            // Success! Save user and token to local storage and navigate to dashboard
             localStorage.setItem('user', JSON.stringify(data));
+            if (data.token) {
+                localStorage.setItem('token', data.token);
+            }
             navigate("/");
 
         } catch (error: any) {
@@ -370,10 +569,12 @@ export default function Auth() {
                                         <Label className="text-xs font-semibold text-[#4B5563]">Phone Number</Label>
                                         <Input
                                             type="tel"
-                                            placeholder="+1 234 567 8900"
+                                            inputMode="numeric"
+                                            maxLength={10}
+                                            placeholder="5551234567"
                                             value={signupPhone}
                                             onChange={(e) => {
-                                                const value = e.target.value.replace(/\D/g, '');
+                                                const value = e.target.value.replace(/\D/g, "").slice(0, 10);
                                                 setSignupPhone(value);
                                                 if (signupErrors.phone) setSignupErrors(prev => ({ ...prev, phone: "" }));
                                             }}
@@ -387,7 +588,7 @@ export default function Auth() {
                                         <div className="relative">
                                             <Input
                                                 type={showSignupPassword ? "text" : "password"}
-                                                placeholder="6+ characters"
+                                                placeholder="Enter password"
                                                 value={signupPassword}
                                                 onChange={(e) => {
                                                     setSignupPassword(e.target.value);
@@ -491,12 +692,159 @@ export default function Auth() {
                                 <p className="text-[#6B7280]">Please enter your details to sign in.</p>
                             </div>
 
+                            {postResetMessage && (
+                                <div className="mb-4 p-3 bg-emerald-50 border border-emerald-200 text-emerald-800 text-sm rounded-lg">
+                                    {postResetMessage}
+                                </div>
+                            )}
+
                             {errorMessage && (
                                 <div className="mb-4 p-3 bg-red-50 border border-red-200 text-red-600 text-sm rounded-lg">
                                     {errorMessage}
                                 </div>
                             )}
 
+                            {showForgotPassword ? (
+                                <div className="space-y-6">
+                                    <div className="mb-2">
+                                        <h2 className="text-xl font-bold text-[#111827] tracking-tight">Reset password</h2>
+                                        <p className="text-sm text-[#6B7280] mt-1">
+                                            {forgotStep === "email"
+                                                ? "Enter your account email and we will send you a verification code."
+                                                : `Enter the code sent to ${resetEmail} and choose a new password.`}
+                                        </p>
+                                    </div>
+
+                                    {forgotStep === "email" ? (
+                                        <form onSubmit={handleForgotPasswordSendCode} className="space-y-6">
+                                            <div className="space-y-2">
+                                                <Label className="text-xs font-semibold text-[#4B5563] uppercase tracking-wider">Email Address</Label>
+                                                <Input
+                                                    type="email"
+                                                    placeholder="you@company.com"
+                                                    value={resetEmail}
+                                                    onChange={(e) => setResetEmail(e.target.value)}
+                                                    disabled={isSubmitting}
+                                                    autoComplete="email"
+                                                    className="h-12 bg-[#F9FAFB] border-[#E5E7EB] rounded-xl text-sm text-[#111827] placeholder:text-[#9CA3AF] focus:ring-1 focus:ring-[#00875B]"
+                                                />
+                                            </div>
+                                            <Button
+                                                disabled={isSubmitting}
+                                                type="submit"
+                                                className="w-full h-12 text-base font-bold bg-[#00875B] text-white hover:bg-[#006E4A] rounded-xl shadow-lg shadow-[#00875B]/10 transition-all duration-200 active:scale-[0.98]"
+                                            >
+                                                {isSubmitting ? "Sending…" : "Send verification code"}
+                                            </Button>
+                                            <div className="text-center">
+                                                <button
+                                                    type="button"
+                                                    onClick={closeForgotPassword}
+                                                    className="text-sm text-[#00875B] font-semibold hover:underline"
+                                                >
+                                                    Back to sign in
+                                                </button>
+                                            </div>
+                                        </form>
+                                    ) : (
+                                        <form onSubmit={handleResetPasswordSubmit} className="space-y-4">
+                                            <div className="space-y-2">
+                                                <Label className="text-xs font-semibold text-[#4B5563] uppercase tracking-wider">Verification code</Label>
+                                                <Input
+                                                    type="text"
+                                                    inputMode="numeric"
+                                                    maxLength={6}
+                                                    placeholder="123456"
+                                                    value={forgotOtp}
+                                                    onChange={(e) => setForgotOtp(e.target.value.replace(/\D/g, ""))}
+                                                    disabled={isSubmitting}
+                                                    autoComplete="one-time-code"
+                                                    className="h-14 text-center text-2xl tracking-[0.35em] font-mono bg-[#F9FAFB] border-[#E5E7EB] rounded-xl text-[#111827] placeholder:text-[#9CA3AF] focus:ring-1 focus:ring-[#00875B]"
+                                                />
+                                            </div>
+                                            <div className="space-y-2">
+                                                <Label className="text-xs font-semibold text-[#4B5563] uppercase tracking-wider">New password</Label>
+                                                <div className="relative">
+                                                    <Input
+                                                        type={showForgotNewPassword ? "text" : "password"}
+                                                        placeholder="New password"
+                                                        value={forgotNewPassword}
+                                                        onChange={(e) => setForgotNewPassword(e.target.value)}
+                                                        disabled={isSubmitting}
+                                                        autoComplete="new-password"
+                                                        className="h-12 bg-[#F9FAFB] border-[#E5E7EB] rounded-xl text-sm pr-12"
+                                                    />
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setShowForgotNewPassword((v) => !v)}
+                                                        className="absolute right-4 top-1/2 -translate-y-1/2 text-[#9CA3AF] hover:text-[#4B5563]"
+                                                        aria-label={showForgotNewPassword ? "Hide password" : "Show password"}
+                                                    >
+                                                        {showForgotNewPassword ? <EyeOff className="h-5 w-5" /> : <Eye className="h-5 w-5" />}
+                                                    </button>
+                                                </div>
+                                            </div>
+                                            <div className="space-y-2">
+                                                <Label className="text-xs font-semibold text-[#4B5563] uppercase tracking-wider">Confirm new password</Label>
+                                                <div className="relative">
+                                                    <Input
+                                                        type={showForgotConfirmPassword ? "text" : "password"}
+                                                        placeholder="Confirm new password"
+                                                        value={forgotConfirmPassword}
+                                                        onChange={(e) => setForgotConfirmPassword(e.target.value)}
+                                                        disabled={isSubmitting}
+                                                        autoComplete="new-password"
+                                                        className="h-12 bg-[#F9FAFB] border-[#E5E7EB] rounded-xl text-sm pr-12"
+                                                    />
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setShowForgotConfirmPassword((v) => !v)}
+                                                        className="absolute right-4 top-1/2 -translate-y-1/2 text-[#9CA3AF] hover:text-[#4B5563]"
+                                                        aria-label={showForgotConfirmPassword ? "Hide password" : "Show password"}
+                                                    >
+                                                        {showForgotConfirmPassword ? <EyeOff className="h-5 w-5" /> : <Eye className="h-5 w-5" />}
+                                                    </button>
+                                                </div>
+                                            </div>
+                                            <p className="text-[11px] text-[#6B7280]">{PASSWORD_ERROR_MESSAGE}</p>
+                                            <Button
+                                                disabled={isSubmitting || forgotOtp.length !== 6}
+                                                type="submit"
+                                                className="w-full h-12 text-base font-bold bg-[#00875B] text-white hover:bg-[#006E4A] rounded-xl shadow-lg shadow-[#00875B]/10 transition-all duration-200 active:scale-[0.98]"
+                                            >
+                                                {isSubmitting ? "Updating…" : "Reset password"}
+                                            </Button>
+                                            <div className="flex flex-col items-center gap-2 pt-2">
+                                                <button
+                                                    type="button"
+                                                    disabled={forgotResendTimer > 0 || isSubmitting || isForgotResending}
+                                                    onClick={() => void handleForgotResendCode()}
+                                                    className="text-sm font-bold text-[#00875B] hover:text-[#006E4A] disabled:text-[#9CA3AF]"
+                                                >
+                                                    {isForgotResending
+                                                        ? "Sending…"
+                                                        : forgotResendTimer > 0
+                                                          ? `Resend code in ${forgotResendTimer}s`
+                                                          : "Resend code"}
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => {
+                                                        setForgotStep("email");
+                                                        setForgotOtp("");
+                                                    }}
+                                                    className="text-sm text-[#6B7280] hover:text-[#00875B] underline"
+                                                >
+                                                    Use a different email
+                                                </button>
+                                                <button type="button" onClick={closeForgotPassword} className="text-sm text-[#6B7280] hover:text-[#00875B] underline">
+                                                    Back to sign in
+                                                </button>
+                                            </div>
+                                        </form>
+                                    )}
+                                </div>
+                            ) : (
                             <form onSubmit={handleLoginSubmit} className="space-y-6">
                                 <div className="space-y-2">
                                     <Label className="text-xs font-semibold text-[#4B5563] uppercase tracking-wider">Email Address</Label>
@@ -517,7 +865,13 @@ export default function Auth() {
                                 <div className="space-y-2">
                                     <div className="flex items-center justify-between">
                                         <Label className="text-xs font-semibold text-[#4B5563] uppercase tracking-wider">Password</Label>
-                                        <button type="button" className="text-xs font-semibold text-[#00875B] hover:underline">Forgot password?</button>
+                                        <button
+                                            type="button"
+                                            onClick={openForgotPassword}
+                                            className="text-xs font-semibold text-[#00875B] hover:underline"
+                                        >
+                                            Forgot password?
+                                        </button>
                                     </div>
                                     <div className="relative">
                                         <Input
@@ -553,6 +907,7 @@ export default function Auth() {
                                     {isSubmitting ? "Signing In..." : "Sign In"}
                                 </Button>
                             </form>
+                            )}
 
                             <div className="mt-8 text-center">
                                 <p className="text-sm text-[#6B7280]">Don't have an account? <button onClick={toggleMode} className="text-[#00875B] font-bold hover:underline">Sign Up</button></p>

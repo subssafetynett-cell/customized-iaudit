@@ -1,8 +1,6 @@
 import { useState, useCallback, useEffect } from "react";
 import { Company, Site, Department, ISOStandard } from "@/types/company";
-import { API_BASE_URL } from "@/config";
-
-const API_URL = `${API_BASE_URL}/api`;
+import { apiFetch } from "@/lib/api";
 
 let globalCompanies: Company[] = [];
 let listeners: Array<() => void> = [];
@@ -51,7 +49,7 @@ export function useCompanyStore() {
       const user = JSON.parse(storedUser);
       if (!user.id) return;
 
-      const response = await fetch(`${API_URL}/companies?userId=${user.id}&_t=${Date.now()}`);
+      const response = await apiFetch(`/companies?_t=${Date.now()}`);
       if (response.ok) {
         const data = await response.json();
         globalCompanies = data.map((c: any) => ({
@@ -88,11 +86,9 @@ export function useCompanyStore() {
     standards: ISOStandard[];
   }) => {
     try {
-      const user = JSON.parse(localStorage.getItem('user') || '{}');
-      const response = await fetch(`${API_URL}/companies`, {
+      const response = await apiFetch(`/companies`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...data, userId: user.id }),
+        body: JSON.stringify(data),
       });
       if (response.ok) {
         const newCompany = await response.json();
@@ -114,7 +110,7 @@ export function useCompanyStore() {
 
   const deleteCompany = async (id: string) => {
     try {
-      const response = await fetch(`${API_URL}/companies/${id}`, {
+      const response = await apiFetch(`/companies/${id}`, {
         method: "DELETE",
       });
       if (response.ok) {
@@ -143,9 +139,8 @@ export function useCompanyStore() {
     }
   ) => {
     try {
-      const response = await fetch(`${API_URL}/companies/${companyId}`, {
+      const response = await apiFetch(`/companies/${companyId}`, {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(data),
       });
       if (response.ok) {
@@ -171,11 +166,9 @@ export function useCompanyStore() {
   const addSite = async (companyId: string, data: any) => {
     console.log(`[useCompanyStore] Initiating addSite for company ${companyId}`, data);
     try {
-      const user = JSON.parse(localStorage.getItem('user') || '{}');
-      const response = await fetch(`${API_URL}/companies/${companyId}/sites`, {
+      const response = await apiFetch(`/companies/${companyId}/sites`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...data, userId: user.id }),
+        body: JSON.stringify(data),
       });
       
       if (response.ok) {
@@ -204,9 +197,8 @@ export function useCompanyStore() {
 
   const updateSite = async (companyId: string, siteId: string, data: any) => {
     try {
-      const response = await fetch(`${API_URL}/sites/${siteId}`, {
+      const response = await apiFetch(`/sites/${siteId}`, {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(data),
       });
       if (response.ok) {
@@ -227,7 +219,7 @@ export function useCompanyStore() {
   };
   const deleteSite = async (companyId: string, siteId: string) => {
     try {
-      const response = await fetch(`${API_URL}/sites/${siteId}`, {
+      const response = await apiFetch(`/sites/${siteId}`, {
         method: "DELETE",
       });
       if (response.ok) {
@@ -244,9 +236,8 @@ export function useCompanyStore() {
   // Departments
   const addDepartment = async (companyId: string, siteId: string, name: string, data: any) => {
     try {
-      const response = await fetch(`${API_URL}/sites/${siteId}/departments`, {
+      const response = await apiFetch(`/sites/${siteId}/departments`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name, ...data }),
       });
       if (response.ok) {
@@ -275,9 +266,8 @@ export function useCompanyStore() {
 
   const updateDepartment = async (companyId: string, siteId: string, deptId: string, data: any) => {
     try {
-      const response = await fetch(`${API_URL}/departments/${deptId}`, {
+      const response = await apiFetch(`/departments/${deptId}`, {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(data),
       });
       if (response.ok) {
@@ -306,7 +296,7 @@ export function useCompanyStore() {
 
   const deleteDepartment = async (companyId: string, siteId: string, deptId: string) => {
     try {
-      const response = await fetch(`${API_URL}/departments/${deptId}`, {
+      const response = await apiFetch(`/departments/${deptId}`, {
         method: "DELETE",
       });
       if (response.ok) {

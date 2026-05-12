@@ -44,7 +44,11 @@ export default function Login() {
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
                   <Label className="text-xs font-semibold text-[#4B5563] uppercase tracking-wider">Password</Label>
-                  <button type="button" className="text-xs font-semibold text-[#213847] hover:underline">
+                  <button
+                    type="button"
+                    onClick={() => navigate("/login", { state: { openForgotPassword: true } })}
+                    className="text-xs font-semibold text-[#213847] hover:underline"
+                  >
                     Forgot password?
                   </button>
                 </div>

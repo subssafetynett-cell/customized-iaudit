@@ -1,6 +1,6 @@
 import { useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { API_BASE_URL } from "@/config";
+import { apiFetch } from "@/lib/api";
 
 const CHECK_INTERVAL_MS = 15000; // Check every 15 seconds
 
@@ -28,7 +28,7 @@ export function useUserStatus() {
         if (!userId) return;
 
         try {
-            const res = await fetch(`${API_BASE_URL}/api/users/${userId}/status`);
+            const res = await apiFetch(`/users/${userId}/status`);
             if (!res.ok) return; // Server error: don't force logout (could be temporary)
 
             const data = await res.json();

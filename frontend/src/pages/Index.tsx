@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useCompanyStore } from "@/hooks/useCompanyStore";
-import { API_BASE_URL } from "@/config";
+import { apiFetch } from "@/lib/api";
 import {
   Building2,
   MapPin,
@@ -117,9 +117,9 @@ const Index = () => {
       try {
         const user = JSON.parse(localStorage.getItem('user') || '{}');
         const [usersRes, plansRes, programsRes] = await Promise.all([
-          fetch(`${API_BASE_URL}/api/users?creatorId=${user.id}`),
-          fetch(`${API_BASE_URL}/api/audit-plans?userId=${user.id}`),
-          fetch(`${API_BASE_URL}/api/audit-programs?userId=${user.id}`)
+          apiFetch(`/users?creatorId=${user.id}`),
+          apiFetch(`/audit-plans?userId=${user.id}`),
+          apiFetch(`/audit-programs?userId=${user.id}`)
         ]);
 
         if (usersRes.ok) setUsers(await usersRes.json());
@@ -367,9 +367,8 @@ const Index = () => {
         if (!currentUser) return;
         localStorage.setItem('trial_modal_seen', 'true');
         try {
-            const response = await fetch(`${API_BASE_URL}/api/users/${currentUser.id}/start-trial`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' }
+            const response = await apiFetch(`/users/${currentUser.id}/start-trial`, {
+                method: 'POST'
             });
             if (response.ok) {
                 const updatedUser = await response.json();

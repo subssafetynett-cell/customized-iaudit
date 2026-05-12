@@ -3,7 +3,8 @@ import { useNavigate } from "react-router-dom";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
-import { Eye, EyeOff, Building2 } from "lucide-react";
+import { Eye, EyeOff } from "lucide-react";
+import { PASSWORD_REGEX, PASSWORD_ERROR_MESSAGE } from "@/lib/validation";
 
 export default function Signup() {
     const navigate = useNavigate();
@@ -16,9 +17,27 @@ export default function Signup() {
     const [showPassword, setShowPassword] = useState(false);
     const [showConfirmPassword, setShowConfirmPassword] = useState(false);
 
+    const [errors, setErrors] = useState<any>({});
+
     const handleSubmit = (e: React.FormEvent) => {
         e.preventDefault();
-        navigate("/");
+        const newErrors: any = {};
+        
+        if (!password) {
+            newErrors.password = "Password is required";
+        } else if (!PASSWORD_REGEX.test(password)) {
+            newErrors.password = PASSWORD_ERROR_MESSAGE;
+        }
+ 
+        if (password !== confirmPassword) {
+            newErrors.confirmPassword = "Passwords do not match";
+        }
+ 
+        setErrors(newErrors);
+ 
+        if (Object.keys(newErrors).length === 0) {
+            navigate("/");
+        }
     };
 
     return (
@@ -104,7 +123,7 @@ export default function Signup() {
                                 <div className="relative">
                                     <Input
                                         type={showPassword ? "text" : "password"}
-                                        placeholder="6+ characters"
+                                        placeholder="Enter password"
                                         value={password}
                                         onChange={(e) => setPassword(e.target.value)}
                                         className="h-11 bg-[#F9FAFB] border-[#E5E7EB] rounded-lg text-sm text-[#111827] placeholder:text-[#9CA3AF] pr-10 focus:ring-1 focus:ring-[#213847]"
@@ -117,6 +136,7 @@ export default function Signup() {
                                         {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                                     </button>
                                 </div>
+                                {errors.password && <p className="text-[10px] text-red-500 mt-1 pl-1 font-medium">{errors.password}</p>}
                             </div>
 
                             <div className="space-y-1.5">

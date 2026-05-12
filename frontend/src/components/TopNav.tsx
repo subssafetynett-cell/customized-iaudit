@@ -34,6 +34,7 @@ import auditPlanFormGuide from "@/assets/audit_plan_form_guide.png";
 import auditExecuteGuide from "@/assets/audit_execute_guide.png";
 import auditProgressGuide from "@/assets/audit_progress_guide.png";
 import auditFindingsGuide from "@/assets/audit_findings_guide.png";
+import { apiFetch } from "@/lib/api";
 
 export function TopNav() {
   const navigate = useNavigate();
@@ -77,10 +78,16 @@ export function TopNav() {
     }
   }, []);
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
     setIsOpen(false);
-    localStorage.removeItem('user');
-    window.location.href = '/login';
+    try {
+      await apiFetch("/auth/logout", { method: "POST" });
+    } catch {
+      /* still clear client state */
+    }
+    localStorage.removeItem("token");
+    localStorage.removeItem("user");
+    window.location.href = "/login";
   };
 
   const initials = `${user.firstName?.charAt(0) || ""}${user.lastName?.charAt(0) || ""}`.toUpperCase();

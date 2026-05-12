@@ -24,7 +24,7 @@ import {
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/ui/use-toast";
-import { API_BASE_URL } from "@/config";
+import { apiFetch } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { Input } from "@/components/ui/input";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
@@ -59,10 +59,8 @@ interface UserStatus {
   planStartDate: string | null;
   planExpiryDate: string | null;
   nextBillingDate: string | null;
-  stripePriceId: string | null;
-  email: string;
-  firstName: string;
-  lastName: string;
+  /** Set server-side from Stripe price id; raw price id is not exposed. */
+  isMonthlyPlan?: boolean;
   renewalType?: string;
   duration?: string;
   stripeSubscriptionId?: string | null;
@@ -100,8 +98,8 @@ export default function SubscriptionDetails() {
     const fetchData = async () => {
       try {
         const [statusRes, invoicesRes] = await Promise.all([
-          fetch(`${API_BASE_URL}/api/users/${userId}/status`),
-          fetch(`${API_BASE_URL}/api/subscription/invoices/${userId}`)
+          apiFetch(`/users/${userId}/status`),
+          apiFetch(`/subscription/invoices/${userId}`)
         ]);
 
         const statusData = await statusRes.json();
@@ -142,9 +140,8 @@ export default function SubscriptionDetails() {
 
     setIsSubmittingCancel(true);
     try {
-      const response = await fetch(`${API_BASE_URL}/api/subscription/cancel-request`, {
+      const response = await apiFetch("/subscription/cancel-request", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           userId,
           reason: cancelReason,
@@ -187,9 +184,8 @@ export default function SubscriptionDetails() {
 
     setIsSubmittingUpgrade(true);
     try {
-      const response = await fetch(`${API_BASE_URL}/api/subscription/upgrade-request`, {
+      const response = await apiFetch("/subscription/upgrade-request", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           userId,
           targetPlan: upgradePlan,
@@ -222,9 +218,8 @@ export default function SubscriptionDetails() {
   const handleUpdatePayment = async () => {
     setIsPortalLoading(true);
     try {
-      const response = await fetch(`${API_BASE_URL}/api/payments/portal`, {
+      const response = await apiFetch("/payments/portal", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ userId })
       });
       const data = await response.json();
@@ -261,7 +256,7 @@ export default function SubscriptionDetails() {
     );
   }
 
-  const isMonthly = status?.stripePriceId?.includes('monthly') || status?.nextBillingDate != null;
+  const isMonthly = status?.isMonthlyPlan === true || status?.nextBillingDate != null;
 
   // Strict fallback logic: If a recurring subscription ID exists, it's AUTOPAY. Yearly acts as MANUAL.
   const actualRenewalType = status?.stripeSubscriptionId ? 'AUTOPAY' : (status?.renewalType || 'MANUAL');

@@ -1,12 +1,15 @@
 import { useState, useEffect } from "react";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
+import { toast } from "sonner";
+import { apiFetch } from "@/lib/api";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { UserPlus, User, Mail, Phone, Lock, Shield, Eye, Edit2 } from "lucide-react";
+import { UserPlus, User, Mail, Phone, Lock, Shield, Eye, EyeOff, Edit2 } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
+import { PASSWORD_REGEX, PASSWORD_ERROR_MESSAGE, isTenDigitPhone, normalizePhone10Digits, PHONE_10_ERROR_MESSAGE } from "@/lib/validation";
 
 interface Props {
     open: boolean;
@@ -28,11 +31,24 @@ export default function UserModal({ open, onClose, onSubmit, mode = "create", in
     const [sendWelcomeEmail, setSendWelcomeEmail] = useState(true);
     const [password, setPassword] = useState("");
     const [confirmPassword, setConfirmPassword] = useState("");
+    const [showPassword, setShowPassword] = useState(false);
+    const [showConfirmPassword, setShowConfirmPassword] = useState(false);
     const [error, setError] = useState("");
     const [isSubmitting, setIsSubmitting] = useState(false);
+    const [originalEmail, setOriginalEmail] = useState("");
+    const [emailChangeOtp, setEmailChangeOtp] = useState("");
+    const [otpSentToEmail, setOtpSentToEmail] = useState<string | null>(null);
+    const [resendTimer, setResendTimer] = useState(0);
+    const [otpSending, setOtpSending] = useState(false);
 
     const isViewMode = mode === "view";
     const isEditMode = mode === "edit";
+
+    useEffect(() => {
+        if (resendTimer <= 0) return undefined;
+        const id = window.setTimeout(() => setResendTimer((s) => Math.max(0, s - 1)), 1000);
+        return () => clearTimeout(id);
+    }, [resendTimer]);
 
     useEffect(() => {
         if (open) {
@@ -40,6 +56,7 @@ export default function UserModal({ open, onClose, onSubmit, mode = "create", in
                 setFirstName(initialData.firstName || "");
                 setLastName(initialData.lastName || "");
                 setEmail(initialData.email || "");
+                setOriginalEmail(initialData.email || "");
                 setMobile(initialData.mobile || "");
                 setRole(initialData.role || "auditor");
                 setCustomRoleName(initialData.customRoleName || "");
@@ -47,10 +64,13 @@ export default function UserModal({ open, onClose, onSubmit, mode = "create", in
                 setSendWelcomeEmail(false);
                 setPassword("");
                 setConfirmPassword("");
+                setShowPassword(false);
+                setShowConfirmPassword(false);
             } else {
                 setFirstName("");
                 setLastName("");
                 setEmail("");
+                setOriginalEmail("");
                 setMobile("");
                 setRole("auditor");
                 setCustomRoleName("");
@@ -58,10 +78,68 @@ export default function UserModal({ open, onClose, onSubmit, mode = "create", in
                 setSendWelcomeEmail(true);
                 setPassword("");
                 setConfirmPassword("");
+                setShowPassword(false);
+                setShowConfirmPassword(false);
             }
+            setEmailChangeOtp("");
+            setOtpSentToEmail(null);
+            setResendTimer(0);
             setError("");
         }
     }, [open, mode, initialData, isEditMode, isViewMode]);
+
+    const emailChangedInEdit =
+        isEditMode &&
+        email.trim().toLowerCase() !== (originalEmail || "").trim().toLowerCase();
+
+    const handleSendEmailOtp = async () => {
+        const targetUserId = initialData?.id ?? initialData?._id;
+        if (targetUserId == null || Number.isNaN(Number(targetUserId))) {
+            setError("Missing user id. Close the dialog and open Edit again.");
+            return;
+        }
+        if (!email.trim()) {
+            setError("Enter the new email address first");
+            return;
+        }
+        setError("");
+        setOtpSending(true);
+        try {
+            const res = await apiFetch(`/users/${Number(targetUserId)}/email-change/send-otp`, {
+                method: "POST",
+                body: JSON.stringify({ newEmail: email.trim() }),
+            });
+            const raw = await res.text();
+            let data: Record<string, unknown> = {};
+            if (raw) {
+                try {
+                    data = JSON.parse(raw) as Record<string, unknown>;
+                } catch {
+                    data = { error: raw.slice(0, 280) };
+                }
+            }
+            if (!res.ok) {
+                if (res.status === 429 && typeof data.retryAfterSeconds === "number") {
+                    setResendTimer(data.retryAfterSeconds);
+                }
+                const parts = [data.error, data.detail, data.hint].filter(Boolean) as string[];
+                const fallback =
+                    res.status === 403
+                        ? "You are not allowed to change this user’s email."
+                        : `Request failed (${res.status}). Check that the API is running.`;
+                throw new Error(parts.length ? parts.join(" — ") : fallback);
+            }
+            setOtpSentToEmail(email.trim().toLowerCase());
+            setResendTimer(60);
+            toast.success("Verification code sent to the new email address");
+        } catch (e: any) {
+            const msg = e.message || "Failed to send verification code";
+            setError(msg);
+            toast.error(msg);
+        } finally {
+            setOtpSending(false);
+        }
+    };
 
     const handleSubmit = async () => {
         if (isViewMode) {
@@ -86,9 +164,15 @@ export default function UserModal({ open, onClose, onSubmit, mode = "create", in
             return;
         }
 
-        if (password && password !== confirmPassword) {
-            setError("Passwords do not match");
-            return;
+        if (password) {
+            if (password !== confirmPassword) {
+                setError("Passwords do not match");
+                return;
+            }
+            if (!PASSWORD_REGEX.test(password)) {
+                setError(PASSWORD_ERROR_MESSAGE);
+                return;
+            }
         }
 
         // Basic email validation
@@ -98,11 +182,29 @@ export default function UserModal({ open, onClose, onSubmit, mode = "create", in
             return;
         }
 
+        if (emailChangedInEdit) {
+            if (!emailChangeOtp.trim()) {
+                setError("Enter the verification code sent to the new email address");
+                return;
+            }
+        }
+
+        const mobileDigits = normalizePhone10Digits(mobile);
+        if (mode === "create") {
+            if (!isTenDigitPhone(mobile)) {
+                setError(PHONE_10_ERROR_MESSAGE);
+                return;
+            }
+        } else if (mobile.trim() !== "" && !isTenDigitPhone(mobile)) {
+            setError(PHONE_10_ERROR_MESSAGE);
+            return;
+        }
+
         const payload: any = {
             firstName,
             lastName,
             email,
-            mobile,
+            mobile: mode === "create" ? mobileDigits : mobile.trim() === "" ? "" : mobileDigits,
             role,
             customRoleName: role === "other" ? customRoleName : undefined,
             isActive,
@@ -111,6 +213,10 @@ export default function UserModal({ open, onClose, onSubmit, mode = "create", in
 
         if (password) {
             payload.password = password;
+        }
+
+        if (emailChangedInEdit) {
+            payload.emailChangeOtp = emailChangeOtp.trim();
         }
 
         try {
@@ -151,6 +257,13 @@ export default function UserModal({ open, onClose, onSubmit, mode = "create", in
                         {getIcon()}
                         {getTitle()}
                     </DialogTitle>
+                    <DialogDescription className="sr-only">
+                        {isViewMode
+                            ? "View user profile and account details."
+                            : isEditMode
+                              ? "Update this user’s profile and access settings."
+                              : "Create a new user account for your organization."}
+                    </DialogDescription>
                 </DialogHeader>
 
                 <div className="flex-1 overflow-y-auto p-6 py-4 space-y-6">
@@ -211,12 +324,60 @@ export default function UserModal({ open, onClose, onSubmit, mode = "create", in
                                 value={email}
                                 onChange={(e) => {
                                     e.stopPropagation();
-                                    setEmail(e.target.value);
+                                    const v = e.target.value;
+                                    setEmail(v);
+                                    const norm = v.trim().toLowerCase();
+                                    if (otpSentToEmail && norm !== otpSentToEmail) {
+                                        setOtpSentToEmail(null);
+                                        setEmailChangeOtp("");
+                                    }
                                 }}
                                 disabled={isViewMode}
                             />
                         </div>
                     </div>
+
+                    {isEditMode && !isViewMode && emailChangedInEdit && (
+                        <div className="rounded-lg border border-amber-200 bg-amber-50/80 p-4 space-y-3 text-sm">
+                            <p className="text-amber-900 font-medium">Verify the new email</p>
+                            <p className="text-amber-800/90 text-xs leading-relaxed">
+                                Send a code to the new address, then enter it below. The email cannot be updated until the code is verified on save.
+                            </p>
+                            <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                className="border-amber-300 bg-white"
+                                disabled={otpSending || resendTimer > 0 || isSubmitting}
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    void handleSendEmailOtp();
+                                }}
+                            >
+                                {otpSending
+                                    ? "Sending…"
+                                    : resendTimer > 0
+                                      ? `Resend code in ${resendTimer}s`
+                                      : "Send verification code"}
+                            </Button>
+                            <div className="space-y-1.5">
+                                <Label htmlFor="modal-email-otp">Verification code</Label>
+                                <Input
+                                    id="modal-email-otp"
+                                    inputMode="numeric"
+                                    autoComplete="one-time-code"
+                                    maxLength={8}
+                                    placeholder="Enter code from email"
+                                    value={emailChangeOtp}
+                                    onChange={(e) => {
+                                        e.stopPropagation();
+                                        setEmailChangeOtp(e.target.value.replace(/\s/g, ""));
+                                    }}
+                                    disabled={isSubmitting}
+                                />
+                            </div>
+                        </div>
+                    )}
 
                     <div className="grid grid-cols-2 gap-4">
                         <div className="space-y-2">
@@ -225,12 +386,15 @@ export default function UserModal({ open, onClose, onSubmit, mode = "create", in
                                 <Phone className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
                                 <Input
                                     id="modal-mobile"
-                                    placeholder="Mobile number"
+                                    type="tel"
+                                    inputMode="numeric"
+                                    maxLength={10}
+                                    placeholder="10-digit number"
                                     className="pl-9"
                                     value={mobile}
                                     onChange={(e) => {
                                         e.stopPropagation();
-                                        setMobile(e.target.value);
+                                        setMobile(e.target.value.replace(/\D/g, "").slice(0, 10));
                                     }}
                                     disabled={isViewMode}
                                 />
@@ -292,18 +456,29 @@ export default function UserModal({ open, onClose, onSubmit, mode = "create", in
                                     Password *
                                 </Label>
                                 <div className="relative">
-                                    <Lock className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
+                                    <Lock className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground pointer-events-none" />
                                     <Input
                                         id="modal-password"
-                                        type="password"
+                                        type={showPassword ? "text" : "password"}
                                         placeholder="Password"
-                                        className="pl-9"
+                                        className="pl-9 pr-10"
                                         value={password}
                                         onChange={(e) => {
                                             e.stopPropagation();
                                             setPassword(e.target.value);
                                         }}
                                     />
+                                    <button
+                                        type="button"
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            setShowPassword((v) => !v);
+                                        }}
+                                        className="absolute right-2 top-1/2 -translate-y-1/2 rounded-sm p-1 text-muted-foreground hover:text-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-1"
+                                        aria-label={showPassword ? "Hide password" : "Show password"}
+                                    >
+                                        {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                                    </button>
                                 </div>
                             </div>
                             <div className="space-y-2">
@@ -311,18 +486,29 @@ export default function UserModal({ open, onClose, onSubmit, mode = "create", in
                                     Confirm Password *
                                 </Label>
                                 <div className="relative">
-                                    <Lock className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
+                                    <Lock className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground pointer-events-none" />
                                     <Input
                                         id="modal-confirm-password"
-                                        type="password"
+                                        type={showConfirmPassword ? "text" : "password"}
                                         placeholder="Confirm Password"
-                                        className="pl-9"
+                                        className="pl-9 pr-10"
                                         value={confirmPassword}
                                         onChange={(e) => {
                                             e.stopPropagation();
                                             setConfirmPassword(e.target.value);
                                         }}
                                     />
+                                    <button
+                                        type="button"
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            setShowConfirmPassword((v) => !v);
+                                        }}
+                                        className="absolute right-2 top-1/2 -translate-y-1/2 rounded-sm p-1 text-muted-foreground hover:text-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-1"
+                                        aria-label={showConfirmPassword ? "Hide confirm password" : "Show confirm password"}
+                                    >
+                                        {showConfirmPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                                    </button>
                                 </div>
                             </div>
                         </div>

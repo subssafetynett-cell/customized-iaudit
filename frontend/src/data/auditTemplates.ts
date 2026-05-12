@@ -15,6 +15,8 @@ export interface ChecklistContent {
     actionBy?: string;
     closeDate?: string;
     assignTo?: string;
+    assignToName?: string;
+    assignToEmail?: string;
     findingType?: "C" | "OFI" | "Min" | "Maj";
 }export interface ClauseChecklistContent {
     clauseId: string; // e.g., "5"
@@ -32,6 +34,8 @@ export interface ChecklistContent {
     actionBy?: string;
     closeDate?: string;
     assignTo?: string;
+    assignToName?: string;
+    assignToEmail?: string;
 }
 
 export interface ProcessAuditContent {
@@ -51,6 +55,8 @@ export interface ProcessAuditContent {
     actionBy?: string;
     closeDate?: string;
     assignTo?: string;
+    assignToName?: string;
+    assignToEmail?: string;
 }
 
 export interface AuditTemplate {

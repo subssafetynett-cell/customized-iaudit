@@ -5,7 +5,8 @@ import { Label } from "@/components/ui/label";
 import { User, Mail, Phone, Loader2, Pencil, X, Check } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import { useNavigate } from "react-router-dom";
-import { API_BASE_URL } from "@/config";
+import { apiFetch } from "@/lib/api";
+import { isTenDigitPhone, normalizePhone10Digits, PHONE_10_ERROR_MESSAGE } from "@/lib/validation";
 
 export default function ProfileSettings() {
     const { toast } = useToast();
@@ -45,6 +46,14 @@ export default function ProfileSettings() {
 
     const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         const { name, value } = e.target;
+        if (name === "mobile") {
+            const digits = value.replace(/\D/g, "").slice(0, 10);
+            setFormData((prev) => ({
+                ...prev,
+                mobile: digits,
+            }));
+            return;
+        }
         setFormData((prev) => ({
             ...prev,
             [name]: value,
@@ -76,19 +85,27 @@ export default function ProfileSettings() {
 
         setIsLoading(true);
 
+        const mobileDigits = normalizePhone10Digits(formData.mobile);
+        if (formData.mobile.trim() !== "" && !isTenDigitPhone(formData.mobile)) {
+            toast({
+                title: "Invalid phone number",
+                description: PHONE_10_ERROR_MESSAGE,
+                variant: "destructive",
+            });
+            setIsLoading(false);
+            return;
+        }
+
         try {
             const userId = user.id || user._id;
 
-            const response = await fetch(`${API_BASE_URL}/api/users/${userId}`, {
+            const response = await apiFetch(`/users/${userId}`, {
                 method: 'PUT',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
                 body: JSON.stringify({
                     firstName: formData.firstName,
                     lastName: formData.lastName,
                     email: formData.email,
-                    mobile: formData.mobile,
+                    mobile: mobileDigits.length === 10 ? mobileDigits : "",
                     role: user.role, // Preserve existing role
                     isActive: user.isActive // Preserve existing status
                 }),
@@ -241,9 +258,12 @@ export default function ProfileSettings() {
                                         <Input
                                             id="mobile"
                                             name="mobile"
+                                            type="tel"
+                                            inputMode="numeric"
+                                            maxLength={10}
                                             value={formData.mobile}
                                             onChange={handleInputChange}
-                                            placeholder="+1 (555) 000-0000"
+                                            placeholder="10-digit number"
                                             className="h-11 bg-white border-slate-200 focus:border-[#213847] focus:ring-[#213847] text-[#101828]"
                                         />
                                     ) : (

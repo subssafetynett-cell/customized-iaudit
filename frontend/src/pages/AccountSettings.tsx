@@ -5,7 +5,8 @@ import { Label } from "@/components/ui/label";
 import { Lock, Loader2, Check, CreditCard, ExternalLink } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import { useNavigate } from "react-router-dom";
-import { API_BASE_URL } from "@/config";
+import { apiFetch } from "@/lib/api";
+import { PASSWORD_REGEX, PASSWORD_ERROR_MESSAGE } from "@/lib/validation";
 
 export default function AccountSettings() {
     const { toast } = useToast();
@@ -53,10 +54,10 @@ export default function AccountSettings() {
             return;
         }
 
-        if (formData.newPassword.length < 6) {
+        if (!PASSWORD_REGEX.test(formData.newPassword)) {
             toast({
                 title: "Error",
-                description: "Password must be at least 6 characters.",
+                description: PASSWORD_ERROR_MESSAGE,
                 variant: "destructive",
             });
             return;
@@ -76,11 +77,8 @@ export default function AccountSettings() {
         try {
             const userId = user.id || user._id;
 
-            const response = await fetch(`${API_BASE_URL}/api/users/${userId}`, {
+            const response = await apiFetch(`/users/${userId}`, {
                 method: 'PUT',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
                 body: JSON.stringify({
                     firstName: user.firstName,
                     lastName: user.lastName,
@@ -123,11 +121,9 @@ export default function AccountSettings() {
         if (!user || (!user.id && !user._id)) return;
         setIsLoading(true);
         try {
-            const userId = user.id || user._id;
-            const response = await fetch(`${API_BASE_URL}/api/payments/portal`, {
+            const response = await apiFetch(`/payments/portal`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ userId }),
+                body: JSON.stringify({ userId: user.id || user._id }),
             });
             const data = await response.json();
             if (data.url) {
@@ -189,6 +185,24 @@ export default function AccountSettings() {
                                         placeholder="Enter new password"
                                         className="h-11 bg-white border-slate-200 focus:border-[#213847] focus:ring-[#213847] text-[#101828]"
                                     />
+                                </div>
+                                <div className="mt-2 space-y-1 pl-6">
+                                    <div className="flex items-center gap-2">
+                                        <div className={`h-1 w-1 rounded-full ${formData.newPassword.length >= 8 ? "bg-green-500" : "bg-slate-300"}`} />
+                                        <p className={`text-[10px] ${formData.newPassword.length >= 8 ? "text-green-600 font-medium" : "text-slate-500"}`}>At least 8 characters</p>
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                        <div className={`h-1 w-1 rounded-full ${/[A-Z]/.test(formData.newPassword) ? "bg-green-500" : "bg-slate-300"}`} />
+                                        <p className={`text-[10px] ${/[A-Z]/.test(formData.newPassword) ? "text-green-600 font-medium" : "text-slate-500"}`}>One uppercase letter</p>
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                        <div className={`h-1 w-1 rounded-full ${/\d/.test(formData.newPassword) ? "bg-green-500" : "bg-slate-300"}`} />
+                                        <p className={`text-[10px] ${/\d/.test(formData.newPassword) ? "text-green-600 font-medium" : "text-slate-500"}`}>One number</p>
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                        <div className={`h-1 w-1 rounded-full ${/[!@#$%^&*(),.?":{}|<>_+=\-\[\]\\\/~^]/.test(formData.newPassword) ? "bg-green-500" : "bg-slate-300"}`} />
+                                        <p className={`text-[10px] ${/[!@#$%^&*(),.?":{}|<>_+=\-\[\]\\\/~^]/.test(formData.newPassword) ? "text-green-600 font-medium" : "text-slate-500"}`}>One special character</p>
+                                    </div>
                                 </div>
 
                                 <div className="space-y-2">

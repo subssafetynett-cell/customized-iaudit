@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { useParams, useLocation, useNavigate } from "react-router-dom";
-import { API_BASE_URL } from "@/config";
+import { apiFetch } from "@/lib/api";
 import {
   ArrowLeft,
   Edit,
@@ -311,7 +311,7 @@ const AuditExecute = () => {
       if (!id) return;
       setIsRefreshing(true);
       try {
-        const res = await fetch(`${API_BASE_URL}/api/audit-plans/${id}`);
+        const res = await apiFetch(`/audit-plans/${id}`);
         if (!res.ok) throw new Error("Plan not found");
         const found = await res.json();
         if (found) {
@@ -803,9 +803,8 @@ const AuditExecute = () => {
         editableChecklist
       };
 
-      const res = await fetch(`${API_BASE_URL}/api/audit-plans/${id}`, {
+      const res = await apiFetch(`/audit-plans/${id}`, {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           // Preserve existing plan fields if needed, or just send auditData
           auditData: auditData

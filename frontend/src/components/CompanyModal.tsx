@@ -6,6 +6,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Company } from "@/types/company";
 import { Building2, Phone, MapPin, Info, Pencil } from "lucide-react";
+import { isTenDigitPhone, normalizePhone10Digits, PHONE_10_ERROR_MESSAGE } from "@/lib/validation";
 
 interface Props {
   open: boolean;
@@ -152,6 +153,7 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
     if (!name.trim()) errors.name = "Company name is required";
     if (!industry) errors.industry = "Industry is required";
     if (!contactNumber.trim()) errors.contactNumber = "Contact number is required";
+    else if (!isTenDigitPhone(contactNumber)) errors.contactNumber = PHONE_10_ERROR_MESSAGE;
     if (!trimmedAddress) errors.streetAddress = "Street address is required";
     if (!city.trim()) errors.city = "City is required";
     if (!state) errors.state = "State is required";
@@ -169,7 +171,7 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
       name: trimmedName,
       logo,
       industry,
-      contactNumber: contactNumber.trim(),
+      contactNumber: normalizePhone10Digits(contactNumber),
       description: description.trim(),
       streetAddress: trimmedAddress,
       city: city.trim(),
@@ -293,11 +295,14 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
                 <Phone className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
                 <Input
                   id="company-contact"
-                  placeholder="+1 234 567 8900"
+                  type="tel"
+                  inputMode="numeric"
+                  maxLength={10}
+                  placeholder="10-digit number"
                   className={`pl-9 ${fieldErrors.contactNumber ? "border-red-500 focus:ring-red-500" : ""}`}
                   value={contactNumber}
                   onChange={(e) => {
-                    const value = e.target.value.replace(/\D/g, "");
+                    const value = e.target.value.replace(/\D/g, "").slice(0, 10);
                     setContactNumber(value);
                     if (fieldErrors.contactNumber) setFieldErrors(prev => ({ ...prev, contactNumber: "" }));
                     setError("");

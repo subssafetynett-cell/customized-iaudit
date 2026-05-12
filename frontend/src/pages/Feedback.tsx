@@ -8,7 +8,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
-import { API_BASE_URL } from "@/config";
+import { apiFetch } from "@/lib/api";
 
 interface FeedbackFormData {
     name: string;
@@ -48,11 +48,8 @@ const Feedback = () => {
                 image: image // base64 string
             };
 
-            const response = await fetch(`${API_BASE_URL}/api/feedback`, {
+            const response = await apiFetch('/feedback', {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
                 body: JSON.stringify(payload),
             });
 

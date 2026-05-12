@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { API_BASE_URL } from "@/config";
+import { apiFetch } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -119,7 +119,7 @@ const CreateAuditPlanPage = () => {
         const fetchUsers = async () => {
             try {
                 const user = JSON.parse(localStorage.getItem('user') || '{}');
-                const response = await fetch(`${API_BASE_URL}/api/users?creatorId=${user.id}`);
+                const response = await apiFetch(`/users?creatorId=${user.id}`);
                 if (response.ok) {
                     const data = await response.json();
                     const usersList = Array.isArray(data) ? data : [];
@@ -156,7 +156,7 @@ const CreateAuditPlanPage = () => {
 
         const loadFullPlan = async (planId: number) => {
             try {
-                const res = await fetch(`${API_BASE_URL}/api/audit-plans/${planId}`);
+                const res = await apiFetch(`/audit-plans/${planId}`);
                 if (res.ok) {
                     const fullPlan = await res.json();
                     setAuditName(fullPlan.auditName || "");
@@ -352,12 +352,11 @@ const CreateAuditPlanPage = () => {
                 userId: user.id
             };
 
-            const url = isEditMode ? `${API_BASE_URL}/api/audit-plans/${plan.id}` : `${API_BASE_URL}/api/audit-plans`;
+            const path = isEditMode ? `/audit-plans/${plan.id}` : `/audit-plans`;
             const method = isEditMode ? 'PUT' : 'POST';
 
-            const response = await fetch(url, {
+            const response = await apiFetch(path, {
                 method: method,
-                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
             });
 

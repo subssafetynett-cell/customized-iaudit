@@ -26,7 +26,6 @@ services:
         condition: service_healthy
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql://${POSTGRES_USER:-appuser}:${POSTGRES_PASSWORD:-apppassword}@postgres:5432/${POSTGRES_DB:-appdb}?sslmode=disable}
-      JWT_SECRET: ${JWT_SECRET}
       PORT: ${PORT:-3001}
       STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY}
       STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET}
@@ -37,6 +36,10 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      args:
+        # Prefer VITE_API_BASE_URL; fall back to legacy VITE_API_URL from `.env`.
+        # Leave unset (empty) to use nginx `/api` proxy inside Docker.
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-${VITE_API_URL:-}}
     restart: unless-stopped
     env_file:
       - .env

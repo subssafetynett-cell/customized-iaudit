@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { API_BASE_URL } from "@/config";
+import { apiFetch } from "@/lib/api";
 import { TopNav } from "@/components/TopNav";
 import { Button } from "@/components/ui/button";
 import {
@@ -56,7 +56,7 @@ const AuditList = () => {
         const fetchPlans = async () => {
             try {
                 const user = JSON.parse(localStorage.getItem('user') || '{}');
-                const res = await fetch(`${API_BASE_URL}/api/audit-plans?userId=${user.id}`);
+                const res = await apiFetch(`/audit-plans?userId=${user.id}`);
                 const data = await res.json();
                 setAuditPlans(Array.isArray(data) ? data : []);
             } catch (error) {
@@ -71,7 +71,7 @@ const AuditList = () => {
 
     const handleDeletePlan = async (planId: number) => {
         try {
-            const res = await fetch(`${API_BASE_URL}/api/audit-plans/${planId}`, {
+            const res = await apiFetch(`/audit-plans/${planId}`, {
                 method: "DELETE"
             });
             if (res.ok) {
@@ -136,7 +136,7 @@ const AuditList = () => {
     const handleDownloadDocx = async (planStub: any) => {
         setLoading(true);
         try {
-            const res = await fetch(`${API_BASE_URL}/api/audit-plans/${planStub.id}`);
+            const res = await apiFetch(`/audit-plans/${planStub.id}`);
             if (!res.ok) throw new Error("Failed to fetch full plan details");
             const plan = await res.json();
 

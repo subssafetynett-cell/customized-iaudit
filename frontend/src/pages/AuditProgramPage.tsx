@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { format } from "date-fns";
-import { API_BASE_URL } from "@/config";
+import { apiFetch } from "@/lib/api";
 import { TopNav } from "@/components/TopNav";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -55,7 +55,7 @@ const AuditProgramPage = () => {
     const [viewMode, setViewMode] = useState<"card" | "list">("card");
     const [activeSiteId, setActiveSiteId] = useState<string>("");
     const navigate = useNavigate();
-    const [searchParams] = useSearchParams();
+    const [searchParams, setSearchParams] = useSearchParams();
     const [showOnboardingGuide, setShowOnboardingGuide] = useState(searchParams.get("onboarding") === "true");
     const [isFinishing, setIsFinishing] = useState(false);
     
@@ -68,9 +68,9 @@ const AuditProgramPage = () => {
             try {
                 const user = JSON.parse(localStorage.getItem('user') || '{}');
                 const [sitesRes, programsRes, plansRes] = await Promise.all([
-                    fetch(`${API_BASE_URL}/api/sites?userId=${user.id}`),
-                    fetch(`${API_BASE_URL}/api/audit-programs?userId=${user.id}&full=true`),
-                    fetch(`${API_BASE_URL}/api/audit-plans?userId=${user.id}`)
+                    apiFetch(`/sites?userId=${user.id}`),
+                    apiFetch(`/audit-programs?userId=${user.id}&full=true`),
+                    apiFetch(`/audit-plans?userId=${user.id}`)
                 ]);
                 const sitesData = await sitesRes.json();
                 const programsData = await programsRes.json();
@@ -97,6 +97,42 @@ const AuditProgramPage = () => {
         };
         fetchData();
     }, []);
+
+    const handleFinishOnboarding = async () => {
+        setIsFinishing(true);
+        try {
+            const userJson = localStorage.getItem('user');
+            if (userJson) {
+                const user = JSON.parse(userJson);
+                const response = await apiFetch(`/users/${user.id}`, {
+                    method: 'PUT',
+                    body: JSON.stringify({ onboardingCompleted: true })
+                });
+
+                if (response.ok) {
+                    const updatedUser = { ...user, onboardingCompleted: true };
+                    localStorage.setItem('user', JSON.stringify(updatedUser));
+                    localStorage.setItem('iaudit_onboarding_tour_completed', 'true');
+                    toast.success("Onboarding completed! Welcome to your dashboard.");
+                    
+                    // Clean up URL params
+                    const newParams = new URLSearchParams(searchParams);
+                    newParams.delete("onboarding");
+                    setSearchParams(newParams);
+                    
+                    setShowOnboardingGuide(false);
+                    navigate("/");
+                } else {
+                    toast.error("Failed to update onboarding status");
+                }
+            }
+        } catch (error) {
+            console.error("Onboarding completion error:", error);
+            toast.error("An unexpected error occurred");
+        } finally {
+            setIsFinishing(false);
+        }
+    };
 
     const calculatePeriods = (frequency: string, duration: number, startDate?: string | Date) => {
         const count = frequency === "Monthly" ? duration * 12 :
@@ -195,7 +231,7 @@ const AuditProgramPage = () => {
 
     const handleDeletePlan = async (planId: number) => {
         try {
-            const res = await fetch(`${API_BASE_URL}/api/audit-plans/${planId}`, {
+            const res = await apiFetch(`/audit-plans/${planId}`, {
                 method: "DELETE"
             });
             if (res.ok) {
@@ -213,7 +249,7 @@ const AuditProgramPage = () => {
     const handleDownloadPDF = async (planStub: any, executionTitle: string, programStub?: any) => {
         setDownloading(true);
         try {
-            const res = await fetch(`${API_BASE_URL}/api/audit-plans/${planStub.id}`);
+            const res = await apiFetch(`/audit-plans/${planStub.id}`);
             if (!res.ok) throw new Error("Failed to fetch full plan details");
             const plan = await res.json();
 
@@ -349,7 +385,7 @@ const AuditProgramPage = () => {
     const handleDownloadDocx = async (planStub: any, executionTitle: string, programStub?: any) => {
         setDownloading(true);
         try {
-            const res = await fetch(`${API_BASE_URL}/api/audit-plans/${planStub.id}`);
+            const res = await apiFetch(`/audit-plans/${planStub.id}`);
             if (!res.ok) throw new Error("Failed to fetch full plan details");
             const plan = await res.json();
 

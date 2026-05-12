@@ -9,7 +9,7 @@ import {
   RefreshCw
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { API_BASE_URL } from "@/config";
+import { apiFetch } from "@/lib/api";
 
 interface SessionDetails {
   plan: string;
@@ -32,7 +32,7 @@ export default function SubscriptionSuccess() {
     sessionStorage.removeItem('hasClosedExpiredModal');
     
     if (sessionId) {
-      fetch(`${API_BASE_URL}/api/stripe/session/${sessionId}`)
+      apiFetch(`/stripe/session/${sessionId}`)
         .then(res => res.json())
         .then(data => {
           setDetails(data);
