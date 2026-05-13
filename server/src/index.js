@@ -1759,6 +1759,20 @@ app.delete('/companies/:id', authenticateToken, checkTrialExpiration, async (req
 // Auth & OTP Routes
 // -------------------------
 
+function getOtpTtlMinutes(purpose) {
+    if (purpose === 'password_reset' || purpose === 'email_change') return 15;
+    return 10;
+}
+
+function assertSmtpConfiguredForOtp() {
+    const user = String(process.env.SMTP_USER || '').trim();
+    const pass = String(process.env.SMTP_PASS || '').trim();
+    if (!user || !pass) {
+        console.error('[OTP] SMTP_USER and SMTP_PASS must both be set to send verification emails.');
+        throw new Error('EMAIL_NOT_CONFIGURED');
+    }
+}
+
 /** normalizedEmail: lowercased + trimmed. purpose: signup | email_change | password_reset */
 async function sendOtpToEmailAddress(normalizedEmail, purpose) {
     const lastOtp = await prisma.otp.findFirst({ where: { email: normalizedEmail } });
@@ -1773,8 +1787,11 @@ async function sendOtpToEmailAddress(normalizedEmail, purpose) {
         }
     }
 
+    assertSmtpConfiguredForOtp();
+
     const otp = generateOTP();
-    const expiresAt = new Date(Date.now() + 1 * 60 * 1000);
+    const ttlMinutes = getOtpTtlMinutes(purpose);
+    const expiresAt = new Date(Date.now() + ttlMinutes * 60 * 1000);
 
     await prisma.otp.upsert({
         where: { email: normalizedEmail },
@@ -1800,19 +1817,20 @@ async function sendOtpToEmailAddress(normalizedEmail, purpose) {
           ? 'Use the verification code below to confirm you can receive email at this address. An administrator requested this address for your account.'
           : 'Please use the verification code below to confirm your email address and complete your signup securely:';
 
+    const smtpFrom = String(process.env.SMTP_USER).trim();
     const mailOptions = {
         from: {
             name: 'iAudit Global',
-            address: process.env.SMTP_USER
+            address: smtpFrom
         },
         to: normalizedEmail,
         subject,
         headers: { 'X-Entity-Ref-ID': otp },
         text: isPasswordReset
-            ? `Your password reset code is: ${otp}. This code expires in 1 minute.`
+            ? `Your password reset code is: ${otp}. This code expires in ${ttlMinutes} minutes.`
             : isEmailChange
-              ? `Your email verification code is: ${otp}. This code expires in 1 minute.`
-              : `Your verification code is: ${otp}. This code will expire in 1 minute.`,
+              ? `Your email verification code is: ${otp}. This code expires in ${ttlMinutes} minutes.`
+              : `Your verification code is: ${otp}. This code will expire in ${ttlMinutes} minutes.`,
         html: `
                 <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 24px; border: 1px solid #e5e7eb; border-radius: 12px; background-color: #ffffff;">
                     <div style="text-align: center; margin-bottom: 24px;">
@@ -1827,7 +1845,7 @@ async function sendOtpToEmailAddress(normalizedEmail, purpose) {
                         <h2 style="font-size: 42px; font-weight: 800; color: #111827; letter-spacing: 8px; margin: 0;">${otp}</h2>
                     </div>
                     <p style="color: #4b5563; font-size: 14px; line-height: 1.5;">
-                        This code will expire in <strong>1 minute</strong>. If you did not request this, you can ignore this email.
+                        This code will expire in <strong>${ttlMinutes} minutes</strong>. If you did not request this, you can ignore this email.
                     </p>
                     <hr style="border: 0; border-top: 1px solid #e5e7eb; margin: 32px 0;" />
                     <div style="text-align: center; color: #9ca3af; font-size: 12px;">
@@ -1842,8 +1860,9 @@ async function sendOtpToEmailAddress(normalizedEmail, purpose) {
         await transporter.sendMail(mailOptions);
         console.log(`OTP successfully sent to ${normalizedEmail}`);
     } catch (emailError) {
-        console.error('Email sending failed, but continuing for development/test:', emailError.message);
-        if (emailError.message.includes('5.7.139')) {
+        console.error('Email sending failed:', emailError.message);
+        await prisma.otp.delete({ where: { email: normalizedEmail } }).catch(() => {});
+        if (String(emailError.message || '').includes('5.7.139')) {
             console.error('\n====================================================================');
             console.error('     🚨 CRITICAL: MICROSOFT 365 SECURITY BLOCK DETECTED 🚨');
             console.error('====================================================================');
@@ -1860,7 +1879,9 @@ async function sendOtpToEmailAddress(normalizedEmail, purpose) {
             console.error('  7. Wait 15-30 minutes for Microsoft to apply the policy.');
             console.error('====================================================================\n');
         }
-        console.log(`Bypassed Email - OTP for ${normalizedEmail} is: ${otp}`);
+        const err = new Error('EMAIL_SEND_FAILED');
+        err.smtpDetail = emailError.message;
+        throw err;
     }
 }
 
@@ -1883,13 +1904,24 @@ const sendOtpLogic = async (req, res) => {
 
         step = 'Send OTP';
         await sendOtpToEmailAddress(email, 'signup');
-        res.status(200).json({ message: 'OTP sent successfully (Bypassed if email failed)' });
+        res.status(200).json({ message: 'OTP sent successfully' });
     } catch (error) {
         if (error.message === 'OTP_COOLDOWN') {
             res.setHeader('Retry-After', String(error.retryAfterSeconds));
             return res.status(429).json({
                 error: `Please wait ${error.retryAfterSeconds} seconds before requesting another code.`,
                 retryAfterSeconds: error.retryAfterSeconds
+            });
+        }
+        if (error.message === 'EMAIL_NOT_CONFIGURED') {
+            return res.status(503).json({
+                error: 'Email delivery is not configured. Please contact support.'
+            });
+        }
+        if (error.message === 'EMAIL_SEND_FAILED') {
+            console.error('[AUTH] OTP email send failed:', error.smtpDetail);
+            return res.status(503).json({
+                error: 'We could not send the verification email. Check spam or junk, wait a few minutes, and try again.'
             });
         }
         handlePrismaError(error, `sendOtpLogic at step: ${step}`);
@@ -2133,6 +2165,18 @@ async function handleForgotPassword(req, res) {
             return res.status(429).json({
                 error: `Please wait ${error.retryAfterSeconds} seconds before requesting another code.`,
                 retryAfterSeconds: error.retryAfterSeconds
+            });
+        }
+        if (error.message === 'EMAIL_NOT_CONFIGURED') {
+            console.error('forgot-password: SMTP_USER / SMTP_PASS missing');
+            return res.status(503).json({
+                error: 'Email delivery is not configured. Please contact support.'
+            });
+        }
+        if (error.message === 'EMAIL_SEND_FAILED') {
+            console.error('forgot-password: SMTP send failed:', error.smtpDetail);
+            return res.status(503).json({
+                error: 'We could not send the verification email. Check spam or junk, wait a few minutes, and try again. If the problem continues, contact support.'
             });
         }
         console.error('forgot-password error:', error);
@@ -2502,6 +2546,15 @@ async function postUserEmailChangeSendOtp(req, res) {
             return res.status(429).json({
                 error: `Please wait ${error.retryAfterSeconds} seconds before requesting another code.`,
                 retryAfterSeconds: error.retryAfterSeconds
+            });
+        }
+        if (error.message === 'EMAIL_NOT_CONFIGURED') {
+            return res.status(503).json({ error: 'Email delivery is not configured on this server.' });
+        }
+        if (error.message === 'EMAIL_SEND_FAILED') {
+            console.error('email-change send-otp SMTP error:', error.smtpDetail);
+            return res.status(503).json({
+                error: 'We could not send the verification email. Check spam or junk and try again.'
             });
         }
         console.error('email-change send-otp error:', error);
