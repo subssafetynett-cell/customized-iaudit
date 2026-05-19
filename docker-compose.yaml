@@ -25,10 +25,13 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      DATABASE_URL: ${DATABASE_URL:-postgresql://${POSTGRES_USER:-appuser}:${POSTGRES_PASSWORD:-apppassword}@postgres:5432/${POSTGRES_DB:-appdb}?sslmode=disable}
+      # Always use the compose Postgres service (host .env often has localhost:5432 for native dev).
+      DATABASE_URL: postgresql://${POSTGRES_USER:-appuser}:${POSTGRES_PASSWORD:-apppassword}@postgres:5432/${POSTGRES_DB:-appdb}?sslmode=disable
       PORT: ${PORT:-3001}
       STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY}
       STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET}
+      SUPERADMIN_EMAIL: ${SUPERADMIN_EMAIL:-admin@iaudit.global}
+      SUPERADMIN_PASSWORD: ${SUPERADMIN_PASSWORD:-123}
     ports:
       - "3001:3001"
 
@@ -37,9 +40,8 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
       args:
-        # Prefer VITE_API_BASE_URL; fall back to legacy VITE_API_URL from `.env`.
-        # Leave unset (empty) to use nginx `/api` proxy inside Docker.
-        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-${VITE_API_URL:-}}
+        # Empty = browser calls same-origin /api/... (nginx proxies to server). Do not use host .env localhost:3001 here.
+        VITE_API_BASE_URL: ""
     restart: unless-stopped
     env_file:
       - .env

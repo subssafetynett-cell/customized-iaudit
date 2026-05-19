@@ -3981,8 +3981,84 @@ app.post('/subscription/upgrade-request', authenticateToken, async (req, res) =>
     }
 });
 
-app.listen(PORT, '0.0.0.0', () => {
+/** Ensure a platform superadmin exists when SUPERADMIN_PASSWORD is configured (e.g. fresh deploy). */
+async function ensurePlatformSuperAdmin() {
+    const email = (process.env.SUPERADMIN_EMAIL || 'admin@iaudit.global').toLowerCase().trim();
+    const password = process.env.SUPERADMIN_PASSWORD;
+    if (!password) {
+        const count = await prisma.user.count({ where: { role: 'superadmin' } });
+        if (count === 0) {
+            console.warn(
+                '[BOOT] No superadmin user found. Set SUPERADMIN_EMAIL and SUPERADMIN_PASSWORD to create the platform admin account.'
+            );
+        }
+        return;
+    }
+
+    try {
+        const existing = await prisma.user.findUnique({ where: { email } });
+        const hashedPassword = await bcrypt.hash(password, 10);
+
+        if (!existing) {
+            await prisma.user.create({
+                data: {
+                    firstName: 'Platform',
+                    lastName: 'Admin',
+                    email,
+                    password: hashedPassword,
+                    role: 'superadmin',
+                    isActive: true,
+                    onboardingCompleted: true
+                }
+            });
+            console.log(`[BOOT] Created platform superadmin account: ${email}`);
+            return;
+        }
+
+        let passwordMatches = false;
+        try {
+            passwordMatches = await bcrypt.compare(password, existing.password);
+        } catch {
+            passwordMatches = false;
+        }
+
+        const isBcryptHash =
+            typeof existing.password === 'string' &&
+            /^\$2[aby]\$\d{2}\$/.test(existing.password);
+
+        // Plaintext in DB: accept env password for login parity, but always migrate to bcrypt.
+        if (!passwordMatches && existing.password === password) {
+            passwordMatches = true;
+        }
+
+        const needsPasswordUpdate = !passwordMatches || !isBcryptHash;
+
+        const updates = {
+            role: 'superadmin',
+            isActive: true,
+            failedLoginAttempts: 0
+        };
+        if (needsPasswordUpdate) {
+            updates.password = hashedPassword;
+        }
+
+        const needsUpdate =
+            existing.role !== 'superadmin' ||
+            !existing.isActive ||
+            needsPasswordUpdate;
+
+        if (needsUpdate) {
+            await prisma.user.update({ where: { id: existing.id }, data: updates });
+            console.log(`[BOOT] Updated platform superadmin account: ${email}`);
+        }
+    } catch (error) {
+        console.error('[BOOT] Failed to ensure platform superadmin:', error);
+    }
+}
+
+app.listen(PORT, '0.0.0.0', async () => {
     console.log(`Server is running on port ${PORT}`);
+    await ensurePlatformSuperAdmin();
 });
 
 // --- Graceful Shutdown Logic ---

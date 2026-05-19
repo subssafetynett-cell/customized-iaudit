@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { apiFetch } from "@/lib/api";
+import { apiFetch, clearSuperAdminSession, hasSuperAdminSession } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -85,8 +85,7 @@ export default function SuperAdmin() {
     const [isDeleting, setIsDeleting] = useState(false);
 
     useEffect(() => {
-        const isAuth = localStorage.getItem("isSuperAdminAuthenticated") === "true";
-        if (!isAuth) {
+        if (!hasSuperAdminSession()) {
             navigate("/super-admin-login");
             return;
         }
@@ -101,17 +100,37 @@ export default function SuperAdmin() {
                 apiFetch(`/companies?admin=true`)
             ]);
 
-            if (usersRes.ok && companiesRes.ok) {
+            let usersLoaded = false;
+            let companiesLoaded = false;
+
+            if (usersRes.ok) {
                 const usersData = await usersRes.json();
-                const companiesData = await companiesRes.json();
-                setUsers(usersData);
-                setCompanies(companiesData);
+                setUsers(Array.isArray(usersData) ? usersData : []);
+                usersLoaded = true;
             } else {
-                toast.error("Failed to load data");
+                const err = await usersRes.json().catch(() => ({}));
+                toast.error(
+                    typeof err.error === "string" ? err.error : "Failed to load users"
+                );
+            }
+
+            if (companiesRes.ok) {
+                const companiesData = await companiesRes.json();
+                setCompanies(Array.isArray(companiesData) ? companiesData : []);
+                companiesLoaded = true;
+            } else if (usersLoaded) {
+                const err = await companiesRes.json().catch(() => ({}));
+                toast.error(
+                    typeof err.error === "string" ? err.error : "Failed to load companies"
+                );
+            }
+
+            if (!usersLoaded && !companiesLoaded) {
+                toast.error("Failed to load dashboard data");
             }
         } catch (error) {
             console.error("Failed to fetch data:", error);
-            toast.error("Failed to load dashboard data");
+            toast.error("Failed to load users");
         } finally {
             setIsLoading(false);
         }
@@ -240,8 +259,8 @@ export default function SuperAdmin() {
                     <Button
                         variant="outline"
                         onClick={() => {
-                            localStorage.removeItem("isSuperAdminAuthenticated");
-                            navigate("/");
+                            clearSuperAdminSession();
+                            navigate("/super-admin-login");
                             toast.success("Super Admin session ended");
                         }}
                         className="rounded-xl border-slate-200 text-slate-600 hover:text-red-600 hover:bg-red-50 hover:border-red-100 gap-2 font-medium"

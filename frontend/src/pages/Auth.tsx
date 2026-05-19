@@ -339,6 +339,9 @@ export default function Auth() {
             if (sessionExpiresAt && typeof sessionExpiresAt === "string") {
                 localStorage.setItem(SESSION_EXPIRES_AT_KEY, sessionExpiresAt);
             }
+            if ((profile as { role?: string }).role === "superadmin") {
+                localStorage.setItem("isSuperAdminAuthenticated", "true");
+            }
             navigate("/");
 
         } catch (error: any) {
@@ -494,6 +497,9 @@ export default function Auth() {
             }
             if (sessionExpiresAt && typeof sessionExpiresAt === "string") {
                 localStorage.setItem(SESSION_EXPIRES_AT_KEY, sessionExpiresAt);
+            }
+            if ((profile as { role?: string }).role === "superadmin") {
+                localStorage.setItem("isSuperAdminAuthenticated", "true");
             }
             navigate("/");
 

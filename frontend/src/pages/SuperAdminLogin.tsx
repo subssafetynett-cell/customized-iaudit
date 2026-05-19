@@ -5,12 +5,13 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { ShieldCheck, Lock, Mail, Eye, EyeOff, AlertCircle } from "lucide-react";
 import { toast } from "sonner";
+import { apiFetch, hasSuperAdminSession, persistSuperAdminSession } from "@/lib/api";
 
 export default function SuperAdminLogin() {
     const navigate = useNavigate();
 
     useEffect(() => {
-        if (localStorage.getItem("isSuperAdminAuthenticated") === "true") {
+        if (hasSuperAdminSession()) {
             navigate("/super-admin", { replace: true });
         }
     }, [navigate]);
@@ -20,24 +21,59 @@ export default function SuperAdminLogin() {
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState("");
 
-    const handleLogin = (e: React.FormEvent) => {
+    const handleLogin = async (e: React.FormEvent) => {
         e.preventDefault();
         setIsLoading(true);
         setError("");
 
-        // Specific requirements: admin@iaudit.global / 123
-        if (email === "admin@iaudit.global" && password === "123") {
-            setTimeout(() => {
-                localStorage.setItem("isSuperAdminAuthenticated", "true");
-                toast.success("Super Admin authenticated successfully");
-                navigate("/super-admin");
-                setIsLoading(false);
-            }, 800);
-        } else {
-            setTimeout(() => {
-                setError("Invalid credentials. Please contact the system administrator.");
-                setIsLoading(false);
-            }, 500);
+        try {
+            const response = await apiFetch("/auth/login", {
+                method: "POST",
+                body: JSON.stringify({
+                    email: email.trim().toLowerCase(),
+                    password,
+                }),
+            });
+
+            const data = await response.json().catch(() => ({}));
+
+            if (!response.ok) {
+                const message =
+                    typeof data.error === "string"
+                        ? data.error
+                        : "Invalid credentials. Please contact the system administrator.";
+                setError(message);
+                return;
+            }
+
+            const { sessionExpiresAt, token, ...profile } = data as Record<string, unknown> & {
+                sessionExpiresAt?: string;
+                token?: string;
+                role?: string;
+            };
+
+            if (profile.role !== "superadmin") {
+                setError("This account does not have super admin access.");
+                return;
+            }
+
+            if (!token || typeof token !== "string") {
+                setError("Login succeeded but no session was issued. Please try again.");
+                return;
+            }
+
+            persistSuperAdminSession(
+                profile as Record<string, unknown>,
+                token,
+                typeof sessionExpiresAt === "string" ? sessionExpiresAt : undefined
+            );
+            toast.success("Super Admin authenticated successfully");
+            navigate("/super-admin");
+        } catch (err) {
+            console.error("Super admin login error:", err);
+            setError("Unable to sign in. Check your connection and try again.");
+        } finally {
+            setIsLoading(false);
         }
     };
 
@@ -123,6 +159,7 @@ export default function SuperAdminLogin() {
 
                 <div className="mt-8 text-center">
                     <button
+                        type="button"
                         onClick={() => navigate("/")}
                         className="text-slate-400 hover:text-[#213847] text-sm font-medium transition-colors inline-flex items-center gap-2"
                     >
