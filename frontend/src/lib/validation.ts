@@ -30,3 +30,48 @@ export function isTenDigitPhone(value: string): boolean {
 }
 
 export const PHONE_10_ERROR_MESSAGE = `Phone number must be exactly ${PHONE_DIGITS_LENGTH} digits.`;
+
+/** Department name (matches server DEPT_TEXT_LIMITS.name). */
+export const DEPT_NAME_MAX = 100;
+
+export const DEPT_NAME_ERROR_MESSAGE = `Department name must be at most ${DEPT_NAME_MAX} characters.`;
+
+/** Site name (matches server SITE_TEXT_LIMITS.name). */
+export const SITE_NAME_MAX = 50;
+
+export const SITE_NAME_ERROR_MESSAGE = `Site name must be at most ${SITE_NAME_MAX} characters.`;
+
+/** Company name (matches server COMPANY_TEXT_LIMITS.name). */
+export const COMPANY_NAME_MAX = 100;
+
+export const COMPANY_NAME_ERROR_MESSAGE = `Company name must be at most ${COMPANY_NAME_MAX} characters.`;
+
+/** Company description (matches server COMPANY_TEXT_LIMITS.description). */
+export const COMPANY_DESCRIPTION_MAX = 500;
+
+export const COMPANY_DESCRIPTION_ERROR_MESSAGE = `Description must be at most ${COMPANY_DESCRIPTION_MAX} characters.`;
+
+/** Max stored logo payload (base64 data URL, matches server COMPANY_TEXT_LIMITS.logo). */
+export const COMPANY_LOGO_MAX_CHARS = 500_000;
+
+export function isWithinMaxLength(value: string, max: number): boolean {
+    return String(value || "").trim().length <= max;
+}
+
+export function truncateForDisplay(text: string, max = 80): string {
+    const s = String(text || "").trim();
+    if (s.length <= max) return s;
+    return `${s.slice(0, max)}…`;
+}
+
+/** Safe copy for delete dialogs so long legacy names do not break the layout. */
+export function formatDeleteDepartmentDescription(deptName: string, siteName?: string): string {
+    const name = truncateForDisplay(deptName, 80);
+    const site = siteName ? truncateForDisplay(siteName, 60) : "this site";
+    return `Are you sure you want to delete the department "${name}" from ${site}? This action cannot be undone.`;
+}
+
+export function formatDeleteSiteDescription(siteName: string): string {
+    const name = truncateForDisplay(siteName, 50);
+    return `Are you sure you want to delete the site "${name}"? All associated departments will be permanently removed. This cannot be undone.`;
+}

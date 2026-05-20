@@ -22,6 +22,7 @@ import {
     Users as UsersIcon
 } from "lucide-react";
 import { TourStepPopover } from "@/components/TourStepPopover";
+import { ONBOARDING_TOTAL_STEPS } from "@/lib/onboardingTour";
 import UserModal from "@/components/UserModal";
 import ReusablePagination from "@/components/ReusablePagination";
 import { Badge } from "@/components/ui/badge";
@@ -69,7 +70,20 @@ export default function Users() {
     const [users, setUsers] = useState<any[]>([]);
     const [isLoading, setIsLoading] = useState(true);
     const [showOnboardingGuide, setShowOnboardingGuide] = useState(searchParams.get("onboarding") === "true");
-    const [onboardingStep, setOnboardingStep] = useState(5);
+    const [onboardingStep, setOnboardingStep] = useState<number | null>(null);
+
+    /** Keep onboarding step in the URL so Next/Back survives re-renders and matches UI state. */
+    const setTourStep = (step: number) => {
+        setSearchParams(
+            (prev) => {
+                const next = new URLSearchParams(prev);
+                next.set("onboarding", "true");
+                next.set("step", String(step));
+                return next;
+            },
+            { replace: true }
+        );
+    };
 
     // Search and Filter States
     const [searchQuery, setSearchQuery] = useState("");
@@ -100,17 +114,23 @@ export default function Users() {
     // Sync onboarding guide state with URL parameter
     useEffect(() => {
         const onboarding = searchParams.get("onboarding") === "true";
-        const step = parseInt(searchParams.get("step") || "5");
-        
-        if (onboarding) {
-            setShowOnboardingGuide(true);
-            setOnboardingStep(step);
-            if (step === 5) {
-                // Use a slight delay to ensure the page is ready
-                setTimeout(() => {
-                    openModal("create");
-                }, 100);
-            }
+        if (!onboarding) {
+            setShowOnboardingGuide(false);
+            return;
+        }
+
+        const step = parseInt(searchParams.get("step") || "10", 10);
+        if (!Number.isFinite(step)) return;
+
+        setShowOnboardingGuide(true);
+        setOnboardingStep(step);
+
+        if (step === 11) {
+            setModalMode("create");
+            setSelectedUser(null);
+            setShowCreate(true);
+        } else {
+            setShowCreate(false);
         }
     }, [searchParams]);
 
@@ -275,13 +295,13 @@ export default function Users() {
                     </div>
 
                     <div>
-                        <Button 
+                        <Button
                             id="tour-step-create-user"
                             onClick={() => {
                                 openModal("create");
                                 setShowOnboardingGuide(false);
-                            }} 
-                            size="sm" 
+                            }}
+                            size="sm"
                             className="w-full sm:w-auto gap-1.5 shadow-sm bg-[#213847] hover:bg-[#213847]/90 text-white rounded-xl px-5 h-11 transition-all"
                         >
                             <UserPlus className="h-4 w-4" /> Create User
@@ -329,7 +349,7 @@ export default function Users() {
                 </div>
 
                 {/* User List Table */}
-                <div className="rounded-xl border bg-card text-card-foreground shadow-sm overflow-hidden mx-4 sm:mx-0">
+                <div id="tour-step-users-list" className="rounded-xl border bg-card text-card-foreground shadow-sm overflow-hidden mx-4 sm:mx-0">
                     <div className="overflow-x-auto">
                         <Table>
                             <TableHeader>
@@ -455,39 +475,98 @@ export default function Users() {
 
             <UserModal
                 open={showCreate}
-                hideOverlay={showOnboardingGuide && onboardingStep === 5}
+                hideOverlay={showOnboardingGuide && onboardingStep === 11}
+                hideCancel={showOnboardingGuide && onboardingStep === 11}
                 onClose={() => {
+                    if (showOnboardingGuide && onboardingStep === 11) return;
                     setShowCreate(false);
                     setSelectedUser(null);
                 }}
-                onSubmit={handleAddUser}
+                onSubmit={async (userData) => {
+                    await handleAddUser(userData);
+                    if (showOnboardingGuide) {
+                        setTourStep(12);
+                    }
+                }}
                 mode={modalMode}
                 initialData={selectedUser}
             />
 
-            {showOnboardingGuide && onboardingStep === 5 && showCreate && (
+            {/* Step 10: Create User button */}
+            {showOnboardingGuide && onboardingStep === 10 && (
                 <TourStepPopover
-                    targetId="viewport"
-                    step={5}
-                    totalSteps={7}
-                    title="User Management"
-                    description="Fill in the user details here. You can assign roles like Auditor or Auditee. Click 'Create User' to continue."
-                    onNext={() => {
-                        setShowCreate(false);
-                        setShowOnboardingGuide(false);
-                        navigate("/self-assessment?onboarding=true");
-                    }}
+                    targetId="tour-step-create-user"
+                    step={10}
+                    totalSteps={ONBOARDING_TOTAL_STEPS}
+                    title="Add User"
+                    description="Click 'Create User' to start adding your team members."
+                    onNext={() => setTourStep(11)}
                     onBack={() => {
-                        setShowCreate(false);
-                        setShowOnboardingGuide(true);
-                        navigate("/companies?onboarding=true&step=4");
+                        setShowOnboardingGuide(false);
+                        navigate("/companies?onboarding=true&step=9");
                     }}
+                    onClose={() => setShowOnboardingGuide(false)}
+                    position="left"
+                    disableShadow={false}
+                />
+            )}
+
+            {/* Step 11: Create User modal */}
+            {showOnboardingGuide && onboardingStep === 11 && showCreate && (
+                <TourStepPopover
+                    targetId="tour-step-user-modal"
+                    step={11}
+                    totalSteps={ONBOARDING_TOTAL_STEPS}
+                    title="Add User Details"
+                    description="Fill in the user details here. You can assign roles like Auditor or Auditee. Click 'Create User' to continue."
+                    onNext={() => setTourStep(12)}
+                    onBack={() => setTourStep(10)}
                     onClose={() => {
                         setShowOnboardingGuide(false);
-                        setShowCreate(false);
+                        setSearchParams(
+                            (prev) => {
+                                const next = new URLSearchParams(prev);
+                                next.delete("onboarding");
+                                next.delete("step");
+                                return next;
+                            },
+                            { replace: true }
+                        );
                     }}
-                    position="center"
+                    position="right"
                     disableShadow={true}
+                />
+            )}
+
+            {/* Step 12: View Users list */}
+            {showOnboardingGuide && onboardingStep === 12 && !showCreate && (
+                <TourStepPopover
+                    targetId="tour-step-users-list"
+                    step={12}
+                    totalSteps={ONBOARDING_TOTAL_STEPS}
+                    title="View Your Team"
+                    description="Here you can see the users list and also by clicking the three dots you can view, edit, change status, and delete users."
+                    onNext={() => setTourStep(13)}
+                    onBack={() => setTourStep(11)}
+                    onClose={() => setShowOnboardingGuide(false)}
+                    position="top"
+                    disableShadow={false}
+                />
+            )}
+
+            {/* Step 13: Move to Self Assessment sidebar */}
+            {showOnboardingGuide && onboardingStep === 13 && (
+                <TourStepPopover
+                    targetId="tour-step-self-assessment"
+                    step={13}
+                    totalSteps={ONBOARDING_TOTAL_STEPS}
+                    title="Self Assessment"
+                    description="Self Assessment helps companies new to ISO evaluate compliance. If you're already certified, this tool is optional and can be skipped."
+                    onNext={() => navigate("/self-assessment?onboarding=true&step=14")}
+                    onBack={() => setTourStep(12)}
+                    onClose={() => setShowOnboardingGuide(false)}
+                    position="right"
+                    disableShadow={false}
                 />
             )}
 

@@ -2,6 +2,7 @@ import { Building2, LayoutDashboard, FileText, ClipboardCheck, BookOpen, FileChe
 import { useLocation } from "react-router-dom";
 import { NavLink } from "@/components/NavLink";
 import { cn } from "@/lib/utils";
+import { TrialSidebarBadge } from "@/components/TrialSidebarBadge";
 
 
 import {
@@ -50,14 +51,15 @@ export function AppSidebar() {
   const isSuperAdminPage = currentPath === "/super-admin";
 
   return (
-    <Sidebar className="border-r border-slate-200">
-      <SidebarHeader className="p-0 gap-0">
+    <Sidebar className="border-r border-slate-200 [&_[data-sidebar=sidebar]]:overflow-hidden">
+      <SidebarHeader className="shrink-0 p-0 gap-0">
         <div className="flex items-center justify-start p-0 m-0 pl-4">
           <img src="/iAudit Global-01.png" alt="iAudit Global" className="h-20 w-auto object-contain block" />
         </div>
       </SidebarHeader>
 
-      <SidebarContent className="px-2 pt-0 mt-0 gap-0">
+      <SidebarContent className="flex min-h-0 flex-1 flex-col gap-0 overflow-hidden px-0 pt-0 mt-0">
+        <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-2 pb-2">
         {!isSuperAdminPage ? (
           <>
             <SidebarGroup className="py-0 px-2 mt-2 first:mt-0">
@@ -125,7 +127,17 @@ export function AppSidebar() {
                           )}
                         >
                           <NavLink 
-                            id={item.title === "Companies" ? "tour-step-companies" : item.title === "Users" ? "tour-step-users" : undefined}
+                            id={
+                              item.title === "Companies"
+                                ? "tour-step-companies"
+                                : item.title === "Users"
+                                  ? "tour-step-users"
+                                  : item.title === "Self Assessment"
+                                    ? "tour-step-self-assessment"
+                                    : item.title === "Gap Analysis"
+                                      ? "tour-step-gap-analysis"
+                                      : undefined
+                            }
                             to={item.url} 
                             className="flex items-center gap-3"
                           >
@@ -152,7 +164,7 @@ export function AppSidebar() {
               </SidebarGroupContent>
             </SidebarGroup>
 
-            <SidebarGroup className="py-0 px-2 mt-2">
+            <SidebarGroup className="py-0 px-2 mt-2 mb-1">
               <SidebarGroupLabel className="text-[11px] font-bold tracking-[0.1em] uppercase text-slate-400 px-4 mb-0.5">
                 BILLING
               </SidebarGroupLabel>
@@ -274,6 +286,8 @@ export function AppSidebar() {
             </SidebarGroupContent>
           </SidebarGroup>
         )}
+        </div>
+        <TrialSidebarBadge />
       </SidebarContent>
     </Sidebar>
   );

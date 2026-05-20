@@ -38,7 +38,7 @@ export function useSessionExpiry() {
             if (e.key !== "token" && e.key !== "user" && e.key !== SESSION_EXPIRES_AT_KEY) return;
             if (!localStorage.getItem("token") && !localStorage.getItem("user")) {
                 const path = window.location.pathname;
-                if (!/^\/(login|signup|auth)(\/|$)/.test(path)) {
+                if (!/^\/(login|signup|auth|super-admin-login)(\/|$)/.test(path)) {
                     window.location.href = "/login";
                 }
             }

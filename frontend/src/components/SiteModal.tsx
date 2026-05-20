@@ -7,7 +7,14 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { MapPin, Info, Contact, Pencil, Globe, Navigation } from "lucide-react";
 import { Site, SiteType } from "@/types/company";
 import { Country, State as StateCity } from "country-state-city";
-import { isTenDigitPhone, normalizePhone10Digits, PHONE_10_ERROR_MESSAGE } from "@/lib/validation";
+import {
+    isTenDigitPhone,
+    isWithinMaxLength,
+    normalizePhone10Digits,
+    PHONE_10_ERROR_MESSAGE,
+    SITE_NAME_ERROR_MESSAGE,
+    SITE_NAME_MAX,
+} from "@/lib/validation";
 
 interface Props {
     open: boolean;
@@ -37,6 +44,7 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
     const [contactNumber, setContactNumber] = useState("");
     const [email, setEmail] = useState("");
     const [error, setError] = useState("");
+    const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
 
     useEffect(() => {
         if (open) {
@@ -64,6 +72,7 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
             setContactNumber(initialData?.contactNumber || "");
             setEmail(initialData?.email || "");
             setError("");
+            setFieldErrors({});
         }
     }, [open, initialData]);
 
@@ -83,27 +92,42 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
         const stateName = StateCity.getStateByCodeAndCountry(stateIso, countryIso)?.name || "";
 
         const hasStates = StateCity.getStatesOfCountry(countryIso).length > 0;
-        const isStateValid = !hasStates || (hasStates && stateIso);
 
-        if (
-            !trimmedName || !trimmedDescription || !siteType || !status || 
-            !trimmedAddress || !trimmedCity || !isStateValid || !countryIso || 
-            !trimmedPostalCode || !trimmedContactName || !trimmedContactPosition || 
-            !trimmedContactNumber || !trimmedEmail
-        ) {
-            setError("All fields are required");
-            return;
+        // Per-field validation
+        const errors: Record<string, string> = {};
+        if (!trimmedName) {
+            errors.name = "Site name is required";
+        } else if (!isWithinMaxLength(trimmedName, SITE_NAME_MAX)) {
+            errors.name = SITE_NAME_ERROR_MESSAGE;
+        }
+        if (!trimmedDescription) errors.description = "Description is required";
+        if (!siteType) errors.siteType = "Site type is required";
+        if (!status) errors.status = "Status is required";
+        if (!trimmedAddress) errors.address = "Address is required";
+        if (!trimmedCity) errors.city = "City is required";
+        if (!countryIso) errors.country = "Country is required";
+        if (hasStates && !stateIso) errors.state = "State/Region is required";
+        if (!trimmedPostalCode) errors.postalCode = "Postal code is required";
+        if (!trimmedContactName) errors.contactName = "Contact name is required";
+        if (!trimmedContactPosition) errors.contactPosition = "Position is required";
+        if (!trimmedContactNumber) {
+            errors.contactNumber = "Contact number is required";
+        } else if (!isTenDigitPhone(trimmedContactNumber)) {
+            errors.contactNumber = PHONE_10_ERROR_MESSAGE;
+        }
+        if (!trimmedEmail) {
+            errors.email = "Email is required";
+        } else {
+            const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+            if (!emailRegex.test(trimmedEmail)) {
+                errors.email = "Please enter a valid email address";
+            }
         }
 
-        if (!isTenDigitPhone(trimmedContactNumber)) {
-            setError(PHONE_10_ERROR_MESSAGE);
-            return;
-        }
+        setFieldErrors(errors);
 
-        // Optional: Simple email validation
-        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-        if (!emailRegex.test(trimmedEmail)) {
-            setError("Please enter a valid email address.");
+        if (Object.keys(errors).length > 0) {
+            setError("Please fill in all required fields correctly.");
             return;
         }
 
@@ -124,8 +148,16 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
         });
     };
 
+    const clearFieldError = (field: string) => {
+        if (fieldErrors[field]) setFieldErrors(prev => ({ ...prev, [field]: "" }));
+        setError("");
+    };
+
+    const fieldErrorClass = (field: string) =>
+        fieldErrors[field] ? "border-red-500 focus:ring-red-500" : "";
+
     return (
-        <Dialog open={open} onOpenChange={onClose}>
+        <Dialog open={open} onOpenChange={(isOpen) => { if (!isOpen) onClose(); }}>
             <DialogContent id="tour-step-site-modal" hideOverlay={hideOverlay} className="sm:max-w-3xl max-h-[85vh] flex flex-col p-0 overflow-hidden shadow-2xl border-none sm:rounded-[1.5rem]"
                 onPointerDownOutside={hideCancel ? (e) => e.preventDefault() : undefined}
                 onEscapeKeyDown={hideCancel ? (e) => e.preventDefault() : undefined}
@@ -162,9 +194,15 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
                             <Input
                                 id="site-name"
                                 placeholder="e.g. Head Office"
+                                maxLength={SITE_NAME_MAX}
+                                className={fieldErrorClass("name")}
                                 value={name}
-                                onChange={(e) => { setName(e.target.value); setError(""); }}
+                                onChange={(e) => { setName(e.target.value); clearFieldError("name"); }}
                             />
+                            <p className="text-[11px] text-muted-foreground ml-1">
+                                {name.length}/{SITE_NAME_MAX} characters
+                            </p>
+                            {fieldErrors.name && <p className="text-[10px] text-red-500 mt-1 pl-1 font-medium">{fieldErrors.name}</p>}
                         </div>
 
                         <div className="space-y-2">
@@ -172,16 +210,18 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
                             <Input
                                 id="site-description"
                                 placeholder="Brief description of the site"
+                                className={fieldErrorClass("description")}
                                 value={description}
-                                onChange={(e) => { setDescription(e.target.value); setError(""); }}
+                                onChange={(e) => { setDescription(e.target.value); clearFieldError("description"); }}
                             />
+                            {fieldErrors.description && <p className="text-[10px] text-red-500 mt-1 pl-1 font-medium">{fieldErrors.description}</p>}
                         </div>
 
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                             <div className="space-y-2">
                                 <Label htmlFor="site-type">Site Type *</Label>
-                                <Select value={siteType} onValueChange={(val) => { setSiteType(val); setError(""); }}>
-                                    <SelectTrigger id="site-type">
+                                <Select value={siteType} onValueChange={(val) => { setSiteType(val); clearFieldError("siteType"); }}>
+                                    <SelectTrigger id="site-type" className={fieldErrorClass("siteType")}>
                                         <SelectValue placeholder="Select type" />
                                     </SelectTrigger>
                                     <SelectContent>
@@ -190,11 +230,12 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
                                         ))}
                                     </SelectContent>
                                 </Select>
+                                {fieldErrors.siteType && <p className="text-[10px] text-red-500 mt-1 pl-1 font-medium">{fieldErrors.siteType}</p>}
                             </div>
                             <div className="space-y-2">
                                 <Label htmlFor="site-status">Status *</Label>
-                                <Select value={status} onValueChange={(val) => { setStatus(val); setError(""); }}>
-                                    <SelectTrigger id="site-status">
+                                <Select value={status} onValueChange={(val) => { setStatus(val); clearFieldError("status"); }}>
+                                    <SelectTrigger id="site-status" className={fieldErrorClass("status")}>
                                         <SelectValue placeholder="Select status" />
                                     </SelectTrigger>
                                     <SelectContent>
@@ -203,6 +244,7 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
                                         ))}
                                     </SelectContent>
                                 </Select>
+                                {fieldErrors.status && <p className="text-[10px] text-red-500 mt-1 pl-1 font-medium">{fieldErrors.status}</p>}
                             </div>
                         </div>
                     </div>
@@ -219,9 +261,11 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
                             <Input
                                 id="site-address"
                                 placeholder="Street address"
+                                className={fieldErrorClass("address")}
                                 value={address}
-                                onChange={(e) => { setAddress(e.target.value); setError(""); }}
+                                onChange={(e) => { setAddress(e.target.value); clearFieldError("address"); }}
                             />
+                            {fieldErrors.address && <p className="text-[10px] text-red-500 mt-1 pl-1 font-medium">{fieldErrors.address}</p>}
                         </div>
 
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -230,14 +274,16 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
                                 <Input
                                     id="site-city"
                                     placeholder="City"
+                                    className={fieldErrorClass("city")}
                                     value={city}
-                                    onChange={(e) => { setCity(e.target.value); setError(""); }}
+                                    onChange={(e) => { setCity(e.target.value); clearFieldError("city"); }}
                                 />
+                                {fieldErrors.city && <p className="text-[10px] text-red-500 mt-1 pl-1 font-medium">{fieldErrors.city}</p>}
                             </div>
                             <div className="space-y-2">
                                 <Label htmlFor="site-country">Country *</Label>
-                                <Select value={countryIso} onValueChange={(val) => { setCountryIso(val); setStateIso(""); setError(""); }}>
-                                    <SelectTrigger id="site-country">
+                                <Select value={countryIso} onValueChange={(val) => { setCountryIso(val); setStateIso(""); clearFieldError("country"); }}>
+                                    <SelectTrigger id="site-country" className={fieldErrorClass("country")}>
                                         <SelectValue placeholder="Select country" />
                                     </SelectTrigger>
                                     <SelectContent>
@@ -246,11 +292,12 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
                                         ))}
                                     </SelectContent>
                                 </Select>
+                                {fieldErrors.country && <p className="text-[10px] text-red-500 mt-1 pl-1 font-medium">{fieldErrors.country}</p>}
                             </div>
                             <div className="space-y-2">
                                 <Label htmlFor="site-state">State/Region *</Label>
-                                <Select value={stateIso} onValueChange={(val) => { setStateIso(val); setError(""); }} disabled={!countryIso}>
-                                    <SelectTrigger id="site-state">
+                                <Select value={stateIso} onValueChange={(val) => { setStateIso(val); clearFieldError("state"); }} disabled={!countryIso}>
+                                    <SelectTrigger id="site-state" className={fieldErrorClass("state")}>
                                         <SelectValue placeholder="Select state" />
                                     </SelectTrigger>
                                     <SelectContent>
@@ -262,6 +309,7 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
                                         )}
                                     </SelectContent>
                                 </Select>
+                                {fieldErrors.state && <p className="text-[10px] text-red-500 mt-1 pl-1 font-medium">{fieldErrors.state}</p>}
                             </div>
                         </div>
 
@@ -271,9 +319,11 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
                                 <Input
                                     id="site-postal"
                                     placeholder="Postal/Zip code"
+                                    className={fieldErrorClass("postalCode")}
                                     value={postalCode}
-                                    onChange={(e) => { setPostalCode(e.target.value); setError(""); }}
+                                    onChange={(e) => { setPostalCode(e.target.value); clearFieldError("postalCode"); }}
                                 />
+                                {fieldErrors.postalCode && <p className="text-[10px] text-red-500 mt-1 pl-1 font-medium">{fieldErrors.postalCode}</p>}
                             </div>
                         </div>
                     </div>
@@ -291,18 +341,22 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
                                 <Input
                                     id="contact-name"
                                     placeholder="Full name"
+                                    className={fieldErrorClass("contactName")}
                                     value={contactName}
-                                    onChange={(e) => { setContactName(e.target.value); setError(""); }}
+                                    onChange={(e) => { setContactName(e.target.value); clearFieldError("contactName"); }}
                                 />
+                                {fieldErrors.contactName && <p className="text-[10px] text-red-500 mt-1 pl-1 font-medium">{fieldErrors.contactName}</p>}
                             </div>
                             <div className="space-y-2">
                                 <Label htmlFor="contact-pos">Contact Position *</Label>
                                 <Input
                                     id="contact-pos"
                                     placeholder="e.g. Site Manager"
+                                    className={fieldErrorClass("contactPosition")}
                                     value={contactPosition}
-                                    onChange={(e) => { setContactPosition(e.target.value); setError(""); }}
+                                    onChange={(e) => { setContactPosition(e.target.value); clearFieldError("contactPosition"); }}
                                 />
+                                {fieldErrors.contactPosition && <p className="text-[10px] text-red-500 mt-1 pl-1 font-medium">{fieldErrors.contactPosition}</p>}
                             </div>
                         </div>
 
@@ -315,12 +369,14 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
                                     inputMode="numeric"
                                     maxLength={10}
                                     placeholder="10-digit number"
+                                    className={fieldErrorClass("contactNumber")}
                                     value={contactNumber}
                                     onChange={(e) => {
                                         setContactNumber(e.target.value.replace(/\D/g, "").slice(0, 10));
-                                        setError("");
+                                        clearFieldError("contactNumber");
                                     }}
                                 />
+                                {fieldErrors.contactNumber && <p className="text-[10px] text-red-500 mt-1 pl-1 font-medium">{fieldErrors.contactNumber}</p>}
                             </div>
                             <div className="space-y-2">
                                 <Label htmlFor="contact-email">Email *</Label>
@@ -328,9 +384,11 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
                                     id="contact-email"
                                     type="email"
                                     placeholder="email@example.com"
+                                    className={fieldErrorClass("email")}
                                     value={email}
-                                    onChange={(e) => { setEmail(e.target.value); setError(""); }}
+                                    onChange={(e) => { setEmail(e.target.value); clearFieldError("email"); }}
                                 />
+                                {fieldErrors.email && <p className="text-[10px] text-red-500 mt-1 pl-1 font-medium">{fieldErrors.email}</p>}
                             </div>
                         </div>
                     </div>
@@ -348,7 +406,7 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
                             Cancel
                         </Button>
                     )}
-                    <Button onClick={handleSubmit} className="px-8 shadow-sm" disabled={!name.trim() || !description.trim() || !siteType || !status || !address.trim() || !city.trim() || (!stateIso && StateCity.getStatesOfCountry(countryIso).length > 0) || !countryIso || !postalCode.trim() || !contactName.trim() || !contactPosition.trim() || !contactNumber.trim() || !email.trim()}>
+                    <Button onClick={handleSubmit} className="px-8 shadow-sm">
                         {mode === "create" ? "Add Site" : "Save Changes"}
                     </Button>
                 </DialogFooter>

@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { apiFetch, clearSuperAdminSession, hasSuperAdminSession } from "@/lib/api";
+import { apiFetch } from "@/lib/api";
+import { hasValidSuperAdminSession, logoutSuperAdmin } from "@/lib/superAdminAuth";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -57,6 +58,19 @@ import {
 import UserModal from "@/components/UserModal";
 import ReusablePagination from "@/components/ReusablePagination";
 
+function formatLoginDate(value: string | null | undefined): string {
+    if (!value) return "Never";
+    const d = new Date(value);
+    if (Number.isNaN(d.getTime())) return "—";
+    return d.toLocaleString(undefined, {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+    });
+}
+
 export default function SuperAdmin() {
     const navigate = useNavigate();
     const [users, setUsers] = useState<any[]>([]);
@@ -85,52 +99,52 @@ export default function SuperAdmin() {
     const [isDeleting, setIsDeleting] = useState(false);
 
     useEffect(() => {
-        if (!hasSuperAdminSession()) {
-            navigate("/super-admin-login");
+        if (!hasValidSuperAdminSession()) {
+            navigate("/login", { replace: true });
             return;
         }
         fetchData();
     }, [navigate]);
 
     const fetchData = async () => {
+        const legacyHeaders = { "X-Super-Admin-Console": "true" };
+
         try {
             setIsLoading(true);
-            const [usersRes, companiesRes] = await Promise.all([
-                apiFetch(`/users?scope=all`),
-                apiFetch(`/companies?admin=true`)
-            ]);
 
-            let usersLoaded = false;
-            let companiesLoaded = false;
+            let usersRes = await apiFetch("/super-admin/users");
+            if (!usersRes.ok) {
+                usersRes = await apiFetch("/users?scope=all", { headers: legacyHeaders });
+            }
+
+            let companiesRes = await apiFetch("/super-admin/companies");
+            if (!companiesRes.ok) {
+                companiesRes = await apiFetch("/companies?admin=true", { headers: legacyHeaders });
+            }
 
             if (usersRes.ok) {
                 const usersData = await usersRes.json();
                 setUsers(Array.isArray(usersData) ? usersData : []);
-                usersLoaded = true;
             } else {
-                const err = await usersRes.json().catch(() => ({}));
+                const usersErr = await usersRes.json().catch(() => ({}));
+                setUsers([]);
                 toast.error(
-                    typeof err.error === "string" ? err.error : "Failed to load users"
+                    usersErr?.error ||
+                        "Could not load users. Sign in again at /login."
                 );
             }
 
             if (companiesRes.ok) {
                 const companiesData = await companiesRes.json();
                 setCompanies(Array.isArray(companiesData) ? companiesData : []);
-                companiesLoaded = true;
-            } else if (usersLoaded) {
-                const err = await companiesRes.json().catch(() => ({}));
-                toast.error(
-                    typeof err.error === "string" ? err.error : "Failed to load companies"
-                );
-            }
-
-            if (!usersLoaded && !companiesLoaded) {
-                toast.error("Failed to load dashboard data");
+            } else {
+                const companiesErr = await companiesRes.json().catch(() => ({}));
+                setCompanies([]);
+                toast.error(companiesErr?.error || "Could not load company associations.");
             }
         } catch (error) {
             console.error("Failed to fetch data:", error);
-            toast.error("Failed to load users");
+            toast.error("Failed to load dashboard data");
         } finally {
             setIsLoading(false);
         }
@@ -203,18 +217,21 @@ export default function SuperAdmin() {
             });
 
             if (response.ok) {
-                setUsers(users.filter(u => u.id !== selectedUser.id));
-                toast.success(`User ${selectedUser.firstName} deleted successfully`);
+                setUsers(users.filter((u) => String(u.id) !== String(selectedUser.id)));
+                toast.success(`${selectedUser.firstName} ${selectedUser.lastName} was deleted successfully`);
                 setShowDeleteDialog(false);
+                setSelectedUser(null);
             } else {
-                toast.error("Failed to delete user");
+                const err = await response.json().catch(() => ({}));
+                toast.error(
+                    typeof err.error === "string" ? err.error : "Failed to delete user"
+                );
             }
         } catch (error) {
             console.error("Error deleting user:", error);
             toast.error("An error occurred while deleting the user");
         } finally {
             setIsDeleting(false);
-            setSelectedUser(null);
         }
     };
 
@@ -258,10 +275,14 @@ export default function SuperAdmin() {
                     </div>
                     <Button
                         variant="outline"
-                        onClick={() => {
-                            clearSuperAdminSession();
-                            navigate("/super-admin-login");
+                        onClick={async () => {
+                            try {
+                                await apiFetch("/auth/logout", { method: "POST" });
+                            } catch {
+                                // Still end local session if server logout fails
+                            }
                             toast.success("Super Admin session ended");
+                            logoutSuperAdmin();
                         }}
                         className="rounded-xl border-slate-200 text-slate-600 hover:text-red-600 hover:bg-red-50 hover:border-red-100 gap-2 font-medium"
                     >
@@ -317,19 +338,21 @@ export default function SuperAdmin() {
                                 <TableHead className="text-white">Role</TableHead>
                                 <TableHead className="text-white">Company Created</TableHead>
                                 <TableHead className="text-white">Status</TableHead>
+                                <TableHead className="text-white">First Login</TableHead>
+                                <TableHead className="text-white">Last Login</TableHead>
                                 <TableHead className="text-right text-white pr-6">Action</TableHead>
                             </TableRow>
                         </TableHeader>
                         <TableBody>
                             {isLoading ? (
                                 <TableRow>
-                                    <TableCell colSpan={6} className="h-48 text-center text-muted-foreground">
+                                    <TableCell colSpan={8} className="h-48 text-center text-muted-foreground">
                                         Loading users...
                                     </TableCell>
                                 </TableRow>
                             ) : paginatedUsers.length === 0 ? (
                                 <TableRow>
-                                    <TableCell colSpan={6} className="h-64 text-center">
+                                    <TableCell colSpan={8} className="h-64 text-center">
                                         <div className="flex flex-col items-center justify-center py-10">
                                             <UserIcon className="h-10 w-10 text-muted-foreground/40 mb-3" />
                                             <p className="text-sm text-muted-foreground">No users found</p>
@@ -382,6 +405,22 @@ export default function SuperAdmin() {
                                                 >
                                                     {user.isActive ? "ACTIVE" : "INACTIVE"}
                                                 </Badge>
+                                            </TableCell>
+                                            <TableCell>
+                                                <span
+                                                    className="text-xs text-slate-600 whitespace-nowrap"
+                                                    title={user.firstLoginAt ? String(user.firstLoginAt) : undefined}
+                                                >
+                                                    {formatLoginDate(user.firstLoginAt)}
+                                                </span>
+                                            </TableCell>
+                                            <TableCell>
+                                                <span
+                                                    className="text-xs text-slate-600 whitespace-nowrap"
+                                                    title={user.lastLoginAt ? String(user.lastLoginAt) : undefined}
+                                                >
+                                                    {formatLoginDate(user.lastLoginAt)}
+                                                </span>
                                             </TableCell>
                                             <TableCell className="text-right pr-6">
                                                 <DropdownMenu>

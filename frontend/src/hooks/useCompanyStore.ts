@@ -12,6 +12,31 @@ function notify() {
   listeners.forEach((l) => l());
 }
 
+function normalizeDepartment(d: any): Department {
+  return {
+    ...d,
+    id: String(d.id),
+  };
+}
+
+function normalizeSite(s: any): Site {
+  return {
+    ...s,
+    id: String(s.id),
+    departments: (s.departments || []).map(normalizeDepartment),
+  };
+}
+
+function normalizeCompany(c: any): Company {
+  return {
+    ...c,
+    id: String(c.id),
+    isoStandards: c.isoStandards || [],
+    sites: (c.sites || []).map(normalizeSite),
+    createdAt: new Date(c.createdAt),
+  };
+}
+
 export function useCompanyStore() {
   const [, setTick] = useState(0);
 
@@ -52,13 +77,7 @@ export function useCompanyStore() {
       const response = await apiFetch(`/companies?_t=${Date.now()}`);
       if (response.ok) {
         const data = await response.json();
-        globalCompanies = data.map((c: any) => ({
-          ...c,
-          id: String(c.id),
-          isoStandards: c.isoStandards || [],
-          sites: c.sites || [],
-          createdAt: new Date(c.createdAt),
-        }));
+        globalCompanies = data.map(normalizeCompany);
         globalLoading = false;
         notify();
       } else {
@@ -92,19 +111,21 @@ export function useCompanyStore() {
       });
       if (response.ok) {
         const newCompany = await response.json();
-        const company: Company = {
+        const company: Company = normalizeCompany({
           ...newCompany,
-          id: String(newCompany.id),
           isoStandards: data.standards,
           sites: [],
-          createdAt: new Date(newCompany.createdAt),
-        };
+        });
         globalCompanies = [...globalCompanies, company];
         notify();
         return company;
       }
+      const errBody = await response.json().catch(() => ({}));
+      const message = typeof errBody.error === "string" ? errBody.error : "Failed to create company";
+      throw new Error(message);
     } catch (error) {
       console.error("Failed to add company:", error);
+      throw error;
     }
   };
 
@@ -174,11 +195,7 @@ export function useCompanyStore() {
       if (response.ok) {
         const newSite = await response.json();
         console.log(`[useCompanyStore] addSite success:`, newSite);
-        const site: Site = {
-          ...newSite,
-          id: String(newSite.id),
-          departments: [],
-        };
+        const site: Site = normalizeSite({ ...newSite, departments: [] });
         globalCompanies = globalCompanies.map((c) =>
           c.id === companyId ? { ...c, sites: [...c.sites, site] } : c
         );
@@ -207,7 +224,11 @@ export function useCompanyStore() {
           c.id === companyId
             ? {
               ...c,
-              sites: c.sites.map((s) => s.id === siteId ? { ...s, ...updated, id: String(updated.id) } : s)
+              sites: c.sites.map((s) =>
+                s.id === siteId
+                  ? normalizeSite({ ...s, ...updated, departments: s.departments ?? [] })
+                  : s
+              )
             }
             : c
         );

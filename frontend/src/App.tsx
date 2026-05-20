@@ -3,7 +3,7 @@ import { Toaster } from "@/components/ui/toaster";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { BrowserRouter, Routes, Route } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { AppLayout } from "./components/AppLayout";
 import { ProtectedRoute } from "./components/ProtectedRoute";
 import { SuperAdminProtectedRoute } from "./components/SuperAdminProtectedRoute";
@@ -31,7 +31,6 @@ import NotFound from "./pages/NotFound";
 import ProfileSettings from "./pages/ProfileSettings";
 import AccountSettings from "./pages/AccountSettings";
 import SuperAdmin from "./pages/SuperAdmin";
-import SuperAdminLogin from "./pages/SuperAdminLogin";
 
 const queryClient = new QueryClient();
 
@@ -47,7 +46,8 @@ const App = () => (
           <Route path="/login" element={<Auth />} />
           <Route path="/signup" element={<Auth />} />
           <Route path="/auth" element={<Auth />} />
-          <Route path="/super-admin-login" element={<SuperAdminLogin />} />
+          {/* Legacy URL — super admin signs in at /login (admin@iaudit.global) */}
+          <Route path="/super-admin-login" element={<Navigate to="/login" replace />} />
 
           {/* Protected Super Admin Routes */}
           <Route

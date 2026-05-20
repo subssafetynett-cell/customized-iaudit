@@ -3,23 +3,28 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import nodemailer from 'nodemailer';
 import crypto from 'node:crypto';
-import prisma, { handlePrismaError } from './prisma.js';
+import prisma, { handlePrismaError, pool } from './prisma.js';
+import { runOtpSendExclusive, withPgOtpAdvisoryLock } from './otpSendLock.js';
 import bcrypt from 'bcrypt';
 import Stripe from 'stripe';
 import { STRIPE_CONFIG } from './stripe-config.js';
+import { ensureSuperAdminUser } from './ensureSuperAdmin.js';
+import { deleteUserCompletely } from './deleteUser.js';
 import {
     COMPANY_TEXT_LIMITS,
     DEPT_TEXT_LIMITS,
     PERSON_NAME_MAX,
     PHONE_DIGITS_LENGTH,
     SITE_TEXT_LIMITS,
+    organizationTextLengthError,
     sanitizeLogoField,
     sanitizeOrganizationText,
     sanitizePersonName,
     sanitizePhoneField,
     sanitizePlainText,
     sanitizeShortLabel,
-    sanitizeStringArray
+    sanitizeStringArray,
+    escapeHtml
 } from './textSanitize.js';
 
 dotenv.config();
@@ -70,6 +75,73 @@ function loginIpRateLimit(req, res, next) {
     next();
 }
 
+const OTP_RESEND_COOLDOWN_MS = 60 * 1000;
+
+/** Per-email OTP send cooldown (survives parallel requests; complements DB check). */
+const otpSendCooldownByEmail = new Map();
+/** Emails with an OTP send currently in progress (blocks burst parallel API calls). */
+const otpSendInFlight = new Set();
+
+const OTP_SEND_IP_WINDOW_MS = Math.max(
+    60_000,
+    Number.parseInt(process.env.OTP_SEND_IP_WINDOW_MS || String(15 * 60 * 1000), 10) || 15 * 60 * 1000
+);
+const OTP_SEND_IP_MAX_IN_WINDOW = Math.min(
+    100,
+    Math.max(5, Number.parseInt(process.env.OTP_SEND_IP_MAX_IN_WINDOW || '15', 10) || 15)
+);
+const otpSendIpBuckets = new Map();
+
+function getClientIp(req) {
+    const forwarded = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+    return forwarded || req.socket?.remoteAddress || 'unknown';
+}
+
+function throwOtpCooldownError(retryAfterSeconds) {
+    const err = new Error('OTP_COOLDOWN');
+    err.retryAfterSeconds = Math.max(1, retryAfterSeconds);
+    throw err;
+}
+
+/** Server-side OTP resend gate — must run before any await in sendOtpToEmailAddress. */
+function acquireOtpSendSlot(normalizedEmail) {
+    if (otpSendInFlight.has(normalizedEmail)) {
+        throwOtpCooldownError(Math.ceil(OTP_RESEND_COOLDOWN_MS / 1000));
+    }
+    const now = Date.now();
+    const lastSent = otpSendCooldownByEmail.get(normalizedEmail);
+    if (lastSent != null && now - lastSent < OTP_RESEND_COOLDOWN_MS) {
+        const remainingSeconds = Math.ceil((OTP_RESEND_COOLDOWN_MS - (now - lastSent)) / 1000);
+        throwOtpCooldownError(remainingSeconds);
+    }
+    otpSendInFlight.add(normalizedEmail);
+    otpSendCooldownByEmail.set(normalizedEmail, now);
+}
+
+function releaseOtpSendSlot(normalizedEmail) {
+    otpSendInFlight.delete(normalizedEmail);
+}
+
+function sendOtpIpRateLimit(req, res, next) {
+    const ip = getClientIp(req);
+    const now = Date.now();
+    let bucket = otpSendIpBuckets.get(ip);
+    if (!bucket || now > bucket.resetAt) {
+        bucket = { n: 0, resetAt: now + OTP_SEND_IP_WINDOW_MS };
+        otpSendIpBuckets.set(ip, bucket);
+    }
+    bucket.n += 1;
+    if (bucket.n > OTP_SEND_IP_MAX_IN_WINDOW) {
+        const retryAfterSeconds = Math.max(1, Math.ceil((bucket.resetAt - now) / 1000));
+        res.setHeader('Retry-After', String(retryAfterSeconds));
+        return res.status(429).json({
+            error: 'Too many verification code requests from this network. Please try again later.',
+            retryAfterSeconds
+        });
+    }
+    next();
+}
+
 /** @returns {{ token: string, sessionExpiresAt: string }} ISO time when the DB session row expires */
 async function createSessionTokenForUser(userId) {
     await prisma.session.deleteMany({
@@ -77,9 +149,21 @@ async function createSessionTokenForUser(userId) {
     }).catch(() => {});
     const token = crypto.randomBytes(48).toString('base64url');
     const expiresAt = new Date(Date.now() + SESSION_MAX_AGE_MS);
+    const now = new Date();
     await prisma.session.create({
         data: { token, userId, expiresAt }
     });
+    const loginStamp = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { firstLoginAt: true }
+    }).catch(() => null);
+    await prisma.user.update({
+        where: { id: userId },
+        data: {
+            lastLoginAt: now,
+            ...(loginStamp?.firstLoginAt == null ? { firstLoginAt: now } : {})
+        }
+    }).catch(() => {});
     return { token, sessionExpiresAt: expiresAt.toISOString() };
 }
 
@@ -139,6 +223,33 @@ const LOGIN_SUCCESS_USER_SELECT = {
     onboardingCompleted: true
 };
 
+const TRIAL_DURATION_DAYS = 14;
+
+/** Start a 14-day trial for eligible users (first login / signup). No-op if trial dates already exist or user is active/superadmin. */
+async function ensureUserTrialStarted(userId) {
+    const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { id: true, role: true, subscriptionStatus: true, trialEndDate: true }
+    });
+    if (!user || user.role === 'superadmin') return false;
+    if (user.subscriptionStatus === 'active') return false;
+    if (user.trialEndDate) return false;
+
+    const trialStartDate = new Date();
+    const trialEndDate = new Date();
+    trialEndDate.setDate(trialStartDate.getDate() + TRIAL_DURATION_DAYS);
+
+    await prisma.user.update({
+        where: { id: userId },
+        data: {
+            trialStartDate,
+            trialEndDate,
+            subscriptionStatus: 'trial'
+        }
+    });
+    return true;
+}
+
 // Email Transporter Configuration
 const transporterConfig = process.env.SMTP_HOST ? {
     host: process.env.SMTP_HOST,
@@ -173,16 +284,38 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 /** Routes registered here run while the URL still starts with `/api/` (before the strip below). */
 const mountedApiRouter = express.Router();
+// This router is mounted before global express.json(); parse JSON for all /api/* handlers on it.
+mountedApiRouter.use(express.json({ limit: '50mb' }));
+
+const CORS_ALLOWED_ORIGINS = new Set([
+    'https://iaudit.global',
+    'https://api.iaudit.global',
+    'https://apps.iaudit.global',
+    'http://localhost:5173',
+    'http://localhost:5174',
+    'http://localhost:8080',
+    'http://localhost:8081',
+    'http://localhost:8082',
+]);
 
 app.use(cors({
-    origin: ['https://iaudit.global', 'https://api.iaudit.global', 'https://apps.iaudit.global', 'http://localhost:5173', 'http://localhost:5174', 'http://localhost:8080', 'http://localhost:8081'], // Allow production and local development
+    origin(origin, callback) {
+        // Non-browser clients (curl, server-to-server) send no Origin header
+        if (!origin) return callback(null, true);
+        if (CORS_ALLOWED_ORIGINS.has(origin)) return callback(null, true);
+        // Any localhost port during local development (Vite may use 8080, 8081, 8082, …)
+        if (/^http:\/\/localhost:\d+$/.test(origin) || /^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
+            return callback(null, true);
+        }
+        return callback(new Error(`CORS blocked for origin: ${origin}`));
+    },
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'Cache-Control', 'Pragma', 'Expires', 'x-user-id']
 }));
 
 // Full `/api/auth/...` paths must be registered before `app.use('/api', mountedApiRouter)` so they are
 // not lost when the sub-router has no match (and so they work even if `/auth/...` aliases are missing).
-app.post('/api/auth/forgot-password', express.json({ limit: '50mb' }), handleForgotPassword);
+app.post('/api/auth/forgot-password', express.json({ limit: '50mb' }), sendOtpIpRateLimit, handleForgotPassword);
 app.post('/api/auth/reset-password', express.json({ limit: '50mb' }), handleResetPassword);
 
 app.use('/api', mountedApiRouter);
@@ -980,10 +1113,14 @@ const checkTrialExpiration = async (req, res, next) => {
 
         const user = await prisma.user.findUnique({
             where: { id: parsedUserId },
-            select: { subscriptionStatus: true, trialEndDate: true }
+            select: { subscriptionStatus: true, trialEndDate: true, role: true }
         });
 
         if (!user) return next();
+
+        if (user.role === 'superadmin') {
+            return next();
+        }
 
         // 1. Handle No Subscription Status (New Users)
         // Allow the request so the frontend can display the TrialModal on the dashboard.
@@ -1088,8 +1225,6 @@ const router = express.Router();
 const generateOTP = () => {
     return Math.floor(100000 + Math.random() * 900000).toString();
 };
-
-const OTP_RESEND_COOLDOWN_MS = 60 * 1000;
 
 /** In-memory cooldown for authenticated assessment report emails (per user id). */
 const assessmentReportEmailLastSent = new Map();
@@ -1322,6 +1457,10 @@ app.post('/companies/:companyId/sites', authenticateToken, checkTrialExpiration,
             return res.status(403).json({ error: 'Forbidden' });
         }
 
+        const siteNameLenErr = organizationTextLengthError(name, SITE_TEXT_LIMITS.name, 'Site name');
+        if (siteNameLenErr) {
+            return res.status(400).json({ error: siteNameLenErr });
+        }
         const sName = sanitizeOrganizationText(name, SITE_TEXT_LIMITS.name);
         if (!sName) {
             return res.status(400).json({ error: 'Site name is required' });
@@ -1402,6 +1541,10 @@ app.put('/sites/:id', authenticateToken, checkTrialExpiration, async (req, res) 
     try {
         const data = {};
         if (name !== undefined) {
+            const siteNameLenErr = organizationTextLengthError(name, SITE_TEXT_LIMITS.name, 'Site name');
+            if (siteNameLenErr) {
+                return res.status(400).json({ error: siteNameLenErr });
+            }
             const sName = sanitizeOrganizationText(name, SITE_TEXT_LIMITS.name);
             if (!sName) {
                 return res.status(400).json({ error: 'Site name is required' });
@@ -1495,6 +1638,10 @@ app.post('/sites/:siteId/departments', authenticateToken, checkTrialExpiration, 
     const { siteId } = req.params;
     const { name, code, status, manager, description } = req.body;
     try {
+        const deptNameLenErr = organizationTextLengthError(name, DEPT_TEXT_LIMITS.name, 'Department name');
+        if (deptNameLenErr) {
+            return res.status(400).json({ error: deptNameLenErr });
+        }
         const dName = sanitizeOrganizationText(name, DEPT_TEXT_LIMITS.name);
         if (!dName) {
             return res.status(400).json({ error: 'Department name is required' });
@@ -1524,6 +1671,10 @@ app.put('/departments/:id', authenticateToken, checkTrialExpiration, async (req,
     try {
         const data = {};
         if (name !== undefined) {
+            const deptNameLenErr = organizationTextLengthError(name, DEPT_TEXT_LIMITS.name, 'Department name');
+            if (deptNameLenErr) {
+                return res.status(400).json({ error: deptNameLenErr });
+            }
             const dName = sanitizeOrganizationText(name, DEPT_TEXT_LIMITS.name);
             if (!dName) {
                 return res.status(400).json({ error: 'Department name is required' });
@@ -1608,12 +1759,23 @@ app.post('/companies', authenticateToken, checkTrialExpiration, async (req, res)
             });
         }
 
+        const sanitizedLogo =
+            logo === undefined || logo === null || logo === ''
+                ? undefined
+                : sanitizeLogoField(logo, COMPANY_TEXT_LIMITS.logo);
+        if (logo && sanitizedLogo === null) {
+            return res.status(400).json({ error: 'Logo image is too large. Use a smaller file (under 10MB).' });
+        }
+        if (logo && sanitizedLogo === '') {
+            return res.status(400).json({ error: 'Invalid logo image. Use PNG or JPEG.' });
+        }
+
         const company = await prisma.company.create({
             data: {
                 name: sName,
                 industry: sanitizePlainText(industry, COMPANY_TEXT_LIMITS.industry),
                 description: sanitizePlainText(description, COMPANY_TEXT_LIMITS.description, { preserveNewlines: true }),
-                logo: sanitizeLogoField(logo, COMPANY_TEXT_LIMITS.logo),
+                logo: sanitizedLogo,
                 contactNumber: companyPhone,
                 streetAddress: sanitizeOrganizationText(streetAddress, COMPANY_TEXT_LIMITS.streetAddress),
                 city: sCity,
@@ -1674,7 +1836,18 @@ app.put('/companies/:id', authenticateToken, checkTrialExpiration, async (req, r
             data.description = sanitizePlainText(description, COMPANY_TEXT_LIMITS.description, { preserveNewlines: true });
         }
         if (logo !== undefined) {
-            data.logo = sanitizeLogoField(logo, COMPANY_TEXT_LIMITS.logo);
+            if (logo === null || logo === '') {
+                data.logo = null;
+            } else {
+                const sanitizedLogo = sanitizeLogoField(logo, COMPANY_TEXT_LIMITS.logo);
+                if (sanitizedLogo === null) {
+                    return res.status(400).json({ error: 'Logo image is too large. Use a smaller file (under 10MB).' });
+                }
+                if (sanitizedLogo === '') {
+                    return res.status(400).json({ error: 'Invalid logo image. Use PNG or JPEG.' });
+                }
+                data.logo = sanitizedLogo;
+            }
         }
         if (streetAddress !== undefined) {
             data.streetAddress = sanitizeOrganizationText(streetAddress, COMPANY_TEXT_LIMITS.streetAddress);
@@ -1764,54 +1937,73 @@ function getOtpTtlMinutes(purpose) {
     return 10;
 }
 
-function assertSmtpConfiguredForOtp() {
+function isSmtpConfigured() {
     const user = String(process.env.SMTP_USER || '').trim();
     const pass = String(process.env.SMTP_PASS || '').trim();
-    if (!user || !pass) {
+    return Boolean(user && pass);
+}
+
+function assertSmtpConfiguredForOtp() {
+    if (!isSmtpConfigured()) {
         console.error('[OTP] SMTP_USER and SMTP_PASS must both be set to send verification emails.');
         throw new Error('EMAIL_NOT_CONFIGURED');
     }
 }
 
+/** Local dev: log OTP to server console when SMTP is not configured (signup still works). */
+function allowDevConsoleOtp() {
+    return process.env.NODE_ENV !== 'production' && process.env.ALLOW_DEV_OTP_CONSOLE !== 'false';
+}
+
 /** normalizedEmail: lowercased + trimmed. purpose: signup | email_change | password_reset */
 async function sendOtpToEmailAddress(normalizedEmail, purpose) {
-    const lastOtp = await prisma.otp.findFirst({ where: { email: normalizedEmail } });
-    if (lastOtp) {
-        const lastSendAt = new Date(lastOtp.updatedAt || lastOtp.createdAt).getTime();
-        const timeSinceLastOtp = Date.now() - lastSendAt;
-        if (timeSinceLastOtp < OTP_RESEND_COOLDOWN_MS) {
-            const remainingSeconds = Math.ceil((OTP_RESEND_COOLDOWN_MS - timeSinceLastOtp) / 1000);
-            const err = new Error('OTP_COOLDOWN');
-            err.retryAfterSeconds = remainingSeconds;
-            throw err;
+    return runOtpSendExclusive(normalizedEmail, () =>
+        withPgOtpAdvisoryLock(normalizedEmail, () =>
+            sendOtpToEmailAddressUnderLock(normalizedEmail, purpose)
+        )
+    );
+}
+
+async function sendOtpToEmailAddressUnderLock(normalizedEmail, purpose) {
+    acquireOtpSendSlot(normalizedEmail);
+    try {
+        const lastOtp = await prisma.otp.findUnique({ where: { email: normalizedEmail } });
+        if (lastOtp) {
+            const lastSendAt = new Date(lastOtp.updatedAt || lastOtp.createdAt).getTime();
+            const timeSinceLastOtp = Date.now() - lastSendAt;
+            if (timeSinceLastOtp < OTP_RESEND_COOLDOWN_MS) {
+                const remainingSeconds = Math.ceil((OTP_RESEND_COOLDOWN_MS - timeSinceLastOtp) / 1000);
+                throwOtpCooldownError(remainingSeconds);
+            }
         }
-    }
 
-    assertSmtpConfiguredForOtp();
+        const otp = generateOTP();
+        const devConsoleOnly = !isSmtpConfigured() && allowDevConsoleOtp();
+        if (!devConsoleOnly) {
+            assertSmtpConfiguredForOtp();
+        }
+        const ttlMinutes = getOtpTtlMinutes(purpose);
+        const expiresAt = new Date(Date.now() + ttlMinutes * 60 * 1000);
 
-    const otp = generateOTP();
-    const ttlMinutes = getOtpTtlMinutes(purpose);
-    const expiresAt = new Date(Date.now() + ttlMinutes * 60 * 1000);
+        await prisma.otp.upsert({
+            where: { email: normalizedEmail },
+            update: { code: otp, expiresAt },
+            create: { email: normalizedEmail, code: otp, expiresAt }
+        });
 
-    await prisma.otp.upsert({
-        where: { email: normalizedEmail },
-        update: { code: otp, expiresAt },
-        create: { email: normalizedEmail, code: otp, expiresAt }
-    });
-
-    const isPasswordReset = purpose === 'password_reset';
-    const isEmailChange = purpose === 'email_change';
-    const subject = isPasswordReset
+        const isPasswordReset = purpose === 'password_reset';
+        const isEmailChange = purpose === 'email_change';
+        const subject = isPasswordReset
         ? 'Reset your iAudit Global password'
         : isEmailChange
           ? 'Verify your new iAudit email'
           : 'Your Account Verification Code';
-    const titleHtml = isPasswordReset
+        const titleHtml = isPasswordReset
         ? 'Password reset'
         : isEmailChange
           ? 'Confirm your email'
           : 'Welcome to iAudit Global';
-    const introHtml = isPasswordReset
+        const introHtml = isPasswordReset
         ? 'You requested to reset your password. Use the verification code below to continue. If you did not request this, you can ignore this email.'
         : isEmailChange
           ? 'Use the verification code below to confirm you can receive email at this address. An administrator requested this address for your account.'
@@ -1856,37 +2048,57 @@ async function sendOtpToEmailAddress(normalizedEmail, purpose) {
             `
     };
 
-    try {
-        await transporter.sendMail(mailOptions);
-        console.log(`OTP successfully sent to ${normalizedEmail}`);
-    } catch (emailError) {
-        console.error('Email sending failed:', emailError.message);
-        await prisma.otp.delete({ where: { email: normalizedEmail } }).catch(() => {});
-        if (String(emailError.message || '').includes('5.7.139')) {
-            console.error('\n====================================================================');
-            console.error('     🚨 CRITICAL: MICROSOFT 365 SECURITY BLOCK DETECTED 🚨');
-            console.error('====================================================================');
-            console.error('Exact Issue: Microsoft Office 365 has disabled Basic Authentication');
-            console.error('             (SMTP AUTH) for the account "noreply@iaudit.global".');
-            console.error('');
-            console.error('HOW TO FIX THIS (Required Admin Action):');
-            console.error('  1. Log in to admin.microsoft.com as a Global Administrator.');
-            console.error('  2. Go to Users > Active users.');
-            console.error('  3. Click on the user: noreply@iaudit.global');
-            console.error('  4. Click the "Mail" tab on the right side window.');
-            console.error('  5. Click "Manage email apps".');
-            console.error('  6. Check the box for "Authenticated SMTP" and save changes.');
-            console.error('  7. Wait 15-30 minutes for Microsoft to apply the policy.');
-            console.error('====================================================================\n');
+        try {
+            if (devConsoleOnly) {
+                console.log('\n====================================================================');
+                console.log(`[DEV OTP] ${purpose} for ${normalizedEmail}: ${otp}`);
+                console.log(`          Expires in ${ttlMinutes} minutes (SMTP not configured).`);
+                console.log('====================================================================\n');
+            } else {
+                await transporter.sendMail(mailOptions);
+                console.log(`OTP successfully sent to ${normalizedEmail}`);
+            }
+        } catch (emailError) {
+            console.error('Email sending failed:', emailError.message);
+            if (allowDevConsoleOtp()) {
+                console.log('\n====================================================================');
+                console.log(`[DEV OTP] ${purpose} for ${normalizedEmail}: ${otp}`);
+                console.log(`          Expires in ${ttlMinutes} minutes (email send failed; use code above).`);
+                console.log('====================================================================\n');
+            } else {
+                await prisma.otp.delete({ where: { email: normalizedEmail } }).catch(() => {});
+                if (String(emailError.message || '').includes('5.7.139')) {
+                    console.error('\n====================================================================');
+                    console.error('     🚨 CRITICAL: MICROSOFT 365 SECURITY BLOCK DETECTED 🚨');
+                    console.error('====================================================================');
+                    console.error('Exact Issue: Microsoft Office 365 has disabled Basic Authentication');
+                    console.error('             (SMTP AUTH) for the account "noreply@iaudit.global".');
+                    console.error('');
+                    console.error('HOW TO FIX THIS (Required Admin Action):');
+                    console.error('  1. Log in to admin.microsoft.com as a Global Administrator.');
+                    console.error('  2. Go to Users > Active users.');
+                    console.error('  3. Click on the user: noreply@iaudit.global');
+                    console.error('  4. Click the "Mail" tab on the right side window.');
+                    console.error('  5. Click "Manage email apps".');
+                    console.error('  6. Check the box for "Authenticated SMTP" and save changes.');
+                    console.error('  7. Wait 15-30 minutes for Microsoft to apply the policy.');
+                    console.error('====================================================================\n');
+                }
+                const err = new Error('EMAIL_SEND_FAILED');
+                err.smtpDetail = emailError.message;
+                throw err;
+            }
         }
-        const err = new Error('EMAIL_SEND_FAILED');
-        err.smtpDetail = emailError.message;
-        throw err;
+    } finally {
+        releaseOtpSendSlot(normalizedEmail);
     }
 }
 
 // Alias for signup if frontend calls /auth/signup directly
 const sendOtpLogic = async (req, res) => {
+    if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
+        return res.status(400).json({ error: 'Invalid request body' });
+    }
     let { email } = req.body;
     if (!email || typeof email !== 'string') {
         return res.status(400).json({ error: 'Valid email is required' });
@@ -1934,8 +2146,14 @@ const sendOtpLogic = async (req, res) => {
     }
 };
 
-app.post('/auth/send-otp', sendOtpLogic);
-app.post('/auth/signup', sendOtpLogic);
+const authJson = express.json({ limit: '50mb' });
+
+app.post('/api/auth/send-otp', authJson, sendOtpIpRateLimit, sendOtpLogic);
+app.post('/api/auth/signup', authJson, sendOtpIpRateLimit, sendOtpLogic);
+app.post('/auth/send-otp', sendOtpIpRateLimit, sendOtpLogic);
+app.post('/auth/signup', sendOtpIpRateLimit, sendOtpLogic);
+mountedApiRouter.post('/auth/send-otp', sendOtpIpRateLimit, sendOtpLogic);
+mountedApiRouter.post('/auth/signup', sendOtpIpRateLimit, sendOtpLogic);
 
 app.post('/auth/verify-otp-and-signup', async (req, res) => {
     const badKeys = getDisallowedExtraKeysError(req.body, SIGNUP_COMPLETE_ALLOWED_BODY_KEYS);
@@ -2005,6 +2223,8 @@ app.post('/auth/verify-otp-and-signup', async (req, res) => {
 
         // Clean up OTP from database
         await prisma.otp.delete({ where: { email } });
+
+        await ensureUserTrialStarted(user.id);
 
         const profile = await prisma.user.findUnique({
             where: { id: user.id },
@@ -2111,6 +2331,8 @@ app.post('/auth/login', loginIpRateLimit, async (req, res) => {
             where: { id: user.id },
             data: { failedLoginAttempts: 0 }
         }).catch(() => {});
+
+        await ensureUserTrialStarted(user.id);
 
         const profile = await prisma.user.findUnique({
             where: { id: user.id },
@@ -2239,19 +2461,100 @@ async function handleResetPassword(req, res) {
     }
 }
 
-app.post('/auth/forgot-password', handleForgotPassword);
+app.post('/auth/forgot-password', sendOtpIpRateLimit, handleForgotPassword);
 app.post('/auth/reset-password', handleResetPassword);
 
-app.post('/auth/logout', authenticateToken, async (req, res) => {
+/** Invalidate every server session for this user (all devices/browsers). */
+async function handleLogout(req, res) {
     try {
-        const t = req.sessionToken;
-        if (t) {
-            await prisma.session.delete({ where: { token: t } }).catch(() => {});
+        const userId = Number.parseInt(String(req.user?.id), 10);
+        if (!Number.isInteger(userId) || userId < 1) {
+            return res.status(401).json({ error: 'Invalid session. Please log in again.' });
         }
+        const { count } = await prisma.session.deleteMany({ where: { userId } });
+        console.log(`[AUTH] Logout: removed ${count} session(s) for user ${userId}`);
         res.status(204).send();
     } catch (error) {
         console.error('[AUTH] Logout error:', error);
         res.status(500).json({ error: 'Failed to log out' });
+    }
+}
+
+app.post('/api/auth/logout', authenticateToken, handleLogout);
+app.post('/auth/logout', authenticateToken, handleLogout);
+mountedApiRouter.post('/auth/logout', authenticateToken, handleLogout);
+
+const SUPER_ADMIN_USER_LIST_SELECT = {
+    id: true,
+    firstName: true,
+    lastName: true,
+    email: true,
+    mobile: true,
+    role: true,
+    customRoleName: true,
+    isActive: true,
+    creatorId: true,
+    createdAt: true,
+    updatedAt: true,
+    firstLoginAt: true,
+    lastLoginAt: true,
+    subscriptionStatus: true,
+    trialEndDate: true
+};
+
+/** @returns {Promise<{ id: number, role: string } | null>} viewer or null if response already sent */
+async function requirePlatformSuperAdmin(req, res) {
+    const actorId = Number(req.user?.id);
+    if (!Number.isInteger(actorId) || actorId < 1) {
+        res.status(401).json({ error: 'Invalid session. Please log in again.' });
+        return null;
+    }
+    const viewer = await prisma.user.findUnique({
+        where: { id: actorId },
+        select: { id: true, role: true }
+    });
+    if (!viewer) {
+        res.status(401).json({ error: 'User not found.' });
+        return null;
+    }
+    if (viewer.role !== 'superadmin') {
+        res.status(403).json({ error: 'Forbidden' });
+        return null;
+    }
+    return viewer;
+}
+
+/** Super Admin console — all platform users (no ?scope= query param required). */
+app.get('/super-admin/users', authenticateToken, async (req, res) => {
+    try {
+        if (!(await requirePlatformSuperAdmin(req, res))) return;
+        const users = await prisma.user.findMany({
+            select: SUPER_ADMIN_USER_LIST_SELECT,
+            orderBy: { id: 'asc' }
+        });
+        res.json(users);
+    } catch (error) {
+        console.error('Failed to fetch super-admin users:', error);
+        res.status(500).json({ error: 'Failed to fetch users' });
+    }
+});
+
+/** Super Admin console — all companies with sites/departments. */
+app.get('/super-admin/companies', authenticateToken, async (req, res) => {
+    try {
+        if (!(await requirePlatformSuperAdmin(req, res))) return;
+        const companies = await prisma.company.findMany({
+            include: {
+                sites: {
+                    include: { departments: true }
+                }
+            },
+            orderBy: { id: 'asc' }
+        });
+        res.json(companies);
+    } catch (error) {
+        console.error('Failed to fetch super-admin companies:', error);
+        res.status(500).json({ error: 'Failed to fetch companies' });
     }
 });
 
@@ -2271,7 +2574,10 @@ app.get('/users', authenticateToken, async (req, res) => {
             return res.status(401).json({ error: 'User not found.' });
         }
 
-        const scopeAll = viewer.role === 'superadmin' && String(req.query.scope || '') === 'all';
+        const scopeAll =
+            viewer.role === 'superadmin' &&
+            (String(req.query.scope || '') === 'all' ||
+                String(req.headers['x-super-admin-console'] || '').toLowerCase() === 'true');
 
         let filterCreatorId = null;
         const rawCreator = req.query.creatorId;
@@ -2710,18 +3016,32 @@ app.delete('/users/:id', authenticateToken, async (req, res) => {
     if (Number.isNaN(targetId)) {
         return res.status(400).json({ error: 'Invalid user id' });
     }
+    const actorId = Number(req.user.id);
     try {
-        if (!(await actorCanAccessTargetUser(req.user.id, targetId))) {
+        if (!(await actorCanAccessTargetUser(actorId, targetId))) {
             return res.status(403).json({ error: 'Forbidden' });
         }
+        if (targetId === actorId) {
+            return res.status(400).json({
+                error: 'You cannot delete your own account while signed in. Sign out or use another admin account.'
+            });
+        }
 
-        await prisma.user.delete({
-            where: { id: targetId }
-        });
+        await deleteUserCompletely(targetId);
+        console.log(`[AUTH] User ${targetId} deleted by actor ${actorId}`);
         res.status(204).send();
     } catch (error) {
+        if (error.code === 'USER_NOT_FOUND') {
+            return res.status(404).json({ error: 'User not found' });
+        }
+        if (error.code === 'INVALID_ID') {
+            return res.status(400).json({ error: 'Invalid user id' });
+        }
         console.error('Error deleting user:', error);
-        res.status(500).json({ error: 'Failed to delete user' });
+        res.status(500).json({
+            error: 'Failed to delete user',
+            message: error.message
+        });
     }
 });
 
@@ -2741,9 +3061,33 @@ app.post('/users/:id/start-trial', authenticateToken, async (req, res) => {
             return res.status(403).json({ error: 'Forbidden' });
         }
 
+        const existing = await prisma.user.findUnique({
+            where: { id: targetId },
+            select: { trialStartDate: true, trialEndDate: true, subscriptionStatus: true, role: true }
+        });
+        if (!existing) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+        if (existing.role === 'superadmin') {
+            return res.status(400).json({ error: 'Trial is not available for this account' });
+        }
+        if (existing.subscriptionStatus === 'active') {
+            return res.status(400).json({ error: 'User already has an active subscription' });
+        }
+        if (existing.trialEndDate) {
+            const full = await prisma.user.findUnique({
+                where: { id: targetId },
+                select: LOGIN_SUCCESS_USER_SELECT
+            });
+            if (!full) {
+                return res.status(404).json({ error: 'User not found' });
+            }
+            return res.json(full);
+        }
+
         const trialStartDate = new Date();
         const trialEndDate = new Date();
-        trialEndDate.setDate(trialStartDate.getDate() + 14);
+        trialEndDate.setDate(trialStartDate.getDate() + TRIAL_DURATION_DAYS);
 
         const user = await prisma.user.update({
             where: { id: targetId },
@@ -3301,10 +3645,21 @@ app.delete('/audit-plans/:id', authenticateToken, checkTrialExpiration, async (r
 
 // Send Self Assessment Report by email
 app.post('/send-assessment-report', authenticateToken, async (req, res) => {
-    const { to, companyName, auditorName, auditCompany, standard, score, date, questions } = req.body;
+    const raw = req.body || {};
+    const to = sanitizePlainText(raw.to, 254)?.toLowerCase().replace(/[^\w.@+-]/g, '') || '';
+    const companyName = sanitizePersonName(raw.companyName, 200) || '';
+    const auditorName = sanitizePersonName(raw.auditorName, 200) || '';
+    const auditCompany = raw.auditCompany ? sanitizePersonName(raw.auditCompany, 200) : '';
+    const standard = sanitizeShortLabel(raw.standard, 80) || '';
+    const score = Number(raw.score);
+    const date = raw.date;
+    const questions = Array.isArray(raw.questions) ? raw.questions : [];
 
     if (!to || !companyName || !standard) {
         return res.status(400).json({ error: 'Missing required fields' });
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) {
+        return res.status(400).json({ error: 'Invalid email address' });
     }
 
     const uid = req.user.id;
@@ -3328,17 +3683,19 @@ app.post('/send-assessment-report', authenticateToken, async (req, res) => {
         // Group questions by clause for detailed breakdown
         const clauseGroups = {};
         (questions || []).forEach(q => {
-            if (!clauseGroups[q.clause]) clauseGroups[q.clause] = { yes: 0, no: 0, total: 0 };
-            clauseGroups[q.clause].total++;
-            if (q.answer === 'yes') clauseGroups[q.clause].yes++;
-            else clauseGroups[q.clause].no++;
+            const clauseKey = sanitizePlainText(q.clause, 200) || 'General';
+            if (!clauseGroups[clauseKey]) clauseGroups[clauseKey] = { yes: 0, no: 0, total: 0 };
+            clauseGroups[clauseKey].total++;
+            if (q.answer === 'yes') clauseGroups[clauseKey].yes++;
+            else clauseGroups[clauseKey].no++;
         });
 
         const clauseRows = Object.entries(clauseGroups).map(([clause, data]) => {
             const pct = Math.round((data.yes / data.total) * 100);
             const color = pct >= 70 ? '#16a34a' : pct >= 40 ? '#d97706' : '#dc2626';
+            const safeClause = escapeHtml(sanitizePlainText(clause, 200) || '');
             return `<tr>
-                <td style="padding:8px 12px;border-bottom:1px solid #e2e8f0;font-size:13px;">${clause}</td>
+                <td style="padding:8px 12px;border-bottom:1px solid #e2e8f0;font-size:13px;">${safeClause}</td>
                 <td style="padding:8px 12px;border-bottom:1px solid #e2e8f0;text-align:center;font-size:13px;">${data.yes} / ${data.total}</td>
                 <td style="padding:8px 12px;border-bottom:1px solid #e2e8f0;text-align:center;">
                     <span style="color:${color};font-weight:600;font-size:13px;">${pct}%</span>
@@ -3352,21 +3709,21 @@ app.post('/send-assessment-report', authenticateToken, async (req, res) => {
         const mailOptions = {
             from: 'subs.safetynett@gmail.com',
             to,
-            subject: `Your ${standard} Self Assessment Report — ${companyName}`,
+            subject: `Your ${escapeHtml(standard)} Self Assessment Report — ${escapeHtml(companyName)}`,
             html: `
             <div style="font-family:Arial,sans-serif;max-width:680px;margin:0 auto;background:#f8fafc;">
                 <!-- Header -->
                 <div style="background:#213847;padding:28px 32px;border-radius:8px 8px 0 0;">
                     <h1 style="margin:0;color:#fff;font-size:22px;">Self Assessment Report</h1>
-                    <p style="margin:6px 0 0;color:#94a3b8;font-size:14px;">${standard}</p>
+                    <p style="margin:6px 0 0;color:#94a3b8;font-size:14px;">${escapeHtml(standard)}</p>
                 </div>
 
                 <!-- Details -->
                 <div style="background:#fff;padding:28px 32px;border-left:1px solid #e2e8f0;border-right:1px solid #e2e8f0;">
                     <table style="width:100%;border-collapse:collapse;margin-bottom:24px;">
-                        <tr><td style="padding:6px 0;color:#64748b;font-size:13px;width:160px;">Company</td><td style="padding:6px 0;font-size:13px;font-weight:600;">${companyName}</td></tr>
-                        ${auditCompany ? `<tr><td style="padding:6px 0;color:#64748b;font-size:13px;">Company Being Audited</td><td style="padding:6px 0;font-size:13px;font-weight:600;">${auditCompany}</td></tr>` : ''}
-                        <tr><td style="padding:6px 0;color:#64748b;font-size:13px;">Auditor</td><td style="padding:6px 0;font-size:13px;">${auditorName || '-'}</td></tr>
+                        <tr><td style="padding:6px 0;color:#64748b;font-size:13px;width:160px;">Company</td><td style="padding:6px 0;font-size:13px;font-weight:600;">${escapeHtml(companyName)}</td></tr>
+                        ${auditCompany ? `<tr><td style="padding:6px 0;color:#64748b;font-size:13px;">Company Being Audited</td><td style="padding:6px 0;font-size:13px;font-weight:600;">${escapeHtml(auditCompany)}</td></tr>` : ''}
+                        <tr><td style="padding:6px 0;color:#64748b;font-size:13px;">Auditor</td><td style="padding:6px 0;font-size:13px;">${escapeHtml(auditorName || '-')}</td></tr>
                         <tr><td style="padding:6px 0;color:#64748b;font-size:13px;">Date</td><td style="padding:6px 0;font-size:13px;">${date ? new Date(date).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' }) : '-'}</td></tr>
                     </table>
 
@@ -3432,7 +3789,7 @@ app.post('/feedback', async (req, res) => {
         const mailOptions = {
             from: process.env.SMTP_USER || 'noreply@iaudit.global',
             to: 'Mathew@iaudit.global',
-            cc: 'jasmin@iaudit.global',
+            cc: ['jasmin@iaudit.global', 'ybro44240@gmail.com'],
             subject: `[Feedback] From ${name}`,
             html: `
                 <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 8px; overflow: hidden;">
@@ -3981,85 +4338,34 @@ app.post('/subscription/upgrade-request', authenticateToken, async (req, res) =>
     }
 });
 
-/** Ensure a platform superadmin exists when SUPERADMIN_PASSWORD is configured (e.g. fresh deploy). */
-async function ensurePlatformSuperAdmin() {
-    const email = (process.env.SUPERADMIN_EMAIL || 'admin@iaudit.global').toLowerCase().trim();
-    const password = process.env.SUPERADMIN_PASSWORD;
-    if (!password) {
-        const count = await prisma.user.count({ where: { role: 'superadmin' } });
-        if (count === 0) {
-            console.warn(
-                '[BOOT] No superadmin user found. Set SUPERADMIN_EMAIL and SUPERADMIN_PASSWORD to create the platform admin account.'
-            );
-        }
-        return;
-    }
-
+async function ensureDatabaseSchemaPatches() {
     try {
-        const existing = await prisma.user.findUnique({ where: { email } });
-        const hashedPassword = await bcrypt.hash(password, 10);
-
-        if (!existing) {
-            await prisma.user.create({
-                data: {
-                    firstName: 'Platform',
-                    lastName: 'Admin',
-                    email,
-                    password: hashedPassword,
-                    role: 'superadmin',
-                    isActive: true,
-                    onboardingCompleted: true
-                }
-            });
-            console.log(`[BOOT] Created platform superadmin account: ${email}`);
-            return;
-        }
-
-        let passwordMatches = false;
-        try {
-            passwordMatches = await bcrypt.compare(password, existing.password);
-        } catch {
-            passwordMatches = false;
-        }
-
-        const isBcryptHash =
-            typeof existing.password === 'string' &&
-            /^\$2[aby]\$\d{2}\$/.test(existing.password);
-
-        // Plaintext in DB: accept env password for login parity, but always migrate to bcrypt.
-        if (!passwordMatches && existing.password === password) {
-            passwordMatches = true;
-        }
-
-        const needsPasswordUpdate = !passwordMatches || !isBcryptHash;
-
-        const updates = {
-            role: 'superadmin',
-            isActive: true,
-            failedLoginAttempts: 0
-        };
-        if (needsPasswordUpdate) {
-            updates.password = hashedPassword;
-        }
-
-        const needsUpdate =
-            existing.role !== 'superadmin' ||
-            !existing.isActive ||
-            needsPasswordUpdate;
-
-        if (needsUpdate) {
-            await prisma.user.update({ where: { id: existing.id }, data: updates });
-            console.log(`[BOOT] Updated platform superadmin account: ${email}`);
-        }
-    } catch (error) {
-        console.error('[BOOT] Failed to ensure platform superadmin:', error);
+        await pool.query(
+            'ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "lastLoginAt" TIMESTAMP(3)'
+        );
+        await pool.query(
+            'ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "firstLoginAt" TIMESTAMP(3)'
+        );
+        await pool.query(
+            'UPDATE "User" SET "firstLoginAt" = "lastLoginAt" WHERE "firstLoginAt" IS NULL AND "lastLoginAt" IS NOT NULL'
+        );
+    } catch (err) {
+        console.error('[bootstrap] Schema patch (login timestamps) failed:', err.message);
     }
 }
 
-app.listen(PORT, '0.0.0.0', async () => {
-    console.log(`Server is running on port ${PORT}`);
-    await ensurePlatformSuperAdmin();
-});
+Promise.all([ensureDatabaseSchemaPatches(), ensureSuperAdminUser()])
+    .then(([, user]) => {
+        console.log(`[bootstrap] Super admin ready: ${user.email}`);
+    })
+    .catch((err) => {
+        console.error('[bootstrap] Startup bootstrap failed:', err);
+    })
+    .finally(() => {
+        app.listen(PORT, '0.0.0.0', () => {
+            console.log(`Server is running on port ${PORT}`);
+        });
+    });
 
 // --- Graceful Shutdown Logic ---
 const gracefulShutdown = async (signal) => {

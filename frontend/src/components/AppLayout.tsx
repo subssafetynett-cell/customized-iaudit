@@ -2,36 +2,87 @@ import { SidebarProvider } from "@/components/ui/sidebar";
 import { AppSidebar } from "@/components/AppSidebar";
 import { TopNav } from "@/components/TopNav";
 import TrialExpiredModal from "@/components/TrialExpiredModal";
-import { useLocation, Outlet } from "react-router-dom";
-import { useState, useEffect } from "react";
+import TrialModal from "@/components/TrialModal";
+import { useLocation, Outlet, useNavigate } from "react-router-dom";
+import { useState, useEffect, useCallback, useRef } from "react";
+import { useStoredUser } from "@/hooks/useStoredUser";
+import { useEnsureTrialStarted } from "@/hooks/useEnsureTrialStarted";
+import { useTrialCountdown } from "@/hooks/useTrialCountdown";
+import {
+  OPEN_TRIAL_MODAL_EVENT,
+  isOnActiveTrial,
+  isTrialExpired,
+  markTrialWelcomeDismissed,
+  shouldAwaitTrialWelcome,
+} from "@/lib/trialUtils";
+import { isSuperAdminRole } from "@/lib/superAdminAuth";
 
 export function AppLayout() {
   const location = useLocation();
-  const userData = localStorage.getItem("user");
-  const user = userData ? JSON.parse(userData) : null;
-  const [showModal, setShowModal] = useState(false);
+  const navigate = useNavigate();
+  const { user, setUser } = useStoredUser();
+  const [showTrialWelcome, setShowTrialWelcome] = useState(false);
+  const [showExpiredModal, setShowExpiredModal] = useState(false);
+  const autoTrialModalUserIdRef = useRef<number | null>(null);
 
-  // Calculate if trial is expired
-  const isExpired = user?.trialEndDate && 
-    Math.ceil((new Date(user.trialEndDate).getTime() - new Date().getTime()) / (1000 * 60 * 60 * 24)) <= 0;
-  
-  const shouldShowModal = (user?.subscriptionStatus === 'expired' || isExpired) && 
-    user?.subscriptionStatus !== 'active' &&
-    location.pathname !== '/subscription';
+  useTrialCountdown();
+
+  const onTrialUpdated = useCallback(
+    (updated: Record<string, unknown>) => {
+      setUser(updated);
+    },
+    [setUser]
+  );
+
+  useEnsureTrialStarted(user, onTrialUpdated);
+
+  const expired =
+    isTrialExpired(user) && user?.subscriptionStatus !== "active";
+
+  const shouldShowExpiredModal =
+    expired && location.pathname !== "/subscription";
 
   useEffect(() => {
-    if (shouldShowModal) {
-      const hasSeenModal = sessionStorage.getItem("expiredModalSeen");
-      if (!hasSeenModal) {
-        setShowModal(true);
-      }
+    if (shouldShowExpiredModal) {
+      setShowExpiredModal(true);
+    } else {
+      setShowExpiredModal(false);
     }
-  }, [shouldShowModal]);
+  }, [shouldShowExpiredModal]);
 
-  const handleCloseModal = () => {
-    setShowModal(false);
-    sessionStorage.setItem("expiredModalSeen", "true");
+  useEffect(() => {
+    const userId = user?.id as number | undefined;
+    if (!userId || !shouldAwaitTrialWelcome(user)) {
+      return;
+    }
+    if (autoTrialModalUserIdRef.current === userId) return;
+
+    autoTrialModalUserIdRef.current = userId;
+    setShowTrialWelcome(true);
+  }, [user, user?.id, user?.trialEndDate, user?.subscriptionStatus, user?.role]);
+
+  useEffect(() => {
+    const openTrialModal = () => {
+      if (!user || isSuperAdminRole(user.role as string)) return;
+      if (!isOnActiveTrial(user)) return;
+      setShowTrialWelcome(true);
+    };
+
+    window.addEventListener(OPEN_TRIAL_MODAL_EVENT, openTrialModal);
+    return () => window.removeEventListener(OPEN_TRIAL_MODAL_EVENT, openTrialModal);
+  }, [user]);
+
+  const handleTrialClose = () => {
+    markTrialWelcomeDismissed();
+    setShowTrialWelcome(false);
   };
+
+  const handleTrialUpgrade = () => {
+    markTrialWelcomeDismissed();
+    setShowTrialWelcome(false);
+    navigate("/subscription");
+  };
+
   return (
     <SidebarProvider>
       <div className="min-h-screen flex w-full">
@@ -43,9 +94,18 @@ export function AppLayout() {
           </main>
         </div>
       </div>
-      <TrialExpiredModal 
-        isOpen={showModal} 
-        onClose={handleCloseModal}
+      {!expired && (
+        <TrialModal
+          isOpen={showTrialWelcome}
+          trialStartDate={user?.trialStartDate as string}
+          trialEndDate={user?.trialEndDate as string}
+          onClose={handleTrialClose}
+          onUpgrade={handleTrialUpgrade}
+        />
+      )}
+      <TrialExpiredModal
+        isOpen={showExpiredModal}
+        onClose={() => setShowExpiredModal(false)}
       />
     </SidebarProvider>
   );

@@ -1,4 +1,4 @@
-import React, { useState, useRef } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import { useSearchParams, useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -14,6 +14,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { useCompanyStore } from "@/hooks/useCompanyStore";
 import { Progress } from "@/components/ui/progress";
 import { TourStepPopover } from "@/components/TourStepPopover";
+import { ONBOARDING_TOTAL_STEPS } from "@/lib/onboardingTour";
+import { apiFetch } from "@/lib/api";
 import {
     Table,
     TableBody,
@@ -34,13 +36,97 @@ import { generatePDF, generateWord } from "../utils/gapAnalysisUtils";
 import { Standard, AuditQuestion, SavedGapAnalysis, FindingType } from "../types/gapAnalysis";
 import { getQuestionsForStandard } from "../data/gapAnalysisQuestions";
 import { DeleteConfirmationDialog } from "../components/DeleteConfirmationDialog";
+import {
+    EVIDENCE_IMAGE_ACCEPT,
+    readValidatedEvidenceImageFile,
+} from "@/lib/evidenceImageUpload";
+import {
+    sanitizeGapAnalysisField,
+    sanitizeGapAnalysisLongField,
+    sanitizeGapAnalysisMultiline,
+    sanitizeGapAnalysisQuestionText,
+    sanitizeGapAnalysisShortField,
+    sanitizeSavedGapAnalysis,
+} from "@/lib/plainTextInput";
 
 const GapAnalysis = () => {
     const navigate = useNavigate();
     const [searchParams, setSearchParams] = useSearchParams();
     const [step, setStep] = useState<"list" | "setup" | "analysis" | "results">("list");
     const [showOnboardingGuide, setShowOnboardingGuide] = useState(searchParams.get("onboarding") === "true");
+    const [onboardingStep, setOnboardingStep] = useState<number | null>(null);
     const { companies } = useCompanyStore();
+
+    const setTourStep = (tourStep: number) => {
+        setSearchParams(
+            (prev) => {
+                const next = new URLSearchParams(prev);
+                next.set("onboarding", "true");
+                next.set("step", String(tourStep));
+                return next;
+            },
+            { replace: true }
+        );
+    };
+
+    useEffect(() => {
+        const onboarding = searchParams.get("onboarding") === "true";
+        if (!onboarding) {
+            setShowOnboardingGuide(false);
+            return;
+        }
+
+        const tourStep = parseInt(searchParams.get("step") || "16", 10);
+        if (!Number.isFinite(tourStep)) return;
+
+        setShowOnboardingGuide(true);
+        setOnboardingStep(tourStep);
+
+        if (tourStep === 16 || tourStep === 17) {
+            setStep("list");
+        } else if (tourStep === 18) {
+            setStep("setup");
+            requestAnimationFrame(() => {
+                document.getElementById("tour-step-gap-analysis-company")?.scrollIntoView({
+                    block: "center",
+                    inline: "nearest",
+                    behavior: "instant",
+                });
+            });
+        }
+    }, [searchParams]);
+
+    const finishOnboardingTour = async () => {
+        localStorage.setItem("iaudit_onboarding_tour_completed", "true");
+        const userJson = localStorage.getItem("user");
+        if (userJson) {
+            const user = JSON.parse(userJson);
+            try {
+                const response = await apiFetch(`/users/${user.id}`, {
+                    method: "PUT",
+                    body: JSON.stringify({ onboardingCompleted: true }),
+                });
+                if (response.ok) {
+                    const updatedUser = { ...user, onboardingCompleted: true };
+                    localStorage.setItem("user", JSON.stringify(updatedUser));
+                }
+            } catch (error) {
+                console.error("Failed to update onboarding status:", error);
+            }
+        }
+
+        setSearchParams(
+            (prev) => {
+                const next = new URLSearchParams(prev);
+                next.delete("onboarding");
+                next.delete("step");
+                return next;
+            },
+            { replace: true }
+        );
+        setShowOnboardingGuide(false);
+        toast.success("Onboarding complete! Open App Instructions anytime for more guidance.");
+    };
     const userCompany = companies.length > 0 ? companies[0] : null;
 
     // Setup State
@@ -84,7 +170,8 @@ const GapAnalysis = () => {
         const saved = localStorage.getItem(`gapAnalyses_${user.id}`);
         if (saved) {
             try {
-                setSavedAnalyses(JSON.parse(saved));
+                const parsed = JSON.parse(saved) as SavedGapAnalysis[];
+                setSavedAnalyses(parsed.map(sanitizeSavedGapAnalysis));
             } catch (e) {
                 console.error("Failed to parse gap analyses", e);
             }
@@ -97,7 +184,7 @@ const GapAnalysis = () => {
             return;
         }
 
-        const newAnalysis: SavedGapAnalysis = {
+        const newAnalysis = sanitizeSavedGapAnalysis({
             id: currentId || crypto.randomUUID(),
             companyName,
             auditDate,
@@ -109,8 +196,8 @@ const GapAnalysis = () => {
             scope,
             auditCompany,
             questions,
-            status
-        };
+            status,
+        });
 
         const exists = savedAnalyses.some(a => a.id === newAnalysis.id);
         const updated = exists
@@ -134,16 +221,17 @@ const GapAnalysis = () => {
     };
 
     const resumeAnalysis = (analysis: SavedGapAnalysis) => {
-        setCompanyName(analysis.companyName);
-        setAuditDate(analysis.auditDate);
-        setStandard(analysis.standard);
-        setLocation(analysis.location);
-        setRepresentatives(analysis.representatives);
-        setAuditorName(analysis.auditorName);
-        setContactEmail(analysis.contactEmail);
-        setScope(analysis.scope);
-        setAuditCompany(analysis.auditCompany || "");
-        setQuestions(analysis.questions);
+        const safe = sanitizeSavedGapAnalysis(analysis);
+        setCompanyName(safe.companyName);
+        setAuditDate(safe.auditDate);
+        setStandard(safe.standard);
+        setLocation(safe.location);
+        setRepresentatives(safe.representatives);
+        setAuditorName(safe.auditorName);
+        setContactEmail(safe.contactEmail);
+        setScope(safe.scope);
+        setAuditCompany(safe.auditCompany || "");
+        setQuestions(safe.questions);
         setCurrentId(analysis.id);
         setStep(analysis.status === "Completed" ? "results" : "analysis");
     };
@@ -189,8 +277,14 @@ const GapAnalysis = () => {
         }
     };
 
-    const handleAnswerChange = (id: string, field: keyof AuditQuestion, value: any) => {
-        setQuestions(prev => prev.map(q => q.id === id ? { ...q, [field]: value } : q));
+    const handleAnswerChange = (id: string, field: keyof AuditQuestion, value: unknown) => {
+        let next = value;
+        if (field === "actionPlan" || field === "evidence") {
+            next = sanitizeGapAnalysisMultiline(String(value ?? ""));
+        }
+        setQuestions((prev) =>
+            prev.map((q) => (q.id === id ? { ...q, [field]: next } : q))
+        );
     };
 
     const handleAddQuestion = () => {
@@ -199,12 +293,13 @@ const GapAnalysis = () => {
     };
 
     const confirmAddQuestion = () => {
-        if (!newQuestionText.trim()) return;
+        const safeText = sanitizeGapAnalysisQuestionText(newQuestionText);
+        if (!safeText.trim()) return;
 
         const newQuestion: AuditQuestion = {
             id: crypto.randomUUID(),
             clause: currentClause,
-            text: newQuestionText,
+            text: safeText,
             finding: null,
             actionPlan: "",
             evidence: "",
@@ -215,13 +310,13 @@ const GapAnalysis = () => {
         setIsAddQuestionOpen(false);
     };
 
-    const handleEvidenceImageUpload = (id: string, file: File) => {
-        const reader = new FileReader();
-        reader.onload = (e) => {
-            const dataUrl = e.target?.result as string;
-            handleAnswerChange(id, "evidenceImage", dataUrl);
-        };
-        reader.readAsDataURL(file);
+    const handleEvidenceImageUpload = async (id: string, file: File) => {
+        const result = await readValidatedEvidenceImageFile(file);
+        if (!result.ok) {
+            toast.error(result.error);
+            return;
+        }
+        handleAnswerChange(id, "evidenceImage", result.dataUrl);
     };
 
     const handleRemoveEvidenceImage = (id: string) => {
@@ -242,7 +337,10 @@ const GapAnalysis = () => {
     };
 
     const handleQuestionTextChange = (id: string, text: string) => {
-        setQuestions(prev => prev.map(q => q.id === id ? { ...q, text } : q));
+        const safeText = sanitizeGapAnalysisQuestionText(text);
+        setQuestions((prev) =>
+            prev.map((q) => (q.id === id ? { ...q, text: safeText } : q))
+        );
     };
 
     // --- Results & PDF Logic ---
@@ -327,7 +425,7 @@ const GapAnalysis = () => {
     return (
         <div className="flex-1 p-8 pt-6 min-h-screen bg-white relative">
             {/* Background Overlay for Onboarding */}
-            {showOnboardingGuide && step === "list" && (
+            {showOnboardingGuide && step === "list" && onboardingStep === 17 && (
                 <div className="fixed inset-0 bg-slate-900/10 z-[40] transition-all duration-500" />
             )}
 
@@ -340,44 +438,56 @@ const GapAnalysis = () => {
                     </div>
                     {/* Header Actions */}
                     {step === "list" && (
-                        <div className={`flex w-full sm:w-auto relative ${showOnboardingGuide ? "z-[60]" : ""}`}>
-                            {showOnboardingGuide && (
+                        <div className={`flex w-full sm:w-auto relative ${showOnboardingGuide && onboardingStep === 17 ? "z-[60]" : ""}`}>
+                            {showOnboardingGuide && onboardingStep === 17 && (
                                 <div className="absolute inset-0 -m-1 rounded-2xl ring-[8px] ring-emerald-500/50 animate-pulse z-[-1]" />
                             )}
                             <Button 
                                 id="tour-step-new-analysis"
                                 onClick={() => {
+                                    if (showOnboardingGuide && onboardingStep === 17) {
+                                        setTourStep(18);
+                                        return;
+                                    }
                                     setStep("setup");
-                                    setShowOnboardingGuide(false);
                                 }} 
-                                className={`w-full sm:w-auto bg-[#213847] hover:bg-[#213847]/90 text-white rounded-xl h-10 px-4 font-medium shadow-sm transition-all duration-300 ${showOnboardingGuide ? 'relative z-[60] scale-105 shadow-2xl' : ''}`}
+                                className={`w-full sm:w-auto bg-[#213847] hover:bg-[#213847]/90 text-white rounded-xl h-10 px-4 font-medium shadow-sm transition-all duration-300 ${showOnboardingGuide && onboardingStep === 17 ? "relative z-[60] scale-105 shadow-2xl" : ""}`}
                             >
                                 <Plus className="h-4 w-4 mr-2" /> New Analysis
                             </Button>
-                            
-                            {/* Onboarding Guide Tooltip */}
-                            {showOnboardingGuide && (
+
+                            {showOnboardingGuide && onboardingStep === 17 && (
                                 <TourStepPopover
                                     targetId="tour-step-new-analysis"
-                                    step={5}
-                                    totalSteps={6}
-                                    title="Gap Analysis"
-                                    description="Gap Analysis was created for companies that are new to ISO Standards or in transition from old to new ISO Standard. Use of the Gap Analysis is optional for ISO Certified companies."
-                                    onNext={() => {
-                                        setShowOnboardingGuide(false);
-                                        navigate("/audits?onboarding=true");
-                                    }}
-                                    onBack={() => {
-                                        setShowOnboardingGuide(false);
-                                        navigate("/self-assessment?onboarding=true");
-                                    }}
+                                    step={17}
+                                    totalSteps={ONBOARDING_TOTAL_STEPS}
+                                    title="New Analysis"
+                                    description="Click New Analysis to start a gap analysis for your company and evaluate compliance against ISO requirements."
+                                    onNext={() => setTourStep(18)}
+                                    onBack={() => setTourStep(16)}
                                     onClose={() => setShowOnboardingGuide(false)}
+                                    position="left"
                                 />
                             )}
                         </div>
                     )}
                 </div>
 
+
+            {showOnboardingGuide && onboardingStep === 16 && (
+                <TourStepPopover
+                    targetId="tour-step-gap-analysis"
+                    step={16}
+                    totalSteps={ONBOARDING_TOTAL_STEPS}
+                    title="Gap Analysis"
+                    description="For organizations new to ISO or moving to a new standard. Optional if your company is already ISO certified."
+                    onNext={() => setTourStep(17)}
+                    onBack={() => navigate("/self-assessment?onboarding=true&step=15")}
+                    onClose={() => setShowOnboardingGuide(false)}
+                    position="right"
+                    disableShadow={false}
+                />
+            )}
 
                 {step === "list" && (
                     <div className="space-y-6">
@@ -388,7 +498,7 @@ const GapAnalysis = () => {
                                 <Input
                                     placeholder="Search by company or date..."
                                     value={searchTerm}
-                                    onChange={(e) => setSearchTerm(e.target.value)}
+                                    onChange={(e) => setSearchTerm(sanitizeGapAnalysisShortField(e.target.value))}
                                     className="pl-9 h-10 rounded-xl border-slate-200 bg-white focus-visible:ring-1 focus-visible:ring-[#213847]/40 w-full shadow-sm"
                                 />
                             </div>
@@ -512,7 +622,17 @@ const GapAnalysis = () => {
                 {
                     step === "setup" && (
                         <div className="space-y-6">
-                            <Button variant="ghost" onClick={() => setStep("list")} className="pl-0 hover:bg-transparent text-emerald-600">
+                            <Button
+                                variant="ghost"
+                                onClick={() => {
+                                    if (showOnboardingGuide && onboardingStep === 18) {
+                                        setTourStep(17);
+                                        return;
+                                    }
+                                    setStep("list");
+                                }}
+                                className="pl-0 hover:bg-transparent text-emerald-600"
+                            >
                                 <ArrowLeft className="w-4 h-4 mr-2" /> Back to List
                             </Button>
 
@@ -523,11 +643,11 @@ const GapAnalysis = () => {
                                 </CardHeader>
                                 <CardContent className="space-y-6 p-6 sm:p-8 bg-white rounded-b-xl">
                                     <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                        <div className="space-y-2">
+                                        <div id="tour-step-gap-analysis-company" className="space-y-2 rounded-xl p-1 -m-1">
                                             <Label className="text-sm font-semibold text-slate-700">Company Name <span className="text-red-500">*</span></Label>
                                             <Input
                                                 value={companyName}
-                                                onChange={e => setCompanyName(e.target.value)}
+                                                onChange={e => setCompanyName(sanitizeGapAnalysisShortField(e.target.value))}
                                                 placeholder="Audited Company"
                                                 className="h-12 rounded-xl border-slate-200 bg-slate-50 shadow-sm focus-visible:ring-1 focus-visible:ring-[#213847]/40 w-full"
                                             />
@@ -566,7 +686,7 @@ const GapAnalysis = () => {
                                             <Label className="text-sm font-semibold text-slate-700">Location</Label>
                                             <Input
                                                 value={location}
-                                                onChange={e => setLocation(e.target.value)}
+                                                onChange={e => setLocation(sanitizeGapAnalysisShortField(e.target.value))}
                                                 placeholder="Audit Location"
                                                 className="h-12 rounded-xl border-slate-200 bg-slate-50 shadow-sm focus-visible:ring-1 focus-visible:ring-[#213847]/40 w-full"
                                             />
@@ -575,7 +695,7 @@ const GapAnalysis = () => {
                                             <Label className="text-sm font-semibold text-slate-700">Representatives</Label>
                                             <Input
                                                 value={representatives}
-                                                onChange={e => setRepresentatives(e.target.value)}
+                                                onChange={e => setRepresentatives(sanitizeGapAnalysisLongField(e.target.value))}
                                                 placeholder="Company Reps"
                                                 className="h-12 rounded-xl border-slate-200 bg-slate-50 shadow-sm focus-visible:ring-1 focus-visible:ring-[#213847]/40 w-full"
                                             />
@@ -584,7 +704,7 @@ const GapAnalysis = () => {
                                             <Label className="text-sm font-semibold text-slate-700">Auditor Name <span className="text-red-500">*</span></Label>
                                             <Input
                                                 value={auditorName}
-                                                onChange={e => setAuditorName(e.target.value)}
+                                                onChange={e => setAuditorName(sanitizeGapAnalysisShortField(e.target.value))}
                                                 placeholder="Your Name"
                                                 className="h-12 rounded-xl border-slate-200 bg-slate-50 shadow-sm focus-visible:ring-1 focus-visible:ring-[#213847]/40 w-full"
                                             />
@@ -593,7 +713,7 @@ const GapAnalysis = () => {
                                             <Label className="text-sm font-semibold text-slate-700">Contact Email</Label>
                                             <Input
                                                 value={contactEmail}
-                                                onChange={e => setContactEmail(e.target.value)}
+                                                onChange={e => setContactEmail(sanitizeGapAnalysisField(e.target.value))}
                                                 placeholder="Email"
                                                 className="h-12 rounded-xl border-slate-200 bg-slate-50 shadow-sm focus-visible:ring-1 focus-visible:ring-[#213847]/40 w-full"
                                             />
@@ -603,7 +723,7 @@ const GapAnalysis = () => {
                                         <Label className="text-sm font-semibold text-slate-700">Scope of Audit</Label>
                                         <Input
                                             value={scope}
-                                            onChange={e => setScope(e.target.value)}
+                                            onChange={e => setScope(sanitizeGapAnalysisLongField(e.target.value))}
                                             placeholder="Audit Scope"
                                             className="h-12 rounded-xl border-slate-200 bg-slate-50 shadow-sm focus-visible:ring-1 focus-visible:ring-[#213847]/40 w-full"
                                         />
@@ -615,7 +735,7 @@ const GapAnalysis = () => {
                                         </Label>
                                         <Input
                                             value={auditCompany}
-                                            onChange={e => setAuditCompany(e.target.value)}
+                                            onChange={e => setAuditCompany(sanitizeGapAnalysisField(e.target.value))}
                                             placeholder="Enter company being audited"
                                             className="h-12 rounded-xl border-slate-200 bg-slate-50 shadow-sm focus-visible:ring-1 focus-visible:ring-[#213847]/40 w-full"
                                         />
@@ -632,6 +752,21 @@ const GapAnalysis = () => {
                                     </div>
                                 </CardContent>
                             </Card>
+
+                            {showOnboardingGuide && onboardingStep === 18 && (
+                                <TourStepPopover
+                                    targetId="tour-step-gap-analysis-company"
+                                    step={18}
+                                    totalSteps={ONBOARDING_TOTAL_STEPS}
+                                    title="Configure Analysis"
+                                    description="Enter your company details, select the ISO standard, then click Start Gap Analysis to begin. This completes the onboarding tour—for detailed guidance, open App Instructions in the header."
+                                    onNext={() => void finishOnboardingTour()}
+                                    onBack={() => setTourStep(17)}
+                                    onClose={() => setShowOnboardingGuide(false)}
+                                    position="right"
+                                />
+                            )}
+
                         </div>
                     )
                 }
@@ -811,11 +946,11 @@ const GapAnalysis = () => {
                                                         <input
                                                             id={`evidence-image-${q.id}`}
                                                             type="file"
-                                                            accept="image/*"
+                                                            accept={EVIDENCE_IMAGE_ACCEPT}
                                                             className="hidden"
                                                             onChange={(e) => {
                                                                 const file = e.target.files?.[0];
-                                                                if (file) handleEvidenceImageUpload(q.id, file);
+                                                                if (file) void handleEvidenceImageUpload(q.id, file);
                                                                 e.target.value = ""; // reset so same file can be re-uploaded
                                                             }}
                                                         />
@@ -871,7 +1006,7 @@ const GapAnalysis = () => {
                                             <Input
                                                 placeholder="Enter your question here..."
                                                 value={newQuestionText}
-                                                onChange={(e) => setNewQuestionText(e.target.value)}
+                                                onChange={(e) => setNewQuestionText(sanitizeGapAnalysisQuestionText(e.target.value))}
                                             />
                                         </div>
                                     </div>

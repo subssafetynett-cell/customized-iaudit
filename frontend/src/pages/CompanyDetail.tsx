@@ -13,6 +13,12 @@ import DepartmentModal from "@/components/DepartmentModal";
 import CompanyModal from "@/components/CompanyModal";
 import { DeleteConfirmationDialog } from "@/components/DeleteConfirmationDialog";
 import { Site, Department, ISOStandard } from "@/types/company";
+import {
+  formatDeleteDepartmentDescription,
+  formatDeleteSiteDescription,
+  SITE_NAME_MAX,
+  truncateForDisplay,
+} from "@/lib/validation";
 
 export default function CompanyDetail() {
   const { id } = useParams<{ id: string }>();
@@ -49,7 +55,7 @@ export default function CompanyDetail() {
 
   const activeSite = company.sites.find((s) => s.id === addDeptSiteId);
   const allDepartments = company.sites.flatMap((s) =>
-    s.departments.map((d) => ({ ...d, siteName: s.name, siteId: s.id }))
+    (s.departments ?? []).map((d) => ({ ...d, siteName: s.name, siteId: s.id }))
   );
 
   return (
@@ -163,13 +169,15 @@ export default function CompanyDetail() {
                             <MapPin className="h-4 w-4 text-primary" />
                           </div>
                           <div className="min-w-0">
-                            <p className="font-medium text-sm">{site.name}</p>
+                            <p className="font-medium text-sm break-all line-clamp-2" title={site.name}>
+                              {truncateForDisplay(site.name, SITE_NAME_MAX)}
+                            </p>
                             {site.address && <p className="text-xs text-muted-foreground truncate">{site.address}</p>}
                           </div>
                         </div>
                         <div className="flex items-center gap-1">
                           <Badge variant="secondary" className="text-xs mr-2">
-                            {site.departments.length} dept{site.departments.length !== 1 ? "s" : ""}
+                            {(site.departments?.length ?? 0)} dept{(site.departments?.length ?? 0) !== 1 ? "s" : ""}
                           </Badge>
                           <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => setEditSite(site)}>
                             <Pencil className="h-3.5 w-3.5" />
@@ -223,7 +231,9 @@ export default function CompanyDetail() {
                             <Users className="h-4 w-4 text-primary" />
                           </div>
                           <div className="min-w-0">
-                            <p className="font-medium text-sm">{dept.name}</p>
+                            <p className="font-medium text-sm break-words max-w-xs line-clamp-2" title={dept.name}>
+                              {truncateForDisplay(dept.name, 100)}
+                            </p>
                             <p className="text-xs text-muted-foreground truncate">
                               {dept.siteName}
                               {dept.description && ` · ${dept.description}`}
@@ -261,7 +271,10 @@ export default function CompanyDetail() {
         <DepartmentModal
           open={!!addDeptSiteId}
           onClose={() => setAddDeptSiteId(null)}
-          onSubmit={(data) => addDepartment(company.id, activeSite.id, data.name, data)}
+          onSubmit={async (data) => {
+            await addDepartment(company.id, activeSite.id, data.name, data);
+            setAddDeptSiteId(null);
+          }}
           siteName={activeSite.name}
           mode="create"
         />
@@ -287,7 +300,10 @@ export default function CompanyDetail() {
         <DepartmentModal
           open={!!editDept}
           onClose={() => setEditDept(null)}
-          onSubmit={(data) => updateDepartment(company.id, editDept.siteId, editDept.dept.id, data)}
+          onSubmit={(data) => {
+            updateDepartment(company.id, editDept.siteId, editDept.dept.id, data);
+            setEditDept(null);
+          }}
           mode="edit"
         />
       )}
@@ -320,8 +336,12 @@ export default function CompanyDetail() {
           }
         }}
         isLoading={isDeleting}
-        title={siteToDelete ? `Delete Site: ${siteToDelete.name}?` : "Delete Site?"}
-        description="Are you sure you want to delete this site? All associated departments will be permanently removed."
+        title="Delete site?"
+        description={
+          siteToDelete
+            ? formatDeleteSiteDescription(siteToDelete.name)
+            : "Are you sure you want to delete this site? All associated departments will be permanently removed."
+        }
       />
 
       <DeleteConfirmationDialog
@@ -336,8 +356,15 @@ export default function CompanyDetail() {
           }
         }}
         isLoading={isDeleting}
-        title={deptToDelete ? `Delete Department: ${deptToDelete.dept.name}?` : "Delete Department?"}
-        description={`Are you sure you want to delete this department from ${deptToDelete ? company.sites.find(s => s.id === deptToDelete.siteId)?.name : "this site"}?`}
+        title="Delete department?"
+        description={
+          deptToDelete
+            ? formatDeleteDepartmentDescription(
+                deptToDelete.dept.name,
+                company.sites.find((s) => s.id === deptToDelete.siteId)?.name
+              )
+            : "Are you sure you want to delete this department?"
+        }
       />
     </div>
   );

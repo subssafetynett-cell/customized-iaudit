@@ -1,4 +1,5 @@
 import { API_BASE_URL } from "@/config";
+import { clearSuperAdminSession, isSuperAdminConsolePath } from "@/lib/superAdminAuth";
 
 /** Full URL for an API path (e.g. `/users`). Only this module reads `API_BASE_URL` — use `apiFetch` from app code. */
 export function resolveApiUrl(endpoint: string): string {
@@ -14,50 +15,19 @@ export function clearClientSession() {
     localStorage.removeItem("token");
     localStorage.removeItem("user");
     localStorage.removeItem(SESSION_EXPIRES_AT_KEY);
-}
-
-export function hasSuperAdminSession(): boolean {
-    if (localStorage.getItem("isSuperAdminAuthenticated") !== "true") return false;
-    if (!localStorage.getItem("token")) return false;
-    try {
-        const user = JSON.parse(localStorage.getItem("user") || "null");
-        return user?.role === "superadmin";
-    } catch {
-        return false;
-    }
-}
-
-/** Fully end super admin access (and the underlying API session). */
-export function clearSuperAdminSession() {
-    localStorage.removeItem("isSuperAdminAuthenticated");
-    clearClientSession();
-}
-
-export function persistSuperAdminSession(
-    profile: Record<string, unknown>,
-    token: string,
-    sessionExpiresAt?: string
-) {
-    localStorage.setItem("isSuperAdminAuthenticated", "true");
-    localStorage.setItem("user", JSON.stringify(profile));
-    localStorage.setItem("token", token);
-    if (sessionExpiresAt) {
-        localStorage.setItem(SESSION_EXPIRES_AT_KEY, sessionExpiresAt);
-    }
+    clearSuperAdminSession();
 }
 
 function redirectToLoginIfNeeded() {
     const path = window.location.pathname;
-    if (/^\/super-admin(\/|$)/.test(path)) {
-        clearSuperAdminSession();
-        if (!/^\/super-admin-login(\/|$)/.test(path)) {
-            window.location.href = "/super-admin-login";
-        }
+    if (/^\/(login|signup|auth|super-admin-login)(\/|$)/.test(path)) {
         return;
     }
-    if (!/^\/(login|signup|auth|super-admin-login)(\/|$)/.test(path)) {
+    if (isSuperAdminConsolePath(path)) {
         window.location.href = "/login";
+        return;
     }
+    window.location.href = "/login";
 }
 
 /** Clears stored auth and sends the user to login when not already on a public auth route. */

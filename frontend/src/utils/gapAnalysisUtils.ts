@@ -3,6 +3,7 @@ import autoTable from 'jspdf-autotable';
 import html2canvas from 'html2canvas'; // Import html2canvas
 import { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, WidthType, ImageRun, BorderStyle, HeadingLevel, AlignmentType, Header, Footer } from 'docx';
 import { saveAs } from 'file-saver';
+import { isSafeEvidenceImageDataUrl } from '@/lib/evidenceImageUpload';
 
 export const generatePDF = async (
     analysisData: any,
@@ -310,7 +311,7 @@ export const generatePDF = async (
     const imageMap: Record<number, { dataUrl: string; w: number; h: number }> = {};
     for (let i = 0; i < questions.length; i++) {
         const q = questions[i] as any;
-        if (q.evidenceImage) {
+        if (q.evidenceImage && isSafeEvidenceImageDataUrl(q.evidenceImage)) {
             const img = new Image();
             await new Promise<void>((resolve) => {
                 img.onload = () => { imageMap[i] = { dataUrl: q.evidenceImage, w: img.width, h: img.height }; resolve(); };
@@ -550,7 +551,7 @@ export const generateWord = async (
         const evidenceCellChildren: Paragraph[] = [
             new Paragraph(q.evidence || '-')
         ];
-        if (q.evidenceImage) {
+        if (q.evidenceImage && isSafeEvidenceImageDataUrl(q.evidenceImage)) {
             try {
                 const imgBuffer = base64ToAB(q.evidenceImage);
                 const { w, h } = await getImgDimensions(q.evidenceImage);

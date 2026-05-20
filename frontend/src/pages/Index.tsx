@@ -34,9 +34,14 @@ import CompanyModal from "@/components/CompanyModal";
 import SiteModal from "@/components/SiteModal";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import TrialModal from "@/components/TrialModal";
 import TrialBanner from "@/components/TrialBanner";
 import { TourStepPopover } from "@/components/TourStepPopover";
+import { ONBOARDING_TOTAL_STEPS } from "@/lib/onboardingTour";
+import {
+  TRIAL_WELCOME_DISMISSED_EVENT,
+  isTrialWelcomeDismissedForUser,
+  shouldAwaitTrialWelcome,
+} from "@/lib/trialUtils";
 
 const Index = () => {
     const navigate = useNavigate();
@@ -47,33 +52,61 @@ const Index = () => {
     const [loading, setLoading] = useState(true);
     const [selfAssessments, setSelfAssessments] = useState<any[]>([]);
     const [gapAnalyses, setGapAnalyses] = useState<any[]>([]);
-    const [showTrialModal, setShowTrialModal] = useState(false);
     const [currentUser, setCurrentUser] = useState<any>(null);
   
-  // Onboarding state
+  // Onboarding state (starts only after trial welcome modal is dismissed)
   const [showWelcome, setShowWelcome] = useState(false);
   const [showCreateCompany, setShowCreateCompany] = useState(false);
   const [showCreateSite, setShowCreateSite] = useState(false);
   const [onboardingStep, setOnboardingStep] = useState<number>(1);
+  const [trialWelcomeDismissed, setTrialWelcomeDismissed] = useState(() => {
+    try {
+      const raw = localStorage.getItem("user");
+      const user = raw ? JSON.parse(raw) : null;
+      return user?.id ? isTrialWelcomeDismissedForUser(user.id) : false;
+    } catch {
+      return false;
+    }
+  });
 
   // Calculate Metrics
   const totalSites = companies.reduce((acc, c) => acc + (c.sites?.length || 0), 0);
   const totalDepts = companies.reduce((acc, c) => acc + (c.sites?.reduce((a, s) => a + (s.departments?.length || 0), 0) || 0), 0);
 
   useEffect(() => {
-    const userJson = localStorage.getItem('user');
+    const onTrialDismissed = () => {
+      setTrialWelcomeDismissed(true);
+      setShowWelcome(false);
+    };
+    window.addEventListener(TRIAL_WELCOME_DISMISSED_EVENT, onTrialDismissed);
+    return () => window.removeEventListener(TRIAL_WELCOME_DISMISSED_EVENT, onTrialDismissed);
+  }, []);
+
+  useEffect(() => {
+    const userJson = localStorage.getItem("user");
     const user = userJson ? JSON.parse(userJson) : null;
-    
-    // Only show onboarding if user exists and hasn't completed it
-    if (!isLoading && user && !user.onboardingCompleted && companies.length === 0) {
+
+    if (!user || user.onboardingCompleted || companies.length > 0) return;
+
+    if (shouldAwaitTrialWelcome(user) && !trialWelcomeDismissed) {
+      setShowWelcome(false);
+      return;
+    }
+
+    if (!isLoading) {
       setShowWelcome(true);
       setOnboardingStep(1);
     }
-  }, [isLoading, companies.length, totalSites]);
+  }, [isLoading, companies.length, totalSites, trialWelcomeDismissed]);
 
   useEffect(() => {
     const handleRestart = (e: any) => {
       const step = e.detail?.step || 2;
+      if (!trialWelcomeDismissed) {
+        const userJson = localStorage.getItem("user");
+        const user = userJson ? JSON.parse(userJson) : null;
+        if (user && shouldAwaitTrialWelcome(user)) return;
+      }
       setShowWelcome(true);
       setOnboardingStep(step);
     };
@@ -81,15 +114,19 @@ const Index = () => {
     const params = new URLSearchParams(window.location.search);
     if (params.get('restartOnboarding') === 'true') {
       const step = Number(params.get('step')) || 2;
-      setShowWelcome(true);
-      setOnboardingStep(step);
-      // Clean up URL
+      const userJson = localStorage.getItem('user');
+      const user = userJson ? JSON.parse(userJson) : null;
+      const blocked = user && shouldAwaitTrialWelcome(user) && !trialWelcomeDismissed;
+      if (!blocked) {
+        setShowWelcome(true);
+        setOnboardingStep(step);
+      }
       window.history.replaceState({}, '', window.location.pathname);
     }
 
     window.addEventListener('restart-onboarding', handleRestart);
     return () => window.removeEventListener('restart-onboarding', handleRestart);
-  }, []);
+  }, [trialWelcomeDismissed]);
 
   useEffect(() => {
     const userJson = localStorage.getItem('user');
@@ -100,17 +137,13 @@ const Index = () => {
   }, []);
 
   useEffect(() => {
-    if (currentUser) {
-      // Show trial modal ONLY IF onboarding is completed
-      // and trial hasn't started and user is on trial tier
-      if (currentUser.onboardingCompleted && 
-          currentUser.subscriptionStatus === 'trial' && 
-          !currentUser.trialEndDate && 
-          !localStorage.getItem('trial_modal_seen')) {
-        setShowTrialModal(true);
-      }
-    }
-  }, [currentUser]);
+    const onUserUpdated = () => {
+      const userJson = localStorage.getItem('user');
+      if (userJson) setCurrentUser(JSON.parse(userJson));
+    };
+    window.addEventListener('user-updated', onUserUpdated);
+    return () => window.removeEventListener('user-updated', onUserUpdated);
+  }, []);
 
   useEffect(() => {
     const fetchData = async () => {
@@ -363,39 +396,16 @@ const Index = () => {
     };
   });
 
-    const handleStartTrial = async () => {
-        if (!currentUser) return;
-        localStorage.setItem('trial_modal_seen', 'true');
-        try {
-            const response = await apiFetch(`/users/${currentUser.id}/start-trial`, {
-                method: 'POST'
-            });
-            if (response.ok) {
-                const updatedUser = await response.json();
-                localStorage.setItem('user', JSON.stringify(updatedUser));
-                setCurrentUser(updatedUser);
-                setShowTrialModal(false);
-                toast.success("Welcome! Your 14-day free trial has started.");
-            } else {
-                toast.error("Failed to start trial. Please try again.");
-                localStorage.removeItem('trial_modal_seen');
-            }
-        } catch (error) {
-            console.error("Trial start error:", error);
-            toast.error("A connection error occurred.");
-            localStorage.removeItem('trial_modal_seen');
-        }
-    };
-
-    const handleSubscribe = () => {
-        localStorage.setItem('trial_modal_seen', 'true');
-        navigate("/subscription");
-    };
-
   // Calculate dynamic max for Y-axis scaling
   const maxVal = trendData.reduce((max, d) => Math.max(max, d.scheduled, d.completed), 0);
   const chartMax = Math.max(8, Math.ceil(maxVal / 2) * 2 + 2);
   const chartTicks = Array.from({ length: (chartMax / 2) + 1 }, (_, i) => i * 2);
+
+  const onboardingBlocked =
+    !!currentUser &&
+    shouldAwaitTrialWelcome(currentUser) &&
+    !trialWelcomeDismissed;
+  const showOnboarding = showWelcome && !onboardingBlocked;
 
   if (loading) {
     return (
@@ -410,18 +420,11 @@ const Index = () => {
 
   return (
     <div className="min-h-screen bg-transparent px-6 py-6">
-        <TrialModal 
-            isOpen={showTrialModal} 
-            onStartTrial={handleStartTrial} 
-            onSubscribe={handleSubscribe} 
-        />
       <div className="max-w-[1600px] mx-auto space-y-6">
-        {currentUser?.onboardingCompleted && (
-          <TrialBanner 
-            subscriptionStatus={currentUser?.subscriptionStatus} 
-            trialEndDate={currentUser?.trialEndDate} 
-          />
-        )}
+        <TrialBanner
+          subscriptionStatus={currentUser?.subscriptionStatus}
+          trialEndDate={currentUser?.trialEndDate}
+        />
 
         {/* Top Stats Cards */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
@@ -849,7 +852,7 @@ const Index = () => {
       </div>
 
       {/* Onboarding Modals */}
-      <Dialog open={showWelcome} onOpenChange={(open) => {
+      <Dialog open={showOnboarding} onOpenChange={(open) => {
         if (!open && companies.length === 0) return;
         setShowWelcome(open);
       }}>
@@ -869,7 +872,7 @@ const Index = () => {
                 <div className="space-y-2">
                   <div className="flex items-center justify-center gap-2 mb-1">
                     <span className="bg-white/20 text-white text-xs font-bold px-3 py-1 rounded-full">
-                      Step {onboardingStep} of 6
+                      Step {onboardingStep} of {ONBOARDING_TOTAL_STEPS}
                     </span>
                   </div>
                   <h2 className="text-2xl font-bold tracking-tight">Welcome to iAudit!</h2>
@@ -913,16 +916,16 @@ const Index = () => {
         )}
       </Dialog>
 
-      {showWelcome && onboardingStep === 2 && (
+      {showOnboarding && onboardingStep === 2 && (
         <TourStepPopover
           targetId="tour-step-companies"
           step={2}
-          totalSteps={6}
+          totalSteps={ONBOARDING_TOTAL_STEPS}
           title="Open a Company"
           description="Your company will be live here. Inside this page you can create sites and departments."
           onNext={() => {
             setShowWelcome(false);
-            navigate("/companies?onboarding=true");
+            navigate("/companies?onboarding=true&step=3");
           }}
           onBack={() => {
             setOnboardingStep(1);
@@ -942,12 +945,18 @@ const Index = () => {
         mode="create"
         hideCancel={companies.length === 0}
         onSubmit={async (data) => {
-          const success = await addCompany(data);
-          if (success) {
-            setShowCreateCompany(false);
-            setOnboardingStep(2);
-            setShowWelcome(true); // Go back to welcome modal as requested
-            toast.success("Company created! Now let's add your first site.");
+          try {
+            const success = await addCompany(data);
+            if (success) {
+              setShowCreateCompany(false);
+              setOnboardingStep(2);
+              setShowWelcome(true);
+              toast.success("Company created! Now let's add your first site.");
+            }
+          } catch (err: unknown) {
+            const message = err instanceof Error ? err.message : "Failed to create company";
+            toast.error(message);
+            throw err;
           }
         }}
       />
