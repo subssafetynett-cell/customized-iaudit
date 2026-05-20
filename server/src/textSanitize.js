@@ -1,3 +1,14 @@
+/** Escape for safe HTML interpolation (email templates, etc.). */
+export function escapeHtml(value) {
+    if (value === undefined || value === null) return '';
+    return String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
 /** Strip ASCII control chars except tab/newline/carriage return. */
 const CTRL = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g;
 
@@ -38,23 +49,32 @@ export function sanitizePlainText(value, maxLen, opts = {}) {
     return s;
 }
 
-/** Logo / image URL: strip markup; block dangerous URL schemes. */
-export function sanitizeLogoField(value, maxLen = 2000) {
+const SAFE_DATA_IMAGE_RE = /^data:image\/(jpeg|jpg|png|webp);base64,[A-Za-z0-9+/=]+$/i;
+const SAFE_HTTP_LOGO_RE = /^https?:\/\/[^\s<>"']+$/i;
+
+/** Logo: allow compressed data-URL images (PNG/JPEG/WebP) or https URLs; block script/SVG payloads. */
+export function sanitizeLogoField(value, maxLen = 500_000) {
     if (value === undefined) return undefined;
     if (value === null) return null;
-    const s = sanitizePlainText(value, maxLen);
-    if (s === undefined || s === null) return s;
+    if (typeof value !== 'string') return null;
+    const s = String(value).trim();
     if (s === '') return '';
+    if (s.length > maxLen) return null;
+
     const low = s.toLowerCase();
-    if (
-        low.startsWith('javascript:') ||
-        low.startsWith('data:') ||
-        low.startsWith('vbscript:') ||
-        low.includes(' ')
-    ) {
+    if (low.startsWith('javascript:') || low.startsWith('vbscript:') || low.includes('<')) {
         return '';
     }
-    return s;
+
+    if (SAFE_DATA_IMAGE_RE.test(s)) {
+        return s;
+    }
+
+    if (SAFE_HTTP_LOGO_RE.test(s)) {
+        return s.slice(0, Math.min(s.length, 2048));
+    }
+
+    return '';
 }
 
 /** ISO / standards tags from the client. */
@@ -121,11 +141,22 @@ export function sanitizeOrganizationText(value, maxLen) {
     return s;
 }
 
+/** Reject over-length org/site/dept names before persist (returns error message or null). */
+export function organizationTextLengthError(value, maxLen, fieldLabel = 'Name') {
+    if (value === undefined || value === null) return null;
+    if (typeof value !== 'string') return `${fieldLabel} must be a string`;
+    const oneLine = String(value).replace(/[\r\n\t]+/g, ' ').trim();
+    if (oneLine.length > maxLen) {
+        return `${fieldLabel} must be at most ${maxLen} characters`;
+    }
+    return null;
+}
+
 export const COMPANY_TEXT_LIMITS = {
-    name: 300,
+    name: 100,
     industry: 200,
-    description: 20000,
-    logo: 2000,
+    description: 500,
+    logo: 500_000,
     contactNumber: PHONE_DIGITS_LENGTH,
     streetAddress: 500,
     city: 120,
@@ -135,7 +166,7 @@ export const COMPANY_TEXT_LIMITS = {
 };
 
 export const SITE_TEXT_LIMITS = {
-    name: 300,
+    name: 50,
     description: 20000,
     siteType: 120,
     status: 80,
@@ -151,7 +182,7 @@ export const SITE_TEXT_LIMITS = {
 };
 
 export const DEPT_TEXT_LIMITS = {
-    name: 300,
+    name: 100,
     code: 80,
     status: 80,
     manager: 200,

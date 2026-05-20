@@ -1,6 +1,14 @@
 import { useState, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { useCompanyStore } from "@/hooks/useCompanyStore";
+import {
+  formatDeleteDepartmentDescription,
+  formatDeleteSiteDescription,
+  SITE_NAME_MAX,
+  COMPANY_NAME_MAX,
+  COMPANY_DESCRIPTION_MAX,
+  truncateForDisplay,
+} from "@/lib/validation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -47,6 +55,8 @@ import { Company, Site, Department } from "@/types/company";
 import { useEffect } from "react";
 import { useSearchParams } from "react-router-dom";
 import { TourStepPopover } from "@/components/TourStepPopover";
+import { ONBOARDING_TOTAL_STEPS } from "@/lib/onboardingTour";
+import { toast } from "sonner";
 
 const CompaniesPage = () => {
   const {
@@ -58,21 +68,23 @@ const CompaniesPage = () => {
   // Navigation and Selection state
   const [selectedCompanyId, setSelectedCompanyId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [showOnboardingGuide, setShowOnboardingGuide] = useState(false);
   const [onboardingStep, setOnboardingStep] = useState<number | null>(null);
+  const [activeTab, setActiveTab] = useState("sites");
 
-  useEffect(() => {
-    const onboarding = searchParams.get("onboarding") === "true";
-    const step = parseInt(searchParams.get("step") || "3");
-    if (onboarding) {
-      setShowOnboardingGuide(true);
-      setOnboardingStep(step);
-      if (step === 4) {
-        setShowAddSite(true);
-      }
-    }
-  }, [searchParams]);
+  /** Keep onboarding step in the URL so Next/Back survives re-renders and matches UI state. */
+  const setTourStep = (step: number) => {
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.set("onboarding", "true");
+        next.set("step", String(step));
+        return next;
+      },
+      { replace: true }
+    );
+  };
 
   // Pagination state
   const [currentPage, setCurrentPage] = useState(1);
@@ -90,6 +102,36 @@ const CompaniesPage = () => {
   const [editSite, setEditSite] = useState<Site | null>(null);
   const [addDeptSiteId, setAddDeptSiteId] = useState<string | null>(null);
   const [editDept, setEditDept] = useState<{ siteId: string; dept: Department } | null>(null);
+
+  useEffect(() => {
+    const onboarding = searchParams.get("onboarding") === "true";
+    if (!onboarding) {
+      setShowOnboardingGuide(false);
+      return;
+    }
+
+    const step = parseInt(searchParams.get("step") || "3", 10);
+    if (!Number.isFinite(step)) return;
+
+    setShowOnboardingGuide(true);
+    setOnboardingStep(step);
+    setShowAddSite(step === 4);
+
+    if (step >= 6 && step <= 9) {
+      setActiveTab("departments");
+    } else if (step >= 3 && step <= 5) {
+      setActiveTab("sites");
+    }
+
+    if (step === 7) {
+      const company =
+        companies.find((c) => c.id === selectedCompanyId) ?? companies[0];
+      const siteId = company?.sites[0]?.id;
+      if (siteId) setAddDeptSiteId(siteId);
+    } else {
+      setAddDeptSiteId(null);
+    }
+  }, [searchParams, companies, selectedCompanyId]);
 
   // Deletion states
   const [companyToDelete, setCompanyToDelete] = useState<Company | null>(null);
@@ -117,9 +159,21 @@ const CompaniesPage = () => {
   }, [filteredCompanies, currentPage, itemsPerPage]);
 
   const activeSite = selectedCompany?.sites.find((s) => s.id === addDeptSiteId);
+
+  const openAddDepartmentModal = (siteId?: string) => {
+    if (!selectedCompany) return;
+    if (selectedCompany.sites.length === 0) {
+      toast.error("Add a site first, then you can create departments.");
+      setActiveTab("sites");
+      return;
+    }
+    const targetSiteId = siteId ?? selectedCompany.sites[0]?.id;
+    if (!targetSiteId) return;
+    setAddDeptSiteId(targetSiteId);
+  };
   const allDepartments = selectedCompany?.sites.flatMap((s) =>
-    s.departments.map((d) => ({ ...d, siteName: s.name, siteId: s.id }))
-  ) || [];
+    (s.departments ?? []).map((d) => ({ ...d, siteName: s.name, siteId: s.id }))
+  ) ?? [];
 
   const handleBackToList = () => {
     setSelectedCompanyId(null);
@@ -166,11 +220,19 @@ const CompaniesPage = () => {
                 {/* Info Section */}
                 <div className="flex-1 space-y-4">
                   <div className="space-y-1">
-                    <h1 className="text-2xl md:text-3xl font-extrabold text-slate-900 tracking-tight leading-tight">
-                      {selectedCompany.name}
+                    <h1
+                      className="text-2xl md:text-3xl font-extrabold text-slate-900 tracking-tight leading-tight break-words"
+                      title={selectedCompany.name}
+                    >
+                      {truncateForDisplay(selectedCompany.name, COMPANY_NAME_MAX)}
                     </h1>
-                    <p className="text-slate-500 text-sm md:text-base font-medium leading-relaxed max-w-4xl">
-                      {selectedCompany.description || "A forward-thinking organization dedicated to implementing world-class auditing standards and operational excellence across all departments and sites."}
+                    <p
+                      className="text-slate-500 text-sm md:text-base font-medium leading-relaxed max-w-4xl break-words"
+                      title={selectedCompany.description || undefined}
+                    >
+                      {selectedCompany.description
+                        ? truncateForDisplay(selectedCompany.description, COMPANY_DESCRIPTION_MAX)
+                        : "A forward-thinking organization dedicated to implementing world-class auditing standards and operational excellence across all departments and sites."}
                     </p>
                   </div>
 
@@ -219,7 +281,7 @@ const CompaniesPage = () => {
           </Card>
 
           {/* Tabs Section */}
-          <Tabs defaultValue="sites" className="w-full">
+          <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
             <TabsList className="w-full justify-start bg-white border border-slate-100 shadow-sm h-14 p-0 mb-8 overflow-x-auto rounded-xl">
               <TabsTrigger
                 value="sites"
@@ -236,20 +298,20 @@ const CompaniesPage = () => {
             </TabsList>
 
             <TabsContent value="sites">
-              <Card className="border border-slate-100 shadow-md rounded-2xl overflow-hidden bg-white">
-                <div className="relative p-6 flex justify-between items-center border-b border-slate-100 text-foreground">
-                  <h2 className="text-xl font-bold">Sites</h2>
-                  <div className={`relative ${showOnboardingGuide ? "z-[60]" : ""}`}>
-                    {showOnboardingGuide && (
+              <Card id="tour-step-sites-card" className="border border-slate-100 shadow-md rounded-2xl overflow-hidden bg-white">
+                <div className="relative p-6 flex flex-col gap-4 sm:flex-row sm:justify-between sm:items-center border-b border-slate-100 text-foreground">
+                  <h2 className="text-xl font-bold shrink-0">Sites</h2>
+                  <div className={`relative shrink-0 ${showOnboardingGuide && onboardingStep === 3 ? "z-[60]" : ""}`}>
+                    {showOnboardingGuide && onboardingStep === 3 && (
                       <div className="absolute inset-0 -m-2 rounded-2xl ring-[8px] ring-blue-500/50 animate-pulse z-[-1]" />
                     )}
                     <Button
                       id="tour-step-add-site"
                       onClick={() => {
                         setShowAddSite(true);
-                        setShowOnboardingGuide(false);
+                        if (showOnboardingGuide) setTourStep(4);
                       }}
-                      className={`bg-[#213847] hover:bg-[#213847]/90 text-white gap-2 px-6 rounded-lg font-bold transition-all ${showOnboardingGuide ? "relative z-[60] scale-105 shadow-2xl" : ""}`}
+                      className={`w-full sm:w-auto bg-[#213847] hover:bg-[#213847]/90 text-white gap-2 px-6 rounded-lg font-bold transition-all ${showOnboardingGuide && onboardingStep === 3 ? "relative z-[60] scale-105 shadow-2xl" : ""}`}
                     >
                       <Plus className="h-4 w-4" /> Add Site
                     </Button>
@@ -257,13 +319,10 @@ const CompaniesPage = () => {
                       <TourStepPopover
                         targetId="tour-step-add-site"
                         step={3}
-                        totalSteps={7}
+                        totalSteps={ONBOARDING_TOTAL_STEPS}
                         title="Create Sites"
                         description="Click this add site button and fill the fields to create sites."
-                        onNext={() => {
-                          setShowAddSite(true);
-                          setOnboardingStep(4);
-                        }}
+                        onNext={() => setTourStep(4)}
                         onBack={() => {
                           setShowOnboardingGuide(false);
                           navigate("/?restartOnboarding=true&step=2");
@@ -275,10 +334,11 @@ const CompaniesPage = () => {
                     )}
                   </div>
                 </div>
-                <Table>
+                <div className="overflow-x-auto">
+                <Table className="w-full table-fixed min-w-[720px]">
                   <TableHeader className="bg-slate-50/50">
                     <TableRow className="border-slate-100">
-                      <TableHead className="font-bold text-slate-500 py-4 px-6 uppercase text-[11px] tracking-wider">Site Name</TableHead>
+                      <TableHead className="font-bold text-slate-500 py-4 px-6 uppercase text-[11px] tracking-wider w-[22%]">Site Name</TableHead>
                       <TableHead className="font-bold text-slate-500 py-4 uppercase text-[11px] tracking-wider">Type</TableHead>
                       <TableHead className="font-bold text-slate-500 py-4 uppercase text-[11px] tracking-wider">Location</TableHead>
                       <TableHead className="font-bold text-slate-500 py-4 uppercase text-[11px] tracking-wider">Contact</TableHead>
@@ -299,8 +359,10 @@ const CompaniesPage = () => {
                     ) : (
                       selectedCompany.sites.map((site) => (
                         <TableRow key={site.id} className="hover:bg-slate-50/30 transition-colors border-slate-50">
-                          <TableCell className="py-5 px-6">
-                            <div className="font-bold text-slate-900">{site.name}</div>
+                          <TableCell className="py-5 px-6 max-w-0 w-[22%]">
+                            <div className="font-bold text-slate-900 break-all line-clamp-2" title={site.name}>
+                              {truncateForDisplay(site.name, SITE_NAME_MAX)}
+                            </div>
                           </TableCell>
                           <TableCell className="py-5">
                             <Badge variant="secondary" className="bg-slate-100 text-slate-600 font-bold px-3 py-0.5 text-[10px] uppercase border-none">
@@ -334,23 +396,45 @@ const CompaniesPage = () => {
                     )}
                   </TableBody>
                 </Table>
+                </div>
               </Card>
+
             </TabsContent>
 
             <TabsContent value="departments">
-              <Card className="border border-slate-100 shadow-md rounded-2xl overflow-hidden bg-white">
-                <div className="p-6 flex justify-between items-center border-b border-slate-100 text-foreground">
-                  <h2 className="text-xl font-bold">Departments</h2>
-                  {selectedCompany.sites.length > 0 && (
-                    <Button
-                      onClick={() => setAddDeptSiteId(selectedCompany.sites[0].id)}
-                      className="bg-[#213847] hover:bg-[#213847]/90 text-white gap-2 px-6 rounded-lg font-bold"
-                    >
-                      <Plus className="h-4 w-4" /> Add Department
-                    </Button>
-                  )}
+              <Card id="tour-step-departments-card" className="border border-slate-100 shadow-md rounded-2xl overflow-hidden bg-white">
+                <div className="relative p-6 flex flex-col gap-4 sm:flex-row sm:justify-between sm:items-center border-b border-slate-100 text-foreground">
+                  <h2 className="text-xl font-bold shrink-0">Departments</h2>
+                  <div className={`relative shrink-0 ${showOnboardingGuide && onboardingStep === 6 ? "z-[60]" : ""}`}>
+                      {showOnboardingGuide && onboardingStep === 6 && (
+                        <div className="absolute inset-0 -m-2 rounded-2xl ring-[8px] ring-blue-500/50 animate-pulse z-[-1]" />
+                      )}
+                      <Button
+                        id="tour-step-add-dept"
+                        type="button"
+                        onClick={() => openAddDepartmentModal()}
+                        className={`w-full sm:w-auto bg-[#213847] hover:bg-[#213847]/90 text-white gap-2 px-6 rounded-lg font-bold transition-all ${showOnboardingGuide && onboardingStep === 6 ? "relative z-[60] scale-105 shadow-2xl" : ""}`}
+                      >
+                        <Plus className="h-4 w-4" /> Add Department
+                      </Button>
+                      {showOnboardingGuide && onboardingStep === 6 && (
+                        <TourStepPopover
+                          targetId="tour-step-add-dept"
+                          step={6}
+                          totalSteps={ONBOARDING_TOTAL_STEPS}
+                          title="Create Departments"
+                          description="Click Add Department to create departments for your site."
+                          onNext={() => setTourStep(7)}
+                          onBack={() => setTourStep(5)}
+                          onClose={() => setShowOnboardingGuide(false)}
+                          position="left"
+                          disableShadow={false}
+                        />
+                      )}
+                    </div>
                 </div>
-                <Table>
+                <div className="overflow-x-auto">
+                <Table className="w-full table-fixed min-w-[640px]">
                   <TableHeader className="bg-slate-50/50">
                     <TableRow className="border-slate-100">
                       <TableHead className="font-bold text-slate-500 py-4 px-6 uppercase text-[11px] tracking-wider">Dept Name</TableHead>
@@ -367,14 +451,23 @@ const CompaniesPage = () => {
                           <div className="flex flex-col items-center gap-2">
                             <Users className="h-10 w-10 text-slate-100" />
                             <p className="text-sm font-medium">No departments defined in any site.</p>
+                            <Button
+                              type="button"
+                              className="mt-4 bg-[#213847] hover:bg-[#213847]/90 text-white gap-2"
+                              onClick={() => openAddDepartmentModal()}
+                            >
+                              <Plus className="h-4 w-4" /> Add Department
+                            </Button>
                           </div>
                         </TableCell>
                       </TableRow>
                     ) : (
                       allDepartments.map((dept: any) => (
                         <TableRow key={dept.id} className="hover:bg-slate-50/30 transition-colors border-slate-50">
-                          <TableCell className="py-5 px-6">
-                            <div className="font-bold text-slate-900">{dept.name}</div>
+                          <TableCell className="py-5 px-6 max-w-0 w-[28%]">
+                            <div className="font-bold text-slate-900 break-all line-clamp-2" title={dept.name}>
+                              {truncateForDisplay(dept.name, 100)}
+                            </div>
                             {dept.description && <div className="text-[11px] text-slate-400 font-medium mt-0.5 truncate max-w-xs">{dept.description}</div>}
                           </TableCell>
                           <TableCell className="py-5">
@@ -403,9 +496,75 @@ const CompaniesPage = () => {
                     )}
                   </TableBody>
                 </Table>
+                </div>
               </Card>
+
+            {/* Step 9: Final Step on Companies - Move to Users sidebar */}
+            {showOnboardingGuide && onboardingStep === 9 && (
+              <TourStepPopover
+                targetId="tour-step-users"
+                step={9}
+                totalSteps={ONBOARDING_TOTAL_STEPS}
+                title="User Management"
+                description="In this page, you can see the user list and create, edit, delete, and manage users."
+                onNext={() => {
+                  setShowOnboardingGuide(false);
+                  navigate("/users?onboarding=true&step=10");
+                }}
+                onBack={() => setTourStep(8)}
+                onClose={() => setShowOnboardingGuide(false)}
+                position="right"
+                disableShadow={false}
+              />
+            )}
             </TabsContent>
           </Tabs>
+
+          {/* Step 5: View Sites — outside Tabs so the target is always measurable */}
+          {showOnboardingGuide && onboardingStep === 5 && !showAddSite && (
+            <TourStepPopover
+              targetId="tour-step-sites-card"
+              step={5}
+              totalSteps={ONBOARDING_TOTAL_STEPS}
+              title="View Your Sites"
+              description={
+                selectedCompany.sites.length > 0
+                  ? "Your site has been created! You can view all your sites here. Use the edit and delete buttons in the Actions column to manage them."
+                  : "This is where your sites will appear once created. You can manage them using the edit and delete buttons in the Actions column."
+              }
+              onNext={() => setTourStep(6)}
+              onBack={() => setTourStep(4)}
+              onClose={() => setShowOnboardingGuide(false)}
+              position="top"
+              disableShadow={false}
+            />
+          )}
+
+          {/* Step 8: View Departments — outside Tabs for the same reason */}
+          {showOnboardingGuide && onboardingStep === 8 && !addDeptSiteId && (
+            <TourStepPopover
+              targetId="tour-step-departments-card"
+              step={8}
+              totalSteps={ONBOARDING_TOTAL_STEPS}
+              title="View Your Departments"
+              description={
+                allDepartments.length > 0
+                  ? "Your department has been created! You can view all your departments here. Use the edit and delete buttons in the Actions column to manage them."
+                  : "This is where your departments will appear once created. You can manage them using the edit and delete buttons in the Actions column."
+              }
+              onNext={() => setTourStep(9)}
+              onBack={() => {
+                if (selectedCompany.sites.length > 0) {
+                  setTourStep(7);
+                } else {
+                  setTourStep(6);
+                }
+              }}
+              onClose={() => setShowOnboardingGuide(false)}
+              position="top"
+              disableShadow={false}
+            />
+          )}
 
           {/* ------------------------------------------------------------------ */}
           {/* SITE MODAL                                                          */}
@@ -415,63 +574,100 @@ const CompaniesPage = () => {
           <SiteModal
             open={showAddSite}
             hideOverlay={showOnboardingGuide && onboardingStep === 4}
+            hideCancel={showOnboardingGuide && onboardingStep === 4}
             onClose={() => {
+              if (showOnboardingGuide && onboardingStep === 4) return;
               setShowAddSite(false);
             }}
             onSubmit={async (data) => {
               const res = await addSite(selectedCompany.id, data);
               if (res?.success) {
-                setShowAddSite(false);
-                setOnboardingStep(5);
-                navigate("/users?onboarding=true&step=5");
+                if (showOnboardingGuide) {
+                  setTourStep(5);
+                } else {
+                  setShowAddSite(false);
+                }
               }
             }}
             mode="create"
           />
 
           {/* ------------------------------------------------------------------ */}
-          {/* STEP 4 TOUR POPOVER                                                 */}
-          {/*                                                                     */}
-          {/* targetId="tour-step-site-modal" points to the invisible fixed       */}
-          {/* anchor div rendered at the top of this component when step === 4.   */}
-          {/* The popover appears to the right of the modal dialog.               */}
-          {/*                                                                     */}
+          {/* STEP 4 TOUR POPOVER — positioned to the right of the site modal     */}
           {/* disableShadow={true} → no dark overlay, modal fully visible.        */}
           {/* ------------------------------------------------------------------ */}
           {showOnboardingGuide && onboardingStep === 4 && showAddSite && (
             <TourStepPopover
-              targetId="viewport"
+              targetId="tour-step-site-modal"
               step={4}
-              totalSteps={7}
+              totalSteps={ONBOARDING_TOTAL_STEPS}
               title="Add Site Details"
-              description="Fill in the site details. Provide at least a Site Name to continue. Click 'Add Site' when ready."
-              onNext={() => {
-                setShowAddSite(false);
-                setOnboardingStep(5);
-                navigate("/users?onboarding=true&step=5");
-              }}
-              onBack={() => {
-                setShowAddSite(false);
-                setOnboardingStep(3);
-                setShowOnboardingGuide(true);
-              }}
+              description="Fill in all the site details and click 'Add Site' when ready."
+              onNext={() => setTourStep(5)}
+              onBack={() => setTourStep(3)}
               onClose={() => {
                 setShowOnboardingGuide(false);
                 setShowAddSite(false);
               }}
-              position="center"
+              position="right"
               hideNext={false}
               disableShadow={true}
             />
           )}
 
-          {activeSite && (
-            <DepartmentModal
-              open={!!addDeptSiteId}
-              onClose={() => setAddDeptSiteId(null)}
-              onSubmit={(data) => addDepartment(selectedCompany.id, activeSite.id, data.name, data)}
-              siteName={activeSite.name}
-              mode="create"
+          {(() => {
+            const deptModalSite = selectedCompany.sites.find((s) => s.id === addDeptSiteId);
+            if (!deptModalSite) return null;
+            return (
+              <DepartmentModal
+                open={!!addDeptSiteId}
+                hideOverlay={showOnboardingGuide && onboardingStep === 7}
+                hideCancel={showOnboardingGuide && onboardingStep === 7}
+                onClose={() => {
+                  if (showOnboardingGuide && onboardingStep === 7) return;
+                  setAddDeptSiteId(null);
+                }}
+                onSubmit={async (data) => {
+                  const res = await addDepartment(
+                    selectedCompany.id,
+                    deptModalSite.id,
+                    data.name,
+                    data
+                  );
+                  if (res && showOnboardingGuide) {
+                    setTourStep(8);
+                  }
+                }}
+                siteName={deptModalSite.name}
+                mode="create"
+              />
+            );
+          })()}
+
+          {/* Step 7: Add Department modal details */}
+          {showOnboardingGuide && onboardingStep === 7 && !!addDeptSiteId && (
+            <TourStepPopover
+              targetId="tour-step-dept-modal"
+              step={7}
+              totalSteps={ONBOARDING_TOTAL_STEPS}
+              title="Add Department Details"
+              description="Fill in the department name and other details, then click 'Create Department'."
+              onNext={() => setTourStep(8)}
+              onBack={() => setTourStep(6)}
+              onClose={() => {
+                setShowOnboardingGuide(false);
+                setSearchParams(
+                  (prev) => {
+                    const next = new URLSearchParams(prev);
+                    next.delete("onboarding");
+                    next.delete("step");
+                    return next;
+                  },
+                  { replace: true }
+                );
+              }}
+              position="right"
+              disableShadow={true}
             />
           )}
 
@@ -502,7 +698,10 @@ const CompaniesPage = () => {
             <DepartmentModal
               open={!!editDept}
               onClose={() => setEditDept(null)}
-              onSubmit={(data) => updateDepartment(selectedCompany.id, editDept.siteId, editDept.dept.id, data)}
+              onSubmit={(data) => {
+                updateDepartment(selectedCompany.id, editDept.siteId, editDept.dept.id, data);
+                setEditDept(null);
+              }}
               mode="edit"
             />
           )}
@@ -520,8 +719,12 @@ const CompaniesPage = () => {
               }
             }}
             isLoading={isDeleting}
-            title={siteToDelete ? `Delete Site: ${siteToDelete.name}?` : "Delete Site?"}
-            description="Are you sure you want to delete this site? All associated departments will be permanently removed."
+            title="Delete site?"
+            description={
+              siteToDelete
+                ? formatDeleteSiteDescription(siteToDelete.name)
+                : "Are you sure you want to delete this site? All associated departments will be permanently removed."
+            }
           />
 
           <DeleteConfirmationDialog
@@ -536,8 +739,15 @@ const CompaniesPage = () => {
               }
             }}
             isLoading={isDeleting}
-            title={deptToDelete ? `Delete Department: ${deptToDelete.dept.name}?` : "Delete Department?"}
-            description={`Are you sure you want to delete this department?`}
+            title="Delete department?"
+            description={
+              deptToDelete
+                ? formatDeleteDepartmentDescription(
+                    deptToDelete.dept.name,
+                    selectedCompany?.sites.find((s) => s.id === deptToDelete.siteId)?.name
+                  )
+                : "Are you sure you want to delete this department?"
+            }
           />
 
           <DeleteConfirmationDialog
@@ -655,7 +865,7 @@ const CompaniesPage = () => {
                       </TableCell>
                       <TableCell className="text-center">
                         <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-muted text-muted-foreground">
-                          {company.sites.reduce((acc, s) => acc + s.departments.length, 0)}
+                          {company.sites.reduce((acc, s) => acc + (s.departments?.length ?? 0), 0)}
                         </span>
                       </TableCell>
                       <TableCell className="text-right pr-6" onClick={(e) => e.stopPropagation()}>

@@ -1,8 +1,10 @@
 import React from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Clock, AlertTriangle, ArrowRight } from 'lucide-react';
+import { Rocket, AlertTriangle, ArrowRight } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
+import { getTrialUiState } from '@/lib/trialUtils';
+import { useTrialCountdown } from '@/hooks/useTrialCountdown';
 
 interface TrialBannerProps {
   subscriptionStatus?: string | null;
@@ -11,71 +13,73 @@ interface TrialBannerProps {
 
 const TrialBanner: React.FC<TrialBannerProps> = ({ subscriptionStatus, trialEndDate }) => {
   const navigate = useNavigate();
+  useTrialCountdown();
 
-  const showBanner = (subscriptionStatus === 'trial' || subscriptionStatus === 'expired') && !!trialEndDate;
+  const { remainingDays, isActive, isUrgent, isExpired } = getTrialUiState({
+    subscriptionStatus,
+    trialEndDate,
+  });
 
-  if (!showBanner) {
+  if (!isActive && !isExpired) {
     return null;
   }
 
-  const remainingDays = Math.ceil(
-    (new Date(trialEndDate).getTime() - new Date().getTime()) / (1000 * 60 * 60 * 24)
-  );
-
-  const isExpired = remainingDays <= 0;
-  const isWarning = !isExpired && remainingDays <= 3;
+  const dayLabel = remainingDays === 1 ? 'day' : 'days';
 
   return (
-    <div 
+    <div
       className={cn(
-        "mb-6 p-4 rounded-xl border flex flex-col md:flex-row items-center justify-between gap-4 transition-all animate-in fade-in slide-in-from-top-4 duration-500",
-        isExpired 
-          ? "bg-red-100 border-red-300 text-red-900"
-          : isWarning 
-            ? "bg-orange-100 border-orange-300 text-orange-800" 
-            : "bg-green-100 border-green-300 text-green-800"
+        'mb-6 p-4 rounded-xl border flex flex-col md:flex-row items-center justify-between gap-4 transition-all animate-in fade-in slide-in-from-top-4 duration-500',
+        isExpired
+          ? 'bg-red-50 border-red-300 text-red-900'
+          : isUrgent
+            ? 'bg-red-50 border-red-200 text-red-900'
+            : 'bg-emerald-50 border-emerald-200 text-emerald-900'
       )}
     >
       <div className="flex items-center gap-3">
-        <div className={cn(
-          "w-10 h-10 rounded-full flex items-center justify-center shrink-0",
-          isExpired 
-            ? "bg-red-200 text-red-600"
-            : isWarning 
-              ? "bg-orange-200 text-orange-600" 
-              : "bg-green-200 text-green-600"
-        )}>
-          {isExpired || isWarning ? <AlertTriangle className="w-5 h-5" /> : <Clock className="w-5 h-5" />}
+        <div
+          className={cn(
+            'w-10 h-10 rounded-full flex items-center justify-center shrink-0',
+            isExpired || isUrgent
+              ? 'bg-red-100 text-red-600'
+              : 'bg-emerald-100 text-emerald-600'
+          )}
+        >
+          {isExpired || isUrgent ? (
+            <AlertTriangle className="w-5 h-5" />
+          ) : (
+            <Rocket className="w-5 h-5" />
+          )}
         </div>
         <div>
           <p className="font-bold text-sm md:text-base">
-            {isExpired 
-              ? "Your free trial has expired." 
-              : `Your free trial ends in ${remainingDays} ${remainingDays === 1 ? 'day' : 'days'}.`
-            }
+            {isExpired
+              ? 'Your free trial has ended — account suspended.'
+              : isUrgent
+                ? `Trial ending soon — only ${remainingDays} ${dayLabel} left!`
+                : `You are on a free trial — ${remainingDays} ${dayLabel} remaining.`}
           </p>
           <p className="text-xs md:text-sm opacity-90">
             {isExpired
-              ? "Upgrade to a professional plan to continue using all premium features."
-              : "Upgrade to a professional plan to continue using all premium features without interruption."
-            }
+              ? 'Upgrade now to restore access. You can only view the dashboard until you subscribe.'
+              : isUrgent
+                ? 'Your trial is almost over. Upgrade now to avoid losing access to your data.'
+                : 'Enjoy full Premium access. Upgrade anytime to keep your plan after the trial ends.'}
           </p>
         </div>
       </div>
-      
-      <Button 
+
+      <Button
         onClick={() => navigate('/subscription')}
-        variant="ghost"
         className={cn(
-          "shrink-0 font-bold gap-2 rounded-lg transition-all text-white",
-          isExpired
-            ? "bg-red-600 hover:bg-red-700 shadow-md shadow-red-200"
-            : isWarning 
-              ? "bg-orange-600 hover:bg-orange-700 shadow-md shadow-orange-200" 
-              : "bg-green-600 hover:bg-green-700 shadow-md shadow-green-200"
+          'shrink-0 font-bold gap-2 rounded-lg text-white',
+          isExpired || isUrgent
+            ? 'bg-red-600 hover:bg-red-700'
+            : 'bg-emerald-600 hover:bg-emerald-700'
         )}
       >
-        Upgrade Now
+        Upgrade now
         <ArrowRight className="w-4 h-4" />
       </Button>
     </div>

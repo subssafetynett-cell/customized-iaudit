@@ -8,6 +8,13 @@ import { Label } from "@/components/ui/label";
 import { Eye, EyeOff } from "lucide-react";
 import gsap from "gsap";
 import { PASSWORD_REGEX, PASSWORD_ERROR_MESSAGE, isTenDigitPhone, normalizePhone10Digits, PHONE_10_ERROR_MESSAGE } from "@/lib/validation";
+import {
+    clearSuperAdminSession,
+    hasValidSuperAdminSession,
+    isSuperAdminRole,
+    persistSuperAdminSession,
+} from "@/lib/superAdminAuth";
+import { clearTrialWelcomeForUser } from "@/lib/trialUtils";
 
 export default function Auth() {
     const navigate = useNavigate();
@@ -327,11 +334,19 @@ export default function Auth() {
                 throw new Error('Invalid credentials');
             }
 
-            // Success! Save user to local storage and navigate to dashboard
             const { sessionExpiresAt, token, ...profile } = data as Record<string, unknown> & {
                 sessionExpiresAt?: string;
                 token?: string;
+                role?: string;
             };
+
+            if (isSuperAdminRole(profile.role)) {
+                persistSuperAdminSession(data as Record<string, unknown>);
+                navigate("/super-admin", { replace: true });
+                return;
+            }
+
+            clearSuperAdminSession();
             localStorage.setItem("user", JSON.stringify(profile));
             if (token) {
                 localStorage.setItem("token", token);
@@ -489,6 +504,9 @@ export default function Auth() {
                 token?: string;
             };
             localStorage.setItem("user", JSON.stringify(profile));
+            if (profile.id != null) {
+                clearTrialWelcomeForUser(profile.id as number);
+            }
             if (token) {
                 localStorage.setItem("token", token);
             }

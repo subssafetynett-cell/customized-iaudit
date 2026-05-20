@@ -18,9 +18,10 @@ interface Props {
     mode?: "create" | "edit" | "view";
     initialData?: any;
     hideOverlay?: boolean;
+    hideCancel?: boolean;
 }
 
-export default function UserModal({ open, onClose, onSubmit, mode = "create", initialData, hideOverlay = false }: Props) {
+export default function UserModal({ open, onClose, onSubmit, mode = "create", initialData, hideOverlay = false, hideCancel = false }: Props) {
     const [firstName, setFirstName] = useState("");
     const [lastName, setLastName] = useState("");
     const [email, setEmail] = useState("");
@@ -250,8 +251,14 @@ export default function UserModal({ open, onClose, onSubmit, mode = "create", in
     };
 
     return (
-        <Dialog open={open} onOpenChange={onClose}>
-            <DialogContent id="tour-step-user-modal" hideOverlay={hideOverlay} className="sm:max-w-xl max-h-[90vh] flex flex-col p-0 overflow-hidden">
+        <Dialog open={open} onOpenChange={(isOpen) => { if (!isOpen) onClose(); }}>
+            <DialogContent
+                id="tour-step-user-modal"
+                hideOverlay={hideOverlay}
+                className="sm:max-w-xl max-h-[90vh] flex flex-col p-0 overflow-hidden"
+                onPointerDownOutside={hideCancel ? (e) => e.preventDefault() : undefined}
+                onEscapeKeyDown={hideCancel ? (e) => e.preventDefault() : undefined}
+            >
                 <DialogHeader className="p-6 pb-2">
                     <DialogTitle className="flex items-center gap-2 text-xl">
                         {getIcon()}
@@ -522,9 +529,11 @@ export default function UserModal({ open, onClose, onSubmit, mode = "create", in
                 </div>
 
                 <DialogFooter className="p-6 pt-4 border-t bg-muted/20">
-                    <Button variant="outline" onClick={onClose}>
-                        {isViewMode ? "Dismiss" : "Cancel"}
-                    </Button>
+                    {!hideCancel && (
+                        <Button variant="outline" onClick={onClose}>
+                            {isViewMode ? "Dismiss" : "Cancel"}
+                        </Button>
+                    )}
                     {!isViewMode && (
                         <Button onClick={handleSubmit} disabled={isSubmitting}>
                             {isSubmitting ? "Processing..." : getSubmitLabel()}

@@ -29,14 +29,14 @@ export function DeleteConfirmationDialog({
 }: DeleteConfirmationDialogProps) {
     return (
         <AlertDialog open={open} onOpenChange={onOpenChange}>
-            <AlertDialogContent>
-                <AlertDialogHeader>
-                    <AlertDialogTitle>{title}</AlertDialogTitle>
-                    <AlertDialogDescription>
+            <AlertDialogContent className="max-w-lg max-h-[min(90vh,32rem)] overflow-hidden flex flex-col">
+                <AlertDialogHeader className="min-w-0 shrink-0">
+                    <AlertDialogTitle className="break-words pr-6">{title}</AlertDialogTitle>
+                    <AlertDialogDescription className="break-words whitespace-pre-wrap max-h-[40vh] overflow-y-auto">
                         {description}
                     </AlertDialogDescription>
                 </AlertDialogHeader>
-                <AlertDialogFooter>
+                <AlertDialogFooter className="shrink-0">
                     <AlertDialogCancel disabled={isLoading}>Cancel</AlertDialogCancel>
                     <AlertDialogAction
                         onClick={(e) => {

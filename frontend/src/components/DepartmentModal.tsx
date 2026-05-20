@@ -6,6 +6,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Users, Info, Briefcase, Pencil, ShieldAlert } from "lucide-react";
 import { Department } from "@/types/company";
+import { DEPT_NAME_MAX, DEPT_NAME_ERROR_MESSAGE, isWithinMaxLength } from "@/lib/validation";
 
 interface Props {
     open: boolean;
@@ -14,12 +15,14 @@ interface Props {
     initialData?: Partial<Department>;
     mode?: "create" | "edit";
     siteName?: string;
+    hideOverlay?: boolean;
+    hideCancel?: boolean;
 }
 
 const STATUSES = ["Active", "Inactive"];
 const MANAGERS = ["Manager 1", "Manager 2", "Manager 3"]; // Example managers
 
-export default function DepartmentModal({ open, onClose, onSubmit, initialData, mode = "create", siteName }: Props) {
+export default function DepartmentModal({ open, onClose, onSubmit, initialData, mode = "create", siteName, hideOverlay = false, hideCancel = false }: Props) {
     const [name, setName] = useState("");
     const [code, setCode] = useState("");
     const [status, setStatus] = useState("Active");
@@ -44,6 +47,10 @@ export default function DepartmentModal({ open, onClose, onSubmit, initialData, 
             setError("Department name is required");
             return;
         }
+        if (!isWithinMaxLength(trimmedName, DEPT_NAME_MAX)) {
+            setError(DEPT_NAME_ERROR_MESSAGE);
+            return;
+        }
         onSubmit({
             name: trimmedName,
             code: code.trim(),
@@ -55,8 +62,14 @@ export default function DepartmentModal({ open, onClose, onSubmit, initialData, 
     };
 
     return (
-        <Dialog open={open} onOpenChange={onClose}>
-            <DialogContent className="sm:max-w-xl max-h-[90vh] flex flex-col p-0 overflow-hidden">
+        <Dialog open={open} onOpenChange={(isOpen) => { if (!isOpen) onClose(); }}>
+            <DialogContent
+                id="tour-step-dept-modal"
+                hideOverlay={hideOverlay}
+                className="sm:max-w-xl max-h-[90vh] flex flex-col p-0 overflow-hidden"
+                onPointerDownOutside={hideCancel ? (e) => e.preventDefault() : undefined}
+                onEscapeKeyDown={hideCancel ? (e) => e.preventDefault() : undefined}
+            >
                 <DialogHeader className="p-6 pb-2">
                     <DialogTitle className="flex items-center gap-2">
                         {mode === "create" ? (
@@ -93,9 +106,13 @@ export default function DepartmentModal({ open, onClose, onSubmit, initialData, 
                                 <Input
                                     id="dept-name"
                                     placeholder="e.g. Operations"
+                                    maxLength={DEPT_NAME_MAX}
                                     value={name}
                                     onChange={(e) => { setName(e.target.value); setError(""); }}
                                 />
+                                <p className="text-[11px] text-muted-foreground ml-1">
+                                    {name.length}/{DEPT_NAME_MAX} characters
+                                </p>
                             </div>
 
                             <div className="space-y-2">
@@ -162,9 +179,11 @@ export default function DepartmentModal({ open, onClose, onSubmit, initialData, 
                 </div>
 
                 <DialogFooter className="p-6 pt-4 border-t bg-muted/20 gap-2 sm:gap-0">
-                    <Button variant="outline" onClick={onClose} className="px-6 border-muted-foreground/30">
-                        Cancel
-                    </Button>
+                    {!hideCancel && (
+                        <Button variant="outline" onClick={onClose} className="px-6 border-muted-foreground/30">
+                            Cancel
+                        </Button>
+                    )}
                     <Button onClick={handleSubmit} className="px-8 shadow-sm">
                         {mode === "create" ? "Create Department" : "Save Changes"}
                     </Button>

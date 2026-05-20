@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { useSearchParams, useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { apiFetch } from "@/lib/api";
@@ -38,6 +38,15 @@ import {
 import { Document, Packer, Paragraph, TextRun, ImageRun, Table as DocxTable, TableRow as DocxTableRow, TableCell as DocxTableCell, WidthType, BorderStyle, AlignmentType, HeadingLevel } from "docx";
 import { saveAs } from "file-saver";
 import { TourStepPopover } from "@/components/TourStepPopover";
+import { ONBOARDING_TOTAL_STEPS } from "@/lib/onboardingTour";
+import {
+    sanitizeSavedSelfAssessment,
+    sanitizeSelfAssessmentEmail,
+    sanitizeSelfAssessmentNameField,
+    sanitizeSelfAssessmentQuestionText,
+    sanitizeSelfAssessmentScope,
+    SELF_ASSESSMENT_REP_MAX,
+} from "@/lib/plainTextInput";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, PieChart, Pie, Legend } from "recharts";
 
 // --- Types ---
@@ -292,6 +301,46 @@ const SelfAssessment = () => {
     const [searchParams, setSearchParams] = useSearchParams();
     const [step, setStep] = useState<"list" | "setup" | "assessment" | "email-collection" | "result">("list");
     const [showOnboardingGuide, setShowOnboardingGuide] = useState(searchParams.get("onboarding") === "true");
+    const [onboardingStep, setOnboardingStep] = useState<number | null>(null);
+
+    const setTourStep = (tourStep: number) => {
+        setSearchParams(
+            (prev) => {
+                const next = new URLSearchParams(prev);
+                next.set("onboarding", "true");
+                next.set("step", String(tourStep));
+                return next;
+            },
+            { replace: true }
+        );
+    };
+
+    useEffect(() => {
+        const onboarding = searchParams.get("onboarding") === "true";
+        if (!onboarding) {
+            setShowOnboardingGuide(false);
+            return;
+        }
+
+        const tourStep = parseInt(searchParams.get("step") || "14", 10);
+        if (!Number.isFinite(tourStep)) return;
+
+        setShowOnboardingGuide(true);
+        setOnboardingStep(tourStep);
+
+        if (tourStep === 14) {
+            setStep("list");
+        } else if (tourStep === 15) {
+            setStep("setup");
+            requestAnimationFrame(() => {
+                document.getElementById("tour-step-assessment-company")?.scrollIntoView({
+                    block: "center",
+                    inline: "nearest",
+                    behavior: "instant",
+                });
+            });
+        }
+    }, [searchParams]);
     const [standard, setStandard] = useState<Standard | "">("");
     const [companyName, setCompanyName] = useState(""); // Auditor's Company
     const [auditorName, setAuditorName] = useState("");
@@ -322,7 +371,8 @@ const SelfAssessment = () => {
         const saved = localStorage.getItem(`selfAssessments_${user.id}`);
         if (saved) {
             try {
-                setSavedAssessments(JSON.parse(saved));
+                const parsed = JSON.parse(saved) as SavedAssessment[];
+                setSavedAssessments(parsed.map((a) => sanitizeSavedSelfAssessment(a) as SavedAssessment));
             } catch (e) {
                 console.error("Failed to parse saved assessments", e);
             }
@@ -330,7 +380,8 @@ const SelfAssessment = () => {
     }, []);
 
     const saveToHistory = (newAssessment: SavedAssessment) => {
-        const updated = [newAssessment, ...savedAssessments];
+        const safe = sanitizeSavedSelfAssessment(newAssessment) as SavedAssessment;
+        const updated = [safe, ...savedAssessments];
         setSavedAssessments(updated);
         const user = JSON.parse(localStorage.getItem('user') || '{}');
         localStorage.setItem(`selfAssessments_${user.id}`, JSON.stringify(updated));
@@ -345,14 +396,20 @@ const SelfAssessment = () => {
     };
 
     const viewAssessment = (assessment: SavedAssessment) => {
+        const safe = sanitizeSavedSelfAssessment(assessment) as SavedAssessment;
         setStep("result");
-        setStandard(assessment.standard);
-        setCompanyName(assessment.companyName);
-        setAuditorName(assessment.auditorName);
-        setAuditorPosition(assessment.auditorPosition || "");
-        setAuditCompany(assessment.auditCompany || "");
-        setQuestions(assessment.questions);
-        setEmail(assessment.email || "");
+        setStandard(safe.standard);
+        setCompanyName(safe.companyName);
+        setAuditorName(safe.auditorName);
+        setAuditorPosition(safe.auditorPosition || "");
+        setAuditCompany(safe.auditCompany || "");
+        setAuditLocation(safe.auditLocation || "");
+        setAuditRepresentatives(safe.auditRepresentatives || "");
+        setContactEmail(safe.contactEmail || "");
+        setAuditScope(safe.auditScope || "");
+        setAuditDate(safe.auditDate || format(new Date(), "yyyy-MM-dd"));
+        setQuestions(safe.questions);
+        setEmail(safe.email || "");
     };
 
     // Modal Interaction State
@@ -461,10 +518,16 @@ const SelfAssessment = () => {
     };
 
     const confirmAddQuestion = () => {
-        if (!newQuestionText.trim()) return;
+        const safeText = sanitizeSelfAssessmentQuestionText(newQuestionText);
+        if (!safeText.trim()) return;
 
         const newId = `custom-${Date.now()}`;
-        const newQuestion: Question = { id: newId, clause: newQuestionClause, text: newQuestionText, answer: null };
+        const newQuestion: Question = {
+            id: newId,
+            clause: sanitizeSelfAssessmentNameField(newQuestionClause, 120),
+            text: safeText,
+            answer: null,
+        };
 
         setQuestions(prev => {
             // Find last index manually to avoid lint error with findLastIndex
@@ -501,16 +564,16 @@ const SelfAssessment = () => {
     };
 
     const handleEmailSubmit = () => {
-        if (!email) {
-            toast.error("Please enter your email address to see results.");
+        const safeEmail = sanitizeSelfAssessmentEmail(email);
+        if (!safeEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(safeEmail)) {
+            toast.error("Please enter a valid email address to see results.");
             return;
         }
 
         const score = calculateScore();
         const newDate = new Date().toISOString();
 
-        // Save assessment
-        const newAssessment: SavedAssessment = {
+        const newAssessment = sanitizeSavedSelfAssessment({
             id: Date.now().toString(),
             companyName,
             auditorName,
@@ -519,10 +582,16 @@ const SelfAssessment = () => {
             standard: standard as Standard,
             score,
             date: newDate,
-            email,
-            questions
-        };
+            email: safeEmail,
+            questions,
+            auditDate,
+            auditLocation,
+            auditRepresentatives,
+            contactEmail,
+            auditScope,
+        }) as SavedAssessment;
 
+        setEmail(safeEmail);
         saveToHistory(newAssessment);
 
         // Send report as PDF email if user ticked the checkbox
@@ -1471,8 +1540,11 @@ const SelfAssessment = () => {
                             <Button 
                                 id="tour-step-new-assessment"
                                 onClick={() => {
+                                    if (showOnboardingGuide && onboardingStep === 14) {
+                                        setTourStep(15);
+                                        return;
+                                    }
                                     setStep("setup");
-                                    setShowOnboardingGuide(false);
                                 }} 
                                 size="sm" 
                                 className={`gap-1.5 shadow-sm bg-[#213847] hover:bg-[#213847]/90 text-white rounded-xl px-5 h-11 transition-all ${showOnboardingGuide ? 'relative z-[60] scale-105 shadow-2xl' : ''}`}
@@ -1480,23 +1552,18 @@ const SelfAssessment = () => {
                                 <Plus className="h-4 w-4" /> New Assessment
                             </Button>
 
-                            {/* Onboarding Guide Tooltip */}
-                            {showOnboardingGuide && (
+                            {/* Step 14: New Assessment Button */}
+                            {showOnboardingGuide && onboardingStep === 14 && (
                                 <TourStepPopover
                                     targetId="tour-step-new-assessment"
-                                    step={4}
-                                    totalSteps={6}
-                                    title="Self Assessment"
-                                    description="Self Assessment was created for companies that are new to ISO Standards and not certified. If you are already ISO certified use of the Self Assessment tool is optional and can be skipped."
-                                    onNext={() => {
-                                        setShowOnboardingGuide(false);
-                                        navigate("/gap-analysis?onboarding=true");
-                                    }}
-                                    onBack={() => {
-                                        setShowOnboardingGuide(false);
-                                        navigate("/users?onboarding=true");
-                                    }}
+                                    step={14}
+                                    totalSteps={ONBOARDING_TOTAL_STEPS}
+                                    title="Start Assessment"
+                                    description="Click 'New Assessment' to start evaluating your organization's compliance."
+                                    onNext={() => setTourStep(15)}
+                                    onBack={() => navigate("/users?onboarding=true&step=13")}
                                     onClose={() => setShowOnboardingGuide(false)}
+                                    position="left"
                                 />
                             )}
                         </div>
@@ -1538,7 +1605,7 @@ const SelfAssessment = () => {
                                             placeholder="Search by company or auditor..."
                                             className="pl-11 h-12 rounded-2xl border-slate-200 bg-white shadow-sm hover:border-slate-300 focus-visible:ring-1 focus-visible:ring-[#213847]/40 w-full"
                                             value={searchQuery}
-                                            onChange={(e) => setSearchQuery(e.target.value)}
+                                            onChange={(e) => setSearchQuery(sanitizeSelfAssessmentNameField(e.target.value, 100))}
                                         />
                                     </div>
                                     <div className="flex gap-4">
@@ -1663,8 +1730,8 @@ const SelfAssessment = () => {
                                 <CardDescription className="text-slate-300">Configure your assessment details to begin.</CardDescription>
                             </CardHeader>
                             <CardContent className="p-8 space-y-6 bg-white rounded-b-xl">
-                                {/* 1. Company Name */}
-                                <div className="space-y-2">
+                                {/* 1. Company Name — tour step 15 highlights this block */}
+                                <div id="tour-step-assessment-company" className="space-y-2 rounded-xl p-1 -m-1">
                                     <Label htmlFor="company" className="text-sm font-semibold text-slate-700">
                                         Name of the Company <span className="text-red-500">*</span>
                                     </Label>
@@ -1672,7 +1739,7 @@ const SelfAssessment = () => {
                                         id="company"
                                         placeholder="Enter your organization name"
                                         value={companyName}
-                                        onChange={(e) => setCompanyName(e.target.value)}
+                                        onChange={(e) => setCompanyName(sanitizeSelfAssessmentNameField(e.target.value))}
                                         className="h-12 rounded-xl border-slate-200 bg-slate-50 shadow-sm focus-visible:ring-1 focus-visible:ring-[#213847]/40 w-full"
                                     />
                                 </div>
@@ -1722,7 +1789,7 @@ const SelfAssessment = () => {
                                             id="auditLocation"
                                             placeholder="Enter audit location"
                                             value={auditLocation}
-                                            onChange={(e) => setAuditLocation(e.target.value)}
+                                            onChange={(e) => setAuditLocation(sanitizeSelfAssessmentNameField(e.target.value))}
                                             className="h-12 rounded-xl border-slate-200 bg-slate-50 shadow-sm focus-visible:ring-1 focus-visible:ring-[#213847]/40 w-full"
                                         />
                                     </div>
@@ -1734,7 +1801,11 @@ const SelfAssessment = () => {
                                             id="auditRepresentatives"
                                             placeholder="Enter names of representatives"
                                             value={auditRepresentatives}
-                                            onChange={(e) => setAuditRepresentatives(e.target.value)}
+                                            onChange={(e) =>
+                                            setAuditRepresentatives(
+                                                sanitizeSelfAssessmentNameField(e.target.value, SELF_ASSESSMENT_REP_MAX)
+                                            )
+                                        }
                                             className="h-12 rounded-xl border-slate-200 bg-slate-50 shadow-sm focus-visible:ring-1 focus-visible:ring-[#213847]/40 w-full"
                                         />
                                     </div>
@@ -1750,7 +1821,7 @@ const SelfAssessment = () => {
                                             id="auditor"
                                             placeholder="Enter auditor name"
                                             value={auditorName}
-                                            onChange={(e) => setAuditorName(e.target.value)}
+                                            onChange={(e) => setAuditorName(sanitizeSelfAssessmentNameField(e.target.value))}
                                             className="h-12 rounded-xl border-slate-200 bg-slate-50 shadow-sm focus-visible:ring-1 focus-visible:ring-[#213847]/40 w-full"
                                         />
                                     </div>
@@ -1764,7 +1835,7 @@ const SelfAssessment = () => {
                                             id="auditorPosition"
                                             placeholder="Enter auditor position"
                                             value={auditorPosition}
-                                            onChange={(e) => setAuditorPosition(e.target.value)}
+                                            onChange={(e) => setAuditorPosition(sanitizeSelfAssessmentNameField(e.target.value))}
                                             className="h-12 rounded-xl border-slate-200 bg-slate-50 shadow-sm focus-visible:ring-1 focus-visible:ring-[#213847]/40 w-full"
                                         />
                                     </div>
@@ -1777,7 +1848,7 @@ const SelfAssessment = () => {
                                             type="email"
                                             placeholder="Enter contact email"
                                             value={contactEmail}
-                                            onChange={(e) => setContactEmail(e.target.value)}
+                                            onChange={(e) => setContactEmail(sanitizeSelfAssessmentEmail(e.target.value))}
                                             className="h-12 rounded-xl border-slate-200 bg-slate-50 shadow-sm focus-visible:ring-1 focus-visible:ring-[#213847]/40 w-full"
                                         />
                                     </div>
@@ -1790,7 +1861,7 @@ const SelfAssessment = () => {
                                         id="auditScope"
                                         placeholder="Enter scope of audit"
                                         value={auditScope}
-                                        onChange={(e) => setAuditScope(e.target.value)}
+                                        onChange={(e) => setAuditScope(sanitizeSelfAssessmentScope(e.target.value))}
                                         className="h-12 rounded-xl border-slate-200 bg-slate-50 shadow-sm focus-visible:ring-1 focus-visible:ring-[#213847]/40 w-full"
                                     />
                                 </div>
@@ -1804,7 +1875,7 @@ const SelfAssessment = () => {
                                         id="auditCompany"
                                         placeholder="Enter company being audited"
                                         value={auditCompany}
-                                        onChange={(e) => setAuditCompany(e.target.value)}
+                                        onChange={(e) => setAuditCompany(sanitizeSelfAssessmentNameField(e.target.value))}
                                         className="h-12 rounded-xl border-slate-200 bg-slate-50 shadow-sm focus-visible:ring-1 focus-visible:ring-[#213847]/40 w-full"
                                     />
                                 </div>
@@ -1821,6 +1892,21 @@ const SelfAssessment = () => {
                                 </div>
                             </CardContent>
                         </Card>
+
+                        {/* Step 15: Setup Form */}
+                        {showOnboardingGuide && onboardingStep === 15 && (
+                            <TourStepPopover
+                                targetId="tour-step-assessment-company"
+                                step={15}
+                                totalSteps={ONBOARDING_TOTAL_STEPS}
+                                title="Configure Assessment"
+                                description="Fill in the company details, select the ISO standard, and click 'Start Assessment' to begin your evaluation."
+                                onNext={() => navigate("/gap-analysis?onboarding=true&step=16")}
+                                onBack={() => setTourStep(14)}
+                                onClose={() => setShowOnboardingGuide(false)}
+                                position="right"
+                            />
+                        )}
                     </div>
                 )}
 
@@ -2002,7 +2088,7 @@ const SelfAssessment = () => {
                                     type="email"
                                     placeholder="you@company.com"
                                     value={email}
-                                    onChange={(e) => setEmail(e.target.value)}
+                                    onChange={(e) => setEmail(sanitizeSelfAssessmentEmail(e.target.value))}
                                     className="h-12"
                                 />
                             </div>
@@ -2345,7 +2431,7 @@ const SelfAssessment = () => {
                             <Input
                                 id="question-text"
                                 value={newQuestionText}
-                                onChange={(e) => setNewQuestionText(e.target.value)}
+                                onChange={(e) => setNewQuestionText(sanitizeSelfAssessmentQuestionText(e.target.value))}
                                 placeholder="Enter your question here..."
                                 autoFocus
                             />

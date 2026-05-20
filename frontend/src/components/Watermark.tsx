@@ -24,7 +24,7 @@ const Watermark: React.FC = () => {
     }, []);
 
     // Hide watermark on authentication pages
-    const isAuthPage = ['/login', '/signup', '/auth'].includes(location.pathname);
+    const isAuthPage = ['/login', '/signup', '/auth', '/super-admin-login', '/super-admin'].includes(location.pathname);
     if (isAuthPage) return null;
 
     const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {

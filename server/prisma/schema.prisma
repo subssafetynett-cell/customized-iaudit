@@ -112,6 +112,10 @@ model User {
   onboardingCompleted Boolean    @default(false)
   /// Wrong-password streak; cleared on successful login or password reset. At LOGIN_MAX_FAILED_ATTEMPTS, login is blocked until reset.
   failedLoginAttempts Int          @default(0)
+  /// Set once on the user's first successful login.
+  firstLoginAt        DateTime?
+  /// Updated on each successful login (new session issued).
+  lastLoginAt         DateTime?
   companies         Company[]      @relation("UserCompanies")
   sites             Site[]         @relation("UserSites")
   creator           User?          @relation("UserCreator", fields: [creatorId], references: [id])

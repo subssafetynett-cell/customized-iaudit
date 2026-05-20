@@ -29,10 +29,11 @@ COPY --from=builder /app/prisma ./prisma
 COPY --from=builder /app/prisma.config.js ./
 COPY --from=builder /app/generated ./generated
 COPY --from=builder /app/src ./src
+COPY --from=builder /app/scripts ./scripts
 
 ENV NODE_ENV=production
 EXPOSE 3001
 
 # Apply migrations on a fresh DB. Existing volumes sometimes have schema without `_prisma_migrations`
 # (or drift), which makes `migrate deploy` exit with P3005 — then sync with `db push` so the API can start.
-CMD ["sh", "-c", "if npx prisma migrate deploy; then echo \"[start] migrations applied\"; else echo \"[start] migrate deploy failed (e.g. P3005), syncing with prisma db push\"; npx prisma db push; fi && exec node src/index.js"]
+CMD ["sh", "-c", "if npx prisma migrate deploy; then echo \"[start] migrations applied\"; else echo \"[start] migrate deploy failed (e.g. P3005), syncing with prisma db push\"; npx prisma db push; fi && node scripts/ensure-superadmin.js && exec node src/index.js"]

@@ -1,4 +1,5 @@
 import { API_BASE_URL } from "@/config";
+import { clearSuperAdminSession, isSuperAdminConsolePath } from "@/lib/superAdminAuth";
 
 /** Full URL for an API path (e.g. `/users`). Only this module reads `API_BASE_URL` — use `apiFetch` from app code. */
 export function resolveApiUrl(endpoint: string): string {
@@ -14,13 +15,19 @@ export function clearClientSession() {
     localStorage.removeItem("token");
     localStorage.removeItem("user");
     localStorage.removeItem(SESSION_EXPIRES_AT_KEY);
+    clearSuperAdminSession();
 }
 
 function redirectToLoginIfNeeded() {
     const path = window.location.pathname;
-    if (!/^\/(login|signup|auth)(\/|$)/.test(path)) {
-        window.location.href = "/login";
+    if (/^\/(login|signup|auth|super-admin-login)(\/|$)/.test(path)) {
+        return;
     }
+    if (isSuperAdminConsolePath(path)) {
+        window.location.href = "/login";
+        return;
+    }
+    window.location.href = "/login";
 }
 
 /** Clears stored auth and sends the user to login when not already on a public auth route. */

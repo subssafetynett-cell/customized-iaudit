@@ -10,6 +10,14 @@ export default defineConfig(({ mode }) => ({
   server: {
     host: "::",
     port: 8080,
+    // When VITE_API_BASE_URL is empty, the app uses same-origin `/api/...` (Docker nginx).
+    // This proxy lets `npm run dev` reach the backend without changing `.env`.
+    proxy: {
+      "/api": {
+        target: "http://localhost:3001",
+        changeOrigin: true,
+      },
+    },
     hmr: {
       overlay: false,
     },

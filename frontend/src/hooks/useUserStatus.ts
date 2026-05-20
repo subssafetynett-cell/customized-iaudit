@@ -1,6 +1,7 @@
 import { useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { apiFetch, clearClientSession, clearSessionAndRedirectToLogin } from "@/lib/api";
+import { dispatchUserUpdated } from "@/lib/trialUtils";
 
 const CHECK_INTERVAL_MS = 15000; // Check every 15 seconds
 
@@ -46,6 +47,7 @@ export function useUserStatus() {
                     onboardingCompleted: data.onboardingCompleted ?? storedUserData.onboardingCompleted
                 };
                 localStorage.setItem("user", JSON.stringify(updatedUser));
+                dispatchUserUpdated();
             }
         } catch {
             // Network error: do not force logout to avoid disruping offline usage

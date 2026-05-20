@@ -6,7 +6,18 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Company } from "@/types/company";
 import { Building2, Phone, MapPin, Info, Pencil } from "lucide-react";
-import { isTenDigitPhone, normalizePhone10Digits, PHONE_10_ERROR_MESSAGE } from "@/lib/validation";
+import {
+  isTenDigitPhone,
+  normalizePhone10Digits,
+  PHONE_10_ERROR_MESSAGE,
+  COMPANY_NAME_MAX,
+  COMPANY_NAME_ERROR_MESSAGE,
+  COMPANY_DESCRIPTION_MAX,
+  COMPANY_DESCRIPTION_ERROR_MESSAGE,
+  COMPANY_LOGO_MAX_CHARS,
+  isWithinMaxLength,
+} from "@/lib/validation";
+import { COMPANY_INDUSTRIES } from "@/lib/industries";
 
 interface Props {
   open: boolean;
@@ -23,22 +34,11 @@ interface Props {
     country?: string;
     postalCode?: string;
     standards: any[];
-  }) => void;
+  }) => void | Promise<void>;
   initialData?: Partial<Company>;
   mode?: "create" | "edit";
   hideCancel?: boolean;
 }
-
-const INDUSTRIES = [
-  "Construction",
-  "Manufacturing",
-  "Technology",
-  "Healthcare",
-  "Education",
-  "Retail",
-  "Finance",
-  "Other",
-];
 
 const COUNTRIES = [
   "India",
@@ -113,6 +113,10 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
     const file = e.target.files?.[0];
     if (file) {
       // Allow up to 10MB
+      if (!/^image\/(jpeg|jpg|png|webp)$/i.test(file.type)) {
+        setError("Logo must be a PNG, JPEG, or WebP image.");
+        return;
+      }
       if (file.size > 10 * 1024 * 1024) {
         setError("Logo must be less than 10MB");
         return;
@@ -137,7 +141,18 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
           canvas.width = width;
           canvas.height = height;
           canvas.getContext("2d")!.drawImage(img, 0, 0, width, height);
-          setLogo(canvas.toDataURL("image/jpeg", 0.85));
+          let quality = 0.85;
+          let dataUrl = canvas.toDataURL("image/jpeg", quality);
+          while (dataUrl.length > COMPANY_LOGO_MAX_CHARS && quality > 0.4) {
+            quality -= 0.1;
+            dataUrl = canvas.toDataURL("image/jpeg", quality);
+          }
+          if (dataUrl.length > COMPANY_LOGO_MAX_CHARS) {
+            setError("Logo is too large after compression. Try a smaller image.");
+            return;
+          }
+          setLogo(dataUrl);
+          setError("");
         };
         img.src = reader.result as string;
       };
@@ -145,12 +160,20 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
     }
   };
 
-  const handleSubmit = () => {
+  const handleSubmit = async () => {
     const trimmedName = name.trim();
     const trimmedAddress = streetAddress.trim();
     const errors: Record<string, string> = {};
 
     if (!name.trim()) errors.name = "Company name is required";
+    else if (!isWithinMaxLength(trimmedName, COMPANY_NAME_MAX)) errors.name = COMPANY_NAME_ERROR_MESSAGE;
+    if (!isWithinMaxLength(description.trim(), COMPANY_DESCRIPTION_MAX)) {
+      errors.description = COMPANY_DESCRIPTION_ERROR_MESSAGE;
+    }
+    if (logo && logo.length > COMPANY_LOGO_MAX_CHARS) {
+      setError("Logo is too large. Use a smaller image.");
+      return;
+    }
     if (!industry) errors.industry = "Industry is required";
     if (!contactNumber.trim()) errors.contactNumber = "Contact number is required";
     else if (!isTenDigitPhone(contactNumber)) errors.contactNumber = PHONE_10_ERROR_MESSAGE;
@@ -167,21 +190,27 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
       return;
     }
 
-    onSubmit({
-      name: trimmedName,
-      logo,
-      industry,
-      contactNumber: normalizePhone10Digits(contactNumber),
-      description: description.trim(),
-      streetAddress: trimmedAddress,
-      city: city.trim(),
-      state: state.trim(),
-      country: country.trim(),
-      postalCode: postalCode.trim(),
-      standards: initialData?.isoStandards || [],
-    });
-
-    onClose();
+    try {
+      await Promise.resolve(
+        onSubmit({
+          name: trimmedName,
+          logo,
+          industry,
+          contactNumber: normalizePhone10Digits(contactNumber),
+          description: description.trim(),
+          streetAddress: trimmedAddress,
+          city: city.trim(),
+          state: state.trim(),
+          country: country.trim(),
+          postalCode: postalCode.trim(),
+          standards: initialData?.isoStandards || [],
+        })
+      );
+      onClose();
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Failed to save company";
+      setError(message);
+    }
   };
 
   return (
@@ -207,6 +236,17 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
       </DialogHeader>
 
       <div className="flex-1 overflow-y-auto p-6 py-4 space-y-8">
+        {/* One-company info banner — only shown in create mode */}
+        {mode === "create" && (
+          <div className="flex items-start gap-3 p-3.5 rounded-xl bg-amber-50 border border-amber-200/60">
+            <Info className="h-4 w-4 text-amber-600 mt-0.5 shrink-0" />
+            <p className="text-xs text-amber-800 leading-relaxed">
+              <span className="font-semibold">You can create only one company.</span>{" "}
+              Don't worry — you can always edit your company details later using the{" "}
+              <Pencil className="inline h-3 w-3 text-amber-700 -mt-0.5" /> edit button on the Company page.
+            </p>
+          </div>
+        )}
         {/* Logo Upload Section */}
         <div className="flex items-start gap-6 p-4 border rounded-xl bg-accent/5">
           <div className="flex flex-col items-center gap-3">
@@ -258,6 +298,7 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
               <Input
                 id="company-name"
                 placeholder="Enter company name"
+                maxLength={COMPANY_NAME_MAX}
                 className={`h-11 bg-[#F9FAFB] border-[#E5E7EB] rounded-lg text-sm text-[#111827] placeholder:text-[#9CA3AF] focus:ring-1 focus:ring-[#00875B] ${fieldErrors.name ? "border-red-500 focus:ring-red-500" : ""}`}
                 value={name}
                 onChange={(e) => {
@@ -266,6 +307,9 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
                   setError("");
                 }}
               />
+              <p className="text-[10px] text-muted-foreground pl-1">
+                {name.length}/{COMPANY_NAME_MAX} characters
+              </p>
               {fieldErrors.name && <p className="text-[10px] text-red-500 mt-1 pl-1 font-medium">{fieldErrors.name}</p>}
             </div>
             <div className="space-y-2">
@@ -279,7 +323,7 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
                   <SelectValue placeholder="Select industry" />
                 </SelectTrigger>
                 <SelectContent>
-                  {INDUSTRIES.map((ind) => (
+                  {COMPANY_INDUSTRIES.map((ind) => (
                     <SelectItem key={ind} value={ind}>{ind}</SelectItem>
                   ))}
                 </SelectContent>
@@ -314,13 +358,25 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
           </div>
 
           <div className="space-y-2">
-            <Label htmlFor="company-desc" className="text-base text-sm">Description</Label>
+            <Label htmlFor="company-desc" className="text-sm">Description</Label>
             <Input
               id="company-desc"
               placeholder="Brief description of the company"
+              maxLength={COMPANY_DESCRIPTION_MAX}
               value={description}
-              onChange={(e) => setDescription(e.target.value)}
+              onChange={(e) => {
+                setDescription(e.target.value);
+                if (fieldErrors.description) setFieldErrors(prev => ({ ...prev, description: "" }));
+                setError("");
+              }}
+              className={fieldErrors.description ? "border-red-500 focus:ring-red-500" : ""}
             />
+            <p className="text-[10px] text-muted-foreground pl-1">
+              {description.length}/{COMPANY_DESCRIPTION_MAX} characters
+            </p>
+            {fieldErrors.description && (
+              <p className="text-[10px] text-red-500 mt-1 pl-1 font-medium">{fieldErrors.description}</p>
+            )}
           </div>
         </div>
 
