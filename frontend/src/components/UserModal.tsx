@@ -7,8 +7,10 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { UserPlus, User, Mail, Phone, Lock, Shield, Eye, EyeOff, Edit2 } from "lucide-react";
+import { UserPlus, User, Mail, Lock, Shield, Eye, EyeOff, Edit2 } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
+import { PhoneInputWithCountryCode } from "@/components/PhoneInputWithCountryCode";
+import { DEFAULT_PHONE_COUNTRY_CODE } from "@/lib/phoneCountries";
 import { PASSWORD_REGEX, PASSWORD_ERROR_MESSAGE, isTenDigitPhone, normalizePhone10Digits, PHONE_10_ERROR_MESSAGE } from "@/lib/validation";
 
 interface Props {
@@ -19,13 +21,25 @@ interface Props {
     initialData?: any;
     hideOverlay?: boolean;
     hideCancel?: boolean;
+    /** Only org admins may assign roles or toggle account status. */
+    canManageRoles?: boolean;
 }
 
-export default function UserModal({ open, onClose, onSubmit, mode = "create", initialData, hideOverlay = false, hideCancel = false }: Props) {
+export default function UserModal({
+    open,
+    onClose,
+    onSubmit,
+    mode = "create",
+    initialData,
+    hideOverlay = false,
+    hideCancel = false,
+    canManageRoles = false,
+}: Props) {
     const [firstName, setFirstName] = useState("");
     const [lastName, setLastName] = useState("");
     const [email, setEmail] = useState("");
     const [mobile, setMobile] = useState("");
+    const [mobileCountry, setMobileCountry] = useState(DEFAULT_PHONE_COUNTRY_CODE);
     const [role, setRole] = useState("auditor");
     const [customRoleName, setCustomRoleName] = useState("");
     const [isActive, setIsActive] = useState(true);
@@ -206,11 +220,14 @@ export default function UserModal({ open, onClose, onSubmit, mode = "create", in
             lastName,
             email,
             mobile: mode === "create" ? mobileDigits : mobile.trim() === "" ? "" : mobileDigits,
-            role,
-            customRoleName: role === "other" ? customRoleName : undefined,
-            isActive,
             sendWelcomeEmail,
         };
+
+        if (canManageRoles) {
+            payload.role = role;
+            payload.customRoleName = role === "other" ? customRoleName : undefined;
+            payload.isActive = isActive;
+        }
 
         if (password) {
             payload.password = password;
@@ -274,7 +291,7 @@ export default function UserModal({ open, onClose, onSubmit, mode = "create", in
                 </DialogHeader>
 
                 <div className="flex-1 overflow-y-auto p-6 py-4 space-y-6">
-                    {(isEditMode || isViewMode) && (
+                    {(isEditMode || isViewMode) && canManageRoles && (
                         <div className="flex items-center justify-between p-3 rounded-lg bg-muted/50 border">
                             <div className="space-y-0.5">
                                 <Label className="text-sm font-medium">User Status</Label>
@@ -389,41 +406,43 @@ export default function UserModal({ open, onClose, onSubmit, mode = "create", in
                     <div className="grid grid-cols-2 gap-4">
                         <div className="space-y-2">
                             <Label htmlFor="mobile">Mobile</Label>
-                            <div className="relative">
-                                <Phone className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
-                                <Input
-                                    id="modal-mobile"
-                                    type="tel"
-                                    inputMode="numeric"
-                                    maxLength={10}
-                                    placeholder="10-digit number"
-                                    className="pl-9"
-                                    value={mobile}
-                                    onChange={(e) => {
-                                        e.stopPropagation();
-                                        setMobile(e.target.value.replace(/\D/g, "").slice(0, 10));
-                                    }}
-                                    disabled={isViewMode}
-                                />
-                            </div>
+                            <PhoneInputWithCountryCode
+                                id="modal-mobile"
+                                countryCode={mobileCountry}
+                                onCountryCodeChange={setMobileCountry}
+                                value={mobile}
+                                onChange={setMobile}
+                                disabled={isViewMode}
+                                inputClassName="bg-background border-input focus:ring-ring"
+                                selectClassName="h-10 bg-background border-input focus:ring-ring"
+                            />
                         </div>
                         <div className="space-y-2">
                             <Label htmlFor="role">Role *</Label>
-                            <Select value={role} onValueChange={setRole} disabled={isViewMode}>
-                                <SelectTrigger id="role">
-                                    <SelectValue placeholder="Select role" />
-                                </SelectTrigger>
-                                <SelectContent>
-                                    <SelectItem value="admin">Admin</SelectItem>
-                                    <SelectItem value="auditor">Auditor</SelectItem>
-                                    <SelectItem value="auditee">Auditee</SelectItem>
-                                    <SelectItem value="other">Other</SelectItem>
-                                </SelectContent>
-                            </Select>
+                            {canManageRoles ? (
+                                <Select value={role} onValueChange={setRole} disabled={isViewMode}>
+                                    <SelectTrigger id="role">
+                                        <SelectValue placeholder="Select role" />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                        <SelectItem value="admin">Admin</SelectItem>
+                                        <SelectItem value="auditor">Auditor</SelectItem>
+                                        <SelectItem value="auditee">Auditee</SelectItem>
+                                        <SelectItem value="other">Other</SelectItem>
+                                    </SelectContent>
+                                </Select>
+                            ) : (
+                                <Input
+                                    id="role"
+                                    value={role === "other" ? customRoleName || "Other" : role}
+                                    disabled
+                                    className="capitalize bg-muted"
+                                />
+                            )}
                         </div>
                     </div>
 
-                    {role === "other" && (
+                    {canManageRoles && role === "other" && (
                         <div className="space-y-2 animate-in fade-in slide-in-from-top-2">
                             <Label htmlFor="custom-role-name">Custom Role Name *</Label>
                             <div className="relative">

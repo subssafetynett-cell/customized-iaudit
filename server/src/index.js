@@ -1,6 +1,6 @@
 import express from 'express';
 import cors from 'cors';
-import dotenv from 'dotenv';
+import { loadServerEnv } from './loadEnv.js';
 import nodemailer from 'nodemailer';
 import crypto from 'node:crypto';
 import prisma, { handlePrismaError, pool } from './prisma.js';
@@ -27,7 +27,7 @@ import {
     escapeHtml
 } from './textSanitize.js';
 
-dotenv.config();
+loadServerEnv();
 
 const PASSWORD_REGEX = /^(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*(),.?":{}|<>_+=\-\[\]\\\/~^]).{8,}$/;
 
@@ -220,7 +220,8 @@ const LOGIN_SUCCESS_USER_SELECT = {
     stripePaymentIntentId: true,
     renewalType: true,
     autopayConsent: true,
-    onboardingCompleted: true
+    onboardingCompleted: true,
+    emailVerifiedAt: true
 };
 
 const TRIAL_DURATION_DAYS = 14;
@@ -1311,7 +1312,7 @@ async function actorCanViewUserBillingStatus(actorId, targetUserId) {
 
 async function actorCanAccessAuditProgram(actorId, program) {
     if (!program) return false;
-    if (await actorCanAccessTargetUser(actorId, program.userId)) return true;
+    if (program.userId != null && (await actorCanAccessTargetUser(actorId, program.userId))) return true;
     if (program.leadAuditorId === actorId) return true;
     if (Array.isArray(program.auditors) && program.auditors.some((a) => a.id === actorId)) return true;
     return false;
@@ -1319,11 +1320,200 @@ async function actorCanAccessAuditProgram(actorId, program) {
 
 async function actorCanAccessAuditPlan(actorId, plan) {
     if (!plan) return false;
+    if (plan.userId != null && (await actorCanAccessTargetUser(actorId, plan.userId))) return true;
     if (plan.userId === actorId) return true;
     if (plan.leadAuditorId === actorId) return true;
     if (Array.isArray(plan.auditors) && plan.auditors.some((a) => a.id === actorId)) return true;
     if (plan.auditProgram && await actorCanAccessAuditProgram(actorId, plan.auditProgram)) return true;
     return false;
+}
+
+async function resolveActorOrgRootId(actorId) {
+    const root = await getOrgRootUserId(actorId);
+    return root ?? actorId;
+}
+
+async function actorIsInOrgSubtree(actorId, orgRootUserId) {
+    if (actorId === orgRootUserId) return true;
+    const subtree = await collectOrgSubtreeUserIds(orgRootUserId);
+    return subtree.includes(actorId);
+}
+
+async function actorCanReadOrgAssessmentStore(actorId, orgRootUserId) {
+    const actor = await prisma.user.findUnique({ where: { id: actorId }, select: { role: true } });
+    if (!actor) return false;
+    if (actor.role === 'superadmin') return true;
+    return actorIsInOrgSubtree(actorId, orgRootUserId);
+}
+
+const USER_ASSIGNABLE_ROLES = new Set(['admin', 'auditor', 'auditee', 'other']);
+
+function normalizeUserRole(role) {
+    return String(role ?? '').trim().toLowerCase();
+}
+
+/** Create/update/delete users and change roles — org admins only (not auditors/auditees). */
+async function actorCanManageOrgUsers(actorId) {
+    const actor = await prisma.user.findUnique({
+        where: { id: actorId },
+        select: { role: true, creatorId: true }
+    });
+    if (!actor) return false;
+    const r = normalizeUserRole(actor.role);
+    if (r === 'superadmin' || r === 'admin') return true;
+    if (actor.creatorId == null) return true;
+    return false;
+}
+
+/** Gap/self assessment writes: org members except read-only auditors. */
+async function actorCanWriteOrgAssessmentStore(actorId) {
+    const actor = await prisma.user.findUnique({
+        where: { id: actorId },
+        select: { role: true, creatorId: true }
+    });
+    if (!actor) return false;
+    if (actor.role === 'superadmin' || actor.role === 'admin') return true;
+    if (actor.creatorId == null) return true;
+    if (actor.role === 'auditor') return false;
+    return true;
+}
+
+function mergeJsonRecordsById(existingList, moreLists) {
+    const byId = new Map();
+    const add = (list) => {
+        if (!Array.isArray(list)) return;
+        for (const item of list) {
+            if (item && item.id != null) byId.set(String(item.id), item);
+        }
+    };
+    add(existingList);
+    for (const list of moreLists) add(list);
+    return Array.from(byId.values());
+}
+
+async function migrateLegacyUserGapStores(orgRootUserId, subtreeIds) {
+    if (!subtreeIds.length) return;
+    try {
+        const legacyRows = await prisma.$queryRaw`
+            SELECT "userId", analyses, draft FROM "UserGapAnalysisStore"
+            WHERE "userId" = ANY(${subtreeIds}::int[])
+        `;
+        if (!legacyRows.length) return;
+
+        let mergedAnalyses = [];
+        let mergedDraft = null;
+        for (const row of legacyRows) {
+            mergedAnalyses = mergeJsonRecordsById(mergedAnalyses, [row.analyses]);
+            if (row.draft) mergedDraft = row.draft;
+        }
+
+        const existing = await prisma.orgGapAnalysisStore.findUnique({
+            where: { orgRootUserId }
+        });
+        const analyses = mergeJsonRecordsById(existing?.analyses ?? [], [mergedAnalyses]);
+        const draft = existing?.draft ?? mergedDraft;
+
+        await prisma.orgGapAnalysisStore.upsert({
+            where: { orgRootUserId },
+            create: { orgRootUserId, analyses, draft },
+            update: { analyses, draft: draft ?? undefined }
+        });
+
+        await prisma.$executeRaw`
+            DELETE FROM "UserGapAnalysisStore" WHERE "userId" = ANY(${subtreeIds}::int[])
+        `;
+    } catch (err) {
+        if (err?.code !== 'P2010' && err?.code !== '42P01') {
+            console.warn('Legacy gap store migration skipped:', err?.message || err);
+        }
+    }
+}
+
+async function migrateLegacyUserSelfAssessmentStores(orgRootUserId, subtreeIds) {
+    if (!subtreeIds.length) return;
+    try {
+        const legacyRows = await prisma.$queryRaw`
+            SELECT "userId", assessments, draft FROM "UserSelfAssessmentStore"
+            WHERE "userId" = ANY(${subtreeIds}::int[])
+        `;
+        if (!legacyRows.length) return;
+
+        let mergedAssessments = [];
+        let mergedDraft = null;
+        for (const row of legacyRows) {
+            mergedAssessments = mergeJsonRecordsById(mergedAssessments, [row.assessments]);
+            if (row.draft) mergedDraft = row.draft;
+        }
+
+        const existing = await prisma.orgSelfAssessmentStore.findUnique({
+            where: { orgRootUserId }
+        });
+        const assessments = mergeJsonRecordsById(existing?.assessments ?? [], [mergedAssessments]);
+        const draft = existing?.draft ?? mergedDraft;
+
+        await prisma.orgSelfAssessmentStore.upsert({
+            where: { orgRootUserId },
+            create: { orgRootUserId, assessments, draft },
+            update: { assessments, draft: draft ?? undefined }
+        });
+
+        await prisma.$executeRaw`
+            DELETE FROM "UserSelfAssessmentStore" WHERE "userId" = ANY(${subtreeIds}::int[])
+        `;
+    } catch (err) {
+        if (err?.code !== 'P2010' && err?.code !== '42P01') {
+            console.warn('Legacy self assessment store migration skipped:', err?.message || err);
+        }
+    }
+}
+
+async function ensureOrgGapStore(actorId) {
+    const orgRootUserId = await resolveActorOrgRootId(actorId);
+    const subtreeIds = await collectOrgSubtreeUserIds(orgRootUserId);
+    await migrateLegacyUserGapStores(orgRootUserId, subtreeIds);
+    let row = await prisma.orgGapAnalysisStore.findUnique({ where: { orgRootUserId } });
+    if (!row) {
+        row = await prisma.orgGapAnalysisStore.create({
+            data: { orgRootUserId, analyses: [], draft: null, updatedByUserId: actorId }
+        });
+    }
+    return { orgRootUserId, row };
+}
+
+async function ensureOrgSelfAssessmentStore(actorId) {
+    const orgRootUserId = await resolveActorOrgRootId(actorId);
+    const subtreeIds = await collectOrgSubtreeUserIds(orgRootUserId);
+    await migrateLegacyUserSelfAssessmentStores(orgRootUserId, subtreeIds);
+    let row = await prisma.orgSelfAssessmentStore.findUnique({ where: { orgRootUserId } });
+    if (!row) {
+        row = await prisma.orgSelfAssessmentStore.create({
+            data: { orgRootUserId, assessments: [], draft: null, updatedByUserId: actorId }
+        });
+    }
+    return { orgRootUserId, row };
+}
+
+/** Org-wide visibility for audit programs. */
+function buildOrgSubtreeProgramVisibilityOr(subtreeIds) {
+    if (!subtreeIds.length) return [{ userId: -1 }];
+    return [
+        { userId: { in: subtreeIds } },
+        { leadAuditorId: { in: subtreeIds } },
+        { auditors: { some: { id: { in: subtreeIds } } } },
+        { user: { is: { creatorId: { in: subtreeIds } } } },
+        { user: { is: { id: { in: subtreeIds } } } }
+    ];
+}
+
+/** Org-wide visibility for audit plans (includes linked programs). */
+function buildOrgSubtreePlanVisibilityOr(subtreeIds) {
+    if (!subtreeIds.length) return [{ userId: -1 }];
+    return [
+        ...buildOrgSubtreeProgramVisibilityOr(subtreeIds),
+        { auditProgram: { is: { userId: { in: subtreeIds } } } },
+        { auditProgram: { is: { leadAuditorId: { in: subtreeIds } } } },
+        { auditProgram: { is: { auditors: { some: { id: { in: subtreeIds } } } } } }
+    ];
 }
 
 // Basic health check endpoint
@@ -1934,6 +2124,7 @@ app.delete('/companies/:id', authenticateToken, checkTrialExpiration, async (req
 
 function getOtpTtlMinutes(purpose) {
     if (purpose === 'password_reset' || purpose === 'email_change') return 15;
+    if (purpose === 'user_invite') return 30;
     return 10;
 }
 
@@ -1993,21 +2184,28 @@ async function sendOtpToEmailAddressUnderLock(normalizedEmail, purpose) {
 
         const isPasswordReset = purpose === 'password_reset';
         const isEmailChange = purpose === 'email_change';
+        const isUserInvite = purpose === 'user_invite';
         const subject = isPasswordReset
         ? 'Reset your iAudit Global password'
         : isEmailChange
           ? 'Verify your new iAudit email'
-          : 'Your Account Verification Code';
+          : isUserInvite
+            ? 'Verify your iAudit Global account'
+            : 'Your Account Verification Code';
         const titleHtml = isPasswordReset
         ? 'Password reset'
         : isEmailChange
           ? 'Confirm your email'
-          : 'Welcome to iAudit Global';
+          : isUserInvite
+            ? 'Activate your account'
+            : 'Welcome to iAudit Global';
         const introHtml = isPasswordReset
         ? 'You requested to reset your password. Use the verification code below to continue. If you did not request this, you can ignore this email.'
         : isEmailChange
           ? 'Use the verification code below to confirm you can receive email at this address. An administrator requested this address for your account.'
-          : 'Please use the verification code below to confirm your email address and complete your signup securely:';
+          : isUserInvite
+            ? 'An administrator created an iAudit Global account for this email address. Enter the verification code below on the sign-in page to confirm you own this inbox. You must verify before you can sign in.'
+            : 'Please use the verification code below to confirm your email address and complete your signup securely:';
 
     const smtpFrom = String(process.env.SMTP_USER).trim();
     const mailOptions = {
@@ -2022,7 +2220,9 @@ async function sendOtpToEmailAddressUnderLock(normalizedEmail, purpose) {
             ? `Your password reset code is: ${otp}. This code expires in ${ttlMinutes} minutes.`
             : isEmailChange
               ? `Your email verification code is: ${otp}. This code expires in ${ttlMinutes} minutes.`
-              : `Your verification code is: ${otp}. This code will expire in ${ttlMinutes} minutes.`,
+              : isUserInvite
+                ? `Your account activation code is: ${otp}. This code expires in ${ttlMinutes} minutes.`
+                : `Your verification code is: ${otp}. This code will expire in ${ttlMinutes} minutes.`,
         html: `
                 <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 24px; border: 1px solid #e5e7eb; border-radius: 12px; background-color: #ffffff;">
                     <div style="text-align: center; margin-bottom: 24px;">
@@ -2217,6 +2417,7 @@ app.post('/auth/verify-otp-and-signup', async (req, res) => {
                 role: sanitizeShortLabel(role, 80) || 'Admin',
                 customRoleName: sanitizeShortLabel(customRoleName, 120),
                 isActive: isActive !== undefined ? isActive : true,
+                emailVerifiedAt: new Date(),
                 password: hashedPassword
             }
         });
@@ -2245,6 +2446,112 @@ app.post('/auth/verify-otp-and-signup', async (req, res) => {
         res.status(500).json({ error: 'Failed to create user' });
     }
 });
+
+const INVITE_VERIFY_ALLOWED_KEYS = new Set(['email', 'otp']);
+
+async function handleVerifyInvitedAccount(req, res) {
+    const badKeys = getDisallowedExtraKeysError(req.body, INVITE_VERIFY_ALLOWED_KEYS);
+    if (badKeys) {
+        return res.status(400).json({ error: badKeys });
+    }
+    let { email, otp } = req.body;
+    if (!email || !otp || typeof email !== 'string') {
+        return res.status(400).json({ error: 'Valid email and verification code are required' });
+    }
+    email = email.toLowerCase().trim();
+    const otpRaw = String(otp).trim();
+
+    try {
+        const user = await prisma.user.findFirst({
+            where: { email },
+            select: { id: true, emailVerifiedAt: true, creatorId: true, isActive: true }
+        });
+        if (!user) {
+            return res.status(400).json({ error: 'Invalid verification request' });
+        }
+        if (user.creatorId == null) {
+            return res.status(400).json({ error: 'This account does not require invite verification' });
+        }
+        if (user.emailVerifiedAt) {
+            return res.status(200).json({ ok: true, message: 'Email is already verified. You can sign in.' });
+        }
+
+        const storedData = await prisma.otp.findFirst({ where: { email } });
+        if (!storedData) {
+            return res.status(400).json({ error: 'No verification code found. Ask your administrator to resend it.' });
+        }
+        if (new Date() > storedData.expiresAt) {
+            await prisma.otp.delete({ where: { email } }).catch(() => {});
+            return res.status(400).json({ error: 'Verification code has expired. Request a new code.' });
+        }
+        if (storedData.code !== otpRaw) {
+            return res.status(400).json({ error: 'Invalid verification code' });
+        }
+
+        await prisma.$transaction([
+            prisma.user.update({
+                where: { id: user.id },
+                data: { emailVerifiedAt: new Date(), isActive: true }
+            }),
+            prisma.otp.delete({ where: { email } })
+        ]);
+
+        res.json({ ok: true, message: 'Email verified. You can now sign in.' });
+    } catch (error) {
+        console.error('Error verifying invited account:', error);
+        res.status(500).json({ error: 'Verification failed' });
+    }
+}
+
+async function handleResendInviteVerification(req, res) {
+    const badKeys = getDisallowedExtraKeysError(req.body, new Set(['email']));
+    if (badKeys) {
+        return res.status(400).json({ error: badKeys });
+    }
+    let { email } = req.body;
+    if (!email || typeof email !== 'string') {
+        return res.status(400).json({ error: 'Valid email is required' });
+    }
+    email = email.toLowerCase().trim();
+    const emailFmt = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailFmt.test(email) || email.length > 254) {
+        return res.status(400).json({ error: 'Please enter a valid email address' });
+    }
+
+    try {
+        const user = await prisma.user.findFirst({
+            where: { email },
+            select: { id: true, emailVerifiedAt: true, creatorId: true }
+        });
+        if (!user || user.creatorId == null || user.emailVerifiedAt) {
+            return res.json({
+                message: 'If this account is pending verification, a new code has been sent.'
+            });
+        }
+
+        await sendOtpToEmailAddress(email, 'user_invite');
+        res.json({ message: 'Verification code sent.' });
+    } catch (error) {
+        if (error.code === 'OTP_COOLDOWN') {
+            return res.status(429).json({
+                error: error.message,
+                retryAfterSeconds: error.retryAfterSeconds
+            });
+        }
+        if (error.message === 'EMAIL_NOT_CONFIGURED') {
+            return res.status(503).json({ error: 'Email service is not configured' });
+        }
+        console.error('Error resending invite verification:', error);
+        res.status(500).json({ error: 'Failed to send verification code' });
+    }
+}
+
+app.post('/api/auth/verify-invited-account', authJson, sendOtpIpRateLimit, handleVerifyInvitedAccount);
+app.post('/auth/verify-invited-account', sendOtpIpRateLimit, handleVerifyInvitedAccount);
+app.post('/api/auth/resend-invite-verification', authJson, sendOtpIpRateLimit, handleResendInviteVerification);
+app.post('/auth/resend-invite-verification', sendOtpIpRateLimit, handleResendInviteVerification);
+mountedApiRouter.post('/auth/verify-invited-account', sendOtpIpRateLimit, handleVerifyInvitedAccount);
+mountedApiRouter.post('/auth/resend-invite-verification', sendOtpIpRateLimit, handleResendInviteVerification);
 
 app.post('/auth/login', loginIpRateLimit, async (req, res) => {
     const badKeys = getDisallowedExtraKeysError(req.body, LOGIN_ALLOWED_BODY_KEYS);
@@ -2278,7 +2585,9 @@ app.post('/auth/login', loginIpRateLimit, async (req, res) => {
                 email: true,
                 password: true,
                 isActive: true,
-                failedLoginAttempts: true
+                failedLoginAttempts: true,
+                emailVerifiedAt: true,
+                creatorId: true
             }
         });
 
@@ -2324,7 +2633,22 @@ app.post('/auth/login', loginIpRateLimit, async (req, res) => {
         }
 
         if (!user.isActive) {
+            if (user.creatorId != null && !user.emailVerifiedAt) {
+                return res.status(403).json({
+                    error: 'Please verify your email before signing in. Check your inbox for the activation code from your administrator.',
+                    code: 'EMAIL_VERIFICATION_REQUIRED',
+                    email
+                });
+            }
             return res.status(403).json({ error: 'Account is deactivated' });
+        }
+
+        if (!user.emailVerifiedAt && user.creatorId != null) {
+            return res.status(403).json({
+                error: 'Please verify your email before signing in. Enter the activation code sent to your inbox.',
+                code: 'EMAIL_VERIFICATION_REQUIRED',
+                email
+            });
         }
 
         await prisma.user.update({
@@ -2623,6 +2947,7 @@ app.get('/users', authenticateToken, async (req, res) => {
                 role: true,
                 customRoleName: true,
                 isActive: true,
+                emailVerifiedAt: true,
                 createdAt: true
             },
             orderBy: { id: 'asc' }
@@ -2722,9 +3047,50 @@ app.get('/users/:id/status', authenticateToken, async (req, res) => {
     }
 });
 
+app.post('/users/:id/resend-verification', authenticateToken, async (req, res) => {
+    const targetId = Number.parseInt(req.params.id, 10);
+    const actorId = Number(req.user.id);
+    if (Number.isNaN(targetId)) {
+        return res.status(400).json({ error: 'Invalid user id' });
+    }
+    try {
+        if (!(await actorCanManageOrgUsers(actorId))) {
+            return res.status(403).json({ error: 'Forbidden', message: 'Only administrators can resend verification.' });
+        }
+        if (!(await actorCanAccessTargetUser(actorId, targetId))) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
+        const user = await prisma.user.findUnique({
+            where: { id: targetId },
+            select: { email: true, emailVerifiedAt: true, creatorId: true }
+        });
+        if (!user) return res.status(404).json({ error: 'User not found' });
+        if (user.creatorId == null) {
+            return res.status(400).json({ error: 'This user does not require invite verification' });
+        }
+        if (user.emailVerifiedAt) {
+            return res.status(400).json({ error: 'Email is already verified' });
+        }
+        await sendOtpToEmailAddress(user.email.toLowerCase().trim(), 'user_invite');
+        res.json({ message: 'Verification code sent.' });
+    } catch (error) {
+        if (error.code === 'OTP_COOLDOWN') {
+            return res.status(429).json({ error: error.message, retryAfterSeconds: error.retryAfterSeconds });
+        }
+        console.error('Error resending user verification:', error);
+        res.status(500).json({ error: 'Failed to send verification code' });
+    }
+});
+
 app.post('/users', authenticateToken, async (req, res) => {
     const { firstName, lastName, email, mobile, role, customRoleName, password, sendWelcomeEmail } = req.body;
     const creatorId = req.user.id;
+    if (!(await actorCanManageOrgUsers(creatorId))) {
+        return res.status(403).json({
+            error: 'Forbidden',
+            message: 'Only administrators can create users.'
+        });
+    }
     if (!password) {
         return res.status(400).json({ error: 'Password is required' });
     }
@@ -2753,50 +3119,63 @@ app.post('/users', authenticateToken, async (req, res) => {
     }
 
     try {
+        const roleNorm = normalizeUserRole(sanitizeShortLabel(role, 80) || 'auditor');
+        if (!USER_ASSIGNABLE_ROLES.has(roleNorm)) {
+            return res.status(400).json({ error: 'Invalid role' });
+        }
         const user = await prisma.user.create({
             data: {
                 firstName: fn,
                 lastName: ln,
                 email: emailNorm,
                 mobile: userMobile,
-                role: sanitizeShortLabel(role, 80) || 'Admin',
+                role: roleNorm,
                 customRoleName: sanitizeShortLabel(customRoleName, 120),
-                isActive: req.body.isActive !== undefined ? req.body.isActive : true,
+                isActive: false,
+                emailVerifiedAt: null,
                 password: await bcrypt.hash(password, 10),
                 creatorId: creatorId ? Number.parseInt(creatorId) : null
             }
         });
 
-        // Send welcome email if requested — fire and forget, don't block the response
+        let verificationEmailSent = false;
+        try {
+            await sendOtpToEmailAddress(emailNorm, 'user_invite');
+            verificationEmailSent = true;
+        } catch (otpErr) {
+            console.error('Failed to send invite verification OTP:', otpErr);
+            if (otpErr.message === 'EMAIL_NOT_CONFIGURED' && allowDevConsoleOtp()) {
+                verificationEmailSent = true;
+            }
+        }
+
         if (sendWelcomeEmail) {
             const mailOptions = {
                 from: process.env.SMTP_USER,
                 to: emailNorm,
-                subject: 'Welcome to iAudit Global!',
+                subject: 'Your iAudit Global account',
                 html: `
                         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 24px;">
                             <h2 style="color: #213847;">Welcome to iAudit Global, ${fn} ${ln}!</h2>
-                            <p style="color: #4B5563;">Your account has been created successfully. Here are your login details:</p>
-                            <div style="background: #F3F4F6; border-radius: 8px; padding: 16px; margin: 20px 0;">
-                                <p style="margin: 0; color: #111827;"><strong>Name:</strong> ${fn} ${ln}</p>
-                                <p style="margin: 8px 0 0; color: #111827;"><strong>Email:</strong> ${emailNorm}</p>
-                                <p style="margin: 8px 0 0; color: #111827;"><strong>Password:</strong> ${password}</p>
-                            </div>
-                            <p style="color: #4B5563;">You can log in to iAudit Global using your email address and password above.</p>
-                            <p style="color: #4B5563;">If you have any questions, please contact your administrator.</p>
+                            <p style="color: #4B5563;">An administrator created an account for you. Before you can sign in, you must verify this email address using the activation code we sent in a separate message.</p>
+                            <p style="color: #4B5563;">After verification, sign in at the iAudit Global login page with this email and the password your administrator provided.</p>
+                            <p style="color: #4B5563;">If you did not expect this account, ignore these emails.</p>
                             <hr style="border: none; border-top: 1px solid #E5E7EB; margin: 24px 0;" />
-                            <p style="color: #9CA3AF; font-size: 12px;">This is an automated message from iAudit Global. Please do not reply to this email.</p>
+                            <p style="color: #9CA3AF; font-size: 12px;">This is an automated message from iAudit Global.</p>
                         </div>
                     `
             };
-            // Non-blocking: email sends in background, user creation returns immediately
             transporter.sendMail(mailOptions)
-                .then(() => console.log(`Welcome email sent to ${emailNorm}`))
-                .catch((emailError) => console.error('Failed to send welcome email:', emailError));
+                .then(() => console.log(`Invite notice email sent to ${emailNorm}`))
+                .catch((emailError) => console.error('Failed to send invite notice email:', emailError));
         }
 
         const { password: _, ...userWithoutPassword } = user;
-        res.status(201).json(userWithoutPassword);
+        res.status(201).json({
+            ...userWithoutPassword,
+            emailVerificationPending: true,
+            verificationEmailSent
+        });
     } catch (error) {
         console.error('Error creating user:', error);
         if (error.code === 'P2002') {
@@ -2892,14 +3271,48 @@ app.put('/users/:id', authenticateToken, async (req, res) => {
         return res.status(400).json({ error: 'Invalid user id' });
     }
     const { firstName, lastName, email, mobile, role, customRoleName, isActive, password, onboardingCompleted, emailChangeOtp } = req.body;
+    const actorId = Number(req.user.id);
     try {
-        if (!(await actorCanAccessTargetUser(req.user.id, targetId))) {
+        if (!(await actorCanAccessTargetUser(actorId, targetId))) {
             return res.status(403).json({ error: 'Forbidden' });
         }
 
-        const targetUser = await prisma.user.findUnique({ where: { id: targetId }, select: { email: true } });
+        const canManageUsers = await actorCanManageOrgUsers(actorId);
+        if (!canManageUsers && targetId !== actorId) {
+            return res.status(403).json({
+                error: 'Forbidden',
+                message: 'Only administrators can edit other users.'
+            });
+        }
+
+        const targetUser = await prisma.user.findUnique({
+            where: { id: targetId },
+            select: { email: true, role: true }
+        });
         if (!targetUser) {
             return res.status(404).json({ error: 'User not found' });
+        }
+
+        const actorRow = await prisma.user.findUnique({
+            where: { id: actorId },
+            select: { role: true }
+        });
+        if (
+            normalizeUserRole(targetUser.role) === 'superadmin' &&
+            normalizeUserRole(actorRow?.role) !== 'superadmin'
+        ) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
+
+        const privilegeFieldsRequested =
+            role !== undefined ||
+            customRoleName !== undefined ||
+            (isActive !== undefined && targetId !== actorId);
+        if (privilegeFieldsRequested && !canManageUsers) {
+            return res.status(403).json({
+                error: 'Forbidden',
+                message: 'Only administrators can change user roles or account status.'
+            });
         }
 
         const oldNorm = targetUser.email.toLowerCase().trim();
@@ -2941,6 +3354,9 @@ app.put('/users/:id', authenticateToken, async (req, res) => {
             email: incomingNorm,
             onboardingCompleted: onboardingCompleted !== undefined ? onboardingCompleted : undefined
         };
+        if (incomingNorm !== oldNorm) {
+            updateData.emailVerifiedAt = new Date();
+        }
 
         if (isActive !== undefined) {
             updateData.isActive = isActive;
@@ -2975,8 +3391,8 @@ app.put('/users/:id', authenticateToken, async (req, res) => {
             }
         }
         if (role !== undefined && role !== null) {
-            const r = sanitizeShortLabel(role, 80);
-            if (!r) {
+            const r = normalizeUserRole(sanitizeShortLabel(role, 80));
+            if (!r || !USER_ASSIGNABLE_ROLES.has(r)) {
                 return res.status(400).json({ error: 'Invalid role' });
             }
             updateData.role = r;
@@ -3018,6 +3434,12 @@ app.delete('/users/:id', authenticateToken, async (req, res) => {
     }
     const actorId = Number(req.user.id);
     try {
+        if (!(await actorCanManageOrgUsers(actorId))) {
+            return res.status(403).json({
+                error: 'Forbidden',
+                message: 'Only administrators can delete users.'
+            });
+        }
         if (!(await actorCanAccessTargetUser(actorId, targetId))) {
             return res.status(403).json({ error: 'Forbidden' });
         }
@@ -3025,6 +3447,14 @@ app.delete('/users/:id', authenticateToken, async (req, res) => {
             return res.status(400).json({
                 error: 'You cannot delete your own account while signed in. Sign out or use another admin account.'
             });
+        }
+
+        const target = await prisma.user.findUnique({
+            where: { id: targetId },
+            select: { role: true }
+        });
+        if (target && normalizeUserRole(target.role) === 'superadmin') {
+            return res.status(403).json({ error: 'Forbidden' });
         }
 
         await deleteUserCompletely(targetId);
@@ -3112,39 +3542,52 @@ app.get('/audit-programs', authenticateToken, checkTrialExpiration, async (req, 
 
     try {
         const actorId = req.user.id;
-        let scopeUserId;
-        if (userId && userId !== 'undefined' && userId !== 'null') {
-            scopeUserId = Number.parseInt(String(userId), 10);
+        const useOrgScope =
+            String(req.query.scope || '') === 'org' ||
+            !userId ||
+            userId === 'undefined' ||
+            userId === 'null';
+
+        let programWhere;
+        if (useOrgScope && req.user.role !== 'superadmin') {
+            const orgRootId = await resolveActorOrgRootId(actorId);
+            if (!(await actorCanReadOrgAssessmentStore(actorId, orgRootId))) {
+                return res.status(403).json({ error: 'Forbidden' });
+            }
+            const subtreeIds = await collectOrgSubtreeUserIds(orgRootId);
+            programWhere = { OR: buildOrgSubtreeProgramVisibilityOr(subtreeIds) };
         } else {
-            scopeUserId = actorId;
-        }
-        if (Number.isNaN(scopeUserId)) {
-            return res.status(400).json({ error: 'Invalid userId' });
-        }
-        if (!(await actorCanAccessTargetUser(actorId, scopeUserId))) {
-            return res.status(403).json({ error: 'Forbidden' });
-        }
+            let scopeUserId;
+            if (userId && userId !== 'undefined' && userId !== 'null') {
+                scopeUserId = Number.parseInt(String(userId), 10);
+            } else {
+                scopeUserId = actorId;
+            }
+            if (Number.isNaN(scopeUserId)) {
+                return res.status(400).json({ error: 'Invalid userId' });
+            }
+            if (!(await actorCanAccessTargetUser(actorId, scopeUserId))) {
+                return res.status(403).json({ error: 'Forbidden' });
+            }
 
-        const parsedUserId = scopeUserId;
-        console.log(`[DEBUG] Fetching audit programs for parsedUserId: ${parsedUserId}`);
+            const parsedUserId = scopeUserId;
+            const user = await prisma.user.findUnique({ where: { id: parsedUserId } });
+            const effectiveAdminId = user?.creatorId || parsedUserId;
 
-        // Fetch the user to check their creatorId for broader visibility
-        const user = await prisma.user.findUnique({ where: { id: parsedUserId } });
-
-        const effectiveAdminId = user?.creatorId || parsedUserId;
-        console.log(`[DEBUG] Fetching audit programs for parsedUserId: ${parsedUserId}, effectiveAdminId: ${effectiveAdminId}`);
-
-        const programs = await prisma.auditProgram.findMany({
-            where: {
+            programWhere = {
                 OR: [
                     { userId: parsedUserId },
                     { leadAuditorId: parsedUserId },
                     { auditors: { some: { id: parsedUserId } } },
-                    { user: { is: { creatorId: parsedUserId } } }, // My sub-users
-                    { user: { is: { id: effectiveAdminId } } }, // My admin's programs
-                    { user: { is: { creatorId: effectiveAdminId } } } // My teammates' programs
+                    { user: { is: { creatorId: parsedUserId } } },
+                    { user: { is: { id: effectiveAdminId } } },
+                    { user: { is: { creatorId: effectiveAdminId } } }
                 ]
-            },
+            };
+        }
+
+        const programs = await prisma.auditProgram.findMany({
+            where: programWhere,
             orderBy: { createdAt: 'desc' },
             select: {
                 id: true,
@@ -3179,7 +3622,6 @@ app.get('/audit-programs', authenticateToken, checkTrialExpiration, async (req, 
                 scheduleData: true
             }
         });
-        console.log(`[DEBUG] Found ${programs.length} programs for user ${parsedUserId}`);
         if (programs.length > 0) {
             console.log(`[DEBUG] First program owners: userId=${programs[0].userId}, leadAuditorId=${programs[0].leadAuditorId}`);
             console.log(`[DEBUG] First program auditors:`, JSON.stringify(programs[0].auditors.map(a => a.id)));
@@ -3361,35 +3803,44 @@ app.get('/audit-plans', authenticateToken, checkTrialExpiration, async (req, res
 
         if (!superAll) {
             const actorId = req.user.id;
-            let scopeUserId;
-            if (userId && userId !== 'undefined' && userId !== 'null') {
-                scopeUserId = Number.parseInt(String(userId), 10);
+            const useOrgScope =
+                String(req.query.scope || '') === 'org' ||
+                !userId ||
+                userId === 'undefined' ||
+                userId === 'null';
+
+            if (useOrgScope) {
+                const orgRootId = await resolveActorOrgRootId(actorId);
+                if (!(await actorCanReadOrgAssessmentStore(actorId, orgRootId))) {
+                    return res.status(403).json({ error: 'Forbidden' });
+                }
+                const subtreeIds = await collectOrgSubtreeUserIds(orgRootId);
+                whereClause.OR = buildOrgSubtreePlanVisibilityOr(subtreeIds);
             } else {
-                scopeUserId = actorId;
-            }
-            if (Number.isNaN(scopeUserId)) {
-                return res.status(400).json({ error: 'Invalid userId' });
-            }
-            if (!(await actorCanAccessTargetUser(actorId, scopeUserId))) {
-                return res.status(403).json({ error: 'Forbidden' });
-            }
+                let scopeUserId = Number.parseInt(String(userId), 10);
+                if (Number.isNaN(scopeUserId)) {
+                    return res.status(400).json({ error: 'Invalid userId' });
+                }
+                if (!(await actorCanAccessTargetUser(actorId, scopeUserId))) {
+                    return res.status(403).json({ error: 'Forbidden' });
+                }
 
-            const uId = scopeUserId;
-            const user = await prisma.user.findUnique({ where: { id: uId } });
-            const effectiveAdminId = user?.creatorId || uId;
-            console.log(`[DEBUG] Fetching audit plans for uId: ${uId}, effectiveAdminId: ${effectiveAdminId}`);
+                const uId = scopeUserId;
+                const user = await prisma.user.findUnique({ where: { id: uId } });
+                const effectiveAdminId = user?.creatorId || uId;
 
-            whereClause.OR = [
-                { userId: uId },
-                { leadAuditorId: uId },
-                { auditors: { some: { id: uId } } },
-                { user: { is: { creatorId: uId } } },
-                { user: { is: { id: effectiveAdminId } } },
-                { user: { is: { creatorId: effectiveAdminId } } },
-                { auditProgram: { is: { userId: uId } } },
-                { auditProgram: { is: { leadAuditorId: uId } } },
-                { auditProgram: { is: { auditors: { some: { id: uId } } } } }
-            ];
+                whereClause.OR = [
+                    { userId: uId },
+                    { leadAuditorId: uId },
+                    { auditors: { some: { id: uId } } },
+                    { user: { is: { creatorId: uId } } },
+                    { user: { is: { id: effectiveAdminId } } },
+                    { user: { is: { creatorId: effectiveAdminId } } },
+                    { auditProgram: { is: { userId: uId } } },
+                    { auditProgram: { is: { leadAuditorId: uId } } },
+                    { auditProgram: { is: { auditors: { some: { id: uId } } } } }
+                ];
+            }
         }
 
         const plans = await prisma.auditPlan.findMany({
@@ -3613,6 +4064,226 @@ app.put('/audit-plans/:id', authenticateToken, checkTrialExpiration, async (req,
     } catch (error) {
         console.error('Error updating audit plan:', error);
         res.status(500).json({ error: 'Failed to update audit plan' });
+    }
+});
+
+// --- Organization-scoped gap analysis & self assessment (not blocked by trial expiry) ---
+
+app.get('/gap-analyses', authenticateToken, async (req, res) => {
+    try {
+        const actorId = Number(req.user.id);
+        const { orgRootUserId, row } = await ensureOrgGapStore(actorId);
+        if (!(await actorCanReadOrgAssessmentStore(actorId, orgRootUserId))) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
+        res.json({
+            orgRootUserId,
+            analyses: row.analyses ?? [],
+            draft: row.draft ?? null,
+            updatedAt: row.updatedAt,
+            canWrite: await actorCanWriteOrgAssessmentStore(actorId),
+        });
+    } catch (error) {
+        console.error('Error loading gap analyses:', error);
+        res.status(500).json({ error: 'Failed to load gap analyses' });
+    }
+});
+
+app.put('/gap-analyses', authenticateToken, async (req, res) => {
+    try {
+        const actorId = Number(req.user.id);
+        if (!(await actorCanWriteOrgAssessmentStore(actorId))) {
+            return res.status(403).json({ error: 'Forbidden', message: 'Read-only role cannot modify gap analyses.' });
+        }
+        const { orgRootUserId } = await ensureOrgGapStore(actorId);
+        const { analyses, draft } = req.body ?? {};
+        const existing = await prisma.orgGapAnalysisStore.findUnique({ where: { orgRootUserId } });
+        const data = {
+            analyses: analyses !== undefined ? analyses : (existing?.analyses ?? []),
+            draft: draft !== undefined ? draft : (existing?.draft ?? null),
+            updatedByUserId: actorId,
+        };
+        const row = await prisma.orgGapAnalysisStore.upsert({
+            where: { orgRootUserId },
+            create: { orgRootUserId, ...data },
+            update: data,
+        });
+        res.json({ ok: true, orgRootUserId, updatedAt: row.updatedAt });
+    } catch (error) {
+        console.error('Error saving gap analyses:', error);
+        res.status(500).json({ error: 'Failed to save gap analyses' });
+    }
+});
+
+app.delete('/gap-analyses/:externalId', authenticateToken, async (req, res) => {
+    try {
+        const actorId = Number(req.user.id);
+        if (!(await actorCanWriteOrgAssessmentStore(actorId))) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
+        const { orgRootUserId, row } = await ensureOrgGapStore(actorId);
+        const externalId = String(req.params.externalId || '');
+        const analyses = Array.isArray(row.analyses) ? row.analyses : [];
+        const next = analyses.filter((a) => String(a?.id) !== externalId);
+        if (next.length === analyses.length) {
+            return res.status(404).json({ error: 'Gap analysis not found' });
+        }
+        await prisma.orgGapAnalysisStore.update({
+            where: { orgRootUserId },
+            data: { analyses: next, updatedByUserId: actorId },
+        });
+        res.status(204).send();
+    } catch (error) {
+        console.error('Error deleting gap analysis:', error);
+        res.status(500).json({ error: 'Failed to delete gap analysis' });
+    }
+});
+
+app.get('/self-assessments', authenticateToken, async (req, res) => {
+    try {
+        const actorId = Number(req.user.id);
+        const { orgRootUserId, row } = await ensureOrgSelfAssessmentStore(actorId);
+        if (!(await actorCanReadOrgAssessmentStore(actorId, orgRootUserId))) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
+        res.json({
+            orgRootUserId,
+            assessments: row.assessments ?? [],
+            draft: row.draft ?? null,
+            updatedAt: row.updatedAt,
+            canWrite: await actorCanWriteOrgAssessmentStore(actorId),
+        });
+    } catch (error) {
+        console.error('Error loading self assessments:', error);
+        res.status(500).json({ error: 'Failed to load self assessments' });
+    }
+});
+
+app.put('/self-assessments', authenticateToken, async (req, res) => {
+    try {
+        const actorId = Number(req.user.id);
+        if (!(await actorCanWriteOrgAssessmentStore(actorId))) {
+            return res.status(403).json({ error: 'Forbidden', message: 'Read-only role cannot modify self assessments.' });
+        }
+        const { orgRootUserId } = await ensureOrgSelfAssessmentStore(actorId);
+        const { assessments, draft } = req.body ?? {};
+        const existing = await prisma.orgSelfAssessmentStore.findUnique({ where: { orgRootUserId } });
+        const data = {
+            assessments: assessments !== undefined ? assessments : (existing?.assessments ?? []),
+            draft: draft !== undefined ? draft : (existing?.draft ?? null),
+            updatedByUserId: actorId,
+        };
+        const row = await prisma.orgSelfAssessmentStore.upsert({
+            where: { orgRootUserId },
+            create: { orgRootUserId, ...data },
+            update: data,
+        });
+        res.json({ ok: true, orgRootUserId, updatedAt: row.updatedAt });
+    } catch (error) {
+        console.error('Error saving self assessments:', error);
+        res.status(500).json({ error: 'Failed to save self assessments' });
+    }
+});
+
+app.delete('/self-assessments/:externalId', authenticateToken, async (req, res) => {
+    try {
+        const actorId = Number(req.user.id);
+        if (!(await actorCanWriteOrgAssessmentStore(actorId))) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
+        const { orgRootUserId, row } = await ensureOrgSelfAssessmentStore(actorId);
+        const externalId = String(req.params.externalId || '');
+        const assessments = Array.isArray(row.assessments) ? row.assessments : [];
+        const next = assessments.filter((a) => String(a?.id) !== externalId);
+        if (next.length === assessments.length) {
+            return res.status(404).json({ error: 'Self assessment not found' });
+        }
+        await prisma.orgSelfAssessmentStore.update({
+            where: { orgRootUserId },
+            data: { assessments: next, updatedByUserId: actorId },
+        });
+        res.status(204).send();
+    } catch (error) {
+        console.error('Error deleting self assessment:', error);
+        res.status(500).json({ error: 'Failed to delete self assessment' });
+    }
+});
+
+/** @deprecated Use /gap-analyses — kept for older clients */
+app.get('/user-persisted/gap-analyses', authenticateToken, async (req, res) => {
+    try {
+        const actorId = Number(req.user.id);
+        const { row } = await ensureOrgGapStore(actorId);
+        res.json({
+            analyses: row.analyses ?? [],
+            draft: row.draft ?? null,
+        });
+    } catch (error) {
+        console.error('Error loading gap analyses:', error);
+        res.status(500).json({ error: 'Failed to load gap analyses' });
+    }
+});
+app.put('/user-persisted/gap-analyses', authenticateToken, async (req, res) => {
+    try {
+        const actorId = Number(req.user.id);
+        if (!(await actorCanWriteOrgAssessmentStore(actorId))) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
+        const { orgRootUserId } = await ensureOrgGapStore(actorId);
+        const { analyses, draft } = req.body ?? {};
+        const existing = await prisma.orgGapAnalysisStore.findUnique({ where: { orgRootUserId } });
+        const data = {
+            analyses: analyses !== undefined ? analyses : (existing?.analyses ?? []),
+            draft: draft !== undefined ? draft : (existing?.draft ?? null),
+            updatedByUserId: actorId,
+        };
+        const row = await prisma.orgGapAnalysisStore.upsert({
+            where: { orgRootUserId },
+            create: { orgRootUserId, ...data },
+            update: data,
+        });
+        res.json({ ok: true, updatedAt: row.updatedAt });
+    } catch (error) {
+        console.error('Error saving gap analyses:', error);
+        res.status(500).json({ error: 'Failed to save gap analyses' });
+    }
+});
+app.get('/user-persisted/self-assessments', authenticateToken, async (req, res) => {
+    try {
+        const actorId = Number(req.user.id);
+        const { orgRootUserId, row } = await ensureOrgSelfAssessmentStore(actorId);
+        res.json({
+            assessments: row.assessments ?? [],
+            draft: row.draft ?? null,
+        });
+    } catch (error) {
+        console.error('Error loading self assessments:', error);
+        res.status(500).json({ error: 'Failed to load self assessments' });
+    }
+});
+app.put('/user-persisted/self-assessments', authenticateToken, async (req, res) => {
+    try {
+        const actorId = Number(req.user.id);
+        if (!(await actorCanWriteOrgAssessmentStore(actorId))) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
+        const { orgRootUserId } = await ensureOrgSelfAssessmentStore(actorId);
+        const { assessments, draft } = req.body ?? {};
+        const existing = await prisma.orgSelfAssessmentStore.findUnique({ where: { orgRootUserId } });
+        const data = {
+            assessments: assessments !== undefined ? assessments : (existing?.assessments ?? []),
+            draft: draft !== undefined ? draft : (existing?.draft ?? null),
+            updatedByUserId: actorId,
+        };
+        const row = await prisma.orgSelfAssessmentStore.upsert({
+            where: { orgRootUserId },
+            create: { orgRootUserId, ...data },
+            update: data,
+        });
+        res.json({ ok: true, updatedAt: row.updatedAt });
+    } catch (error) {
+        console.error('Error saving self assessments:', error);
+        res.status(500).json({ error: 'Failed to save self assessments' });
     }
 });
 

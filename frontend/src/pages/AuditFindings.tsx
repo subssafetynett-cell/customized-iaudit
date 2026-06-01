@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { apiFetch } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -29,6 +29,12 @@ import autoTable from "jspdf-autotable";
 import * as XLSX from "xlsx";
 import { Document, Packer, Paragraph, TextRun, Table as DocxTable, TableRow as DocxTableRow, TableCell as DocxTableCell, WidthType, HeadingLevel, AlignmentType, ImageRun, BorderStyle } from "docx";
 import { saveAs } from "file-saver";
+import { TourStepPopover } from "@/components/TourStepPopover";
+import {
+    AUDIT_FINDINGS_TOUR_TOTAL_STEPS,
+    getAuditFindingsTourStepConfig,
+} from "@/lib/auditFindingsOnboardingTour";
+import { cn } from "@/lib/utils";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -368,6 +374,63 @@ const FILTER_INACTIVE = "bg-white text-slate-600 border border-slate-200 hover:b
 
 export default function AuditFindings() {
     const navigate = useNavigate();
+    const [searchParams, setSearchParams] = useSearchParams();
+    const auditFindingsTourActive = searchParams.get("auditFindingsTour") === "true";
+    const auditFindingsTourStep = Math.min(
+        AUDIT_FINDINGS_TOUR_TOTAL_STEPS,
+        Math.max(1, parseInt(searchParams.get("auditFindingsStep") || "1", 10)),
+    );
+    const auditFindingsTourStepConfig =
+        getAuditFindingsTourStepConfig(auditFindingsTourStep);
+
+    const setAuditFindingsTourStep = (step: number) => {
+        setSearchParams(
+            (prev) => {
+                const next = new URLSearchParams(prev);
+                next.set("auditFindingsTour", "true");
+                next.set("auditFindingsStep", String(step));
+                return next;
+            },
+            { replace: true },
+        );
+    };
+
+    const exitAuditFindingsTour = () => {
+        setSearchParams(
+            (prev) => {
+                const next = new URLSearchParams(prev);
+                next.delete("auditFindingsTour");
+                next.delete("auditFindingsStep");
+                return next;
+            },
+            { replace: true },
+        );
+    };
+
+    const tourFindingsHighlight = (step: number) =>
+        auditFindingsTourActive && auditFindingsTourStep === step
+            ? "relative z-[60] ring-[4px] ring-emerald-500/80 ring-offset-2 rounded-xl"
+            : "";
+
+    const handleAuditFindingsTourNext = () => {
+        if (auditFindingsTourStep >= AUDIT_FINDINGS_TOUR_TOTAL_STEPS) {
+            exitAuditFindingsTour();
+            navigate("/getting-started");
+            toast.success("Findings tour complete!");
+            return;
+        }
+        setAuditFindingsTourStep(auditFindingsTourStep + 1);
+    };
+
+    const handleAuditFindingsTourBack = () => {
+        if (auditFindingsTourStep <= 1) {
+            exitAuditFindingsTour();
+            navigate("/getting-started");
+            return;
+        }
+        setAuditFindingsTourStep(auditFindingsTourStep - 1);
+    };
+
     const [findings, setFindings] = useState<Finding[]>([]);
     const [loading, setLoading] = useState(true);
     const [activeFilter, setActiveFilter] = useState<FilterType>("All");
@@ -394,7 +457,7 @@ export default function AuditFindings() {
             const isSuperAdmin = user.role === 'superadmin';
             const path = isSuperAdmin
                 ? `/audit-plans?scope=all&includeData=true`
-                : `/audit-plans?userId=${user.id || user._id}&includeData=true`;
+                : `/audit-plans?scope=org&includeData=true`;
 
             const res = await apiFetch(path);
             if (!res.ok) throw new Error("API call failed");
@@ -707,7 +770,10 @@ export default function AuditFindings() {
     };
 
     return (
-        <div className="flex-1 p-8 pt-6 bg-white min-h-screen">
+        <div className="flex-1 p-8 pt-6 bg-white min-h-screen relative">
+            {auditFindingsTourActive && (
+                <div className="fixed inset-0 bg-slate-900/10 z-[40] pointer-events-none" />
+            )}
             <div className="max-w-6xl mx-auto space-y-6 pb-16">
                 <div className="flex items-center justify-between">
                     <div>
@@ -721,7 +787,13 @@ export default function AuditFindings() {
                     </div>
                 </div>
 
-                <div className="grid grid-cols-3 gap-4">
+                <div
+                    id="tour-step-findings-summary"
+                    className={cn(
+                        "grid grid-cols-3 gap-4",
+                        tourFindingsHighlight(2),
+                    )}
+                >
                     {(["OFI", "Minor", "Major"] as const).map((type) => {
                         const label = type === "OFI" ? "OFI" : type === "Minor" ? "Minor N/C" : "Major N/C";
                         const accent = type === "OFI" ? "amber" : type === "Minor" ? "orange" : "red";
@@ -740,7 +812,13 @@ export default function AuditFindings() {
                     })}
                 </div>
 
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <div
+                    id="tour-step-findings-filters"
+                    className={cn(
+                        "flex flex-col sm:flex-row sm:items-center justify-between gap-4",
+                        tourFindingsHighlight(3),
+                    )}
+                >
                     <div className="flex gap-2 flex-wrap">
                         {FILTERS.map((f) => (
                             <button
@@ -768,17 +846,38 @@ export default function AuditFindings() {
                 </div>
 
                 {loading ? (
-                    <div className="flex items-center justify-center py-24 text-slate-400 text-sm gap-2">
+                    <div
+                        id="tour-step-findings-list"
+                        className={cn(
+                            "flex items-center justify-center py-24 text-slate-400 text-sm gap-2 min-h-[200px]",
+                            tourFindingsHighlight(4),
+                        )}
+                    >
                         <RefreshCw className="w-5 h-5 animate-spin" /> Loading findings…
                     </div>
                 ) : filtered.length === 0 ? (
-                    <div className="flex flex-col items-center justify-center py-24 text-slate-400 gap-3">
+                    <div
+                        id="tour-step-findings-list"
+                        className={cn(
+                            "flex flex-col items-center justify-center py-24 text-slate-400 gap-3 min-h-[200px] rounded-xl border border-slate-200 bg-slate-50/50",
+                            tourFindingsHighlight(4),
+                        )}
+                    >
                         <SearchX className="w-12 h-12 opacity-40" />
                         <p className="text-base font-semibold">No findings found</p>
+                        <p className="text-sm text-slate-400 max-w-md text-center">
+                            Findings from completed audits will appear here automatically.
+                        </p>
                     </div>
                 ) : (
                     <>
-                        <div className="rounded-xl border border-slate-200 overflow-hidden shadow-sm">
+                        <div
+                            id="tour-step-findings-list"
+                            className={cn(
+                                "rounded-xl border border-slate-200 overflow-hidden shadow-sm",
+                                tourFindingsHighlight(4),
+                            )}
+                        >
                             <Table>
                                 <TableHeader className="bg-[#213847]">
                                     <TableRow className="hover:bg-slate-800 divide-x divide-slate-600">
@@ -841,6 +940,24 @@ export default function AuditFindings() {
                     </>
                 )}
             </div>
+
+            {auditFindingsTourActive && auditFindingsTourStepConfig && (
+                <TourStepPopover
+                    key={auditFindingsTourStep}
+                    targetId={auditFindingsTourStepConfig.targetId}
+                    step={auditFindingsTourStep}
+                    totalSteps={AUDIT_FINDINGS_TOUR_TOTAL_STEPS}
+                    title={auditFindingsTourStepConfig.title}
+                    description={auditFindingsTourStepConfig.description}
+                    position={auditFindingsTourStepConfig.position}
+                    onNext={handleAuditFindingsTourNext}
+                    onBack={handleAuditFindingsTourBack}
+                    onClose={() => {
+                        exitAuditFindingsTour();
+                        navigate("/getting-started");
+                    }}
+                />
+            )}
 
             <Dialog open={!!editingFinding} onOpenChange={(open) => !open && setEditingFinding(null)}>
                 <DialogContent className="max-w-2xl">

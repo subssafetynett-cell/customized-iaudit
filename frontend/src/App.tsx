@@ -31,6 +31,7 @@ import NotFound from "./pages/NotFound";
 import ProfileSettings from "./pages/ProfileSettings";
 import AccountSettings from "./pages/AccountSettings";
 import SuperAdmin from "./pages/SuperAdmin";
+import GettingStarted from "./pages/GettingStarted";
 
 const queryClient = new QueryClient();
 
@@ -62,6 +63,7 @@ const App = () => (
           {/* Protected User Routes */}
           <Route element={<ProtectedRoute><AppLayout /></ProtectedRoute>}>
             <Route path="/" element={<Index />} />
+            <Route path="/getting-started" element={<GettingStarted />} />
             <Route path="/companies" element={<Companies />} />
             <Route path="/company/:id" element={<CompanyDetail />} />
             <Route path="/users" element={<Users />} />

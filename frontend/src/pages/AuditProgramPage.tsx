@@ -36,6 +36,11 @@ import { saveAs } from "file-saver";
 import logoImg from "@/assets/logo.png";
 import { auditTemplates } from "@/data/auditTemplates";
 import { CLAUSE_MATRIX, ClauseMatrixRow } from "@/data/clauseMapping";
+import { TourStepPopover } from "@/components/TourStepPopover";
+import {
+    AUDIT_PLAN_TOUR_TOTAL_STEPS,
+    getAuditPlanTourStepConfig,
+} from "@/lib/auditPlanOnboardingTour";
 
 interface Clause {
     id: string;
@@ -56,6 +61,42 @@ const AuditProgramPage = () => {
     const [activeSiteId, setActiveSiteId] = useState<string>("");
     const navigate = useNavigate();
     const [searchParams, setSearchParams] = useSearchParams();
+    const auditPlanTourActive = searchParams.get("auditPlanTour") === "true";
+    const auditPlanTourStep = Math.min(
+        AUDIT_PLAN_TOUR_TOTAL_STEPS,
+        Math.max(1, parseInt(searchParams.get("auditPlanStep") || "1", 10)),
+    );
+    const auditPlanTourStepConfig = getAuditPlanTourStepConfig(auditPlanTourStep);
+
+    const setAuditPlanTourStep = (step: number) => {
+        setSearchParams(
+            (prev) => {
+                const next = new URLSearchParams(prev);
+                next.set("auditPlanTour", "true");
+                next.set("auditPlanStep", String(step));
+                return next;
+            },
+            { replace: true },
+        );
+    };
+
+    const exitAuditPlanTour = () => {
+        setSearchParams(
+            (prev) => {
+                const next = new URLSearchParams(prev);
+                next.delete("auditPlanTour");
+                next.delete("auditPlanStep");
+                return next;
+            },
+            { replace: true },
+        );
+    };
+
+    const tourPlanHighlight = (step: number) =>
+        auditPlanTourActive && auditPlanTourStep === step
+            ? "relative z-[60] ring-[4px] ring-emerald-500/80 ring-offset-2 rounded-xl"
+            : "";
+
     const [showOnboardingGuide, setShowOnboardingGuide] = useState(searchParams.get("onboarding") === "true");
     const [isFinishing, setIsFinishing] = useState(false);
     
@@ -69,8 +110,8 @@ const AuditProgramPage = () => {
                 const user = JSON.parse(localStorage.getItem('user') || '{}');
                 const [sitesRes, programsRes, plansRes] = await Promise.all([
                     apiFetch(`/sites?userId=${user.id}`),
-                    apiFetch(`/audit-programs?userId=${user.id}&full=true`),
-                    apiFetch(`/audit-plans?userId=${user.id}`)
+                    apiFetch(`/audit-programs?scope=org&full=true`),
+                    apiFetch(`/audit-plans?scope=org`)
                 ]);
                 const sitesData = await sitesRes.json();
                 const programsData = await programsRes.json();
@@ -227,6 +268,69 @@ const AuditProgramPage = () => {
 
     const hasPlan = (programId: number, executionId: string) => {
         return (auditPlans || []).some(p => p.auditProgramId === programId && p.executionId === executionId);
+    };
+
+    const getPendingCreatePlanTarget = () => {
+        const siteIds = sites.length > 0 ? [activeSiteId, ...sites.map((s) => s.id.toString()).filter((id) => id !== activeSiteId)] : [];
+        for (const siteId of siteIds) {
+            const sitePrograms = (auditPrograms || []).filter(
+                (p) => p.siteId?.toString() === siteId,
+            );
+            for (const siteProgram of sitePrograms) {
+                const executions = getAuditExecutions(siteProgram) || [];
+                for (const exec of executions) {
+                    if (!hasPlan(siteProgram.id, exec.id)) {
+                        const site = sites.find(
+                            (s) => s.id?.toString() === siteProgram.siteId?.toString(),
+                        );
+                        return {
+                            execution: {
+                                ...exec,
+                                siteName: site?.name || "N/A",
+                                site,
+                            },
+                            program: siteProgram,
+                            site,
+                            plan: null,
+                        };
+                    }
+                }
+            }
+        }
+        return null;
+    };
+
+    const handleAuditPlanTourNext = () => {
+        if (auditPlanTourStep === 3) {
+            const target = getPendingCreatePlanTarget();
+            if (!target) {
+                toast.error(
+                    "No audit program periods found. Create an audit program with scheduled periods first.",
+                );
+                return;
+            }
+            navigate(
+                `/audit-program/create-plan?auditPlanTour=true&auditPlanStep=4`,
+                { state: target },
+            );
+            return;
+        }
+        if (auditPlanTourStep >= AUDIT_PLAN_TOUR_TOTAL_STEPS) {
+            exitAuditPlanTour();
+            navigate("/getting-started");
+            toast.success("Audit plan tour complete!");
+            return;
+        }
+        setAuditPlanTourStep(auditPlanTourStep + 1);
+    };
+
+    const handleAuditPlanTourBack = () => {
+        if (auditPlanTourStep <= 1) {
+            exitAuditPlanTour();
+            navigate("/getting-started");
+            return;
+        }
+        setAuditPlanTourStep(auditPlanTourStep - 1);
     };
 
     const handleDeletePlan = async (planId: number) => {
@@ -537,7 +641,10 @@ const AuditProgramPage = () => {
     );
 
     return (
-        <div className="flex-1 space-y-8 p-8 pt-6 min-h-screen bg-white">
+        <div className="flex-1 space-y-8 p-8 pt-6 min-h-screen bg-white relative">
+            {auditPlanTourActive && (
+                <div className="fixed inset-0 bg-slate-900/10 z-[40] pointer-events-none" />
+            )}
             <div className="w-full max-w-[1800px] mx-auto space-y-8 animate-in fade-in duration-500">
                 {/* Onboarding Guide Step 6 */}
                 {showOnboardingGuide && (
@@ -657,15 +764,35 @@ const AuditProgramPage = () => {
                                 );
                             }
 
+                            const firstPendingIdx = allExecutions.findIndex((exec) => {
+                                const siteProgram = (auditPrograms || []).find(
+                                    (p) => p.id === exec.programId,
+                                );
+                                return (
+                                    siteProgram && !hasPlan(siteProgram.id, exec.id)
+                                );
+                            });
+
                             return (
-                                <div className={cn(
-                                    "animate-in fade-in slide-in-from-bottom-4 duration-700",
-                                    viewMode === "card" ? "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6" : "flex flex-col gap-3"
-                                )}>
+                                <div
+                                    id="tour-step-audit-plans-list"
+                                    className={cn(
+                                        "animate-in fade-in slide-in-from-bottom-4 duration-700",
+                                        viewMode === "card"
+                                            ? "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6"
+                                            : "flex flex-col gap-3",
+                                        tourPlanHighlight(2),
+                                    )}
+                                >
                                     {(allExecutions || []).map((exec, idx) => {
                                         const siteProgram = (auditPrograms || []).find(p => p.id === exec.programId);
                                         const plan = (auditPlans || []).find(p => p.auditProgramId === exec.programId && p.executionId === exec.id);
                                         const planExists = !!plan;
+                                        const isCreatePlanTourTarget =
+                                            auditPlanTourActive &&
+                                            auditPlanTourStep === 3 &&
+                                            idx === firstPendingIdx &&
+                                            firstPendingIdx >= 0;
 
                                         return viewMode === "card" ? (
                                             <Card key={idx} className="group relative border border-white/50 bg-white shadow-sm hover:shadow-md transition-all duration-500 rounded-2xl p-6 flex flex-col gap-6 border-slate-200/50">
@@ -765,12 +892,33 @@ const AuditProgramPage = () => {
                                                 </div>
 
                                                 <Button
+                                                    id={
+                                                        isCreatePlanTourTarget
+                                                            ? "tour-step-create-plan-btn"
+                                                            : undefined
+                                                    }
                                                     size="lg"
                                                     className={cn(
                                                         "w-full font-bold rounded-2xl h-12 shadow-md transition-all duration-300 group/btn text-sm relative overflow-hidden",
-                                                        planExists ? "bg-white text-indigo-600 border-2 border-indigo-100 hover:bg-indigo-50 hover:border-indigo-200" : "bg-slate-900 hover:bg-emerald-600 text-white"
+                                                        planExists ? "bg-white text-indigo-600 border-2 border-indigo-100 hover:bg-indigo-50 hover:border-indigo-200" : "bg-slate-900 hover:bg-emerald-600 text-white",
+                                                        isCreatePlanTourTarget && tourPlanHighlight(3),
                                                     )}
-                                                    onClick={() => navigate("/audit-program/create-plan", { state: { execution: exec, program: siteProgram, site: exec.site, plan } })}
+                                                    onClick={() => {
+                                                        const createPath = auditPlanTourActive
+                                                            ? "/audit-program/create-plan?auditPlanTour=true&auditPlanStep=4"
+                                                            : "/audit-program/create-plan";
+                                                        navigate(createPath, {
+                                                            state: {
+                                                                execution: exec,
+                                                                program: siteProgram,
+                                                                site: exec.site,
+                                                                plan,
+                                                            },
+                                                        });
+                                                        if (isCreatePlanTourTarget) {
+                                                            setAuditPlanTourStep(4);
+                                                        }
+                                                    }}
                                                 >
                                                     <div className="relative z-10 flex items-center justify-center gap-2">
                                                         {planExists ? <LayoutDashboard className="w-4 h-4" /> : <Calendar className="w-4 h-4 transition-transform duration-500 group-hover/btn:rotate-12" />}
@@ -825,11 +973,32 @@ const AuditProgramPage = () => {
                                                         {exec.clauseCount} Sections
                                                     </div>
                                                     <Button
+                                                        id={
+                                                            isCreatePlanTourTarget
+                                                                ? "tour-step-create-plan-btn"
+                                                                : undefined
+                                                        }
                                                         className={cn(
                                                             "font-bold rounded-xl h-10 px-6 shadow-md transition-all duration-300 hover:scale-105 active:scale-95 group/btn relative overflow-hidden",
-                                                            planExists ? "bg-white text-indigo-600 border-2 border-indigo-100 hover:bg-indigo-50" : "bg-emerald-500 hover:bg-emerald-600 text-white shadow-emerald-100"
+                                                            planExists ? "bg-white text-indigo-600 border-2 border-indigo-100 hover:bg-indigo-50" : "bg-emerald-500 hover:bg-emerald-600 text-white shadow-emerald-100",
+                                                            isCreatePlanTourTarget && tourPlanHighlight(3),
                                                         )}
-                                                        onClick={() => navigate("/audit-program/create-plan", { state: { execution: exec, program: siteProgram, site: exec.site, plan } })}
+                                                        onClick={() => {
+                                                            const createPath = auditPlanTourActive
+                                                                ? "/audit-program/create-plan?auditPlanTour=true&auditPlanStep=4"
+                                                                : "/audit-program/create-plan";
+                                                            navigate(createPath, {
+                                                                state: {
+                                                                    execution: exec,
+                                                                    program: siteProgram,
+                                                                    site: exec.site,
+                                                                    plan,
+                                                                },
+                                                            });
+                                                            if (isCreatePlanTourTarget) {
+                                                                setAuditPlanTourStep(4);
+                                                            }
+                                                        }}
                                                     >
                                                         <div className="relative z-10 flex items-center justify-center gap-2">
                                                             {planExists ? <LayoutDashboard className="w-4 h-4" /> : <Calendar className="w-4 h-4 transition-transform duration-500 group-hover/btn:rotate-12" />}
@@ -889,6 +1058,26 @@ const AuditProgramPage = () => {
                     </div>
                 ))}
             </div>
+            {auditPlanTourActive &&
+                auditPlanTourStep <= 3 &&
+                auditPlanTourStepConfig && (
+                    <TourStepPopover
+                        key={auditPlanTourStep}
+                        targetId={auditPlanTourStepConfig.targetId}
+                        step={auditPlanTourStep}
+                        totalSteps={AUDIT_PLAN_TOUR_TOTAL_STEPS}
+                        title={auditPlanTourStepConfig.title}
+                        description={auditPlanTourStepConfig.description}
+                        position={auditPlanTourStepConfig.position}
+                        onNext={handleAuditPlanTourNext}
+                        onBack={handleAuditPlanTourBack}
+                        onClose={() => {
+                            exitAuditPlanTour();
+                            navigate("/getting-started");
+                        }}
+                    />
+                )}
+
             {/* Delete Confirmation Dialog */}
             <AlertDialog open={isDeleteDialogOpen} onOpenChange={setIsDeleteDialogOpen}>
                 <AlertDialogContent className="rounded-2xl border-slate-200">

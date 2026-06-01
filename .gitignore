@@ -8,7 +8,7 @@ dist/
 build/
 .next/
 
-# Env files
+# Env files — only server/.env (not committed)
 .env
 **/.env
 .env.*

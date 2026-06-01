@@ -6,6 +6,8 @@ import { User, Mail, Phone, Loader2, Pencil, X, Check } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import { useNavigate } from "react-router-dom";
 import { apiFetch } from "@/lib/api";
+import { PhoneInputWithCountryCode } from "@/components/PhoneInputWithCountryCode";
+import { DEFAULT_PHONE_COUNTRY_CODE, getDialForCountryCode } from "@/lib/phoneCountries";
 import { isTenDigitPhone, normalizePhone10Digits, PHONE_10_ERROR_MESSAGE } from "@/lib/validation";
 
 export default function ProfileSettings() {
@@ -22,6 +24,7 @@ export default function ProfileSettings() {
         email: "",
         mobile: ""
     });
+    const [mobileCountry, setMobileCountry] = useState(DEFAULT_PHONE_COUNTRY_CODE);
 
     useEffect(() => {
         // Load user from local storage
@@ -46,14 +49,6 @@ export default function ProfileSettings() {
 
     const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         const { name, value } = e.target;
-        if (name === "mobile") {
-            const digits = value.replace(/\D/g, "").slice(0, 10);
-            setFormData((prev) => ({
-                ...prev,
-                mobile: digits,
-            }));
-            return;
-        }
         setFormData((prev) => ({
             ...prev,
             [name]: value,
@@ -255,19 +250,23 @@ export default function ProfileSettings() {
                                         Phone Number
                                     </Label>
                                     {isEditing ? (
-                                        <Input
+                                        <PhoneInputWithCountryCode
                                             id="mobile"
-                                            name="mobile"
-                                            type="tel"
-                                            inputMode="numeric"
-                                            maxLength={10}
+                                            dialCode={mobileDial}
+                                            onDialCodeChange={setMobileDial}
                                             value={formData.mobile}
-                                            onChange={handleInputChange}
-                                            placeholder="10-digit number"
-                                            className="h-11 bg-white border-slate-200 focus:border-[#213847] focus:ring-[#213847] text-[#101828]"
+                                            onChange={(digits) =>
+                                                setFormData((prev) => ({ ...prev, mobile: digits }))
+                                            }
+                                            inputClassName="h-11 bg-white border-slate-200 focus:border-[#213847] focus:ring-[#213847] text-[#101828]"
+                                            selectClassName="h-11 bg-white border-slate-200 focus:ring-[#213847] text-[#101828]"
                                         />
                                     ) : (
-                                        <p className="text-[#101828] font-medium h-11 flex items-center px-3 bg-slate-50 border border-transparent rounded-md">{formData.mobile || "Not provided"}</p>
+                                        <p className="text-[#101828] font-medium h-11 flex items-center px-3 bg-slate-50 border border-transparent rounded-md">
+                                            {formData.mobile
+                                                ? `${getDialForCountryCode(mobileCountry)} ${formData.mobile}`
+                                                : "Not provided"}
+                                        </p>
                                     )}
                                 </div>
                             </div>

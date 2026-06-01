@@ -1,5 +1,5 @@
-import React, { useState } from "react";
-import { useParams, useNavigate } from "react-router-dom";
+import React, { useState, useEffect } from "react";
+import { useParams, useNavigate, useSearchParams } from "react-router-dom";
 import { ArrowLeft, Save, CheckCircle2, Image as ImageIcon, Upload, Plus, Trash2, FileText } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -10,10 +10,55 @@ import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { auditTemplates, ChecklistContent, SectionContent, ClauseChecklistContent, ProcessAuditContent } from "@/data/auditTemplates";
 import { toast } from "sonner";
+import { TourStepPopover } from "@/components/TourStepPopover";
+import {
+    AUDIT_TEMPLATES_LIST_MAX_STEP,
+    AUDIT_TEMPLATES_TOUR_TOTAL_STEPS,
+    getAuditTemplatesTourStepConfig,
+} from "@/lib/auditTemplatesOnboardingTour";
+import { cn } from "@/lib/utils";
 
 const ExecuteAuditTemplate = () => {
     const { id } = useParams();
     const navigate = useNavigate();
+    const [searchParams, setSearchParams] = useSearchParams();
+    const auditTemplatesTourActive = searchParams.get("auditTemplatesTour") === "true";
+    const auditTemplatesTourStep = Math.min(
+        AUDIT_TEMPLATES_TOUR_TOTAL_STEPS,
+        Math.max(1, parseInt(searchParams.get("auditTemplatesStep") || "1", 10)),
+    );
+    const auditTemplatesTourStepConfig =
+        getAuditTemplatesTourStepConfig(auditTemplatesTourStep);
+
+    const setAuditTemplatesTourStep = (step: number) => {
+        setSearchParams(
+            (prev) => {
+                const next = new URLSearchParams(prev);
+                next.set("auditTemplatesTour", "true");
+                next.set("auditTemplatesStep", String(step));
+                return next;
+            },
+            { replace: true },
+        );
+    };
+
+    const exitAuditTemplatesTour = () => {
+        setSearchParams(
+            (prev) => {
+                const next = new URLSearchParams(prev);
+                next.delete("auditTemplatesTour");
+                next.delete("auditTemplatesStep");
+                return next;
+            },
+            { replace: true },
+        );
+    };
+
+    const tourTemplateHighlight = (step: number) =>
+        auditTemplatesTourActive && auditTemplatesTourStep === step
+            ? "relative z-[60] ring-[4px] ring-emerald-500/80 ring-offset-2 rounded-xl"
+            : "";
+
     const template = auditTemplates.find(t => t.id === id);
 
     const [checklistData, setChecklistData] = useState<Record<number, { findings: string, evidence: string, ofi: string, description?: string, correction?: string, rootCause?: string, correctiveAction?: string }>>({});
@@ -95,6 +140,38 @@ const ExecuteAuditTemplate = () => {
     const removePositiveAspect = (index: number) => setPositiveAspects(positiveAspects.filter((_, i) => i !== index));
     const removeOpportunity = (index: number) => setOpportunities(opportunities.filter((_, i) => i !== index));
     const removeNonConformance = (index: number) => setNonConformances(nonConformances.filter((_, i) => i !== index));
+
+    const firstClauseUploadIndex = React.useMemo(() => {
+        for (let i = 0; i < editableChecklist.length; i++) {
+            const isLast =
+                i === editableChecklist.length - 1 ||
+                editableChecklist[i + 1]?.clause !== editableChecklist[i]?.clause;
+            if (isLast) return i;
+        }
+        return 0;
+    }, [editableChecklist]);
+
+    useEffect(() => {
+        if (!auditTemplatesTourActive || !auditTemplatesTourStepConfig) return;
+        if (
+            auditTemplatesTourStepConfig.targetId === "viewport" ||
+            auditTemplatesTourStepConfig.position === "center"
+        ) {
+            return;
+        }
+        const scrollToTarget = () => {
+            const el = document.getElementById(auditTemplatesTourStepConfig.targetId);
+            if (el) {
+                el.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
+            }
+        };
+        const t = window.setTimeout(scrollToTarget, 150);
+        return () => window.clearTimeout(t);
+    }, [
+        auditTemplatesTourActive,
+        auditTemplatesTourStep,
+        auditTemplatesTourStepConfig?.targetId,
+    ]);
 
     if (!template) {
         return <div className="p-8">Template not found</div>;
@@ -272,28 +349,76 @@ const ExecuteAuditTemplate = () => {
     };
 
     const handleSubmit = () => {
-        // Here you would typically save to backend
         console.log("Submitting Audit:", {
             templateId: template?.id,
             data: template?.type === 'checklist' ? { checklistData, editableChecklist } : template?.type === 'clause-checklist' ? clauseData : sectionData
         });
         toast.success("Audit submitted successfully!");
+        if (auditTemplatesTourActive && auditTemplatesTourStep === 15) {
+            setAuditTemplatesTourStep(16);
+            return;
+        }
         navigate("/audit-templates");
     };
 
+    const handleAuditTemplatesTourNext = () => {
+        if (auditTemplatesTourStep === 15) {
+            handleSubmit();
+            return;
+        }
+        if (auditTemplatesTourStep >= AUDIT_TEMPLATES_TOUR_TOTAL_STEPS) {
+            exitAuditTemplatesTour();
+            navigate("/getting-started");
+            toast.success("Audit workflow tour complete!");
+            return;
+        }
+        setAuditTemplatesTourStep(auditTemplatesTourStep + 1);
+    };
+
+    const handleAuditTemplatesTourBack = () => {
+        if (auditTemplatesTourStep === 6) {
+            navigate(
+                `/audit-templates?auditTemplatesTour=true&auditTemplatesStep=${AUDIT_TEMPLATES_LIST_MAX_STEP}`,
+            );
+            return;
+        }
+        if (auditTemplatesTourStep > 6) {
+            setAuditTemplatesTourStep(auditTemplatesTourStep - 1);
+        }
+    };
+
     return (
-        <div className="flex-1 p-8 pt-6 bg-white min-h-screen">
+        <div className="flex-1 p-8 pt-6 bg-white min-h-screen relative">
+            {auditTemplatesTourActive && (
+                <div className="fixed inset-0 bg-slate-900/10 z-[40] pointer-events-none" />
+            )}
             <div className="max-w-5xl mx-auto space-y-6">
 
-                {/* Header Navigation */}
                 <div className="flex items-center gap-4 mb-6">
-                    <Button variant="ghost" onClick={() => navigate("/audit-templates")} className="gap-2 pl-0 hover:bg-transparent hover:text-slate-600">
+                    <Button
+                        variant="ghost"
+                        onClick={() => {
+                            if (auditTemplatesTourActive) {
+                                navigate(
+                                    `/audit-templates?auditTemplatesTour=true&auditTemplatesStep=${AUDIT_TEMPLATES_LIST_MAX_STEP}`,
+                                );
+                            } else {
+                                navigate("/audit-templates");
+                            }
+                        }}
+                        className="gap-2 pl-0 hover:bg-transparent hover:text-slate-600"
+                    >
                         <ArrowLeft className="w-4 h-4" /> Back to Templates
                     </Button>
                 </div>
 
-                {/* Template Info Header */}
-                <div className="flex justify-between items-start">
+                <div
+                    id="tour-step-template-execute-header"
+                    className={cn(
+                        "flex justify-between items-start",
+                        tourTemplateHighlight(6),
+                    )}
+                >
                     <div>
                         <h1 className="text-2xl font-bold text-slate-900">{template.title}</h1>
                         <p className="text-slate-500 mt-1">{template.description}</p>
@@ -305,8 +430,10 @@ const ExecuteAuditTemplate = () => {
                 {(template.type === 'clause-checklist' || template.type === 'checklist') && (
                     <div className="space-y-8 mb-8 bg-white rounded-lg p-6 shadow-sm border border-slate-200">
 
-                        {/* Previous Audit Findings */}
-                        <div className="space-y-4">
+                        <div
+                            id="tour-step-template-previous-findings"
+                            className={cn("space-y-4", tourTemplateHighlight(7))}
+                        >
                             <h3 className="text-xl font-bold text-slate-900 border-b border-slate-200 pb-2">Previous Audit Findings</h3>
                             <div className="border border-slate-800 rounded-md overflow-hidden">
                                 <div className="bg-slate-800 text-white font-bold p-2 text-sm">
@@ -321,8 +448,10 @@ const ExecuteAuditTemplate = () => {
                             </div>
                         </div>
 
-                        {/* Details of Changes */}
-                        <div className="space-y-4">
+                        <div
+                            id="tour-step-template-details-changes"
+                            className={cn("space-y-4", tourTemplateHighlight(8))}
+                        >
                             <h3 className="text-xl font-bold text-slate-900 border-b border-slate-200 pb-2">Details of Changes</h3>
                             <div className="border border-slate-800 rounded-md overflow-hidden overflow-x-auto">
                                 <Table>
@@ -367,8 +496,10 @@ const ExecuteAuditTemplate = () => {
                             </div>
                         </div>
 
-                        {/* Audit Participants */}
-                        <div className="space-y-4">
+                        <div
+                            id="tour-step-template-participants"
+                            className={cn("space-y-4", tourTemplateHighlight(9))}
+                        >
                             <h3 className="text-xl font-bold text-slate-900 border-b border-slate-200 pb-2">Audit Participants</h3>
                             <div className="border border-slate-800 rounded-md overflow-hidden overflow-x-auto">
                                 <Table>
@@ -407,8 +538,10 @@ const ExecuteAuditTemplate = () => {
                             </div>
                         </div>
 
-                        {/* Audit Findings Summary */}
-                        <div className="space-y-6 pt-6 border-t border-slate-200">
+                        <div
+                            id="tour-step-template-audit-findings"
+                            className={cn("space-y-6 pt-6 border-t border-slate-200", tourTemplateHighlight(10))}
+                        >
                             <div>
                                 <h3 className="text-2xl font-bold text-slate-800 mb-2">Audit Findings</h3>
 
@@ -919,6 +1052,7 @@ const ExecuteAuditTemplate = () => {
                             <div className="h-0.5 flex-1 bg-slate-700"></div>
                         </div>
 
+                        <div>
                         {processAudits.map((audit, index) => {
                             const type = audit.findingType;
                             const showExtended = type === "Minor" || type === "Major" || type === "OFI" || type === "C";
@@ -950,7 +1084,11 @@ const ExecuteAuditTemplate = () => {
                                                 </TableRow>
                                                 <TableRow className="border-b border-slate-100 hover:bg-transparent">
                                                     <TableCell colSpan={2} className="p-0">
-                                                        <Textarea className="w-full min-h-[120px] border-0 focus-visible:ring-0 rounded-none bg-transparent resize-y p-5 shadow-none" value={audit.evidence} onChange={(e) => updateProcessAudit(index, "evidence", e.target.value)} />
+                                                        <Textarea
+                                                            className="w-full min-h-[120px] border-0 focus-visible:ring-0 rounded-none bg-transparent resize-y p-5 shadow-none"
+                                                            value={audit.evidence}
+                                                            onChange={(e) => updateProcessAudit(index, "evidence", e.target.value)}
+                                                        />
                                                     </TableCell>
                                                 </TableRow>
                                                 <TableRow className="border-b border-slate-100 hover:bg-transparent">
@@ -1006,19 +1144,20 @@ const ExecuteAuditTemplate = () => {
                                                 </div>
                                             )}
 
-                                            <div className="flex items-center justify-center p-4 border-2 border-dashed border-slate-200 bg-white rounded-xl hover:bg-slate-50 hover:border-slate-300 cursor-pointer transition-all group">
+                                            <label className="flex items-center justify-center p-4 border-2 border-dashed border-slate-200 bg-white rounded-xl hover:bg-slate-50 hover:border-slate-300 cursor-pointer transition-all group">
                                                 <div className="flex items-center gap-3 text-slate-500 group-hover:text-slate-800 font-medium">
                                                     <div className="bg-slate-100 p-2 rounded-full group-hover:bg-slate-200 transition-colors">
                                                         <Upload className="w-4 h-4" />
                                                     </div>
                                                     <span>Add / Upload / Insert record or picture</span>
                                                 </div>
-                                            </div>
+                                            </label>
                                         </div>
                                     </CardContent>
                                 </Card>
                             );
                         })}
+                        </div>
 
                         <Button
                             variant="outline"
@@ -1032,7 +1171,10 @@ const ExecuteAuditTemplate = () => {
 
                 {/* Dynamic Content Based on Type */}
                 {template.type === 'clause-checklist' ? (
-                    <div className="space-y-8">
+                    <div
+                        id="tour-step-template-checklist"
+                        className={cn("space-y-8", tourTemplateHighlight(11))}
+                    >
                         <div className="flex justify-between items-center bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
                             <h3 className="text-lg font-bold text-slate-800">Clause Checklist Details</h3>
                             <Button 
@@ -1095,7 +1237,13 @@ const ExecuteAuditTemplate = () => {
                                         {/* Finding Type Selector */}
                                         <div className="flex items-center gap-4 bg-slate-50 p-3 rounded-lg border border-slate-200">
                                             <span className="text-sm font-medium text-slate-700">Finding Type:</span>
-                                            <div className="flex gap-2">
+                                            <div
+                                                id={index === 0 ? "tour-step-template-finding-buttons" : undefined}
+                                                className={cn(
+                                                    "flex gap-2",
+                                                    index === 0 && tourTemplateHighlight(12),
+                                                )}
+                                            >
                                                 {[
                                                     { label: 'Compliant (C)', value: 'C', color: 'bg-emerald-500 hover:bg-emerald-600' },
                                                     { label: 'OFI', value: 'OFI', color: 'bg-yellow-600 hover:bg-yellow-700' },
@@ -1121,7 +1269,11 @@ const ExecuteAuditTemplate = () => {
                                             <div className="space-y-2 animate-in fade-in slide-in-from-top-2">
                                                 <Label className="text-slate-700">Finding Details</Label>
                                                 <Textarea
-                                                    className="bg-white border-slate-200 text-slate-900 placeholder:text-slate-400"
+                                                    id={index === 0 ? "tour-step-template-audit-evidence" : undefined}
+                                                    className={cn(
+                                                        "bg-white border-slate-200 text-slate-900 placeholder:text-slate-400",
+                                                        index === 0 && tourTemplateHighlight(13),
+                                                    )}
                                                     placeholder="Enter initial findings..."
                                                     value={currentData.findingDetails || ""}
                                                     onChange={(e) => handleClauseChange(index, 'findingDetails', e.target.value)}
@@ -1129,7 +1281,6 @@ const ExecuteAuditTemplate = () => {
                                             </div>
                                         )}
 
-                                        {/* Extended Fields for Non-Compliance/OFI */}
                                         {showExtended && (
                                             <div className="space-y-4 pt-4 border-t border-slate-200 animate-in fade-in slide-in-from-top-2">
                                                 <div className="space-y-2">
@@ -1175,7 +1326,13 @@ const ExecuteAuditTemplate = () => {
 
                                         {/* Footer / Upload */}
                                         <div className="border-t border-slate-200 pt-3 mt-2 flex flex-col gap-3">
-                                            <label className="flex items-center justify-center p-4 border border-dashed border-slate-300 rounded-lg hover:bg-slate-50 bg-slate-50/50 cursor-pointer transition-colors group">
+                                            <label
+                                                id={index === 0 ? "tour-step-template-upload-evidence" : undefined}
+                                                className={cn(
+                                                    "flex items-center justify-center p-4 border border-dashed border-slate-300 rounded-lg hover:bg-slate-50 bg-slate-50/50 cursor-pointer transition-colors group",
+                                                    index === 0 && tourTemplateHighlight(14),
+                                                )}
+                                            >
                                                 <input
                                                     type="file"
                                                     multiple
@@ -1213,21 +1370,40 @@ const ExecuteAuditTemplate = () => {
 
                     </div>
                 ) : template.type === 'section' ? (
-                    <div className="space-y-6">
+                    <div
+                        id="tour-step-template-checklist"
+                        className={cn("space-y-6", tourTemplateHighlight(11))}
+                    >
                         {(template.content as SectionContent[]).map((section, index) => (
                             <Card key={index} className="overflow-hidden border-2 border-slate-200">
-                                <CardHeader className="bg-amber-700/90 text-white py-3 px-4">
+                                <CardHeader
+                                    id={index === 0 ? "tour-step-template-finding-buttons" : undefined}
+                                    className={cn(
+                                        "bg-amber-700/90 text-white py-3 px-4",
+                                        index === 0 && tourTemplateHighlight(12),
+                                    )}
+                                >
                                     <CardTitle className="text-lg font-medium">{section.title}</CardTitle>
                                 </CardHeader>
                                 <CardContent className="p-0">
                                     <Textarea
-                                        className="min-h-[150px] border-0 focus-visible:ring-0 rounded-none resize-y p-4 text-base"
+                                        id={index === 0 ? "tour-step-template-audit-evidence" : undefined}
+                                        className={cn(
+                                            "min-h-[150px] border-0 focus-visible:ring-0 rounded-none resize-y p-4 text-base",
+                                            index === 0 && tourTemplateHighlight(13),
+                                        )}
                                         placeholder={section.placeholder}
                                         value={sectionData[index] || ""}
                                         onChange={e => handleSectionChange(index, e.target.value)}
                                     />
                                     <div className="border-t border-slate-100 bg-slate-50 flex flex-col items-center justify-center">
-                                        <label className="w-full p-2 flex items-center justify-center gap-2 cursor-pointer hover:bg-slate-100 transition-colors text-slate-500 text-sm">
+                                        <label
+                                            id={index === 0 ? "tour-step-template-upload-evidence" : undefined}
+                                            className={cn(
+                                                "w-full p-2 flex items-center justify-center gap-2 cursor-pointer hover:bg-slate-100 transition-colors text-slate-500 text-sm",
+                                                index === 0 && tourTemplateHighlight(14),
+                                            )}
+                                        >
                                             <input
                                                 type="file"
                                                 multiple
@@ -1263,7 +1439,7 @@ const ExecuteAuditTemplate = () => {
                 ) : template.type === 'process-audit' ? (
                     null
                 ) : (template.type === 'checklist') && (
-                    <div className="space-y-4">
+                    <div id="tour-step-template-checklist" className={cn("space-y-4", tourTemplateHighlight(11))}>
                         <div className="flex justify-between items-center bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
                             <h3 className="text-lg font-bold text-slate-800">Checklist Questions</h3>
                             <Button 
@@ -1332,7 +1508,13 @@ const ExecuteAuditTemplate = () => {
                                                     {!isEditMode && (
                                                         <>
                                                             <TableCell className="p-2 align-top bg-slate-50/10">
-                                                                <div className="flex flex-wrap gap-1 mb-2 justify-center">
+                                                                <div
+                                                                    id={index === 0 ? "tour-step-template-finding-buttons" : undefined}
+                                                                    className={cn(
+                                                                        "flex flex-wrap gap-1 mb-2 justify-center",
+                                                                        index === 0 && tourTemplateHighlight(12),
+                                                                    )}
+                                                                >
                                                                     {[{ val: 'C', label: 'Compliant (C)', color: 'bg-emerald-500' }, { val: 'OFI', label: 'Opportunity for Improvement', color: 'bg-amber-500' }, { val: 'Min', label: 'Minor Non-Conformity', color: 'bg-orange-600' }, { val: 'Maj', label: 'Major Non-Conformity', color: 'bg-red-600' }].map(opt => (
                                                                         <button
                                                                             key={opt.val}
@@ -1357,7 +1539,11 @@ const ExecuteAuditTemplate = () => {
                                                                         <>
                                                                             <Label className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">Audit Evidence</Label>
                                                                             <Textarea
-                                                                                className="min-h-[80px] text-xs resize-y border border-slate-300 bg-white shadow-sm focus:border-slate-500 focus:ring-1 focus:ring-slate-500 transition-all placeholder:text-slate-400"
+                                                                                id={index === 0 ? "tour-step-template-audit-evidence" : undefined}
+                                                                                className={cn(
+                                                                                    "min-h-[80px] text-xs resize-y border border-slate-300 bg-white shadow-sm focus:border-slate-500 focus:ring-1 focus:ring-slate-500 transition-all placeholder:text-slate-400",
+                                                                                    index === 0 && tourTemplateHighlight(13),
+                                                                                )}
                                                                                 placeholder="State documented info/records checked..."
                                                                                 value={checklistData[index]?.evidence || ""}
                                                                                 onChange={e => handleChecklistChange(index, 'evidence', e.target.value)}
@@ -1449,7 +1635,18 @@ const ExecuteAuditTemplate = () => {
                                                             <>
                                                                 <TableRow className="bg-slate-50 border-b-4 border-slate-200">
                                                                     <TableCell colSpan={4} className="p-0">
-                                                                        <label className="flex items-center justify-center p-3 bg-slate-50 border-t border-slate-200 cursor-pointer hover:bg-slate-100 transition-colors group">
+                                                                        <label
+                                                                            id={
+                                                                                index === firstClauseUploadIndex
+                                                                                    ? "tour-step-template-upload-evidence"
+                                                                                    : undefined
+                                                                            }
+                                                                            className={cn(
+                                                                                "flex items-center justify-center p-3 bg-slate-50 border-t border-slate-200 cursor-pointer hover:bg-slate-100 transition-colors group",
+                                                                                index === firstClauseUploadIndex &&
+                                                                                    tourTemplateHighlight(14),
+                                                                            )}
+                                                                        >
                                                                             <input
                                                                                 type="file"
                                                                                 multiple
@@ -1513,15 +1710,44 @@ const ExecuteAuditTemplate = () => {
                     </div>
                 )}
 
-                {/* Footer Actions */}
                 <div className="flex justify-end pt-4 pb-8">
-                    <Button size="lg" className="bg-slate-600 hover:bg-slate-700 text-white gap-2" onClick={handleSubmit}>
+                    <Button
+                        id="tour-step-template-submit-audit"
+                        size="lg"
+                        className={cn(
+                            "bg-slate-600 hover:bg-slate-700 text-white gap-2",
+                            tourTemplateHighlight(15),
+                        )}
+                        onClick={handleSubmit}
+                    >
                         <CheckCircle2 className="w-5 h-5" /> Submit Audit
                     </Button>
                 </div>
 
-            </div >
-        </div >
+            </div>
+
+            {auditTemplatesTourActive &&
+                auditTemplatesTourStep >= 6 &&
+                auditTemplatesTourStepConfig && (
+                    <TourStepPopover
+                        key={auditTemplatesTourStep}
+                        targetId={auditTemplatesTourStepConfig.targetId}
+                        step={auditTemplatesTourStep}
+                        totalSteps={AUDIT_TEMPLATES_TOUR_TOTAL_STEPS}
+                        title={auditTemplatesTourStepConfig.title}
+                        description={auditTemplatesTourStepConfig.description}
+                        position={auditTemplatesTourStepConfig.position}
+                        onNext={handleAuditTemplatesTourNext}
+                        onBack={handleAuditTemplatesTourBack}
+                        onClose={() => {
+                            exitAuditTemplatesTour();
+                            navigate("/getting-started");
+                        }}
+                        hideNext={auditTemplatesTourStep === 15}
+                        disableShadow={auditTemplatesTourStep === 15}
+                    />
+                )}
+        </div>
     );
 };
 

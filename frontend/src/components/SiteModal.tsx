@@ -7,6 +7,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { MapPin, Info, Contact, Pencil, Globe, Navigation } from "lucide-react";
 import { Site, SiteType } from "@/types/company";
 import { Country, State as StateCity } from "country-state-city";
+import { CountrySelect } from "@/components/CountrySelect";
+import { StateSelect } from "@/components/StateSelect";
+import { resolveCountryIsoFromName } from "@/lib/worldCountries";
 import {
     isTenDigitPhone,
     isWithinMaxLength,
@@ -37,6 +40,7 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
     const [address, setAddress] = useState("");
     const [city, setCity] = useState("");
     const [stateIso, setStateIso] = useState("");
+    const [stateText, setStateText] = useState("");
     const [countryIso, setCountryIso] = useState("");
     const [postalCode, setPostalCode] = useState("");
     const [contactName, setContactName] = useState("");
@@ -56,14 +60,20 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
             setCity(initialData?.city || "");
             
             // Map names back to ISO codes for the dropdowns
-            const initialCountryIso = Country.getAllCountries().find(c => c.name === initialData?.country)?.isoCode || "";
+            const initialCountryIso = resolveCountryIsoFromName(initialData?.country || "");
             setCountryIso(initialCountryIso);
             
-            if (initialCountryIso && initialData?.state) {
-                const initialStateIso = StateCity.getStatesOfCountry(initialCountryIso).find(s => s.name === initialData.state)?.isoCode || "";
+            const statesForCountry = initialCountryIso
+                ? StateCity.getStatesOfCountry(initialCountryIso)
+                : [];
+            if (initialCountryIso && initialData?.state && statesForCountry.length > 0) {
+                const initialStateIso =
+                    statesForCountry.find((s) => s.name === initialData.state)?.isoCode || "";
                 setStateIso(initialStateIso);
+                setStateText("");
             } else {
                 setStateIso("");
+                setStateText(initialData?.state || "");
             }
 
             setPostalCode(initialData?.postalCode || "");
@@ -89,9 +99,10 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
         const trimmedEmail = email.trim();
 
         const countryName = Country.getCountryByCode(countryIso)?.name || "";
-        const stateName = StateCity.getStateByCodeAndCountry(stateIso, countryIso)?.name || "";
-
         const hasStates = StateCity.getStatesOfCountry(countryIso).length > 0;
+        const stateName = hasStates
+            ? StateCity.getStateByCodeAndCountry(stateIso, countryIso)?.name || ""
+            : stateText.trim();
 
         // Per-field validation
         const errors: Record<string, string> = {};
@@ -106,7 +117,11 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
         if (!trimmedAddress) errors.address = "Address is required";
         if (!trimmedCity) errors.city = "City is required";
         if (!countryIso) errors.country = "Country is required";
-        if (hasStates && !stateIso) errors.state = "State/Region is required";
+        if (hasStates && !stateIso) {
+            errors.state = "State/Region is required";
+        } else if (!hasStates && !stateText.trim()) {
+            errors.state = "State/Region is required";
+        }
         if (!trimmedPostalCode) errors.postalCode = "Postal code is required";
         if (!trimmedContactName) errors.contactName = "Contact name is required";
         if (!trimmedContactPosition) errors.contactPosition = "Position is required";
@@ -282,33 +297,45 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
                             </div>
                             <div className="space-y-2">
                                 <Label htmlFor="site-country">Country *</Label>
-                                <Select value={countryIso} onValueChange={(val) => { setCountryIso(val); setStateIso(""); clearFieldError("country"); }}>
-                                    <SelectTrigger id="site-country" className={fieldErrorClass("country")}>
-                                        <SelectValue placeholder="Select country" />
-                                    </SelectTrigger>
-                                    <SelectContent>
-                                        {Country.getAllCountries().map((c) => (
-                                            <SelectItem key={c.isoCode} value={c.isoCode}>{c.name}</SelectItem>
-                                        ))}
-                                    </SelectContent>
-                                </Select>
+                                <CountrySelect
+                                    id="site-country"
+                                    value={countryIso}
+                                    onValueChange={(val) => {
+                                        setCountryIso(val);
+                                        setStateIso("");
+                                        setStateText("");
+                                        clearFieldError("country");
+                                    }}
+                                    error={!!fieldErrors.country}
+                                />
                                 {fieldErrors.country && <p className="text-[10px] text-red-500 mt-1 pl-1 font-medium">{fieldErrors.country}</p>}
                             </div>
                             <div className="space-y-2">
                                 <Label htmlFor="site-state">State/Region *</Label>
-                                <Select value={stateIso} onValueChange={(val) => { setStateIso(val); clearFieldError("state"); }} disabled={!countryIso}>
-                                    <SelectTrigger id="site-state" className={fieldErrorClass("state")}>
-                                        <SelectValue placeholder="Select state" />
-                                    </SelectTrigger>
-                                    <SelectContent>
-                                        {countryIso && StateCity.getStatesOfCountry(countryIso).map((s) => (
-                                            <SelectItem key={s.isoCode} value={s.isoCode}>{s.name}</SelectItem>
-                                        ))}
-                                        {countryIso && StateCity.getStatesOfCountry(countryIso).length === 0 && (
-                                            <SelectItem value="none">No states available</SelectItem>
-                                        )}
-                                    </SelectContent>
-                                </Select>
+                                {countryIso && StateCity.getStatesOfCountry(countryIso).length > 0 ? (
+                                    <StateSelect
+                                        id="site-state"
+                                        countryIso={countryIso}
+                                        value={stateIso}
+                                        onValueChange={(val) => {
+                                            setStateIso(val);
+                                            clearFieldError("state");
+                                        }}
+                                        error={!!fieldErrors.state}
+                                    />
+                                ) : (
+                                    <Input
+                                        id="site-state"
+                                        placeholder="State or region"
+                                        className={fieldErrorClass("state")}
+                                        value={stateText}
+                                        onChange={(e) => {
+                                            setStateText(e.target.value);
+                                            clearFieldError("state");
+                                        }}
+                                        disabled={!countryIso}
+                                    />
+                                )}
                                 {fieldErrors.state && <p className="text-[10px] text-red-500 mt-1 pl-1 font-medium">{fieldErrors.state}</p>}
                             </div>
                         </div>

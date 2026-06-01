@@ -84,6 +84,8 @@ model User {
   createdAt         DateTime       @default(now())
   updatedAt         DateTime       @updatedAt
   isActive          Boolean        @default(true)
+  /// Set when the user proves they control their email (signup OTP or org invite OTP).
+  emailVerifiedAt   DateTime?
   creatorId         Int?
 
   // Subscription and Trial fields
@@ -127,6 +129,28 @@ model User {
   subscriptions     Subscription[]
   payments          Payment[]
   sessions          Session[]
+  orgGapAnalysisStore     OrgGapAnalysisStore?     @relation("OrgGapStore")
+  orgSelfAssessmentStore  OrgSelfAssessmentStore?  @relation("OrgSelfAssessmentStore")
+}
+
+/// Organization-wide gap analysis history and in-progress draft (shared by all org members).
+model OrgGapAnalysisStore {
+  orgRootUserId     Int      @id
+  analyses          Json     @default("[]")
+  draft             Json?
+  updatedAt         DateTime @updatedAt
+  updatedByUserId   Int?
+  orgRoot           User     @relation("OrgGapStore", fields: [orgRootUserId], references: [id], onDelete: Cascade)
+}
+
+/// Organization-wide self assessment history and in-progress draft.
+model OrgSelfAssessmentStore {
+  orgRootUserId     Int      @id
+  assessments       Json     @default("[]")
+  draft             Json?
+  updatedAt         DateTime @updatedAt
+  updatedByUserId   Int?
+  orgRoot           User     @relation("OrgSelfAssessmentStore", fields: [orgRootUserId], references: [id], onDelete: Cascade)
 }
 
 /// Server-side session (opaque bearer token). Replaces stateless JWT for request authentication.

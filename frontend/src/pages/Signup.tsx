@@ -4,6 +4,8 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Eye, EyeOff } from "lucide-react";
+import { PhoneInputWithCountryCode } from "@/components/PhoneInputWithCountryCode";
+import { DEFAULT_PHONE_COUNTRY_CODE } from "@/lib/phoneCountries";
 import { PASSWORD_REGEX, PASSWORD_ERROR_MESSAGE } from "@/lib/validation";
 
 export default function Signup() {
@@ -14,6 +16,7 @@ export default function Signup() {
     const [firstName, setFirstName] = useState("");
     const [lastName, setLastName] = useState("");
     const [phone, setPhone] = useState("");
+    const [phoneCountry, setPhoneCountry] = useState(DEFAULT_PHONE_COUNTRY_CODE);
     const [showPassword, setShowPassword] = useState(false);
     const [showConfirmPassword, setShowConfirmPassword] = useState(false);
 
@@ -109,12 +112,13 @@ export default function Signup() {
 
                             <div className="space-y-1.5">
                                 <Label className="text-xs font-semibold text-[#4B5563]">Phone Number</Label>
-                                <Input
-                                    type="tel"
-                                    placeholder="+1 234 567 8900"
+                                <PhoneInputWithCountryCode
+                                    countryCode={phoneCountry}
+                                    onCountryCodeChange={setPhoneCountry}
                                     value={phone}
-                                    onChange={(e) => setPhone(e.target.value)}
-                                    className="h-11 bg-[#F9FAFB] border-[#E5E7EB] rounded-lg text-sm text-[#111827] placeholder:text-[#9CA3AF] focus:ring-1 focus:ring-[#213847]"
+                                    onChange={setPhone}
+                                    selectClassName="focus:ring-[#213847]"
+                                    inputClassName="focus:ring-[#213847]"
                                 />
                             </div>
 

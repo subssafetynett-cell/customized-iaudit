@@ -3,6 +3,10 @@ import { useNavigate } from "react-router-dom";
 import { useCompanyStore } from "@/hooks/useCompanyStore";
 import { apiFetch } from "@/lib/api";
 import {
+    fetchGapAnalysesPersisted,
+    fetchSelfAssessmentsPersisted,
+} from "@/lib/userPersistedData";
+import {
   Building2,
   MapPin,
   Users as UsersIcon,
@@ -102,6 +106,10 @@ const Index = () => {
   useEffect(() => {
     const handleRestart = (e: any) => {
       const step = e.detail?.step || 2;
+      if (step >= 4) {
+        navigate(`/companies?onboarding=true&step=${step}`);
+        return;
+      }
       if (!trialWelcomeDismissed) {
         const userJson = localStorage.getItem("user");
         const user = userJson ? JSON.parse(userJson) : null;
@@ -114,6 +122,11 @@ const Index = () => {
     const params = new URLSearchParams(window.location.search);
     if (params.get('restartOnboarding') === 'true') {
       const step = Number(params.get('step')) || 2;
+      if (step >= 4) {
+        navigate(`/companies?onboarding=true&step=${step}`);
+        window.history.replaceState({}, '', window.location.pathname);
+        return;
+      }
       const userJson = localStorage.getItem('user');
       const user = userJson ? JSON.parse(userJson) : null;
       const blocked = user && shouldAwaitTrialWelcome(user) && !trialWelcomeDismissed;
@@ -126,7 +139,7 @@ const Index = () => {
 
     window.addEventListener('restart-onboarding', handleRestart);
     return () => window.removeEventListener('restart-onboarding', handleRestart);
-  }, [trialWelcomeDismissed]);
+  }, [trialWelcomeDismissed, navigate]);
 
   useEffect(() => {
     const userJson = localStorage.getItem('user');
@@ -151,21 +164,19 @@ const Index = () => {
         const user = JSON.parse(localStorage.getItem('user') || '{}');
         const [usersRes, plansRes, programsRes] = await Promise.all([
           apiFetch(`/users?creatorId=${user.id}`),
-          apiFetch(`/audit-plans?userId=${user.id}`),
-          apiFetch(`/audit-programs?userId=${user.id}`)
+          apiFetch(`/audit-plans?scope=org`),
+          apiFetch(`/audit-programs?scope=org`)
         ]);
 
         if (usersRes.ok) setUsers(await usersRes.json());
         if (plansRes.ok) setAuditPlans(await plansRes.json());
         if (programsRes.ok) setAuditPrograms(await programsRes.json());
 
-        // Load Self Assessments from localStorage
-        const savedSelf = localStorage.getItem(`selfAssessments_${user.id}`);
-        if (savedSelf) setSelfAssessments(JSON.parse(savedSelf));
+        const { assessments } = await fetchSelfAssessmentsPersisted();
+        setSelfAssessments(assessments);
 
-        // Load Gap Analyses from localStorage
-        const savedGap = localStorage.getItem(`gapAnalyses_${user.id}`);
-        if (savedGap) setGapAnalyses(JSON.parse(savedGap));
+        const { analyses } = await fetchGapAnalysesPersisted();
+        setGapAnalyses(analyses);
 
       } catch (error) {
         console.error("Failed to fetch dashboard data:", error);
@@ -800,7 +811,7 @@ const Index = () => {
           <Card className="lg:col-span-4 border-none shadow-sm rounded-xl bg-white p-6">
             <div className="flex items-center justify-between mb-6">
               <div>
-                <h2 className="text-lg font-bold text-[#111827]">Recent Audits</h2>
+                <h2 className="text-lg font-bold text-[#111827]">Scheduled Audits</h2>
                 <p className="text-xs text-[#9CA3AF]">Latest created audit plans</p>
               </div>
               <button className="text-[#9CA3AF] hover:text-[#111827]">...</button>
@@ -852,7 +863,9 @@ const Index = () => {
       </div>
 
       {/* Onboarding Modals */}
-      <Dialog open={showOnboarding} onOpenChange={(open) => {
+      <Dialog
+        open={showOnboarding && onboardingStep === 1}
+        onOpenChange={(open) => {
         if (!open && companies.length === 0) return;
         setShowWelcome(open);
       }}>
@@ -928,6 +941,10 @@ const Index = () => {
             navigate("/companies?onboarding=true&step=3");
           }}
           onBack={() => {
+            if (companies.length > 0) {
+              setShowWelcome(false);
+              return;
+            }
             setOnboardingStep(1);
           }}
           onClose={() => setShowWelcome(false)}

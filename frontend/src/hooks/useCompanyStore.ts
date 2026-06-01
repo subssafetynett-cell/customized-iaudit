@@ -37,6 +37,11 @@ function normalizeCompany(c: any): Company {
   };
 }
 
+/** Synchronous read of cached companies (for tour routing without waiting on fetch). */
+export function getCompaniesSnapshot(): Company[] {
+  return globalCompanies;
+}
+
 export function useCompanyStore() {
   const [, setTick] = useState(0);
 

@@ -7,6 +7,8 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import { Eye, EyeOff } from "lucide-react";
 import gsap from "gsap";
+import { PhoneInputWithCountryCode } from "@/components/PhoneInputWithCountryCode";
+import { DEFAULT_PHONE_COUNTRY_CODE } from "@/lib/phoneCountries";
 import { PASSWORD_REGEX, PASSWORD_ERROR_MESSAGE, isTenDigitPhone, normalizePhone10Digits, PHONE_10_ERROR_MESSAGE } from "@/lib/validation";
 import {
     clearSuperAdminSession,
@@ -34,6 +36,7 @@ export default function Auth() {
     const [signupLastName, setSignupLastName] = useState("");
     const [signupEmail, setSignupEmail] = useState("");
     const [signupPhone, setSignupPhone] = useState("");
+    const [signupPhoneCountry, setSignupPhoneCountry] = useState(DEFAULT_PHONE_COUNTRY_CODE);
     const [signupPassword, setSignupPassword] = useState("");
     const [signupConfirmPassword, setSignupConfirmPassword] = useState("");
     const [showSignupPassword, setShowSignupPassword] = useState(false);
@@ -60,6 +63,12 @@ export default function Auth() {
     const [postResetMessage, setPostResetMessage] = useState("");
     const [showForgotNewPassword, setShowForgotNewPassword] = useState(false);
     const [showForgotConfirmPassword, setShowForgotConfirmPassword] = useState(false);
+
+    const [showInviteVerify, setShowInviteVerify] = useState(false);
+    const [inviteVerifyEmail, setInviteVerifyEmail] = useState("");
+    const [inviteOtp, setInviteOtp] = useState("");
+    const [inviteResendTimer, setInviteResendTimer] = useState(0);
+    const [isInviteResending, setIsInviteResending] = useState(false);
 
     const containerRef = useRef<HTMLDivElement>(null);
     const overlayRef = useRef<HTMLDivElement>(null);
@@ -102,7 +111,82 @@ export default function Auth() {
         return () => clearTimeout(interval);
     }, [forgotResendTimer]);
 
+    useEffect(() => {
+        let interval: NodeJS.Timeout;
+        if (inviteResendTimer > 0) {
+            interval = setTimeout(() => {
+                setInviteResendTimer((prev) => Math.max(0, prev - 1));
+            }, 1000);
+        }
+        return () => clearTimeout(interval);
+    }, [inviteResendTimer]);
+
+    const closeInviteVerify = () => {
+        setShowInviteVerify(false);
+        setInviteOtp("");
+        setErrorMessage("");
+    };
+
+    const handleResendInviteOtp = async () => {
+        setIsInviteResending(true);
+        setErrorMessage("");
+        try {
+            const response = await apiFetch("/auth/resend-invite-verification", {
+                method: "POST",
+                body: JSON.stringify({ email: inviteVerifyEmail.trim().toLowerCase() }),
+            });
+            const data = await response.json();
+            if (!response.ok) {
+                if (response.status === 429 && typeof data.retryAfterSeconds === "number") {
+                    setInviteResendTimer(data.retryAfterSeconds);
+                }
+                throw new Error(data.error || "Failed to resend code");
+            }
+            setInviteResendTimer(60);
+            setPostResetMessage("A new verification code was sent to your email.");
+        } catch (e: unknown) {
+            const msg = e instanceof Error ? e.message : "Failed to resend code";
+            setErrorMessage(msg);
+        } finally {
+            setIsInviteResending(false);
+        }
+    };
+
+    const handleInviteVerifySubmit = async (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!inviteOtp.trim()) {
+            setErrorMessage("Enter the verification code from your email");
+            return;
+        }
+        setIsSubmitting(true);
+        setErrorMessage("");
+        try {
+            const response = await apiFetch("/auth/verify-invited-account", {
+                method: "POST",
+                body: JSON.stringify({
+                    email: inviteVerifyEmail.trim().toLowerCase(),
+                    otp: inviteOtp.trim(),
+                }),
+            });
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data.error || "Verification failed");
+            }
+            setShowInviteVerify(false);
+            setInviteOtp("");
+            setPostResetMessage(
+                data.message || "Email verified. You can sign in with your password.",
+            );
+            setLoginEmail(inviteVerifyEmail.trim().toLowerCase());
+        } catch (e: unknown) {
+            setErrorMessage(e instanceof Error ? e.message : "Verification failed");
+        } finally {
+            setIsSubmitting(false);
+        }
+    };
+
     const openForgotPassword = () => {
+        setShowInviteVerify(false);
         setErrorMessage("");
         setPostResetMessage("");
         setResetEmail(loginEmail.trim());
@@ -314,6 +398,18 @@ export default function Auth() {
             const data = await response.json().catch(() => ({}));
 
             if (!response.ok) {
+                if (response.status === 403 && data.code === 'EMAIL_VERIFICATION_REQUIRED') {
+                    setInviteVerifyEmail(
+                        typeof data.email === 'string' ? data.email : loginEmail.trim().toLowerCase(),
+                    );
+                    setShowInviteVerify(true);
+                    setShowForgotPassword(false);
+                    setErrorMessage(
+                        data.error ||
+                            'Verify your email with the activation code sent by your administrator before signing in.',
+                    );
+                    return;
+                }
                 if (response.status === 403 && data.code === 'ACCOUNT_LOCKED_PASSWORD_RESET_REQUIRED') {
                     throw new Error(
                         data.error ||
@@ -605,18 +701,15 @@ export default function Auth() {
 
                                     <div className="space-y-1.5">
                                         <Label className="text-xs font-semibold text-[#4B5563]">Phone Number</Label>
-                                        <Input
-                                            type="tel"
-                                            inputMode="numeric"
-                                            maxLength={10}
-                                            placeholder="5551234567"
+                                        <PhoneInputWithCountryCode
+                                            countryCode={signupPhoneCountry}
+                                            onCountryCodeChange={setSignupPhoneCountry}
                                             value={signupPhone}
-                                            onChange={(e) => {
-                                                const value = e.target.value.replace(/\D/g, "").slice(0, 10);
+                                            onChange={(value) => {
                                                 setSignupPhone(value);
                                                 if (signupErrors.phone) setSignupErrors(prev => ({ ...prev, phone: "" }));
                                             }}
-                                            className={`h-11 bg-[#F9FAFB] border-[#E5E7EB] rounded-lg text-sm text-[#111827] placeholder:text-[#9CA3AF] focus:ring-1 focus:ring-[#00875B] ${signupErrors.phone ? "border-red-500 focus:ring-red-500" : ""}`}
+                                            error={!!signupErrors.phone}
                                         />
                                         {signupErrors.phone && <p className="text-[10px] text-red-500 mt-1 pl-1 font-medium">{signupErrors.phone}</p>}
                                     </div>
@@ -742,7 +835,60 @@ export default function Auth() {
                                 </div>
                             )}
 
-                            {showForgotPassword ? (
+                            {showInviteVerify ? (
+                                <div className="space-y-6">
+                                    <div className="mb-2">
+                                        <h2 className="text-xl font-bold text-[#111827] tracking-tight">Verify your email</h2>
+                                        <p className="text-sm text-[#6B7280] mt-1">
+                                            Enter the activation code sent to {inviteVerifyEmail}. You must verify before you can sign in.
+                                        </p>
+                                    </div>
+                                    <form onSubmit={handleInviteVerifySubmit} className="space-y-4">
+                                        <div className="space-y-2">
+                                            <Label className="text-xs font-semibold text-[#4B5563] uppercase tracking-wider">Activation code</Label>
+                                            <Input
+                                                type="text"
+                                                inputMode="numeric"
+                                                maxLength={8}
+                                                placeholder="123456"
+                                                value={inviteOtp}
+                                                onChange={(e) => setInviteOtp(e.target.value.replace(/\D/g, ""))}
+                                                disabled={isSubmitting}
+                                                autoComplete="one-time-code"
+                                                className="h-14 text-center text-2xl tracking-[0.35em] font-mono bg-[#F9FAFB] border-[#E5E7EB] rounded-xl"
+                                            />
+                                        </div>
+                                        <Button
+                                            disabled={isSubmitting}
+                                            type="submit"
+                                            className="w-full h-12 text-base font-bold bg-[#00875B] text-white hover:bg-[#006E4A] rounded-xl"
+                                        >
+                                            {isSubmitting ? "Verifying…" : "Verify email"}
+                                        </Button>
+                                        <button
+                                            type="button"
+                                            disabled={inviteResendTimer > 0 || isSubmitting || isInviteResending}
+                                            onClick={() => void handleResendInviteOtp()}
+                                            className="w-full text-sm text-[#00875B] font-semibold hover:underline disabled:opacity-50"
+                                        >
+                                            {isInviteResending
+                                                ? "Sending…"
+                                                : inviteResendTimer > 0
+                                                  ? `Resend code in ${inviteResendTimer}s`
+                                                  : "Resend activation code"}
+                                        </button>
+                                        <div className="text-center">
+                                            <button
+                                                type="button"
+                                                onClick={closeInviteVerify}
+                                                className="text-sm text-[#00875B] font-semibold hover:underline"
+                                            >
+                                                Back to sign in
+                                            </button>
+                                        </div>
+                                    </form>
+                                </div>
+                            ) : showForgotPassword ? (
                                 <div className="space-y-6">
                                     <div className="mb-2">
                                         <h2 className="text-xl font-bold text-[#111827] tracking-tight">Reset password</h2>

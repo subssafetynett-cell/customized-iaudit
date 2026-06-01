@@ -86,6 +86,21 @@ const CompaniesPage = () => {
     );
   };
 
+  const exitOnboardingTour = () => {
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.delete("onboarding");
+        next.delete("step");
+        return next;
+      },
+      { replace: true }
+    );
+    setShowOnboardingGuide(false);
+    setShowAddSite(false);
+    setAddDeptSiteId(null);
+  };
+
   // Pagination state
   const [currentPage, setCurrentPage] = useState(1);
   const itemsPerPage = 8;
@@ -115,7 +130,13 @@ const CompaniesPage = () => {
 
     setShowOnboardingGuide(true);
     setOnboardingStep(step);
-    setShowAddSite(step === 4);
+
+    const tourCompany =
+      companies.find((c) => c.id === selectedCompanyId) ?? companies[0];
+    const firstSiteId = tourCompany?.sites?.[0]?.id;
+
+    // Step 7 needs a site before the department form can open
+    setShowAddSite(step === 4 || (step === 7 && !firstSiteId));
 
     if (step >= 6 && step <= 9) {
       setActiveTab("departments");
@@ -123,11 +144,10 @@ const CompaniesPage = () => {
       setActiveTab("sites");
     }
 
-    if (step === 7) {
-      const company =
-        companies.find((c) => c.id === selectedCompanyId) ?? companies[0];
-      const siteId = company?.sites[0]?.id;
-      if (siteId) setAddDeptSiteId(siteId);
+    if (step === 7 && firstSiteId) {
+      setAddDeptSiteId(firstSiteId);
+    } else if (step !== 7) {
+      setAddDeptSiteId(null);
     } else {
       setAddDeptSiteId(null);
     }
@@ -170,6 +190,23 @@ const CompaniesPage = () => {
     const targetSiteId = siteId ?? selectedCompany.sites[0]?.id;
     if (!targetSiteId) return;
     setAddDeptSiteId(targetSiteId);
+  };
+
+  /** Advance tour step; modals open/close via onboarding useEffect for steps 4 and 7. */
+  const goToTourStep = (step: number) => setTourStep(step);
+
+  const advanceFromDepartmentIntroStep = () => {
+    if (!selectedCompany) return;
+    setActiveTab("departments");
+    const siteId = selectedCompany.sites[0]?.id;
+    if (siteId) {
+      setAddDeptSiteId(siteId);
+      setShowAddSite(false);
+    } else {
+      setAddDeptSiteId(null);
+      setShowAddSite(true);
+    }
+    goToTourStep(7);
   };
   const allDepartments = selectedCompany?.sites.flatMap((s) =>
     (s.departments ?? []).map((d) => ({ ...d, siteName: s.name, siteId: s.id }))
@@ -309,7 +346,7 @@ const CompaniesPage = () => {
                       id="tour-step-add-site"
                       onClick={() => {
                         setShowAddSite(true);
-                        if (showOnboardingGuide) setTourStep(4);
+                        if (showOnboardingGuide) goToTourStep(4);
                       }}
                       className={`w-full sm:w-auto bg-[#213847] hover:bg-[#213847]/90 text-white gap-2 px-6 rounded-lg font-bold transition-all ${showOnboardingGuide && onboardingStep === 3 ? "relative z-[60] scale-105 shadow-2xl" : ""}`}
                     >
@@ -321,13 +358,13 @@ const CompaniesPage = () => {
                         step={3}
                         totalSteps={ONBOARDING_TOTAL_STEPS}
                         title="Create Sites"
-                        description="Click this add site button and fill the fields to create sites."
-                        onNext={() => setTourStep(4)}
+                        description="Use Add Site to create locations for your company. You can skip this for now and continue with Next."
+                        onNext={() => goToTourStep(4)}
                         onBack={() => {
                           setShowOnboardingGuide(false);
                           navigate("/?restartOnboarding=true&step=2");
                         }}
-                        onClose={() => setShowOnboardingGuide(false)}
+                        onClose={exitOnboardingTour}
                         position="left"
                         disableShadow={false}
                       />
@@ -423,10 +460,10 @@ const CompaniesPage = () => {
                           step={6}
                           totalSteps={ONBOARDING_TOTAL_STEPS}
                           title="Create Departments"
-                          description="Click Add Department to create departments for your site."
-                          onNext={() => setTourStep(7)}
-                          onBack={() => setTourStep(5)}
-                          onClose={() => setShowOnboardingGuide(false)}
+                          description="Click Add Department to create departments for your site, or press Next to continue."
+                          onNext={advanceFromDepartmentIntroStep}
+                          onBack={() => goToTourStep(5)}
+                          onClose={exitOnboardingTour}
                           position="left"
                           disableShadow={false}
                         />
@@ -511,8 +548,8 @@ const CompaniesPage = () => {
                   setShowOnboardingGuide(false);
                   navigate("/users?onboarding=true&step=10");
                 }}
-                onBack={() => setTourStep(8)}
-                onClose={() => setShowOnboardingGuide(false)}
+                onBack={() => goToTourStep(8)}
+                onClose={exitOnboardingTour}
                 position="right"
                 disableShadow={false}
               />
@@ -532,9 +569,9 @@ const CompaniesPage = () => {
                   ? "Your site has been created! You can view all your sites here. Use the edit and delete buttons in the Actions column to manage them."
                   : "This is where your sites will appear once created. You can manage them using the edit and delete buttons in the Actions column."
               }
-              onNext={() => setTourStep(6)}
-              onBack={() => setTourStep(4)}
-              onClose={() => setShowOnboardingGuide(false)}
+              onNext={() => goToTourStep(6)}
+              onBack={() => goToTourStep(4)}
+              onClose={exitOnboardingTour}
               position="top"
               disableShadow={false}
             />
@@ -552,15 +589,9 @@ const CompaniesPage = () => {
                   ? "Your department has been created! You can view all your departments here. Use the edit and delete buttons in the Actions column to manage them."
                   : "This is where your departments will appear once created. You can manage them using the edit and delete buttons in the Actions column."
               }
-              onNext={() => setTourStep(9)}
-              onBack={() => {
-                if (selectedCompany.sites.length > 0) {
-                  setTourStep(7);
-                } else {
-                  setTourStep(6);
-                }
-              }}
-              onClose={() => setShowOnboardingGuide(false)}
+              onNext={() => goToTourStep(9)}
+              onBack={() => goToTourStep(7)}
+              onClose={exitOnboardingTour}
               position="top"
               disableShadow={false}
             />
@@ -573,17 +604,28 @@ const CompaniesPage = () => {
           {/* ------------------------------------------------------------------ */}
           <SiteModal
             open={showAddSite}
-            hideOverlay={showOnboardingGuide && onboardingStep === 4}
-            hideCancel={showOnboardingGuide && onboardingStep === 4}
+            hideOverlay={
+              showOnboardingGuide && (onboardingStep === 4 || onboardingStep === 7)
+            }
+            hideCancel={
+              showOnboardingGuide && (onboardingStep === 4 || onboardingStep === 7)
+            }
             onClose={() => {
-              if (showOnboardingGuide && onboardingStep === 4) return;
+              if (showOnboardingGuide && (onboardingStep === 4 || onboardingStep === 7)) {
+                return;
+              }
               setShowAddSite(false);
             }}
             onSubmit={async (data) => {
               const res = await addSite(selectedCompany.id, data);
               if (res?.success) {
-                if (showOnboardingGuide) {
-                  setTourStep(5);
+                if (showOnboardingGuide && onboardingStep === 7) {
+                  setShowAddSite(false);
+                  if (res.site?.id) {
+                    setAddDeptSiteId(res.site.id);
+                  }
+                } else if (showOnboardingGuide && onboardingStep === 4) {
+                  goToTourStep(5);
                 } else {
                   setShowAddSite(false);
                 }
@@ -592,25 +634,32 @@ const CompaniesPage = () => {
             mode="create"
           />
 
-          {/* ------------------------------------------------------------------ */}
-          {/* STEP 4 TOUR POPOVER — positioned to the right of the site modal     */}
-          {/* disableShadow={true} → no dark overlay, modal fully visible.        */}
-          {/* ------------------------------------------------------------------ */}
           {showOnboardingGuide && onboardingStep === 4 && showAddSite && (
             <TourStepPopover
               targetId="tour-step-site-modal"
               step={4}
               totalSteps={ONBOARDING_TOTAL_STEPS}
               title="Add Site Details"
-              description="Fill in all the site details and click 'Add Site' when ready."
-              onNext={() => setTourStep(5)}
-              onBack={() => setTourStep(3)}
-              onClose={() => {
-                setShowOnboardingGuide(false);
-                setShowAddSite(false);
-              }}
+              description="Fill in the site details and click Add Site when ready, or press Next to continue."
+              onNext={() => goToTourStep(5)}
+              onBack={() => goToTourStep(3)}
+              onClose={exitOnboardingTour}
               position="right"
-              hideNext={false}
+              disableShadow={true}
+            />
+          )}
+
+          {showOnboardingGuide && onboardingStep === 7 && showAddSite && !addDeptSiteId && (
+            <TourStepPopover
+              targetId="tour-step-site-modal"
+              step={7}
+              totalSteps={ONBOARDING_TOTAL_STEPS}
+              title="Add a Site First"
+              description="Create a site for this company, then the department form will open. Or press Next to continue the tour."
+              onNext={() => goToTourStep(8)}
+              onBack={() => goToTourStep(6)}
+              onClose={exitOnboardingTour}
+              position="right"
               disableShadow={true}
             />
           )}
@@ -635,7 +684,9 @@ const CompaniesPage = () => {
                     data
                   );
                   if (res && showOnboardingGuide) {
-                    setTourStep(8);
+                    goToTourStep(8);
+                  } else if (res) {
+                    setAddDeptSiteId(null);
                   }
                 }}
                 siteName={deptModalSite.name}
@@ -644,28 +695,16 @@ const CompaniesPage = () => {
             );
           })()}
 
-          {/* Step 7: Add Department modal details */}
           {showOnboardingGuide && onboardingStep === 7 && !!addDeptSiteId && (
             <TourStepPopover
               targetId="tour-step-dept-modal"
               step={7}
               totalSteps={ONBOARDING_TOTAL_STEPS}
               title="Add Department Details"
-              description="Fill in the department name and other details, then click 'Create Department'."
-              onNext={() => setTourStep(8)}
-              onBack={() => setTourStep(6)}
-              onClose={() => {
-                setShowOnboardingGuide(false);
-                setSearchParams(
-                  (prev) => {
-                    const next = new URLSearchParams(prev);
-                    next.delete("onboarding");
-                    next.delete("step");
-                    return next;
-                  },
-                  { replace: true }
-                );
-              }}
+              description="Fill in the department name and other details, then click Create Department, or press Next to continue."
+              onNext={() => goToTourStep(8)}
+              onBack={() => goToTourStep(6)}
+              onClose={exitOnboardingTour}
               position="right"
               disableShadow={true}
             />

@@ -18,6 +18,10 @@ import {
   isWithinMaxLength,
 } from "@/lib/validation";
 import { COMPANY_INDUSTRIES } from "@/lib/industries";
+import { Country, State as StateCity } from "country-state-city";
+import { CountrySelect } from "@/components/CountrySelect";
+import { StateSelect } from "@/components/StateSelect";
+import { resolveCountryIsoFromName } from "@/lib/worldCountries";
 
 interface Props {
   open: boolean;
@@ -40,44 +44,6 @@ interface Props {
   hideCancel?: boolean;
 }
 
-const COUNTRIES = [
-  "India",
-  "United Arab Emirates",
-  "United States",
-  "United Kingdom",
-  "Australia",
-  "Canada",
-  "Saudi Arabia",
-  "Qatar",
-  "Oman",
-  "Kuwait",
-  "Bahrain",
-  "Singapore",
-  "Malaysia",
-  "Germany",
-  "France",
-];
-
-const STATES = {
-  "India": [
-    "Andhra Pradesh", "Arunachal Pradesh", "Assam", "Bihar", "Chhattisgarh", "Goa", "Gujarat", "Haryana", 
-    "Himachal Pradesh", "Jharkhand", "Karnataka", "Kerala", "Madhya Pradesh", "Maharashtra", "Manipur", 
-    "Meghalaya", "Mizoram", "Nagaland", "Odisha", "Punjab", "Rajasthan", "Sikkim", "Tamil Nadu", "Telangana", 
-    "Tripura", "Uttar Pradesh", "Uttarakhand", "West Bengal", "Andaman and Nicobar Islands", "Chandigarh", 
-    "Dadra and Nagar Haveli and Daman and Diu", "Delhi", "Jammu and Kashmir", "Ladakh", "Lakshadweep", "Puducherry"
-  ],
-  "United Arab Emirates": [
-    "Abu Dhabi", "Dubai", "Sharjah", "Ajman", "Umm Al Quwain", "Ras Al Khaimah", "Fujairah"
-  ],
-  "United States": [
-    "Alabama", "Alaska", "Arizona", "Arkansas", "California", "Colorado", "Connecticut", "Delaware", "Florida", "Georgia",
-    "Hawaii", "Idaho", "Illinois", "Indiana", "Iowa", "Kansas", "Kentucky", "Louisiana", "Maine", "Maryland",
-    "Massachusetts", "Michigan", "Minnesota", "Mississippi", "Missouri", "Montana", "Nebraska", "Nevada", "New Hampshire", "New Jersey",
-    "New Mexico", "New York", "North Carolina", "North Dakota", "Ohio", "Oklahoma", "Oregon", "Pennsylvania", "Rhode Island", "South Carolina",
-    "South Dakota", "Tennessee", "Texas", "Utah", "Vermont", "Virginia", "Washington", "West Virginia", "Wisconsin", "Wyoming"
-  ]
-};
-
 export default function CompanyModal({ open, onClose, onSubmit, initialData, mode = "create", hideCancel = false }: Props) {
   const [name, setName] = useState("");
   const [logo, setLogo] = useState<string | undefined>();
@@ -87,7 +53,8 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
   const [streetAddress, setStreetAddress] = useState("");
   const [city, setCity] = useState("");
   const [state, setState] = useState("");
-  const [country, setCountry] = useState("");
+  const [stateIso, setStateIso] = useState("");
+  const [countryIso, setCountryIso] = useState("");
   const [postalCode, setPostalCode] = useState("");
   const [error, setError] = useState("");
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
@@ -101,8 +68,19 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
       setDescription(initialData?.description || "");
       setStreetAddress(initialData?.streetAddress || "");
       setCity(initialData?.city || "");
-      setState(initialData?.state || "");
-      setCountry(initialData?.country || "");
+      const initialCountryIso = resolveCountryIsoFromName(initialData?.country || "");
+      setCountryIso(initialCountryIso);
+      if (initialCountryIso && initialData?.state) {
+        const initialStateIso =
+          StateCity.getStatesOfCountry(initialCountryIso).find(
+            (s) => s.name === initialData.state,
+          )?.isoCode || "";
+        setStateIso(initialStateIso);
+        setState(initialData.state);
+      } else {
+        setStateIso("");
+        setState(initialData?.state || "");
+      }
       setPostalCode(initialData?.postalCode || "");
       setError("");
       setFieldErrors({});
@@ -179,8 +157,19 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
     else if (!isTenDigitPhone(contactNumber)) errors.contactNumber = PHONE_10_ERROR_MESSAGE;
     if (!trimmedAddress) errors.streetAddress = "Street address is required";
     if (!city.trim()) errors.city = "City is required";
-    if (!state) errors.state = "State is required";
-    if (!country) errors.country = "Country is required";
+    const countryName = Country.getCountryByCode(countryIso)?.name || "";
+    const statesForCountry = countryIso ? StateCity.getStatesOfCountry(countryIso) : [];
+    const hasStates = statesForCountry.length > 0;
+    const stateName = hasStates
+      ? StateCity.getStateByCodeAndCountry(stateIso, countryIso)?.name || ""
+      : state.trim();
+
+    if (!countryIso) errors.country = "Country is required";
+    if (hasStates) {
+      if (!stateIso) errors.state = "State is required";
+    } else if (!state.trim()) {
+      errors.state = "State is required";
+    }
     if (!postalCode.trim()) errors.postalCode = "Postal code is required";
 
     setFieldErrors(errors);
@@ -200,8 +189,8 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
           description: description.trim(),
           streetAddress: trimmedAddress,
           city: city.trim(),
-          state: state.trim(),
-          country: country.trim(),
+          state: stateName,
+          country: countryName,
           postalCode: postalCode.trim(),
           standards: initialData?.isoStandards || [],
         })
@@ -406,40 +395,34 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="space-y-2">
               <Label htmlFor="country" className="text-sm">Country *</Label>
-              <Select value={country} onValueChange={(val) => {
-                setCountry(val);
-                setState(""); // Reset state when country changes
-                if (fieldErrors.country) setFieldErrors(prev => ({ ...prev, country: "" }));
-                setError("");
-              }}>
-                <SelectTrigger id="country" className={`${fieldErrors.country ? "border-red-500 focus:ring-red-500" : ""}`}>
-                  <SelectValue placeholder="Select country" />
-                </SelectTrigger>
-                <SelectContent>
-                  {COUNTRIES.map((c) => (
-                    <SelectItem key={c} value={c}>{c}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <CountrySelect
+                id="country"
+                value={countryIso}
+                onValueChange={(val) => {
+                  setCountryIso(val);
+                  setStateIso("");
+                  setState("");
+                  if (fieldErrors.country) setFieldErrors((prev) => ({ ...prev, country: "" }));
+                  setError("");
+                }}
+                error={!!fieldErrors.country}
+              />
               {fieldErrors.country && <p className="text-[10px] text-red-500 mt-1 pl-1 font-medium">{fieldErrors.country}</p>}
             </div>
             <div className="space-y-2">
               <Label htmlFor="state" className="text-sm">State/Province *</Label>
-              {STATES[country as keyof typeof STATES] ? (
-                <Select value={state} onValueChange={(val) => {
-                  setState(val);
-                  if (fieldErrors.state) setFieldErrors(prev => ({ ...prev, state: "" }));
-                  setError("");
-                }}>
-                  <SelectTrigger id="state" className={`${fieldErrors.state ? "border-red-500 focus:ring-red-500" : ""}`}>
-                    <SelectValue placeholder="Select state" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {STATES[country as keyof typeof STATES].map((s: string) => (
-                      <SelectItem key={s} value={s}>{s}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+              {countryIso && StateCity.getStatesOfCountry(countryIso).length > 0 ? (
+                <StateSelect
+                  id="state"
+                  countryIso={countryIso}
+                  value={stateIso}
+                  onValueChange={(val) => {
+                    setStateIso(val);
+                    if (fieldErrors.state) setFieldErrors((prev) => ({ ...prev, state: "" }));
+                    setError("");
+                  }}
+                  error={!!fieldErrors.state}
+                />
               ) : (
                 <Input
                   id="state"
@@ -448,9 +431,10 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
                   value={state}
                   onChange={(e) => {
                     setState(e.target.value);
-                    if (fieldErrors.state) setFieldErrors(prev => ({ ...prev, state: "" }));
+                    if (fieldErrors.state) setFieldErrors((prev) => ({ ...prev, state: "" }));
                     setError("");
                   }}
+                  disabled={!countryIso}
                 />
               )}
               {fieldErrors.state && <p className="text-[10px] text-red-500 mt-1 pl-1 font-medium">{fieldErrors.state}</p>}

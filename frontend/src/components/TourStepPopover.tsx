@@ -370,7 +370,12 @@ export const TourStepPopover: React.FC<TourStepPopoverProps> = ({
             {/* Buttons */}
             <div className="flex items-center gap-2 pt-1">
               <button
-                onClick={onBack}
+                type="button"
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  onBack();
+                }}
                 className="flex-1 h-8 rounded-lg border border-emerald-600 text-emerald-700 text-xs font-bold hover:bg-emerald-50 bg-white flex items-center justify-center gap-1.5 transition-colors"
               >
                 <ArrowLeft className="w-3.5 h-3.5" />
@@ -378,7 +383,12 @@ export const TourStepPopover: React.FC<TourStepPopoverProps> = ({
               </button>
               {!hideNext && (
                 <button
-                  onClick={onNext}
+                  type="button"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    onNext();
+                  }}
                   className="flex-1 h-8 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold flex items-center justify-center gap-1.5 transition-colors shadow-md shadow-emerald-100"
                 >
                   Next

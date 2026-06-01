@@ -6,6 +6,9 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-appdb}
       POSTGRES_USER: ${POSTGRES_USER:-appuser}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-apppassword}
+    ports:
+      # Lets Prisma / local tools on the host use localhost:5432 (not hostname "postgres").
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -20,18 +23,7 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     env_file:
-      - .env
-    depends_on:
-      postgres:
-        condition: service_healthy
-    environment:
-      # Always use the compose Postgres service (host .env often has localhost:5432 for native dev).
-      DATABASE_URL: postgresql://${POSTGRES_USER:-appuser}:${POSTGRES_PASSWORD:-apppassword}@postgres:5432/${POSTGRES_DB:-appdb}?sslmode=disable
-      PORT: ${PORT:-3001}
-      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY}
-      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET}
-      SUPERADMIN_EMAIL: ${SUPERADMIN_EMAIL:-admin@iaudit.global}
-      SUPERADMIN_PASSWORD: ${SUPERADMIN_PASSWORD:-123}
+      - ./server/.env
     ports:
       - "3001:3001"
 
@@ -44,7 +36,7 @@ services:
         VITE_API_BASE_URL: ""
     restart: unless-stopped
     env_file:
-      - .env
+      - ./server/.env
     depends_on:
       - server
     ports:

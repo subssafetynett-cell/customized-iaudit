@@ -2,8 +2,8 @@ import pkgPg from 'pg';
 const { Pool } = pkgPg;
 import { PrismaPg } from '@prisma/adapter-pg';
 import pkgPrisma from '../generated/prisma/index.js';
-import dotenv from 'dotenv';
-dotenv.config();
+import { loadServerEnv } from './loadEnv.js';
+loadServerEnv();
 
 const { PrismaClient } = pkgPrisma;
 

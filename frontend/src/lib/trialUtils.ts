@@ -113,7 +113,7 @@ export function shouldAwaitTrialWelcome(
   return true;
 }
 
-export const TRIAL_EXPIRED_ALLOWED_PATHS = ["/", "/feedback", "/subscription"] as const;
+export const TRIAL_EXPIRED_ALLOWED_PATHS = ["/", "/getting-started", "/feedback", "/subscription"] as const;
 
 export function isPathAllowedForExpiredTrial(pathname: string): boolean {
   return (TRIAL_EXPIRED_ALLOWED_PATHS as readonly string[]).includes(pathname);
