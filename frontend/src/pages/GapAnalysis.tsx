@@ -41,6 +41,13 @@ import {
     readValidatedEvidenceImageFile,
 } from "@/lib/evidenceImageUpload";
 import {
+    fetchGapAnalysesPersisted,
+    migrateLocalGapAnalysesToServer,
+    persistGapAnalysesList,
+    persistGapAnalysisDraft,
+    deleteGapAnalysisPersisted,
+} from "@/lib/userPersistedData";
+import {
     sanitizeGapAnalysisField,
     sanitizeGapAnalysisLongField,
     sanitizeGapAnalysisMultiline,
@@ -144,6 +151,7 @@ const GapAnalysis = () => {
     const [questions, setQuestions] = useState<AuditQuestion[]>([]);
     const [savedAnalyses, setSavedAnalyses] = useState<SavedGapAnalysis[]>([]);
     const [currentId, setCurrentId] = useState<string | null>(null);
+    const [currentClauseIndex, setCurrentClauseIndex] = useState(0);
 
     // Modal State
     const [isAddQuestionOpen, setIsAddQuestionOpen] = useState(false);
@@ -164,18 +172,85 @@ const GapAnalysis = () => {
     const itemsPerPage = 8;
 
 
-    // Load saved analyses
+    const draftSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    const buildGapDraftPayload = React.useCallback((): Record<string, unknown> | null => {
+        if (step !== "setup" && step !== "analysis") return null;
+        if (!companyName && !standard && questions.length === 0) return null;
+        return {
+            id: currentId || crypto.randomUUID(),
+            companyName,
+            auditDate,
+            standard,
+            location,
+            representatives,
+            auditorName,
+            contactEmail,
+            scope,
+            auditCompany,
+            questions,
+            status: "In Progress" as const,
+            step,
+            currentClauseIndex,
+        };
+    }, [
+        step,
+        currentId,
+        companyName,
+        auditDate,
+        standard,
+        location,
+        representatives,
+        auditorName,
+        contactEmail,
+        scope,
+        auditCompany,
+        questions,
+        currentClauseIndex,
+    ]);
+
+    const scheduleGapDraftSave = React.useCallback(() => {
+        if (draftSaveTimerRef.current) clearTimeout(draftSaveTimerRef.current);
+        draftSaveTimerRef.current = setTimeout(() => {
+            const draft = buildGapDraftPayload();
+            if (draft) void persistGapAnalysisDraft(draft);
+        }, 1500);
+    }, [buildGapDraftPayload]);
+
+    // Load saved analyses from API (with localStorage backup / migration)
     React.useEffect(() => {
-        const user = JSON.parse(localStorage.getItem('user') || '{}');
-        const saved = localStorage.getItem(`gapAnalyses_${user.id}`);
-        if (saved) {
-            try {
-                const parsed = JSON.parse(saved) as SavedGapAnalysis[];
-                setSavedAnalyses(parsed.map(sanitizeSavedGapAnalysis));
-            } catch (e) {
-                console.error("Failed to parse gap analyses", e);
+        let cancelled = false;
+        (async () => {
+            const { analyses, draft } = await fetchGapAnalysesPersisted<SavedGapAnalysis>();
+            if (cancelled) return;
+            const merged = await migrateLocalGapAnalysesToServer(
+                analyses.map(sanitizeSavedGapAnalysis),
+            );
+            if (cancelled) return;
+            setSavedAnalyses(merged);
+
+            if (draft && typeof draft === "object" && draft.step === "analysis" && Array.isArray(draft.questions)) {
+                const safe = sanitizeSavedGapAnalysis(draft as unknown as SavedGapAnalysis);
+                setCompanyName(safe.companyName);
+                setAuditDate(safe.auditDate);
+                setStandard(safe.standard);
+                setLocation(safe.location);
+                setRepresentatives(safe.representatives);
+                setAuditorName(safe.auditorName);
+                setContactEmail(safe.contactEmail);
+                setScope(safe.scope);
+                setAuditCompany(safe.auditCompany || "");
+                setQuestions(safe.questions);
+                setCurrentId(safe.id);
+                setCurrentClauseIndex(
+                    typeof draft.currentClauseIndex === "number" ? draft.currentClauseIndex : 0,
+                );
+                setStep("analysis");
             }
-        }
+        })();
+        return () => {
+            cancelled = true;
+        };
     }, []);
 
     const saveCurrentAnalysis = (status: "In Progress" | "Completed" = "In Progress") => {
@@ -205,8 +280,10 @@ const GapAnalysis = () => {
             : [newAnalysis, ...savedAnalyses];
 
         setSavedAnalyses(updated);
-        const user = JSON.parse(localStorage.getItem('user') || '{}');
-        localStorage.setItem(`gapAnalyses_${user.id}`, JSON.stringify(updated));
+        void persistGapAnalysesList(updated);
+        if (status === "Completed") {
+            void persistGapAnalysisDraft(null);
+        }
 
         if (!currentId) setCurrentId(newAnalysis.id);
         toast.success(`Analysis saved as ${status}`);
@@ -215,8 +292,8 @@ const GapAnalysis = () => {
     const deleteAnalysis = (id: string) => {
         const updated = savedAnalyses.filter(a => a.id !== id);
         setSavedAnalyses(updated);
-        const user = JSON.parse(localStorage.getItem('user') || '{}');
-        localStorage.setItem(`gapAnalyses_${user.id}`, JSON.stringify(updated));
+        void persistGapAnalysesList(updated);
+        void deleteGapAnalysisPersisted(id);
         toast.success("Analysis deleted");
     };
 
@@ -249,13 +326,29 @@ const GapAnalysis = () => {
             return;
         }
 
+        const newId = crypto.randomUUID();
         setQuestions(initialQuestions);
-        setCurrentId(crypto.randomUUID());
+        setCurrentId(newId);
         setCurrentClauseIndex(0);
         setStep("analysis");
+        void persistGapAnalysisDraft({
+            id: newId,
+            companyName,
+            auditDate,
+            standard,
+            location,
+            representatives,
+            auditorName,
+            contactEmail,
+            scope,
+            auditCompany,
+            questions: initialQuestions,
+            status: "In Progress",
+            step: "analysis",
+            currentClauseIndex: 0,
+        });
     };
 
-    const [currentClauseIndex, setCurrentClauseIndex] = useState(0);
     const uniqueClauses = Array.from(new Set(questions.map(q => q.clause)));
     const currentClause = uniqueClauses[currentClauseIndex];
     // const currentQuestions = questions.filter(q => q.clause === currentClause); // Not used currently but logic exists
@@ -264,11 +357,18 @@ const GapAnalysis = () => {
         if (currentClauseIndex < uniqueClauses.length - 1) {
             setCurrentClauseIndex(prev => prev + 1);
             window.scrollTo({ top: 0, behavior: "smooth" });
+            scheduleGapDraftSave();
         } else {
             saveCurrentAnalysis("Completed");
             setStep("results");
         }
     };
+
+    React.useEffect(() => {
+        if (step === "analysis" || step === "setup") {
+            scheduleGapDraftSave();
+        }
+    }, [step, questions, companyName, standard, auditorName, scheduleGapDraftSave]);
 
     const handlePrevClause = () => {
         if (currentClauseIndex > 0) {
@@ -278,6 +378,7 @@ const GapAnalysis = () => {
     };
 
     const handleAnswerChange = (id: string, field: keyof AuditQuestion, value: unknown) => {
+        scheduleGapDraftSave();
         let next = value;
         if (field === "actionPlan" || field === "evidence") {
             next = sanitizeGapAnalysisMultiline(String(value ?? ""));
@@ -312,11 +413,13 @@ const GapAnalysis = () => {
 
     const handleEvidenceImageUpload = async (id: string, file: File) => {
         const result = await readValidatedEvidenceImageFile(file);
-        if (!result.ok) {
-            toast.error(result.error);
+        if (result.ok) {
+            handleAnswerChange(id, "evidenceImage", result.dataUrl);
             return;
         }
-        handleAnswerChange(id, "evidenceImage", result.dataUrl);
+        if ("error" in result) {
+            toast.error(result.error);
+        }
     };
 
     const handleRemoveEvidenceImage = (id: string) => {
@@ -444,13 +547,7 @@ const GapAnalysis = () => {
                             )}
                             <Button 
                                 id="tour-step-new-analysis"
-                                onClick={() => {
-                                    if (showOnboardingGuide && onboardingStep === 17) {
-                                        setTourStep(18);
-                                        return;
-                                    }
-                                    setStep("setup");
-                                }} 
+                                onClick={() => setStep("setup")} 
                                 className={`w-full sm:w-auto bg-[#213847] hover:bg-[#213847]/90 text-white rounded-xl h-10 px-4 font-medium shadow-sm transition-all duration-300 ${showOnboardingGuide && onboardingStep === 17 ? "relative z-[60] scale-105 shadow-2xl" : ""}`}
                             >
                                 <Plus className="h-4 w-4 mr-2" /> New Analysis
@@ -462,7 +559,7 @@ const GapAnalysis = () => {
                                     step={17}
                                     totalSteps={ONBOARDING_TOTAL_STEPS}
                                     title="New Analysis"
-                                    description="Click New Analysis to start a gap analysis for your company and evaluate compliance against ISO requirements."
+                                    description="Use New Analysis to open the setup form. You can skip creating an analysis now and continue with Next."
                                     onNext={() => setTourStep(18)}
                                     onBack={() => setTourStep(16)}
                                     onClose={() => setShowOnboardingGuide(false)}
@@ -759,7 +856,7 @@ const GapAnalysis = () => {
                                     step={18}
                                     totalSteps={ONBOARDING_TOTAL_STEPS}
                                     title="Configure Analysis"
-                                    description="Enter your company details, select the ISO standard, then click Start Gap Analysis to begin. This completes the onboarding tour—for detailed guidance, open App Instructions in the header."
+                                    description="Enter analysis details if you wish, or skip and click Next to finish the tour. For more help later, use App Instructions in the header."
                                     onNext={() => void finishOnboardingTour()}
                                     onBack={() => setTourStep(17)}
                                     onClose={() => setShowOnboardingGuide(false)}

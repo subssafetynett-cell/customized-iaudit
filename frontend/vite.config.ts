@@ -5,8 +5,8 @@ import { componentTagger } from "lovable-tagger";
 
 // https://vitejs.dev/config/
 export default defineConfig(({ mode }) => ({
-  // Load `VITE_*` from monorepo root `.env` when running/building from `frontend/`
-  envDir: path.resolve(__dirname, ".."),
+  // Load `VITE_*` from server/.env (single project env file)
+  envDir: path.resolve(__dirname, "../server"),
   server: {
     host: "::",
     port: 8080,

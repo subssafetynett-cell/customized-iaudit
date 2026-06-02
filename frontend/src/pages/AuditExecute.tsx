@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from "react";
-import { useParams, useLocation, useNavigate } from "react-router-dom";
+import React, { useState, useEffect, useCallback } from "react";
+import { useParams, useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { apiFetch } from "@/lib/api";
 import {
   ArrowLeft,
@@ -61,6 +61,13 @@ import {
   ImageRun
 } from "docx";
 import { saveAs } from "file-saver";
+import { TourStepPopover } from "@/components/TourStepPopover";
+import {
+  AUDIT_EXECUTE_TOUR_TOTAL_STEPS,
+  getAuditExecuteTourStepConfig,
+} from "@/lib/auditExecuteOnboardingTour";
+import { cn } from "@/lib/utils";
+import { useAuditExecutionAutosave } from "@/hooks/useAuditExecutionAutosave";
 
 import { CLAUSE_MATRIX, ClauseMatrixRow } from "@/data/clauseMapping";
 
@@ -97,6 +104,43 @@ const AuditExecute = () => {
   const { id } = useParams();
   const location = useLocation();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const auditExecuteTourActive = searchParams.get("auditExecuteTour") === "true";
+  const auditExecuteTourStep = Math.min(
+    AUDIT_EXECUTE_TOUR_TOTAL_STEPS,
+    Math.max(1, parseInt(searchParams.get("auditExecuteStep") || "1", 10)),
+  );
+  const auditExecuteTourStepConfig =
+    getAuditExecuteTourStepConfig(auditExecuteTourStep);
+
+  const setAuditExecuteTourStep = (step: number) => {
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.set("auditExecuteTour", "true");
+        next.set("auditExecuteStep", String(step));
+        return next;
+      },
+      { replace: true },
+    );
+  };
+
+  const exitAuditExecuteTour = () => {
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.delete("auditExecuteTour");
+        next.delete("auditExecuteStep");
+        return next;
+      },
+      { replace: true },
+    );
+  };
+
+  const tourExecuteHighlight = (step: number) =>
+    auditExecuteTourActive && auditExecuteTourStep === step
+      ? "relative z-[60] ring-[4px] ring-emerald-500/80 ring-offset-2 rounded-xl"
+      : "";
 
   // State for the loaded plan
   const [currentPlan, setCurrentPlan] = useState<any>(location.state?.plan);
@@ -544,6 +588,61 @@ const AuditExecute = () => {
     pendingItems,
   } = calculateProgress();
 
+  const buildAuditDataPayload = useCallback(
+    () => ({
+      checklistData,
+      sectionData,
+      clauseData,
+      previousFindings,
+      detailsOfChanges,
+      participants,
+      positiveAspects,
+      opportunities,
+      nonConformances,
+      executiveSummary,
+      summaryCounts,
+      auditFindings,
+      auditGlobalInfo,
+      processAudits,
+      extraChecklistItems,
+      showExecutiveSummary,
+      showAuditParticipants,
+      showAuditFindings,
+      lastSaved: new Date().toISOString(),
+      progress: progressValue,
+      editableChecklist,
+    }),
+    [
+      checklistData,
+      sectionData,
+      clauseData,
+      previousFindings,
+      detailsOfChanges,
+      participants,
+      positiveAspects,
+      opportunities,
+      nonConformances,
+      executiveSummary,
+      summaryCounts,
+      auditFindings,
+      auditGlobalInfo,
+      processAudits,
+      extraChecklistItems,
+      showExecutiveSummary,
+      showAuditParticipants,
+      showAuditFindings,
+      progressValue,
+      editableChecklist,
+    ],
+  );
+
+  useAuditExecutionAutosave({
+    planId: id,
+    buildAuditData: buildAuditDataPayload,
+    enabled: !!plan && !!template,
+    deps: [buildAuditDataPayload],
+  });
+
   const collectFindings = () => {
     const findings: {
       source: "clause" | "checklist" | "process";
@@ -778,41 +877,24 @@ const AuditExecute = () => {
   const handleSubmit = async () => {
     try {
       const auditData = {
-        checklistData,
-        sectionData,
-        clauseData,
-        previousFindings,
-        detailsOfChanges,
-        participants,
-        positiveAspects,
-        opportunities,
-        nonConformances,
-        executiveSummary,
-        summaryCounts,
-        auditFindings,
-        auditGlobalInfo,
-        processAudits,
-        extraChecklistItems,
-        showExecutiveSummary,
-        showAuditParticipants,
-        showAuditFindings,
-        lastSaved: new Date().toISOString(),
-        progress: progressValue,
+        ...buildAuditDataPayload(),
         clauseFiles,
         genericFiles,
-        editableChecklist
       };
 
       const res = await apiFetch(`/audit-plans/${id}`, {
         method: "PUT",
         body: JSON.stringify({
-          // Preserve existing plan fields if needed, or just send auditData
-          auditData: auditData
+          auditData,
         })
       });
 
       if (res.ok) {
         toast.success("Audit execution saved successfully!");
+        if (auditExecuteTourActive && auditExecuteTourStep === 5) {
+          setAuditExecuteTourStep(6);
+          return;
+        }
         navigate("/audit");
       } else {
         throw new Error("Failed to save");
@@ -820,6 +902,30 @@ const AuditExecute = () => {
     } catch (error) {
       console.error("Save error:", error);
       toast.error("Failed to save audit progress");
+    }
+  };
+
+  const handleAuditExecuteTourNext = () => {
+    if (auditExecuteTourStep === 5) {
+      void handleSubmit();
+      return;
+    }
+    if (auditExecuteTourStep >= AUDIT_EXECUTE_TOUR_TOTAL_STEPS) {
+      exitAuditExecuteTour();
+      navigate("/getting-started");
+      toast.success("Audits tour complete!");
+      return;
+    }
+    setAuditExecuteTourStep(auditExecuteTourStep + 1);
+  };
+
+  const handleAuditExecuteTourBack = () => {
+    if (auditExecuteTourStep === 4) {
+      navigate("/audit?auditExecuteTour=true&auditExecuteStep=3");
+      return;
+    }
+    if (auditExecuteTourStep > 4) {
+      setAuditExecuteTourStep(auditExecuteTourStep - 1);
     }
   };
 
@@ -1689,7 +1795,10 @@ const AuditExecute = () => {
   };
 
   return (
-    <div className="flex-1 p-8 pt-6 bg-transparent min-h-screen">
+    <div className="flex-1 p-8 pt-6 bg-transparent min-h-screen relative">
+      {auditExecuteTourActive && (
+        <div className="fixed inset-0 bg-slate-900/10 z-[40] pointer-events-none" />
+      )}
       <div className="max-w-6xl mx-auto space-y-6 pb-24">
         {/* Header Navigation */}
         <div className="flex items-center justify-between mb-2">
@@ -1709,7 +1818,13 @@ const AuditExecute = () => {
           {/* Left Column: Plan Overview & Audit Details */}
           <div className="col-span-1 md:col-span-2 space-y-6">
             {/* Plan Overview Card */}
-            <Card className="shadow-sm border-slate-100 p-6 flex flex-col pt-5 h-fit">
+            <Card
+              id="tour-step-audit-execute-overview"
+              className={cn(
+                "shadow-sm border-slate-100 p-6 flex flex-col pt-5 h-fit",
+                tourExecuteHighlight(4),
+              )}
+            >
               <div className="flex justify-between items-center bg-white mb-5">
                 <h2 className="text-lg font-bold text-slate-900">
                   Plan Overview
@@ -4609,8 +4724,12 @@ const AuditExecute = () => {
               </Button>
             )}
             <Button
+              id="tour-step-save-audit-progress"
               size="lg"
-              className="bg-emerald-600 hover:bg-emerald-700 text-white gap-2 px-8 shadow-sm"
+              className={cn(
+                "bg-emerald-600 hover:bg-emerald-700 text-white gap-2 px-8 shadow-sm",
+                tourExecuteHighlight(5),
+              )}
               onClick={handleSubmit}
             >
               <Save className="w-5 h-5" /> Save Audit Progress
@@ -4618,6 +4737,28 @@ const AuditExecute = () => {
           </div>
         </div>
       </div>
+
+      {auditExecuteTourActive &&
+        auditExecuteTourStep >= 4 &&
+        auditExecuteTourStepConfig && (
+          <TourStepPopover
+            key={auditExecuteTourStep}
+            targetId={auditExecuteTourStepConfig.targetId}
+            step={auditExecuteTourStep}
+            totalSteps={AUDIT_EXECUTE_TOUR_TOTAL_STEPS}
+            title={auditExecuteTourStepConfig.title}
+            description={auditExecuteTourStepConfig.description}
+            position={auditExecuteTourStepConfig.position}
+            onNext={handleAuditExecuteTourNext}
+            onBack={handleAuditExecuteTourBack}
+            onClose={() => {
+              exitAuditExecuteTour();
+              navigate("/getting-started");
+            }}
+            hideNext={auditExecuteTourStep === 5}
+            disableShadow={auditExecuteTourStep === 5}
+          />
+        )}
     </div>
   );
 };

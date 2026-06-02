@@ -1,4 +1,4 @@
-import { Building2, LayoutDashboard, FileText, ClipboardCheck, BookOpen, FileCheck, BarChart3, CreditCard, ChevronRight, Users, ClipboardList, AlertTriangle, ShieldCheck, MessageSquare } from "lucide-react";
+import { Building2, LayoutDashboard, FileText, ClipboardCheck, BookOpen, FileCheck, BarChart3, CreditCard, ChevronRight, Users, ClipboardList, AlertTriangle, ShieldCheck, MessageSquare, Rocket } from "lucide-react";
 import { useLocation } from "react-router-dom";
 import { NavLink } from "@/components/NavLink";
 import { cn } from "@/lib/utils";
@@ -20,6 +20,7 @@ import {
 
 const dashboardNav = [
   { title: "Dashboard", url: "/", icon: LayoutDashboard },
+  { title: "Start Onboarding", url: "/getting-started", icon: Rocket },
 ];
 
 const managementNav = [
@@ -45,6 +46,7 @@ export function AppSidebar() {
 
   const isActive = (path: string) => {
     if (path === "/companies") return currentPath === "/companies" || currentPath.startsWith("/company/");
+    if (path === "/getting-started") return currentPath === "/getting-started";
     return currentPath === path;
   };
 
@@ -93,9 +95,11 @@ export function AppSidebar() {
                             </div>
                             <span className={cn(
                               "text-sm tracking-tight transition-colors",
-                              active
-                                ? "text-[#1e855e] font-bold"
-                                : "text-slate-400 font-normal"
+                              item.title === "Start Onboarding"
+                                ? "text-[#166534] font-bold"
+                                : active
+                                  ? "text-[#1e855e] font-bold"
+                                  : "text-slate-400 font-normal"
                             )}>{item.title}</span>
                           </NavLink>
                         </SidebarMenuButton>
@@ -136,7 +140,17 @@ export function AppSidebar() {
                                     ? "tour-step-self-assessment"
                                     : item.title === "Gap Analysis"
                                       ? "tour-step-gap-analysis"
-                                      : undefined
+                                      : item.title === "Audit Program"
+                                        ? "tour-step-audit-program-nav"
+                                        : item.title === "Audit Plan"
+                                          ? "tour-step-audit-plan-nav"
+                                          : item.title === "Audit"
+                                            ? "tour-step-audit-nav"
+                                            : item.title === "Findings"
+                                              ? "tour-step-findings-nav"
+                                              : item.title === "Audit Templates"
+                                                ? "tour-step-audit-templates-nav"
+                                                : undefined
                             }
                             to={item.url} 
                             className="flex items-center gap-3"

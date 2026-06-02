@@ -6,6 +6,9 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-appdb}
       POSTGRES_USER: ${POSTGRES_USER:-appuser}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-apppassword}
+    ports:
+      # Lets Prisma / local tools on the host use localhost:5432 (not hostname "postgres").
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -20,7 +23,7 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     env_file:
-      - .env
+      - ./server/.env
     depends_on:
       postgres:
         condition: service_healthy
@@ -49,7 +52,7 @@ services:
         VITE_API_BASE_URL: ""
     restart: unless-stopped
     env_file:
-      - .env
+      - ./server/.env
     depends_on:
       - server
     ports:

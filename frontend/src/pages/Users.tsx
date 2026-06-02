@@ -24,6 +24,8 @@ import {
 import { TourStepPopover } from "@/components/TourStepPopover";
 import { ONBOARDING_TOTAL_STEPS } from "@/lib/onboardingTour";
 import UserModal from "@/components/UserModal";
+import { canManageOrgUsers } from "@/lib/userRoles";
+import { useStoredUser } from "@/hooks/useStoredUser";
 import ReusablePagination from "@/components/ReusablePagination";
 import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
@@ -85,6 +87,8 @@ export default function Users() {
         );
     };
 
+    const goToTourStep = (step: number) => setTourStep(step);
+
     // Search and Filter States
     const [searchQuery, setSearchQuery] = useState("");
     const [roleFilter, setRoleFilter] = useState("all");
@@ -106,8 +110,24 @@ export default function Users() {
     // Deletion States
     const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
     const [userToDelete, setUserToDelete] = useState<any>(null);
+    const [loggedInUserId, setLoggedInUserId] = useState<number | string | null>(null);
+    const { user: storedUser } = useStoredUser();
+    const isOrgAdmin = canManageOrgUsers(
+        storedUser as { role?: string; creatorId?: number | null } | null,
+    );
+
+    const isSignedInUser = (rowUser: { id?: number | string }) => {
+        if (loggedInUserId == null || rowUser?.id == null) return false;
+        return String(rowUser.id) === String(loggedInUserId);
+    };
 
     useEffect(() => {
+        try {
+            const stored = JSON.parse(localStorage.getItem("user") || "null");
+            setLoggedInUserId(stored?.id ?? stored?._id ?? null);
+        } catch {
+            setLoggedInUserId(null);
+        }
         fetchUsers();
     }, []);
 
@@ -131,6 +151,7 @@ export default function Users() {
             setShowCreate(true);
         } else {
             setShowCreate(false);
+            setSelectedUser(null);
         }
     }, [searchParams]);
 
@@ -183,7 +204,16 @@ export default function Users() {
                 const updatedUser = await response.json();
                 if (modalMode === "create") {
                     setUsers([...users, updatedUser]);
-                    toast.success("User created successfully!");
+                    if (updatedUser.emailVerificationPending) {
+                        toast.success(
+                            updatedUser.verificationEmailSent
+                                ? "User created. A verification code was sent to their email — they must verify before signing in."
+                                : "User created but verification email could not be sent. Use Resend verification from the user menu.",
+                            { duration: 8000 },
+                        );
+                    } else {
+                        toast.success("User created successfully!");
+                    }
                 } else {
                     setUsers(users.map(u => u.id === updatedUser.id ? updatedUser : u));
                     if (updatedUser.id === user.id) {
@@ -210,10 +240,14 @@ export default function Users() {
     };
 
     const handleToggleStatus = async (user: any) => {
+        if (!isOrgAdmin) {
+            toast.error("Only administrators can change user status.");
+            return;
+        }
         try {
             const response = await apiFetch(`/users/${user.id}`, {
                 method: "PUT",
-                body: JSON.stringify({ ...user, isActive: !user.isActive }),
+                body: JSON.stringify({ isActive: !user.isActive }),
             });
 
             if (response.ok) {
@@ -236,8 +270,28 @@ export default function Users() {
         }
     };
 
+    const handleResendVerification = async (user: { id: number }) => {
+        try {
+            const response = await apiFetch(`/users/${user.id}/resend-verification`, {
+                method: "POST",
+            });
+            const data = await response.json().catch(() => ({}));
+            if (response.ok) {
+                toast.success(data.message || "Verification code sent.");
+            } else {
+                toast.error(data.error || "Failed to send verification code");
+            }
+        } catch {
+            toast.error("Failed to send verification code");
+        }
+    };
+
     const handleDeleteUser = async () => {
         if (!userToDelete) return;
+        if (!isOrgAdmin) {
+            toast.error("Only administrators can delete users.");
+            return;
+        }
 
         try {
             const response = await apiFetch(`/users/${userToDelete.id}`, {
@@ -294,19 +348,18 @@ export default function Users() {
                         <p className="text-sm text-muted-foreground mt-0.5">Manage system users, their roles and access status</p>
                     </div>
 
-                    <div>
-                        <Button
-                            id="tour-step-create-user"
-                            onClick={() => {
-                                openModal("create");
-                                setShowOnboardingGuide(false);
-                            }}
-                            size="sm"
-                            className="w-full sm:w-auto gap-1.5 shadow-sm bg-[#213847] hover:bg-[#213847]/90 text-white rounded-xl px-5 h-11 transition-all"
-                        >
-                            <UserPlus className="h-4 w-4" /> Create User
-                        </Button>
-                    </div>
+                    {isOrgAdmin && (
+                        <div>
+                            <Button
+                                id="tour-step-create-user"
+                                onClick={() => openModal("create")}
+                                size="sm"
+                                className="w-full sm:w-auto gap-1.5 shadow-sm bg-[#213847] hover:bg-[#213847]/90 text-white rounded-xl px-5 h-11 transition-all"
+                            >
+                                <UserPlus className="h-4 w-4" /> Create User
+                            </Button>
+                        </div>
+                    )}
                 </div>
 
                 {/* Filters Row */}
@@ -402,12 +455,18 @@ export default function Users() {
                                                 </Badge>
                                             </TableCell>
                                             <TableCell>
-                                                <Badge
-                                                    variant={user.isActive ? "default" : "outline"}
-                                                    className={user.isActive ? "bg-[#e6f7e9] hover:bg-[#d4f2da] text-[#22a04c] border-none px-4 py-1 rounded-full shadow-none font-medium" : "text-muted-foreground px-4 py-1 rounded-full font-medium"}
-                                                >
-                                                    {user.isActive ? "Active" : "Inactive"}
-                                                </Badge>
+                                                {!user.emailVerifiedAt ? (
+                                                    <Badge variant="outline" className="text-amber-700 border-amber-300 bg-amber-50 px-3 py-1 rounded-full font-medium">
+                                                        Pending verification
+                                                    </Badge>
+                                                ) : (
+                                                    <Badge
+                                                        variant={user.isActive ? "default" : "outline"}
+                                                        className={user.isActive ? "bg-[#e6f7e9] hover:bg-[#d4f2da] text-[#22a04c] border-none px-4 py-1 rounded-full shadow-none font-medium" : "text-muted-foreground px-4 py-1 rounded-full font-medium"}
+                                                    >
+                                                        {user.isActive ? "Active" : "Inactive"}
+                                                    </Badge>
+                                                )}
                                             </TableCell>
                                             <TableCell className="text-muted-foreground text-sm">
                                                 {new Date(user.createdAt).toLocaleDateString()}
@@ -426,32 +485,48 @@ export default function Users() {
                                                         <DropdownMenuItem onClick={() => openModal("view", user)} className="cursor-pointer">
                                                             <Eye className="h-4 w-4 mr-2" /> View Details
                                                         </DropdownMenuItem>
-                                                        <DropdownMenuItem onClick={() => openModal("edit", user)} className="cursor-pointer">
-                                                            <Edit2 className="h-4 w-4 mr-2" /> Edit User
-                                                        </DropdownMenuItem>
-                                                        <DropdownMenuItem
-                                                            onClick={() => handleToggleStatus(user)}
-                                                            className="cursor-pointer font-medium"
-                                                        >
-                                                            {user.isActive ? (
-                                                                <>
-                                                                    <UserMinus className="h-4 w-4 mr-2 text-orange-500" />
-                                                                    <span className="text-orange-500">Make Inactive</span>
-                                                                </>
-                                                            ) : (
-                                                                <>
-                                                                    <UserCheck className="h-4 w-4 mr-2 text-emerald-500" />
-                                                                    <span className="text-emerald-500">Make Active</span>
-                                                                </>
-                                                            )}
-                                                        </DropdownMenuItem>
-                                                        <DropdownMenuSeparator />
-                                                        <DropdownMenuItem
-                                                            onClick={() => triggerDelete(user)}
-                                                            className="text-destructive focus:text-destructive cursor-pointer"
-                                                        >
-                                                            <Trash2 className="h-4 w-4 mr-2" /> Delete User
-                                                        </DropdownMenuItem>
+                                                        {(isOrgAdmin || isSignedInUser(user)) && (
+                                                            <DropdownMenuItem onClick={() => openModal("edit", user)} className="cursor-pointer">
+                                                                <Edit2 className="h-4 w-4 mr-2" /> Edit User
+                                                            </DropdownMenuItem>
+                                                        )}
+                                                        {isOrgAdmin && !user.emailVerifiedAt && (
+                                                            <DropdownMenuItem
+                                                                onClick={() => handleResendVerification(user)}
+                                                                className="cursor-pointer font-medium"
+                                                            >
+                                                                <Mail className="h-4 w-4 mr-2" /> Resend verification
+                                                            </DropdownMenuItem>
+                                                        )}
+                                                        {isOrgAdmin && (
+                                                            <DropdownMenuItem
+                                                                onClick={() => handleToggleStatus(user)}
+                                                                className="cursor-pointer font-medium"
+                                                            >
+                                                                {user.isActive ? (
+                                                                    <>
+                                                                        <UserMinus className="h-4 w-4 mr-2 text-orange-500" />
+                                                                        <span className="text-orange-500">Make Inactive</span>
+                                                                    </>
+                                                                ) : (
+                                                                    <>
+                                                                        <UserCheck className="h-4 w-4 mr-2 text-emerald-500" />
+                                                                        <span className="text-emerald-500">Make Active</span>
+                                                                    </>
+                                                                )}
+                                                            </DropdownMenuItem>
+                                                        )}
+                                                        {isOrgAdmin && !isSignedInUser(user) && (
+                                                            <>
+                                                                <DropdownMenuSeparator />
+                                                                <DropdownMenuItem
+                                                                    onClick={() => triggerDelete(user)}
+                                                                    className="text-destructive focus:text-destructive cursor-pointer"
+                                                                >
+                                                                    <Trash2 className="h-4 w-4 mr-2" /> Delete User
+                                                                </DropdownMenuItem>
+                                                            </>
+                                                        )}
                                                     </DropdownMenuContent>
                                                 </DropdownMenu>
                                             </TableCell>
@@ -485,11 +560,15 @@ export default function Users() {
                 onSubmit={async (userData) => {
                     await handleAddUser(userData);
                     if (showOnboardingGuide) {
-                        setTourStep(12);
+                        goToTourStep(12);
+                    } else {
+                        setShowCreate(false);
+                        setSelectedUser(null);
                     }
                 }}
                 mode={modalMode}
                 initialData={selectedUser}
+                canManageRoles={isOrgAdmin}
             />
 
             {/* Step 10: Create User button */}
@@ -500,12 +579,20 @@ export default function Users() {
                     totalSteps={ONBOARDING_TOTAL_STEPS}
                     title="Add User"
                     description="Click 'Create User' to start adding your team members."
-                    onNext={() => setTourStep(11)}
-                    onBack={() => {
+                    onNext={() => goToTourStep(11)}
+                    onBack={() => navigate("/companies?onboarding=true&step=9")}
+                    onClose={() => {
+                        setSearchParams(
+                            (prev) => {
+                                const next = new URLSearchParams(prev);
+                                next.delete("onboarding");
+                                next.delete("step");
+                                return next;
+                            },
+                            { replace: true }
+                        );
                         setShowOnboardingGuide(false);
-                        navigate("/companies?onboarding=true&step=9");
                     }}
-                    onClose={() => setShowOnboardingGuide(false)}
                     position="left"
                     disableShadow={false}
                 />
@@ -518,11 +605,10 @@ export default function Users() {
                     step={11}
                     totalSteps={ONBOARDING_TOTAL_STEPS}
                     title="Add User Details"
-                    description="Fill in the user details here. You can assign roles like Auditor or Auditee. Click 'Create User' to continue."
-                    onNext={() => setTourStep(12)}
-                    onBack={() => setTourStep(10)}
+                    description="Fill in the user details and assign a role, then click Create User, or press Next to continue."
+                    onNext={() => goToTourStep(12)}
+                    onBack={() => goToTourStep(10)}
                     onClose={() => {
-                        setShowOnboardingGuide(false);
                         setSearchParams(
                             (prev) => {
                                 const next = new URLSearchParams(prev);
@@ -532,6 +618,8 @@ export default function Users() {
                             },
                             { replace: true }
                         );
+                        setShowOnboardingGuide(false);
+                        setShowCreate(false);
                     }}
                     position="right"
                     disableShadow={true}
@@ -546,9 +634,20 @@ export default function Users() {
                     totalSteps={ONBOARDING_TOTAL_STEPS}
                     title="View Your Team"
                     description="Here you can see the users list and also by clicking the three dots you can view, edit, change status, and delete users."
-                    onNext={() => setTourStep(13)}
-                    onBack={() => setTourStep(11)}
-                    onClose={() => setShowOnboardingGuide(false)}
+                    onNext={() => goToTourStep(13)}
+                    onBack={() => goToTourStep(11)}
+                    onClose={() => {
+                        setSearchParams(
+                            (prev) => {
+                                const next = new URLSearchParams(prev);
+                                next.delete("onboarding");
+                                next.delete("step");
+                                return next;
+                            },
+                            { replace: true }
+                        );
+                        setShowOnboardingGuide(false);
+                    }}
                     position="top"
                     disableShadow={false}
                 />

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { useSearchParams, useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { apiFetch } from "@/lib/api";
@@ -47,6 +47,13 @@ import {
     sanitizeSelfAssessmentScope,
     SELF_ASSESSMENT_REP_MAX,
 } from "@/lib/plainTextInput";
+import {
+    fetchSelfAssessmentsPersisted,
+    migrateLocalSelfAssessmentsToServer,
+    persistSelfAssessmentsList,
+    persistSelfAssessmentDraft,
+    deleteSelfAssessmentPersisted,
+} from "@/lib/userPersistedData";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, PieChart, Pie, Legend } from "recharts";
 
 // --- Types ---
@@ -365,33 +372,103 @@ const SelfAssessment = () => {
     const [email, setEmail] = useState("");
     const [marketingConsent, setMarketingConsent] = useState(false);
 
-    // Load saved assessments on mount
-    React.useEffect(() => {
-        const user = JSON.parse(localStorage.getItem('user') || '{}');
-        const saved = localStorage.getItem(`selfAssessments_${user.id}`);
-        if (saved) {
-            try {
-                const parsed = JSON.parse(saved) as SavedAssessment[];
-                setSavedAssessments(parsed.map((a) => sanitizeSavedSelfAssessment(a) as SavedAssessment));
-            } catch (e) {
-                console.error("Failed to parse saved assessments", e);
+    const [currentClauseIndex, setCurrentClauseIndex] = useState(0);
+    const draftSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    const buildSelfAssessmentDraft = useCallback((): Record<string, unknown> | null => {
+        if (step !== "setup" && step !== "assessment") return null;
+        if (!standard && questions.length === 0) return null;
+        return {
+            standard,
+            companyName,
+            auditorName,
+            auditorPosition,
+            auditCompany,
+            auditLocation,
+            auditRepresentatives,
+            contactEmail,
+            auditScope,
+            auditDate,
+            questions,
+            step,
+            currentClauseIndex,
+        };
+    }, [
+        step,
+        standard,
+        companyName,
+        auditorName,
+        auditorPosition,
+        auditCompany,
+        auditLocation,
+        auditRepresentatives,
+        contactEmail,
+        auditScope,
+        auditDate,
+        questions,
+        currentClauseIndex,
+    ]);
+
+    const scheduleSelfAssessmentDraftSave = useCallback(() => {
+        if (draftSaveTimerRef.current) clearTimeout(draftSaveTimerRef.current);
+        draftSaveTimerRef.current = setTimeout(() => {
+            const draft = buildSelfAssessmentDraft();
+            if (draft) void persistSelfAssessmentDraft(draft);
+        }, 1500);
+    }, [buildSelfAssessmentDraft]);
+
+    useEffect(() => {
+        let cancelled = false;
+        (async () => {
+            const { assessments, draft } = await fetchSelfAssessmentsPersisted<SavedAssessment>();
+            if (cancelled) return;
+            const merged = await migrateLocalSelfAssessmentsToServer(
+                assessments.map((a) => sanitizeSavedSelfAssessment(a) as SavedAssessment),
+            );
+            if (cancelled) return;
+            setSavedAssessments(merged);
+
+            if (
+                draft &&
+                typeof draft === "object" &&
+                draft.step === "assessment" &&
+                Array.isArray(draft.questions)
+            ) {
+                setStandard((draft.standard as typeof standard) || "");
+                setCompanyName(String(draft.companyName ?? ""));
+                setAuditorName(String(draft.auditorName ?? ""));
+                setAuditorPosition(String(draft.auditorPosition ?? ""));
+                setAuditCompany(String(draft.auditCompany ?? ""));
+                setAuditLocation(String(draft.auditLocation ?? ""));
+                setAuditRepresentatives(String(draft.auditRepresentatives ?? ""));
+                setContactEmail(String(draft.contactEmail ?? ""));
+                setAuditScope(String(draft.auditScope ?? ""));
+                setAuditDate(String(draft.auditDate ?? format(new Date(), "yyyy-MM-dd")));
+                setQuestions(draft.questions as Question[]);
+                setCurrentClauseIndex(
+                    typeof draft.currentClauseIndex === "number" ? draft.currentClauseIndex : 0,
+                );
+                setStep("assessment");
             }
-        }
+        })();
+        return () => {
+            cancelled = true;
+        };
     }, []);
 
     const saveToHistory = (newAssessment: SavedAssessment) => {
         const safe = sanitizeSavedSelfAssessment(newAssessment) as SavedAssessment;
         const updated = [safe, ...savedAssessments];
         setSavedAssessments(updated);
-        const user = JSON.parse(localStorage.getItem('user') || '{}');
-        localStorage.setItem(`selfAssessments_${user.id}`, JSON.stringify(updated));
+        void persistSelfAssessmentsList(updated);
+        void persistSelfAssessmentDraft(null);
     };
 
     const deleteSavedAssessment = (id: string) => {
         const updated = savedAssessments.filter(a => a.id !== id);
         setSavedAssessments(updated);
-        const user = JSON.parse(localStorage.getItem('user') || '{}');
-        localStorage.setItem(`selfAssessments_${user.id}`, JSON.stringify(updated));
+        void persistSelfAssessmentsList(updated);
+        void deleteSelfAssessmentPersisted(id);
         toast.success("Assessment deleted from history");
     };
 
@@ -466,13 +543,35 @@ const SelfAssessment = () => {
 
         // Deep copy to avoid reference issues if modifying
         setQuestions(JSON.parse(JSON.stringify(initialQuestions)));
-        setCurrentClauseIndex(0); // Reset to first clause
+        setCurrentClauseIndex(0);
         setStep("assessment");
+        void persistSelfAssessmentDraft({
+            standard,
+            companyName,
+            auditorName,
+            auditorPosition,
+            auditCompany,
+            auditLocation,
+            auditRepresentatives,
+            contactEmail,
+            auditScope,
+            auditDate,
+            questions: JSON.parse(JSON.stringify(initialQuestions)),
+            step: "assessment",
+            currentClauseIndex: 0,
+        });
     };
 
     const handleAnswer = (id: string, answer: "yes" | "no") => {
         setQuestions(prev => prev.map(q => q.id === id ? { ...q, answer } : q));
+        scheduleSelfAssessmentDraftSave();
     };
+
+    useEffect(() => {
+        if (step === "assessment" || step === "setup") {
+            scheduleSelfAssessmentDraftSave();
+        }
+    }, [step, questions, standard, companyName, scheduleSelfAssessmentDraftSave]);
 
     const handleDeleteQuestion = (id: string) => {
         setQuestionToDelete(id);
@@ -487,8 +586,6 @@ const SelfAssessment = () => {
             setQuestionToDelete(null);
         }
     };
-
-    const [currentClauseIndex, setCurrentClauseIndex] = useState(0);
 
     // Derived state for clause navigation
     const uniqueClauses = Array.from(new Set(questions.map(q => q.clause)));
@@ -1539,13 +1636,7 @@ const SelfAssessment = () => {
                             )}
                             <Button 
                                 id="tour-step-new-assessment"
-                                onClick={() => {
-                                    if (showOnboardingGuide && onboardingStep === 14) {
-                                        setTourStep(15);
-                                        return;
-                                    }
-                                    setStep("setup");
-                                }} 
+                                onClick={() => setStep("setup")} 
                                 size="sm" 
                                 className={`gap-1.5 shadow-sm bg-[#213847] hover:bg-[#213847]/90 text-white rounded-xl px-5 h-11 transition-all ${showOnboardingGuide ? 'relative z-[60] scale-105 shadow-2xl' : ''}`}
                             >
@@ -1559,7 +1650,7 @@ const SelfAssessment = () => {
                                     step={14}
                                     totalSteps={ONBOARDING_TOTAL_STEPS}
                                     title="Start Assessment"
-                                    description="Click 'New Assessment' to start evaluating your organization's compliance."
+                                    description="Use New Assessment to configure an evaluation. You can skip creating one now and continue with Next."
                                     onNext={() => setTourStep(15)}
                                     onBack={() => navigate("/users?onboarding=true&step=13")}
                                     onClose={() => setShowOnboardingGuide(false)}
@@ -1900,7 +1991,7 @@ const SelfAssessment = () => {
                                 step={15}
                                 totalSteps={ONBOARDING_TOTAL_STEPS}
                                 title="Configure Assessment"
-                                description="Fill in the company details, select the ISO standard, and click 'Start Assessment' to begin your evaluation."
+                                description="Enter company details and select a standard if you like. You can skip starting an assessment and continue with Next."
                                 onNext={() => navigate("/gap-analysis?onboarding=true&step=16")}
                                 onBack={() => setTourStep(14)}
                                 onClose={() => setShowOnboardingGuide(false)}

@@ -21,6 +21,10 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, DropdownMenuCheckboxItem } from "@/components/ui/dropdown-menu";
 import { TourStepPopover } from "@/components/TourStepPopover";
 import {
+    AUDIT_TOUR_TOTAL_STEPS,
+    getAuditTourStepConfig,
+} from "@/lib/auditOnboardingTour";
+import {
     AlertDialog,
     AlertDialogAction,
     AlertDialogCancel,
@@ -52,6 +56,42 @@ const YEARS = Array.from({ length: 10 }, (_, i) => (new Date().getFullYear() + i
 const AuditPrograms = () => {
     const navigate = useNavigate();
     const [searchParams, setSearchParams] = useSearchParams();
+    const auditTourActive = searchParams.get("auditTour") === "true";
+    const auditTourStep = Math.min(
+        AUDIT_TOUR_TOTAL_STEPS,
+        Math.max(1, parseInt(searchParams.get("auditStep") || "1", 10)),
+    );
+    const auditTourStepConfig = getAuditTourStepConfig(auditTourStep);
+
+    const setAuditTourStep = (step: number) => {
+        setSearchParams(
+            (prev) => {
+                const next = new URLSearchParams(prev);
+                next.set("auditTour", "true");
+                next.set("auditStep", String(step));
+                return next;
+            },
+            { replace: true },
+        );
+    };
+
+    const exitAuditTour = () => {
+        setSearchParams(
+            (prev) => {
+                const next = new URLSearchParams(prev);
+                next.delete("auditTour");
+                next.delete("auditStep");
+                return next;
+            },
+            { replace: true },
+        );
+    };
+
+    const tourHighlight = (step: number) =>
+        auditTourActive && auditTourStep === step
+            ? "relative z-[60] ring-[4px] ring-emerald-500/80 ring-offset-2 rounded-xl"
+            : "";
+
     const [view, setView] = useState<"list" | "create" | "edit" | "view">("list");
     const [showOnboardingGuide, setShowOnboardingGuide] = useState(searchParams.get("onboarding") === "true");
     const [windowWidth, setWindowWidth] = useState(typeof window !== 'undefined' ? window.innerWidth : 1200);
@@ -73,6 +113,20 @@ const AuditPrograms = () => {
         window.addEventListener("resize", handleResize);
         return () => window.removeEventListener("resize", handleResize);
     }, []);
+
+    useEffect(() => {
+        if (!auditTourActive) return;
+        if (auditTourStep <= 2) {
+            if (view !== "list") setView("list");
+            return;
+        }
+        if (view !== "create" && view !== "edit") {
+            setView("create");
+        }
+        if (auditTourStep >= 5) {
+            setShowSchedule(true);
+        }
+    }, [auditTourActive, auditTourStep]);
 
     const isMobile = windowWidth < 768;
 
@@ -100,7 +154,7 @@ const AuditPrograms = () => {
                 const [sitesRes, usersRes, programsRes] = await Promise.all([
                     apiFetch(`/sites?userId=${user.id}`),
                     apiFetch(`/users?creatorId=${user.id}`),
-                    apiFetch(`/audit-programs?userId=${user.id}`)
+                    apiFetch(`/audit-programs?scope=org`)
                 ]);
                 const sitesData = sitesRes.ok ? await sitesRes.json() : [];
                 let usersData = usersRes.ok ? await usersRes.json() : [];
@@ -134,7 +188,7 @@ const AuditPrograms = () => {
     const fetchPrograms = async () => {
         try {
             const user = JSON.parse(localStorage.getItem('user') || '{}');
-            const res = await apiFetch(`/audit-programs?userId=${user.id}`);
+            const res = await apiFetch(`/audit-programs?scope=org`);
             if (res.ok) {
                 const data = await res.json();
                 setAuditPrograms(Array.isArray(data) ? data : []);
@@ -242,6 +296,10 @@ const AuditPrograms = () => {
             if (response.ok) {
                 toast.success(view === "edit" ? "Audit Program updated!" : "Audit Program created!");
                 await fetchPrograms();
+                if (auditTourActive && auditTourStep === 7) {
+                    setAuditTourStep(8);
+                    return;
+                }
                 setView("list");
                 resetForm();
             } else {
@@ -346,6 +404,50 @@ const AuditPrograms = () => {
         setCustomRows([]);
         setProgramStartDate(new Date());
         setShowSchedule(false);
+    };
+
+    const handleAuditTourNext = () => {
+        if (auditTourStep === 2) {
+            resetForm();
+            setView("create");
+            setAuditTourStep(3);
+            return;
+        }
+        if (auditTourStep === 4) {
+            if (!auditName || selectedStandards.length === 0 || !selectedSite) {
+                toast.error("Please fill in Audit Name, Standard(s) and Site");
+                return;
+            }
+            setShowSchedule(true);
+            toast.success("Schedule generated!");
+            setAuditTourStep(5);
+            return;
+        }
+        if (auditTourStep >= AUDIT_TOUR_TOTAL_STEPS) {
+            exitAuditTour();
+            setView("list");
+            toast.success("You completed the first auditing step!");
+            navigate("/getting-started");
+            return;
+        }
+        setAuditTourStep(auditTourStep + 1);
+    };
+
+    const handleAuditTourBack = () => {
+        if (auditTourStep <= 1) {
+            exitAuditTour();
+            navigate("/getting-started");
+            return;
+        }
+        if (auditTourStep === 3) {
+            setView("list");
+            setAuditTourStep(2);
+            return;
+        }
+        if (auditTourStep === 5) {
+            setShowSchedule(false);
+        }
+        setAuditTourStep(auditTourStep - 1);
     };
 
     const getSelectedClausesList = () => {
@@ -736,9 +838,9 @@ const AuditPrograms = () => {
     return (
         <div className="flex-1 space-y-8 p-8 pt-6 min-h-screen bg-white relative">
             {/* Background Overlay for Onboarding */}
-            {showOnboardingGuide && view === "list" && (
-                <div className="fixed inset-0 bg-slate-900/10 z-[40] transition-all duration-500" />
-            )}
+            {(showOnboardingGuide && view === "list") || auditTourActive ? (
+                <div className="fixed inset-0 bg-slate-900/10 z-[40] transition-all duration-500 pointer-events-none" />
+            ) : null}
 
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
                 <div className="text-center sm:text-left">
@@ -749,8 +851,8 @@ const AuditPrograms = () => {
                 </div>
                 {view === "list" && (
                     <div className="relative">
-                        <div className={`relative ${showOnboardingGuide ? "z-[60]" : ""}`}>
-                            {showOnboardingGuide && (
+                        <div className={cn("relative", (showOnboardingGuide || auditTourActive) && auditTourStep === 2 ? "z-[60]" : "")}>
+                            {(showOnboardingGuide || (auditTourActive && auditTourStep === 2)) && (
                                 <div className="absolute inset-0 -m-1 rounded-2xl ring-[8px] ring-emerald-500/50 animate-pulse z-[-1]" />
                             )}
                             <Button
@@ -758,8 +860,15 @@ const AuditPrograms = () => {
                                     resetForm();
                                     setView("create");
                                     setShowOnboardingGuide(false);
+                                    if (auditTourActive && auditTourStep === 2) {
+                                        setAuditTourStep(3);
+                                    }
                                 }}
-                                className={`bg-[#213847] hover:bg-[#213847]/90 text-white gap-2 rounded-xl h-11 px-5 shadow-sm font-semibold transition-all duration-300 ${showOnboardingGuide ? 'relative z-[60] scale-105 shadow-2xl' : ''}`}
+                                className={cn(
+                                    "bg-[#213847] hover:bg-[#213847]/90 text-white gap-2 rounded-xl h-11 px-5 shadow-sm font-semibold transition-all duration-300",
+                                    (showOnboardingGuide || (auditTourActive && auditTourStep === 2)) && "relative z-[60] scale-105 shadow-2xl",
+                                    tourHighlight(2),
+                                )}
                                 id="tour-step-create-program"
                             >
                                 <Plus className="w-4 h-4" /> Create Audit Program
@@ -975,7 +1084,13 @@ const AuditPrograms = () => {
                             <ArrowLeft className="w-4 h-4" /> Back to List
                         </Button>
                     </div>
-                    <Card className="border-none shadow-sm animate-in fade-in slide-in-from-top-4 duration-300">
+                    <Card
+                        id="tour-step-audit-program-form"
+                        className={cn(
+                            "border-none shadow-sm animate-in fade-in slide-in-from-top-4 duration-300",
+                            tourHighlight(3),
+                        )}
+                    >
                         <CardHeader>
                             <CardTitle className="text-lg font-semibold">
                                 {view === "edit" ? "Edit Audit Program" : view === "view" ? "View Audit Program" : "Create Audit Program"}
@@ -1231,8 +1346,17 @@ const AuditPrograms = () => {
                         {view !== "view" && (
                             <div className="px-6 pb-6">
                                 <Button
-                                    className="w-full md:w-auto bg-emerald-600 hover:bg-emerald-700 text-white px-8 py-2 h-auto rounded-lg font-semibold transition-all shadow-sm"
-                                    onClick={handleGenerateSchedule}
+                                    id="tour-step-generate-schedule"
+                                    className={cn(
+                                        "w-full md:w-auto bg-emerald-600 hover:bg-emerald-700 text-white px-8 py-2 h-auto rounded-lg font-semibold transition-all shadow-sm",
+                                        tourHighlight(4),
+                                    )}
+                                    onClick={() => {
+                                        handleGenerateSchedule();
+                                        if (auditTourActive && auditTourStep === 4 && auditName && selectedStandards.length > 0 && selectedSite) {
+                                            setAuditTourStep(5);
+                                        }
+                                    }}
                                 >
                                     Generate Schedule
                                 </Button>
@@ -1243,7 +1367,13 @@ const AuditPrograms = () => {
                     {showSchedule && (
                         <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
                             {/* Program Timeline */}
-                            <Card className="border-none shadow-sm overflow-hidden bg-white">
+                            <Card
+                                id="tour-step-program-timeline"
+                                className={cn(
+                                    "border-none shadow-sm overflow-hidden bg-white",
+                                    tourHighlight(5),
+                                )}
+                            >
                                 <CardHeader className="flex flex-row items-center gap-3 sm:gap-4 pb-2 p-4 sm:p-6">
                                     <div className="p-2 sm:p-2.5 bg-emerald-50 rounded-xl">
                                         <Calendar className="w-4 h-4 sm:w-5 sm:h-5 text-emerald-600" />
@@ -1294,7 +1424,13 @@ const AuditPrograms = () => {
                                     {selectedStandards.length > 0 ? selectedStandards.join(', ') : "ISO 9001:2015 - Quality Management System"}
                                 </Badge>
 
-                                <div className="overflow-x-auto scrollbar-thin border rounded-xl bg-white shadow-sm p-1">
+                                <div
+                                    id="tour-step-schedule-matrix"
+                                    className={cn(
+                                        "overflow-x-auto scrollbar-thin border rounded-xl bg-white shadow-sm p-1",
+                                        tourHighlight(6),
+                                    )}
+                                >
                                     <table className="w-full text-left border-collapse min-w-max">
                                         <thead>
                                             <tr>
@@ -1507,7 +1643,11 @@ const AuditPrograms = () => {
                             {view !== "view" && (
                                 <div className="pt-10 flex justify-end">
                                     <Button
-                                        className="bg-slate-900 hover:bg-slate-800 text-white px-10 py-6 h-auto rounded-xl font-bold text-lg gap-3 shadow-lg hover:shadow-xl transition-all active:scale-95"
+                                        id="tour-step-save-program"
+                                        className={cn(
+                                            "bg-slate-900 hover:bg-slate-800 text-white px-10 py-6 h-auto rounded-xl font-bold text-lg gap-3 shadow-lg hover:shadow-xl transition-all active:scale-95",
+                                            tourHighlight(7),
+                                        )}
                                         onClick={handleSaveProgram}
                                         disabled={loading || selectedClausesList.length === 0}
                                     >
@@ -1525,6 +1665,25 @@ const AuditPrograms = () => {
                         </div>
                     )}
                 </>
+            )}
+
+            {auditTourActive && auditTourStepConfig && (
+                <TourStepPopover
+                    key={auditTourStep}
+                    targetId={auditTourStepConfig.targetId}
+                    step={auditTourStep}
+                    totalSteps={AUDIT_TOUR_TOTAL_STEPS}
+                    title={auditTourStepConfig.title}
+                    description={auditTourStepConfig.description}
+                    position={auditTourStepConfig.position}
+                    onNext={handleAuditTourNext}
+                    onBack={handleAuditTourBack}
+                    hideNext={auditTourStep === 7}
+                    onClose={() => {
+                        exitAuditTour();
+                        navigate("/getting-started");
+                    }}
+                />
             )}
 
             <AlertDialog open={isDeleteDialogOpen} onOpenChange={setIsDeleteDialogOpen}>

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { apiFetch } from "@/lib/api";
 import { TopNav } from "@/components/TopNav";
 import { Button } from "@/components/ui/button";
@@ -30,6 +30,12 @@ import { toast } from "sonner";
 import { format } from "date-fns";
 import { downloadAuditReport, type AuditReportFormat } from "@/utils/auditReportExport";
 import ReusablePagination from "@/components/ReusablePagination";
+import { TourStepPopover } from "@/components/TourStepPopover";
+import {
+    AUDIT_EXECUTE_TOUR_TOTAL_STEPS,
+    getAuditExecuteTourStepConfig,
+} from "@/lib/auditExecuteOnboardingTour";
+import { cn } from "@/lib/utils";
 
 const AuditList = () => {
     const [auditPlans, setAuditPlans] = useState<any[]>([]);
@@ -40,7 +46,44 @@ const AuditList = () => {
     /** e.g. "42-pdf" while generating a report for plan 42 */
     const [downloadingKey, setDownloadingKey] = useState<string | null>(null);
     const navigate = useNavigate();
-    
+    const [searchParams, setSearchParams] = useSearchParams();
+    const auditExecuteTourActive = searchParams.get("auditExecuteTour") === "true";
+    const auditExecuteTourStep = Math.min(
+        AUDIT_EXECUTE_TOUR_TOTAL_STEPS,
+        Math.max(1, parseInt(searchParams.get("auditExecuteStep") || "1", 10)),
+    );
+    const auditExecuteTourStepConfig =
+        getAuditExecuteTourStepConfig(auditExecuteTourStep);
+
+    const setAuditExecuteTourStep = (step: number) => {
+        setSearchParams(
+            (prev) => {
+                const next = new URLSearchParams(prev);
+                next.set("auditExecuteTour", "true");
+                next.set("auditExecuteStep", String(step));
+                return next;
+            },
+            { replace: true },
+        );
+    };
+
+    const exitAuditExecuteTour = () => {
+        setSearchParams(
+            (prev) => {
+                const next = new URLSearchParams(prev);
+                next.delete("auditExecuteTour");
+                next.delete("auditExecuteStep");
+                return next;
+            },
+            { replace: true },
+        );
+    };
+
+    const tourExecuteHighlight = (step: number) =>
+        auditExecuteTourActive && auditExecuteTourStep === step
+            ? "relative z-[60] ring-[4px] ring-emerald-500/80 ring-offset-2 rounded-xl"
+            : "";
+
     // Deletion State
     const [planToDelete, setPlanToDelete] = useState<any>(null);
     const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
@@ -53,7 +96,7 @@ const AuditList = () => {
         const fetchPlans = async () => {
             try {
                 const user = JSON.parse(localStorage.getItem('user') || '{}');
-                const res = await apiFetch(`/audit-plans?userId=${user.id}`);
+                const res = await apiFetch(`/audit-plans?scope=org`);
                 const data = await res.json();
                 setAuditPlans(Array.isArray(data) ? data : []);
             } catch (error) {
@@ -165,13 +208,51 @@ const AuditList = () => {
         currentPage * itemsPerPage
     );
 
+    const tourTargetPlan =
+        paginatedPlans[0] ?? filteredPlans[0] ?? auditPlans[0] ?? null;
+
+    const handleAuditExecuteTourNext = () => {
+        if (auditExecuteTourStep === 3) {
+            if (!tourTargetPlan?.id) {
+                toast.error(
+                    "No audit plans found. Create an audit plan first, then return to run the audit.",
+                );
+                return;
+            }
+            navigate(
+                `/audit/execute/${tourTargetPlan.id}?auditExecuteTour=true&auditExecuteStep=4`,
+                { state: { plan: tourTargetPlan } },
+            );
+            return;
+        }
+        if (auditExecuteTourStep >= AUDIT_EXECUTE_TOUR_TOTAL_STEPS) {
+            exitAuditExecuteTour();
+            navigate("/getting-started");
+            toast.success("Audits tour complete!");
+            return;
+        }
+        setAuditExecuteTourStep(auditExecuteTourStep + 1);
+    };
+
+    const handleAuditExecuteTourBack = () => {
+        if (auditExecuteTourStep <= 1) {
+            exitAuditExecuteTour();
+            navigate("/getting-started");
+            return;
+        }
+        setAuditExecuteTourStep(auditExecuteTourStep - 1);
+    };
+
     // Reset page to 1 when filters change
     useEffect(() => {
         setCurrentPage(1);
     }, [searchQuery, statusFilter, selectedSite]);
 
     return (
-        <div className="flex-1 space-y-8 p-8 pt-6 min-h-screen bg-white">
+        <div className="flex-1 space-y-8 p-8 pt-6 min-h-screen bg-white relative">
+            {auditExecuteTourActive && (
+                <div className="fixed inset-0 bg-slate-900/10 z-[40] pointer-events-none" />
+            )}
             <div className="w-full max-w-[1800px] mx-auto space-y-8 animate-in fade-in duration-500">
                 <div className="flex flex-col md:flex-row md:items-center justify-between gap-6 relative z-10 w-full">
                     <div className="space-y-1">
@@ -245,7 +326,13 @@ const AuditList = () => {
                         </TabsList>
                     </div>
 
-                    <div className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm relative z-10 w-full">
+                    <div
+                        id="tour-step-audit-plans-list"
+                        className={cn(
+                            "bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm relative z-10 w-full",
+                            tourExecuteHighlight(2),
+                        )}
+                    >
                         <Table>
                             <TableHeader className="bg-[#213847]">
                                 <TableRow className="hover:bg-[#213847] border-none">
@@ -290,8 +377,19 @@ const AuditList = () => {
                                             console.warn("Failed to parse itinerary", e);
                                         }
 
+                                        const isTourTargetRow =
+                                            tourTargetPlan?.id === plan.id;
                                         return (
-                                            <TableRow key={plan.id} className="cursor-pointer hover:bg-slate-50/80 transition-colors border-b border-slate-100 last:border-0 group">
+                                            <TableRow
+                                                key={plan.id}
+                                                className={cn(
+                                                    "cursor-pointer hover:bg-slate-50/80 transition-colors border-b border-slate-100 last:border-0 group",
+                                                    auditExecuteTourActive &&
+                                                        auditExecuteTourStep === 2 &&
+                                                        isTourTargetRow &&
+                                                        "relative z-[60] ring-[4px] ring-emerald-500/80 ring-offset-2",
+                                                )}
+                                            >
                                                 <TableCell className="font-bold text-slate-800 py-5">
                                                     {plan.auditName || "Unnamed Audit"}
                                                 </TableCell>
@@ -332,7 +430,30 @@ const AuditList = () => {
                                                 </TableCell>
                                                 <TableCell className="text-right py-5">
                                                     <div className="flex justify-end items-center gap-2 pr-2">
-                                                        <Button variant="ghost" size="icon" className="w-8 h-8 text-emerald-600 bg-emerald-50 hover:bg-emerald-100 hover:text-emerald-700 rounded-full" title="Perform Audit" onClick={() => navigate(`/audit/execute/${plan.id}`, { state: { plan } })}>
+                                                        <Button
+                                                            id={
+                                                                isTourTargetRow
+                                                                    ? "tour-step-start-audit-eye"
+                                                                    : undefined
+                                                            }
+                                                            variant="ghost"
+                                                            size="icon"
+                                                            className={cn(
+                                                                "w-8 h-8 text-emerald-600 bg-emerald-50 hover:bg-emerald-100 hover:text-emerald-700 rounded-full",
+                                                                isTourTargetRow &&
+                                                                    tourExecuteHighlight(3),
+                                                            )}
+                                                            title="Perform Audit"
+                                                            onClick={() => {
+                                                                const path =
+                                                                    auditExecuteTourActive
+                                                                        ? `/audit/execute/${plan.id}?auditExecuteTour=true&auditExecuteStep=4`
+                                                                        : `/audit/execute/${plan.id}`;
+                                                                navigate(path, {
+                                                                    state: { plan },
+                                                                });
+                                                            }}
+                                                        >
                                                             <Eye className="w-4 h-4" />
                                                         </Button>
                                                         <DropdownMenu>
@@ -423,6 +544,26 @@ const AuditList = () => {
                     </AlertDialogFooter>
                 </AlertDialogContent>
             </AlertDialog>
+
+            {auditExecuteTourActive &&
+                auditExecuteTourStep <= 3 &&
+                auditExecuteTourStepConfig && (
+                    <TourStepPopover
+                        key={auditExecuteTourStep}
+                        targetId={auditExecuteTourStepConfig.targetId}
+                        step={auditExecuteTourStep}
+                        totalSteps={AUDIT_EXECUTE_TOUR_TOTAL_STEPS}
+                        title={auditExecuteTourStepConfig.title}
+                        description={auditExecuteTourStepConfig.description}
+                        position={auditExecuteTourStepConfig.position}
+                        onNext={handleAuditExecuteTourNext}
+                        onBack={handleAuditExecuteTourBack}
+                        onClose={() => {
+                            exitAuditExecuteTour();
+                            navigate("/getting-started");
+                        }}
+                    />
+                )}
         </div>
     );
 };

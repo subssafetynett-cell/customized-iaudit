@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { useLocation, useNavigate } from "react-router-dom";
+import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { apiFetch } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -40,6 +40,11 @@ import {
     TableRow,
 } from "@/components/ui/table";
 import { auditTemplates } from "@/data/auditTemplates";
+import { TourStepPopover } from "@/components/TourStepPopover";
+import {
+    AUDIT_PLAN_TOUR_TOTAL_STEPS,
+    getAuditPlanTourStepConfig,
+} from "@/lib/auditPlanOnboardingTour";
 
 interface ItineraryItem {
     id: string;
@@ -80,8 +85,45 @@ const AutoResizeTextarea = ({ value, onChange, className, placeholder }: any) =>
 const CreateAuditPlanPage = () => {
     const location = useLocation();
     const navigate = useNavigate();
+    const [searchParams, setSearchParams] = useSearchParams();
     const { execution, program, site, plan } = location.state || {};
     const isEditMode = !!plan;
+
+    const auditPlanTourActive = searchParams.get("auditPlanTour") === "true";
+    const auditPlanTourStep = Math.min(
+        AUDIT_PLAN_TOUR_TOTAL_STEPS,
+        Math.max(4, parseInt(searchParams.get("auditPlanStep") || "4", 10)),
+    );
+    const auditPlanTourStepConfig = getAuditPlanTourStepConfig(auditPlanTourStep);
+
+    const setAuditPlanTourStep = (step: number) => {
+        setSearchParams(
+            (prev) => {
+                const next = new URLSearchParams(prev);
+                next.set("auditPlanTour", "true");
+                next.set("auditPlanStep", String(step));
+                return next;
+            },
+            { replace: true },
+        );
+    };
+
+    const exitAuditPlanTour = () => {
+        setSearchParams(
+            (prev) => {
+                const next = new URLSearchParams(prev);
+                next.delete("auditPlanTour");
+                next.delete("auditPlanStep");
+                return next;
+            },
+            { replace: true },
+        );
+    };
+
+    const tourPlanHighlight = (step: number) =>
+        auditPlanTourActive && auditPlanTourStep === step
+            ? "relative z-[60] ring-[4px] ring-emerald-500/80 ring-offset-2 rounded-xl"
+            : "";
 
     // Form State
     const [auditName, setAuditName] = useState("");
@@ -287,13 +329,13 @@ const CreateAuditPlanPage = () => {
 
     const addItineraryItem = () => {
         const newItem: ItineraryItem = {
-            id: Date.now().toString(),
+            id: `itinerary-${Date.now()}`,
             startTime: "",
             endTime: "",
             activity: "",
-            notes: ""
+            notes: "",
         };
-        setItinerary([...itinerary, newItem]);
+        setItinerary((prev) => [...prev, newItem]);
     };
 
     const removeItineraryItem = (id: string) => {
@@ -362,6 +404,10 @@ const CreateAuditPlanPage = () => {
 
             if (response.ok) {
                 toast.success(isEditMode ? "Audit Plan updated successfully!" : "Audit Plan saved successfully!");
+                if (auditPlanTourActive && auditPlanTourStep === 7) {
+                    setAuditPlanTourStep(8);
+                    return;
+                }
                 setTimeout(() => navigate("/audit"), 1000);
             } else {
                 const data = await response.json().catch(() => ({}));
@@ -377,8 +423,37 @@ const CreateAuditPlanPage = () => {
 
     const previewTemplate = auditTemplates.find(t => t.id === previewTemplateId);
 
+    const handleAuditPlanTourNext = () => {
+        if (auditPlanTourStep === 7) {
+            if (!auditName || !selectedTemplateId || !auditDate || !auditLocation) {
+                toast.error("Please fill in all required fields (Name, Template, Date, Location).");
+                return;
+            }
+            void handleSave();
+            return;
+        }
+        if (auditPlanTourStep >= AUDIT_PLAN_TOUR_TOTAL_STEPS) {
+            exitAuditPlanTour();
+            navigate("/getting-started");
+            toast.success("Audit plan tour complete!");
+            return;
+        }
+        setAuditPlanTourStep(auditPlanTourStep + 1);
+    };
+
+    const handleAuditPlanTourBack = () => {
+        if (auditPlanTourStep <= 4) {
+            navigate("/audit-program?auditPlanTour=true&auditPlanStep=3");
+            return;
+        }
+        setAuditPlanTourStep(auditPlanTourStep - 1);
+    };
+
     return (
-        <div className="min-h-screen bg-[#F8FAFC] p-8 space-y-8 pb-32">
+        <div className="min-h-screen bg-[#F8FAFC] p-8 space-y-8 pb-32 relative">
+            {auditPlanTourActive && (
+                <div className="fixed inset-0 bg-slate-900/10 z-[40] pointer-events-none" />
+            )}
             {/* Header */}
             <div className="flex items-center justify-between sticky top-0 bg-[#F8FAFC]/90 backdrop-blur-sm z-50 py-4 -my-4 border-b border-slate-200/50 mb-4 px-1">
                 <div className="flex items-center gap-4">
@@ -390,7 +465,15 @@ const CreateAuditPlanPage = () => {
                         <p className="text-slate-500 font-medium text-sm">Define the scope, criteria, and schedule for your upcoming audit.</p>
                     </div>
                 </div>
-                <Button onClick={handleSave} disabled={isSaving} className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold shadow-lg shadow-emerald-100 rounded-xl gap-2">
+                <Button
+                    id="tour-step-save-audit-plan"
+                    onClick={handleSave}
+                    disabled={isSaving}
+                    className={cn(
+                        "bg-emerald-600 hover:bg-emerald-700 text-white font-bold shadow-lg shadow-emerald-100 rounded-xl gap-2",
+                        tourPlanHighlight(7),
+                    )}
+                >
                     <Save className="w-4 h-4" />
                     {isEditMode ? "Update Audit Plan" : "Save Audit Plan"}
                 </Button>
@@ -400,7 +483,13 @@ const CreateAuditPlanPage = () => {
                 {/* Left Column: Core Details */}
                 <div className="lg:col-span-2 space-y-6">
                     {/* General Information Card */}
-                    <Card className="border-slate-200 shadow-sm rounded-2xl overflow-hidden">
+                    <Card
+                        id="tour-step-audit-plan-form"
+                        className={cn(
+                            "border-slate-200 shadow-sm rounded-2xl overflow-hidden",
+                            tourPlanHighlight(4),
+                        )}
+                    >
                         <CardHeader className="bg-slate-50/50 border-b border-slate-100 pb-4">
                             <CardTitle className="flex items-center gap-2 text-base font-bold text-slate-700">
                                 <FileText className="w-4 h-4 text-emerald-500" />
@@ -420,7 +509,13 @@ const CreateAuditPlanPage = () => {
 
 
                             {/* ── Template Picker – highlighted ── */}
-                            <div className="md:col-span-2 rounded-xl border-2 border-indigo-300 bg-gradient-to-br from-indigo-50 to-white p-4 shadow-sm space-y-3">
+                            <div
+                                id="tour-step-audit-plan-template"
+                                className={cn(
+                                    "md:col-span-2 rounded-xl border-2 border-indigo-300 bg-gradient-to-br from-indigo-50 to-white p-4 shadow-sm space-y-3",
+                                    tourPlanHighlight(5),
+                                )}
+                            >
                                 <div className="flex items-center justify-between">
                                     <Label className="text-xs font-black text-indigo-700 uppercase tracking-wide flex items-center gap-1.5">
                                         <FileText className="w-3.5 h-3.5" />
@@ -591,14 +686,26 @@ const CreateAuditPlanPage = () => {
                     </Card>
 
                     {/* Itinerary Section */}
-                    <div className="space-y-4">
+                    <div id="tour-step-audit-plan-itinerary" className="space-y-4">
                         <div className="flex items-center justify-between">
                             <h3 className="text-lg font-bold text-slate-700 flex items-center gap-2">
                                 <Clock className="w-5 h-5 text-emerald-500" />
                                 Daily Itinerary
                                 <Badge variant="secondary" className="ml-2 bg-slate-100 text-slate-600">{itinerary.length}</Badge>
                             </h3>
-                            <Button size="sm" onClick={addItineraryItem} className="bg-slate-900 text-white hover:bg-slate-800 rounded-lg text-xs font-bold gap-2">
+                            <Button
+                                id="tour-step-add-activity-btn"
+                                type="button"
+                                size="sm"
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    addItineraryItem();
+                                }}
+                                className={cn(
+                                    "bg-slate-900 text-white hover:bg-slate-800 rounded-lg text-xs font-bold gap-2",
+                                    tourPlanHighlight(6),
+                                )}
+                            >
                                 <Plus className="w-3 h-3" />
                                 Add Activity
                             </Button>
@@ -834,7 +941,27 @@ const CreateAuditPlanPage = () => {
                     </div>
                 </DialogContent>
             </Dialog>
-        </div >
+
+            {auditPlanTourActive && auditPlanTourStepConfig && auditPlanTourStep >= 4 && (
+                <TourStepPopover
+                    key={auditPlanTourStep}
+                    targetId={auditPlanTourStepConfig.targetId}
+                    step={auditPlanTourStep}
+                    totalSteps={AUDIT_PLAN_TOUR_TOTAL_STEPS}
+                    title={auditPlanTourStepConfig.title}
+                    description={auditPlanTourStepConfig.description}
+                    position={auditPlanTourStepConfig.position}
+                    onNext={handleAuditPlanTourNext}
+                    onBack={handleAuditPlanTourBack}
+                    hideNext={auditPlanTourStep === 7}
+                    disableShadow={auditPlanTourStep === 6}
+                    onClose={() => {
+                        exitAuditPlanTour();
+                        navigate("/getting-started");
+                    }}
+                />
+            )}
+        </div>
     );
 };
 
