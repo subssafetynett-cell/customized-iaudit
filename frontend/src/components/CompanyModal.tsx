@@ -23,6 +23,12 @@ import { COMPANY_INDUSTRIES } from "@/lib/industries";
 import { compressCompanyLogoFile } from "@/utils/companyLogo";
 import { uploadCompanyLogoFile } from "@/lib/uploadCompanyLogo";
 import { toast } from "sonner";
+import { Country, State as StateCity } from "country-state-city";
+import { CountrySelect } from "@/components/CountrySelect";
+import { StateSelect } from "@/components/StateSelect";
+import { resolveCountryIsoFromName } from "@/lib/worldCountries";
+
+const NO_STATE_PROVINCE_LABEL = "No state / province";
 
 interface Props {
   open: boolean;
@@ -111,6 +117,8 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
   }, [open, initialData]);
 
   const displayLogo = logoPreviewUrl || logo;
+  const statesForSelectedCountry = countryIso ? StateCity.getStatesOfCountry(countryIso) : [];
+  const hasStatesForCountry = statesForSelectedCountry.length > 0;
 
   const revokeBlobPreview = (blobUrl: string | null | undefined) => {
     if (blobUrl?.startsWith("blob:")) {
@@ -220,16 +228,13 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
     if (!trimmedAddress) errors.streetAddress = "Street address is required";
     if (!city.trim()) errors.city = "City is required";
     const countryName = Country.getCountryByCode(countryIso)?.name || "";
-    const statesForCountry = countryIso ? StateCity.getStatesOfCountry(countryIso) : [];
-    const hasStates = statesForCountry.length > 0;
+    const hasStates = hasStatesForCountry;
     const stateName = hasStates
       ? StateCity.getStateByCodeAndCountry(stateIso, countryIso)?.name || ""
-      : state.trim();
+      : "";
 
     if (!countryIso) errors.country = "Country is required";
-    if (hasStates) {
-      if (!stateIso) errors.state = "State is required";
-    } else if (!state.trim()) {
+    if (hasStates && !stateIso) {
       errors.state = "State is required";
     }
     if (!postalCode.trim()) errors.postalCode = "Postal code is required";
@@ -550,6 +555,10 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
                   setCountryIso(val);
                   setStateIso("");
                   setState("");
+                  const nextHasStates = val ? StateCity.getStatesOfCountry(val).length > 0 : false;
+                  if (!nextHasStates) {
+                    if (fieldErrors.state) setFieldErrors((prev) => ({ ...prev, state: "" }));
+                  }
                   if (fieldErrors.country) setFieldErrors((prev) => ({ ...prev, country: "" }));
                   setError("");
                 }}
@@ -558,8 +567,17 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
               {fieldErrors.country && <p className="text-[10px] text-red-500 mt-1 pl-1 font-medium">{fieldErrors.country}</p>}
             </div>
             <div className="space-y-2">
-              <Label htmlFor="state" className="text-sm">State/Province *</Label>
-              {countryIso && StateCity.getStatesOfCountry(countryIso).length > 0 ? (
+              <Label htmlFor="state" className="text-sm">
+                State/Province{hasStatesForCountry && countryIso ? " *" : ""}
+              </Label>
+              {!countryIso ? (
+                <Input
+                  id="state"
+                  disabled
+                  placeholder="Select country first"
+                  className="bg-muted text-muted-foreground"
+                />
+              ) : hasStatesForCountry ? (
                 <StateSelect
                   id="state"
                   countryIso={countryIso}
@@ -574,15 +592,10 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
               ) : (
                 <Input
                   id="state"
-                  placeholder="State or Province"
-                  className={`${fieldErrors.state ? "border-red-500 focus:ring-red-500" : ""}`}
-                  value={state}
-                  onChange={(e) => {
-                    setState(e.target.value);
-                    if (fieldErrors.state) setFieldErrors((prev) => ({ ...prev, state: "" }));
-                    setError("");
-                  }}
-                  disabled={!countryIso}
+                  readOnly
+                  disabled
+                  value={NO_STATE_PROVINCE_LABEL}
+                  className="bg-muted text-muted-foreground cursor-not-allowed"
                 />
               )}
               {fieldErrors.state && <p className="text-[10px] text-red-500 mt-1 pl-1 font-medium">{fieldErrors.state}</p>}

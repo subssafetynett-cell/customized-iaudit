@@ -19,6 +19,8 @@ import {
     SITE_NAME_MAX,
 } from "@/lib/validation";
 
+const NO_STATE_REGION_LABEL = "No state / region";
+
 interface Props {
     open: boolean;
     onClose: () => void;
@@ -49,6 +51,9 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
     const [email, setEmail] = useState("");
     const [error, setError] = useState("");
     const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+
+    const statesForSelectedCountry = countryIso ? StateCity.getStatesOfCountry(countryIso) : [];
+    const hasStatesForCountry = statesForSelectedCountry.length > 0;
 
     useEffect(() => {
         if (open) {
@@ -99,10 +104,10 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
         const trimmedEmail = email.trim();
 
         const countryName = Country.getCountryByCode(countryIso)?.name || "";
-        const hasStates = StateCity.getStatesOfCountry(countryIso).length > 0;
+        const hasStates = hasStatesForCountry;
         const stateName = hasStates
             ? StateCity.getStateByCodeAndCountry(stateIso, countryIso)?.name || ""
-            : stateText.trim();
+            : "";
 
         // Per-field validation
         const errors: Record<string, string> = {};
@@ -118,8 +123,6 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
         if (!trimmedCity) errors.city = "City is required";
         if (!countryIso) errors.country = "Country is required";
         if (hasStates && !stateIso) {
-            errors.state = "State/Region is required";
-        } else if (!hasStates && !stateText.trim()) {
             errors.state = "State/Region is required";
         }
         if (!trimmedPostalCode) errors.postalCode = "Postal code is required";
@@ -304,6 +307,8 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
                                         setCountryIso(val);
                                         setStateIso("");
                                         setStateText("");
+                                        const nextHasStates = val ? StateCity.getStatesOfCountry(val).length > 0 : false;
+                                        if (!nextHasStates) clearFieldError("state");
                                         clearFieldError("country");
                                     }}
                                     error={!!fieldErrors.country}
@@ -311,8 +316,17 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
                                 {fieldErrors.country && <p className="text-[10px] text-red-500 mt-1 pl-1 font-medium">{fieldErrors.country}</p>}
                             </div>
                             <div className="space-y-2">
-                                <Label htmlFor="site-state">State/Region *</Label>
-                                {countryIso && StateCity.getStatesOfCountry(countryIso).length > 0 ? (
+                                <Label htmlFor="site-state">
+                                    State/Region{hasStatesForCountry && countryIso ? " *" : ""}
+                                </Label>
+                                {!countryIso ? (
+                                    <Input
+                                        id="site-state"
+                                        disabled
+                                        placeholder="Select country first"
+                                        className="bg-muted text-muted-foreground"
+                                    />
+                                ) : hasStatesForCountry ? (
                                     <StateSelect
                                         id="site-state"
                                         countryIso={countryIso}
@@ -326,14 +340,10 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
                                 ) : (
                                     <Input
                                         id="site-state"
-                                        placeholder="State or region"
-                                        className={fieldErrorClass("state")}
-                                        value={stateText}
-                                        onChange={(e) => {
-                                            setStateText(e.target.value);
-                                            clearFieldError("state");
-                                        }}
-                                        disabled={!countryIso}
+                                        readOnly
+                                        disabled
+                                        value={NO_STATE_REGION_LABEL}
+                                        className="bg-muted text-muted-foreground cursor-not-allowed"
                                     />
                                 )}
                                 {fieldErrors.state && <p className="text-[10px] text-red-500 mt-1 pl-1 font-medium">{fieldErrors.state}</p>}
