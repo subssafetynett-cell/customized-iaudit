@@ -54,6 +54,25 @@ export const COMPANY_DESCRIPTION_ERROR_MESSAGE = `Description must be at most ${
 /** Max stored logo payload (base64 data URL, matches server COMPANY_TEXT_LIMITS.logo). */
 export const COMPANY_LOGO_MAX_CHARS = 500_000;
 
+/** Max logo file size before upload (matches client compression + server guidance). */
+export const COMPANY_LOGO_MAX_BYTES = 10 * 1024 * 1024;
+export const COMPANY_LOGO_MAX_MB = 10;
+
+export const COMPANY_LOGO_TYPE_ERROR_MESSAGE =
+    "Logo must be a PNG, JPEG, or WebP image.";
+
+export const COMPANY_LOGO_TOO_LARGE_ERROR_MESSAGE = `This logo is over ${COMPANY_LOGO_MAX_MB} MB and cannot be uploaded. Please choose a smaller image (maximum ${COMPANY_LOGO_MAX_MB} MB).`;
+
+export function formatMegabytes(bytes: number): string {
+    return (bytes / (1024 * 1024)).toFixed(1);
+}
+
+/** Returns a user-facing error when the selected file exceeds the logo size limit. */
+export function getCompanyLogoFileSizeError(fileSizeBytes: number): string | null {
+    if (fileSizeBytes <= COMPANY_LOGO_MAX_BYTES) return null;
+    return `This logo is ${formatMegabytes(fileSizeBytes)} MB. Files over ${COMPANY_LOGO_MAX_MB} MB cannot be uploaded — please choose a smaller image.`;
+}
+
 export function isWithinMaxLength(value: string, max: number): boolean {
     return String(value || "").trim().length <= max;
 }

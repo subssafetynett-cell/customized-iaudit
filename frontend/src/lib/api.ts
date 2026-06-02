@@ -40,7 +40,9 @@ export async function apiFetch(endpoint: string, options: RequestInit = {}) {
     const token = localStorage.getItem("token");
 
     const headers: Record<string, string> = {
-        "Content-Type": "application/json",
+        ...(typeof FormData !== "undefined" && options.body instanceof FormData
+            ? {}
+            : { "Content-Type": "application/json" }),
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
     };
     const extra = options.headers;
