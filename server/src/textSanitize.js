@@ -51,6 +51,20 @@ export function sanitizePlainText(value, maxLen, opts = {}) {
 
 const SAFE_DATA_IMAGE_RE = /^data:image\/(jpeg|jpg|png|webp);base64,[A-Za-z0-9+/=]+$/i;
 const SAFE_HTTP_LOGO_RE = /^https?:\/\/[^\s<>"']+$/i;
+const DATA_IMAGE_MIME_RE = /^image\/(jpeg|jpg|png|webp|pjpeg|x-png)$/i;
+
+function normalizeDataUrlLogo(s) {
+    const match = /^data:(image\/[^;,]+)(?:;[^,]*)?;base64,([\s\S]+)$/i.exec(s);
+    if (!match) return null;
+    const mime = match[1].toLowerCase();
+    if (!DATA_IMAGE_MIME_RE.test(mime)) return null;
+    const payload = match[2].replace(/\s+/g, '');
+    if (!/^[A-Za-z0-9+/=]+$/.test(payload)) return null;
+    const normalizedMime = mime === 'image/jpg' || mime === 'image/pjpeg' || mime === 'image/x-png'
+        ? (mime === 'image/x-png' ? 'image/png' : 'image/jpeg')
+        : mime;
+    return `data:${normalizedMime};base64,${payload}`;
+}
 
 /** Logo: allow compressed data-URL images (PNG/JPEG/WebP) or https URLs; block script/SVG payloads. */
 export function sanitizeLogoField(value, maxLen = 500_000) {
@@ -64,6 +78,14 @@ export function sanitizeLogoField(value, maxLen = 500_000) {
     const low = s.toLowerCase();
     if (low.startsWith('javascript:') || low.startsWith('vbscript:') || low.includes('<')) {
         return '';
+    }
+
+    const normalizedDataUrl = normalizeDataUrlLogo(s);
+    if (normalizedDataUrl) {
+        if (normalizedDataUrl.length > maxLen) return null;
+        if (SAFE_DATA_IMAGE_RE.test(normalizedDataUrl)) {
+            return normalizedDataUrl;
+        }
     }
 
     if (SAFE_DATA_IMAGE_RE.test(s)) {
