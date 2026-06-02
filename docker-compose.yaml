@@ -24,6 +24,12 @@ services:
     restart: unless-stopped
     env_file:
       - ./server/.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Host .env often uses localhost:5433 (safetynet on the machine). In Compose, DB is the postgres service.
+      DATABASE_URL: postgresql://${POSTGRES_USER:-appuser}:${POSTGRES_PASSWORD:-apppassword}@postgres:5432/${POSTGRES_DB:-appdb}?schema=public
     ports:
       - "3001:3001"
 

@@ -4457,11 +4457,41 @@ app.post('/feedback', async (req, res) => {
     }
 
     try {
+        // SECURITY: treat input as plain text only.
+        // - Strip markup from `name` / `feedback`
+        // - Escape before interpolating into HTML email templates
+        const safeName = sanitizePersonName(name);
+        if (!safeName) return res.status(400).json({ error: 'Invalid name' });
+
+        const safeEmail = typeof email === 'string' ? email.trim() : '';
+        const emailOk = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i.test(safeEmail);
+        if (!emailOk) return res.status(400).json({ error: 'Invalid email' });
+
+        const safeFeedback = sanitizePlainText(feedback, 5_000, { preserveNewlines: true });
+        if (!safeFeedback) return res.status(400).json({ error: 'Invalid feedback' });
+
+        const feedbackHtml = escapeHtml(safeFeedback).replace(/\n/g, '<br/>');
+        const safeImage = typeof image === 'string' ? image.trim() : '';
+        const allowedFeedbackMimeToExt = {
+            'image/png': 'png',
+            'image/jpeg': 'jpg',
+            'application/pdf': 'pdf'
+        };
+        let attachmentPayload = null;
+        if (safeImage) {
+            const match = safeImage.match(/^data:([a-z0-9.+-]+\/[a-z0-9.+-]+);base64,([A-Za-z0-9+/=]+)$/i);
+            if (!match) return res.status(400).json({ error: 'Invalid attachment format' });
+            const mime = match[1].toLowerCase();
+            const extension = allowedFeedbackMimeToExt[mime];
+            if (!extension) return res.status(400).json({ error: 'Only PNG, JPG, and PDF files are allowed' });
+            attachmentPayload = { base64Data: match[2], extension, mime };
+        }
+
         const mailOptions = {
             from: process.env.SMTP_USER || 'noreply@iaudit.global',
             to: 'Mathew@iaudit.global',
             cc: ['jasmin@iaudit.global', 'ybro44240@gmail.com'],
-            subject: `[Feedback] From ${name}`,
+            subject: `[Feedback] From ${safeName}`,
             html: `
                 <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 8px; overflow: hidden;">
                     <div style="background: #213847; padding: 20px; text-align: center;">
@@ -4472,16 +4502,16 @@ app.post('/feedback', async (req, res) => {
                         
                         <div style="background: #f8fafc; padding: 16px; border-radius: 6px; margin-bottom: 20px;">
                             <p style="margin: 0 0 8px; color: #64748b; font-size: 12px; text-transform: uppercase;">Name</p>
-                            <p style="margin: 0 0 16px; font-weight: 600; color: #1e293b;">${name}</p>
+                            <p style="margin: 0 0 16px; font-weight: 600; color: #1e293b;">${escapeHtml(safeName)}</p>
                             
                             <p style="margin: 0 0 8px; color: #64748b; font-size: 12px; text-transform: uppercase;">Email</p>
-                            <p style="margin: 0 0 16px; font-weight: 600; color: #1e293b;">${email}</p>
+                            <p style="margin: 0 0 16px; font-weight: 600; color: #1e293b;">${escapeHtml(safeEmail)}</p>
                             
                             <p style="margin: 0 0 8px; color: #64748b; font-size: 12px; text-transform: uppercase;">Feedback</p>
-                            <p style="margin: 0; color: #334155; line-height: 1.6;">${feedback}</p>
+                            <p style="margin: 0; color: #334155; line-height: 1.6;">${feedbackHtml}</p>
                         </div>
                         
-                        ${image ? '<p style="color: #64748b; font-size: 13px;"><em>An image attachment is included below.</em></p>' : ''}
+                        ${attachmentPayload ? '<p style="color: #64748b; font-size: 13px;"><em>An attachment is included below.</em></p>' : ''}
                     </div>
                     <div style="background: #f1f5f9; padding: 12px; text-align: center; font-size: 12px; color: #94a3b8;">
                         This email was sent automatically from iAudit Global Feedback system.
@@ -4490,14 +4520,12 @@ app.post('/feedback', async (req, res) => {
             `
         };
 
-        if (image) {
-            const base64Data = image.split(';base64,').pop();
-            const extension = image.split(';')[0].split('/')[1] || 'png';
-
+        if (attachmentPayload) {
             mailOptions.attachments = [{
-                filename: `feedback_image.${extension}`,
-                content: base64Data,
-                encoding: 'base64'
+                filename: `feedback_attachment.${attachmentPayload.extension}`,
+                content: attachmentPayload.base64Data,
+                encoding: 'base64',
+                contentType: attachmentPayload.mime
             }];
         }
 

@@ -19,18 +19,27 @@ interface FeedbackFormData {
 const Feedback = () => {
     const [loading, setLoading] = useState(false);
     const [image, setImage] = useState<string | null>(null);
+    const [attachmentMime, setAttachmentMime] = useState<string | null>(null);
     const { register, handleSubmit, reset, formState: { errors } } = useForm<FeedbackFormData>();
+    const allowedUploadTypes = new Set(["image/png", "image/jpeg", "application/pdf"]);
 
     const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
         if (file) {
+            if (!allowedUploadTypes.has(file.type)) {
+                toast.error("Only PNG, JPG, and PDF files are allowed");
+                e.target.value = "";
+                return;
+            }
             if (file.size > 5 * 1024 * 1024) {
-                toast.error("Image size should be less than 5MB");
+                toast.error("File size should be less than 5MB");
+                e.target.value = "";
                 return;
             }
             const reader = new FileReader();
             reader.onloadend = () => {
                 setImage(reader.result as string);
+                setAttachmentMime(file.type);
             };
             reader.readAsDataURL(file);
         }
@@ -38,6 +47,7 @@ const Feedback = () => {
 
     const removeImage = () => {
         setImage(null);
+        setAttachmentMime(null);
     };
 
     const onSubmit = async (data: FeedbackFormData) => {
@@ -99,7 +109,12 @@ const Feedback = () => {
                                                 id="name"
                                                 placeholder="John Doe"
                                                 className={cn("pl-10 bg-white/50 border-slate-200 focus:border-emerald-500 transition-all", errors.name && "border-red-500")}
-                                                {...register("name", { required: "Name is required" })}
+                                                {...register("name", {
+                                                    required: "Name is required",
+                                                    maxLength: { value: 100, message: "Name is too long" },
+                                                    validate: (v) =>
+                                                        !/[<>]/.test(v) || "HTML tags are not allowed"
+                                                })}
                                             />
                                         </div>
                                         {errors.name && <p className="text-xs text-red-500">{errors.name.message}</p>}
@@ -134,7 +149,12 @@ const Feedback = () => {
                                         placeholder="Share your thoughts, suggestions, or experiences here..."
                                         rows={5}
                                         className={cn("bg-white/50 border-slate-200 focus:border-emerald-500 transition-all resize-none", errors.feedback && "border-red-500")}
-                                        {...register("feedback", { required: "Feedback is required" })}
+                                        {...register("feedback", {
+                                            required: "Feedback is required",
+                                            maxLength: { value: 2000, message: "Feedback is too long" },
+                                            validate: (v) =>
+                                                !/[<>]/.test(v) || "HTML tags are not allowed"
+                                        })}
                                     />
                                     {errors.feedback && <p className="text-xs text-red-500">{errors.feedback.message}</p>}
                                 </div>
@@ -156,18 +176,24 @@ const Feedback = () => {
                                             <input
                                                 id="image-upload"
                                                 type="file"
-                                                accept="image/*"
+                                                accept=".png,.jpg,.jpeg,.pdf,image/png,image/jpeg,application/pdf"
                                                 className="hidden"
                                                 onChange={handleImageChange}
                                             />
                                         </label>
                                     ) : (
                                         <div className="relative w-full aspect-video md:aspect-[21/9] rounded-xl overflow-hidden border border-slate-200 group">
-                                            <img
-                                                src={image}
-                                                alt="Feedback attachment"
-                                                className="w-full h-full object-cover"
-                                            />
+                                            {attachmentMime === "application/pdf" ? (
+                                                <div className="w-full h-full flex items-center justify-center bg-slate-50 text-slate-600 text-sm font-medium">
+                                                    PDF attachment selected
+                                                </div>
+                                            ) : (
+                                                <img
+                                                    src={image}
+                                                    alt="Feedback attachment"
+                                                    className="w-full h-full object-cover"
+                                                />
+                                            )}
                                             <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
                                                 <Button
                                                     type="button"
