@@ -35,7 +35,12 @@ import {
     AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import ReusablePagination from "@/components/ReusablePagination";
-import { CLAUSE_MATRIX, ClauseMatrixRow } from "@/data/clauseMapping";
+import {
+    CLAUSE_MATRIX,
+    ClauseMatrixRow,
+    isClauseMatrixHeading,
+    isMainClauseHeading,
+} from "@/data/clauseMapping";
 
 const ISO_STANDARDS = [
     "ISO 9001:2015 - Quality Management System",
@@ -45,7 +50,59 @@ const ISO_STANDARDS = [
 
 const FREQUENCIES = ["Monthly", "Quarterly", "Bi-annually", "Annually"];
 
-import { CLAUSE_MATRIX, ClauseMatrixRow, isClauseMatrixHeading, isMainClauseHeading } from "@/data/clauseMapping";
+type PdfImageAsset = { dataUrl: string; format: "PNG" | "JPEG"; ratio: number };
+
+async function loadImageAsset(src: string, maxDim = 120): Promise<PdfImageAsset | null> {
+    if (!src?.trim()) return null;
+    try {
+        return await new Promise((resolve) => {
+            const img = new Image();
+            img.crossOrigin = "anonymous";
+            img.onload = () => {
+                let { width, height } = img;
+                if (width > maxDim || height > maxDim) {
+                    if (width > height) {
+                        height = Math.round((height * maxDim) / width);
+                        width = maxDim;
+                    } else {
+                        width = Math.round((width * maxDim) / height);
+                        height = maxDim;
+                    }
+                }
+                const canvas = document.createElement("canvas");
+                canvas.width = width;
+                canvas.height = height;
+                const ctx = canvas.getContext("2d")!;
+                ctx.fillStyle = "#ffffff";
+                ctx.fillRect(0, 0, width, height);
+                ctx.drawImage(img, 0, 0, width, height);
+                const usePng = src.startsWith("data:image/png") || /\.png(\?|$)/i.test(src);
+                resolve({
+                    dataUrl: canvas.toDataURL(usePng ? "image/png" : "image/jpeg", 0.85),
+                    format: usePng ? "PNG" : "JPEG",
+                    ratio: height / width,
+                });
+            };
+            img.onerror = () => resolve(null);
+            img.src = src;
+        });
+    } catch {
+        return null;
+    }
+}
+
+function resolveProgramCompany(program: any, sitesList: any[]) {
+    const nested = program?.site?.company;
+    if (nested?.name) {
+        return { name: nested.name, logo: nested.logo || null };
+    }
+    const siteId = program?.siteId ?? program?.site?.id;
+    const site = sitesList.find((s: any) => String(s.id) === String(siteId));
+    if (site?.company?.name) {
+        return { name: site.company.name, logo: site.company.logo || null };
+    }
+    return { name: "N/A", logo: null };
+}
 
 const MONTHS = [
     "January", "February", "March", "April", "May", "June",
@@ -493,6 +550,8 @@ const AuditPrograms = () => {
     const selectedClausesList = getSelectedClausesList();
 
     const handleDownloadPDF = async (program: any) => {
+        const toastId = toast.loading("Preparing PDF…");
+        try {
         // Fetch full program details (schedule + site/company for header)
         let fullProgram = program;
         try {
@@ -689,11 +748,21 @@ const AuditPrograms = () => {
             styles: { fontSize: 6, cellPadding: 0.8, halign: 'center', valign: 'middle' }
         });
 
-        doc.save(`${program.name.replace(/\s+/g, '_')}_Schedule.pdf`);
-        toast.success("PDF downloaded successfully");
+        const safeName = (program.name || "Audit_Program").replace(/\s+/g, "_");
+        doc.save(`${safeName}_Schedule.pdf`);
+        toast.success("PDF downloaded successfully", { id: toastId });
+        } catch (error) {
+            console.error("Audit program PDF download error:", error);
+            toast.error(
+                error instanceof Error ? error.message : "Failed to generate PDF",
+                { id: toastId },
+            );
+        }
     };
 
     const handleDownloadWord = async (program: any) => {
+        const toastId = toast.loading("Preparing Word document…");
+        try {
         let fullProgram = program;
         try {
             const res = await apiFetch(`/audit-programs/${program.id}`);
@@ -904,10 +973,17 @@ const AuditPrograms = () => {
             }],
         });
 
-        Packer.toBlob(doc).then((blob) => {
-            saveAs(blob, `${program.name.replace(/\s+/g, '_')}_Schedule.docx`);
-            toast.success("Word document downloaded successfully");
-        });
+        const blob = await Packer.toBlob(doc);
+        const safeName = (program.name || "Audit_Program").replace(/\s+/g, "_");
+        saveAs(blob, `${safeName}_Schedule.docx`);
+        toast.success("Word document downloaded successfully", { id: toastId });
+        } catch (error) {
+            console.error("Audit program Word download error:", error);
+            toast.error(
+                error instanceof Error ? error.message : "Failed to generate Word document",
+                { id: toastId },
+            );
+        }
     };
 
 

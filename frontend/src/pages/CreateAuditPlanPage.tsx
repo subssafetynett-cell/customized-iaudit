@@ -88,6 +88,8 @@ const CreateAuditPlanPage = () => {
     const [searchParams, setSearchParams] = useSearchParams();
     const { execution, program, site, plan } = location.state || {};
     const isEditMode = !!plan;
+    const [savedPlanId, setSavedPlanId] = useState<number | null>(plan?.id ?? null);
+    const persistedPlanId = plan?.id ?? savedPlanId;
 
     const auditPlanTourActive = searchParams.get("auditPlanTour") === "true";
     const auditPlanTourStep = Math.min(
@@ -369,8 +371,29 @@ const CreateAuditPlanPage = () => {
         setDraggedItemIndex(null);
     };
 
+    const auditPlanBasicFieldsValid = () =>
+        Boolean(auditName.trim() && auditDate && auditLocation.trim());
+
+    const auditPlanRequiredFieldsValid = () =>
+        Boolean(auditPlanBasicFieldsValid() && selectedTemplateId);
+
+    const scrollTourTarget = (targetId: string) => {
+        requestAnimationFrame(() => {
+            document
+                .getElementById(targetId)
+                ?.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
+        });
+    };
+
+    const scrollToAuditPlanTourStep = (step: number) => {
+        const target = getAuditPlanTourStepConfig(step)?.targetId;
+        if (target && target !== "viewport") {
+            scrollTourTarget(target);
+        }
+    };
+
     const handleSave = async () => {
-        if (!auditName || !selectedTemplateId || !auditDate || !auditLocation) {
+        if (!auditPlanRequiredFieldsValid()) {
             toast.error("Please fill in all required fields (Name, Template, Date, Location).");
             return;
         }
@@ -379,12 +402,14 @@ const CreateAuditPlanPage = () => {
         try {
             const user = JSON.parse(localStorage.getItem('user') || '{}');
             const payload = {
-                auditProgramId: isEditMode ? plan.auditProgramId : (program?.id || execution?.programId),
+                auditProgramId: isEditMode
+                    ? plan.auditProgramId
+                    : (program?.id || execution?.programId),
                 executionId: isEditMode ? plan.executionId : execution?.id,
-                auditName,
+                auditName: auditName.trim(),
                 templateId: selectedTemplateId,
                 date: auditDate,
-                location: auditLocation,
+                location: auditLocation.trim(),
                 scope: auditScope,
                 objective: auditObjective,
                 criteria: auditCriteria,
@@ -394,8 +419,9 @@ const CreateAuditPlanPage = () => {
                 userId: user.id
             };
 
-            const path = isEditMode ? `/audit-plans/${plan.id}` : `/audit-plans`;
-            const method = isEditMode ? 'PUT' : 'POST';
+            const updating = persistedPlanId != null;
+            const path = updating ? `/audit-plans/${persistedPlanId}` : `/audit-plans`;
+            const method = updating ? "PUT" : "POST";
 
             const response = await apiFetch(path, {
                 method: method,
@@ -403,7 +429,13 @@ const CreateAuditPlanPage = () => {
             });
 
             if (response.ok) {
-                toast.success(isEditMode ? "Audit Plan updated successfully!" : "Audit Plan saved successfully!");
+                const saved = await response.json().catch(() => null);
+                if (!updating && saved?.id) {
+                    setSavedPlanId(Number(saved.id));
+                }
+                toast.success(
+                    updating ? "Audit Plan updated successfully!" : "Audit Plan saved successfully!",
+                );
                 if (auditPlanTourActive && auditPlanTourStep === 7) {
                     setAuditPlanTourStep(8);
                     return;
@@ -411,7 +443,11 @@ const CreateAuditPlanPage = () => {
                 setTimeout(() => navigate("/audit"), 1000);
             } else {
                 const data = await response.json().catch(() => ({}));
-                toast.error(data.details || data.error || (isEditMode ? "Failed to update audit plan." : "Failed to save audit plan."));
+                toast.error(
+                    data.details ||
+                        data.error ||
+                        (updating ? "Failed to update audit plan." : "Failed to save audit plan."),
+                );
             }
         } catch (error) {
             console.error("Save audit plan error", error);
@@ -424,12 +460,12 @@ const CreateAuditPlanPage = () => {
     const previewTemplate = auditTemplates.find(t => t.id === previewTemplateId);
 
     const handleAuditPlanTourNext = () => {
-        if (auditPlanTourStep === 7) {
-            if (!auditName || !selectedTemplateId || !auditDate || !auditLocation) {
-                toast.error("Please fill in all required fields (Name, Template, Date, Location).");
-                return;
-            }
-            void handleSave();
+        if (auditPlanTourStep === 4 && !auditPlanBasicFieldsValid()) {
+            toast.error("Please complete Audit Name, Date, and Location before continuing.");
+            return;
+        }
+        if (auditPlanTourStep === 5 && !selectedTemplateId) {
+            toast.error("Please select an audit template before continuing.");
             return;
         }
         if (auditPlanTourStep >= AUDIT_PLAN_TOUR_TOTAL_STEPS) {
@@ -448,6 +484,11 @@ const CreateAuditPlanPage = () => {
         }
         setAuditPlanTourStep(auditPlanTourStep - 1);
     };
+
+    useEffect(() => {
+        if (!auditPlanTourActive) return;
+        scrollToAuditPlanTourStep(auditPlanTourStep);
+    }, [auditPlanTourActive, auditPlanTourStep]);
 
     return (
         <div className="min-h-screen bg-[#F8FAFC] p-8 space-y-8 pb-32 relative">
