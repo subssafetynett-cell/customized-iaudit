@@ -230,6 +230,9 @@ const AuditExecute = () => {
       }
     >
   >({});
+  const [assignableUsers, setAssignableUsers] = useState<
+    { id: string; name: string; email: string }[]
+  >([]);
 
   // Extra questions added per clause during the audit (not in original template)
   const [extraChecklistItems, setExtraChecklistItems] = useState<
@@ -411,6 +414,36 @@ const AuditExecute = () => {
     };
     fetchPlanDetails();
   }, [id]);
+
+  // Load org users for Assign To dropdowns
+  useEffect(() => {
+    const fetchAssignableUsers = async () => {
+      try {
+        const res = await apiFetch("/users");
+        if (!res.ok) return;
+        const data = await res.json();
+        const rows = Array.isArray(data) ? data : [];
+        const mapped = rows
+          .map((u: any) => {
+            const fullName = `${u?.firstName || ""} ${u?.lastName || ""}`.trim();
+            const name = fullName || u?.name || u?.email || "";
+            const email = String(u?.email || "").trim();
+            const id = String(u?.id ?? email ?? "");
+            return { id, name, email, isActive: u?.isActive };
+          })
+          .filter((u: any) => u.id && u.name && u.email && u.isActive !== false)
+          .filter(
+            (u: any, idx: number, arr: any[]) =>
+              arr.findIndex((x: any) => x.email.toLowerCase() === u.email.toLowerCase()) === idx,
+          )
+          .map(({ id, name, email }: any) => ({ id, name, email }));
+        setAssignableUsers(mapped);
+      } catch (error) {
+        console.error("Failed to fetch users for assignee dropdown:", error);
+      }
+    };
+    fetchAssignableUsers();
+  }, []);
   const [sectionData, setSectionData] = useState<Record<number, string>>({});
   const [signatureData, setSignatureData] = useState<string | null>(null);
   const [clauseFiles, setClauseFiles] = useState<Record<string, AuditEvidenceMedia[]>>({});
@@ -919,6 +952,17 @@ const AuditExecute = () => {
       ...prev,
       [clauseId]: { ...prev[clauseId], [field]: value },
     }));
+  };
+
+  const getSelectedAssigneeId = (name?: string, email?: string) => {
+    const byEmail = (email || "").trim().toLowerCase();
+    if (byEmail) {
+      const hit = assignableUsers.find((u) => u.email.toLowerCase() === byEmail);
+      if (hit) return hit.id;
+    }
+    const byName = (name || "").trim().toLowerCase();
+    if (!byName) return "";
+    return assignableUsers.find((u) => u.name.trim().toLowerCase() === byName)?.id || "";
   };
 
   const handleSubmit = async () => {
@@ -2735,17 +2779,32 @@ const AuditExecute = () => {
                               else if (f.source === 'process') updateProcessAudit(Number(f.id), 'closeDate', e.target.value);
                             }}
                           />
-                          <Input
-                            type="text"
-                            className="border-0 focus-visible:ring-0 rounded-none bg-transparent h-12 px-4 shadow-none text-sm"
-                            placeholder="Name..."
-                            value={f.assignToName}
+                          <select
+                            className="border-0 focus:outline-none rounded-none bg-transparent h-12 px-4 shadow-none text-sm w-full"
+                            value={getSelectedAssigneeId(f.assignToName, f.assignToEmail)}
                             onChange={(e) => {
-                              if (f.source === 'clause') handleClauseChange(f.id, 'assignToName', e.target.value);
-                              else if (f.source === 'checklist') handleChecklistChange(Number(f.id), 'assignToName', e.target.value);
-                              else if (f.source === 'process') updateProcessAudit(Number(f.id), 'assignToName', e.target.value);
+                              const selected = assignableUsers.find((u) => u.id === e.target.value);
+                              const selectedName = selected?.name || "";
+                              const selectedEmail = selected?.email || "";
+                              if (f.source === "clause") {
+                                handleClauseChange(f.id, "assignToName", selectedName);
+                                handleClauseChange(f.id, "assignToEmail", selectedEmail);
+                              } else if (f.source === "checklist") {
+                                handleChecklistChange(Number(f.id), "assignToName", selectedName);
+                                handleChecklistChange(Number(f.id), "assignToEmail", selectedEmail);
+                              } else if (f.source === "process") {
+                                updateProcessAudit(Number(f.id), "assignToName", selectedName);
+                                updateProcessAudit(Number(f.id), "assignToEmail", selectedEmail);
+                              }
                             }}
-                          />
+                          >
+                            <option value="">Select user...</option>
+                            {assignableUsers.map((u) => (
+                              <option key={u.id} value={u.id}>
+                                {u.name}
+                              </option>
+                            ))}
+                          </select>
                           <Input
                             type="email"
                             className={`border-0 focus-visible:ring-0 rounded-none bg-transparent h-12 px-4 shadow-none text-sm ${f.assignToEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(f.assignToEmail) ? 'text-red-500 bg-red-50/50' : ''}`}
@@ -3136,13 +3195,22 @@ const AuditExecute = () => {
                           </div>
                           <div className="space-y-2">
                             <Label className="text-sm font-bold text-slate-700">Assign To (Name)</Label>
-                            <Input
-                              type="text"
-                              className="bg-white border-slate-200 text-slate-900"
-                              placeholder="Name..."
-                              value={currentData.assignToName || ""}
-                              onChange={(e) => handleClauseChange(clause.id, "assignToName", e.target.value)}
-                            />
+                            <select
+                              className="h-10 w-full rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-900"
+                              value={getSelectedAssigneeId(currentData.assignToName, currentData.assignToEmail)}
+                              onChange={(e) => {
+                                const selected = assignableUsers.find((u) => u.id === e.target.value);
+                                handleClauseChange(clause.id, "assignToName", selected?.name || "");
+                                handleClauseChange(clause.id, "assignToEmail", selected?.email || "");
+                              }}
+                            >
+                              <option value="">Select user...</option>
+                              {assignableUsers.map((u) => (
+                                <option key={u.id} value={u.id}>
+                                  {u.name}
+                                </option>
+                              ))}
+                            </select>
                           </div>
                           <div className="space-y-2">
                             <Label className="text-sm font-bold text-slate-700">Assign To (Email)</Label>
@@ -3927,13 +3995,22 @@ const AuditExecute = () => {
                             </div>
                             <div className="space-y-2">
                               <Label className="text-sm font-bold text-slate-700">Assign To (Name)</Label>
-                              <Input
-                                type="text"
-                                className="bg-slate-50 border-slate-200 text-slate-900 focus:bg-white"
-                                placeholder="Name..."
-                                value={audit.assignToName || ""}
-                                onChange={(e) => updateProcessAudit(index, "assignToName", e.target.value)}
-                              />
+                              <select
+                                className="h-10 w-full rounded-md border border-slate-200 bg-slate-50 px-3 text-sm text-slate-900 focus:bg-white"
+                                value={getSelectedAssigneeId(audit.assignToName, audit.assignToEmail)}
+                                onChange={(e) => {
+                                  const selected = assignableUsers.find((u) => u.id === e.target.value);
+                                  updateProcessAudit(index, "assignToName", selected?.name || "");
+                                  updateProcessAudit(index, "assignToEmail", selected?.email || "");
+                                }}
+                              >
+                                <option value="">Select user...</option>
+                                {assignableUsers.map((u) => (
+                                  <option key={u.id} value={u.id}>
+                                    {u.name}
+                                  </option>
+                                ))}
+                              </select>
                             </div>
                             <div className="space-y-2">
                               <Label className="text-sm font-bold text-slate-700">Assign To (Email)</Label>
@@ -4613,13 +4690,22 @@ const AuditExecute = () => {
                                     </div>
                                     <div className="space-y-2">
                                       <Label className="text-sm font-bold text-slate-700">Assign To (Name)</Label>
-                                      <Input
-                                        type="text"
-                                        className="bg-slate-50 border-slate-200 text-slate-900 focus:bg-white"
-                                        placeholder="Name..."
-                                        value={checklistData[index]?.assignToName || ""}
-                                        onChange={(e) => handleChecklistChange(index, "assignToName", e.target.value)}
-                                      />
+                                      <select
+                                        className="h-10 w-full rounded-md border border-slate-200 bg-slate-50 px-3 text-sm text-slate-900 focus:bg-white"
+                                        value={getSelectedAssigneeId(checklistData[index]?.assignToName, checklistData[index]?.assignToEmail)}
+                                        onChange={(e) => {
+                                          const selected = assignableUsers.find((u) => u.id === e.target.value);
+                                          handleChecklistChange(index, "assignToName", selected?.name || "");
+                                          handleChecklistChange(index, "assignToEmail", selected?.email || "");
+                                        }}
+                                      >
+                                        <option value="">Select user...</option>
+                                        {assignableUsers.map((u) => (
+                                          <option key={u.id} value={u.id}>
+                                            {u.name}
+                                          </option>
+                                        ))}
+                                      </select>
                                     </div>
                                     <div className="space-y-2">
                                       <Label className="text-sm font-bold text-slate-700">Assign To (Email)</Label>

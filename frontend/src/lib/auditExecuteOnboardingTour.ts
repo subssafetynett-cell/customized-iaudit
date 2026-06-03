@@ -31,7 +31,7 @@ export const AUDIT_EXECUTE_TOUR_STEPS: AuditExecuteTourStepConfig[] = [
         targetId: "tour-step-start-audit-eye",
         title: "Start the audit",
         description:
-            "Click the eye icon to open the audit execution screen and work through the checklist for this plan.",
+            "Click the perform audit button to open the audit execution screen and work through the checklist for this plan.",
         position: "left",
     },
     {

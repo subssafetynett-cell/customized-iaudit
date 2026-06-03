@@ -35,6 +35,7 @@ import {
     AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import ReusablePagination from "@/components/ReusablePagination";
+import { CLAUSE_MATRIX, ClauseMatrixRow } from "@/data/clauseMapping";
 
 const ISO_STANDARDS = [
     "ISO 9001:2015 - Quality Management System",
@@ -492,65 +493,115 @@ const AuditPrograms = () => {
     const selectedClausesList = getSelectedClausesList();
 
     const handleDownloadPDF = async (program: any) => {
-        // Fetch full program details to ensure scheduleData is available
+        // Fetch full program details (schedule + site/company for header)
         let fullProgram = program;
-        if (!program.scheduleData) {
-            try {
-                const res = await apiFetch(`/audit-programs/${program.id}`);
-                if (res.ok) fullProgram = await res.json();
-            } catch (e) {
-                console.error("Failed to fetch full program details for PDF", e);
-            }
+        try {
+            const res = await apiFetch(`/audit-programs/${program.id}`);
+            if (res.ok) fullProgram = await res.json();
+        } catch (e) {
+            console.error("Failed to fetch full program details for PDF", e);
         }
         const doc = new jsPDF({ orientation: 'landscape' });
         const loadData = fullProgram.scheduleData || {};
         const programPeriods = calculatePeriods(fullProgram.frequency, fullProgram.duration, loadData.startDate || fullProgram.createdAt);
-        // Reassign program to fullProgram for the rest of the function
         program = fullProgram;
 
+        const company = resolveProgramCompany(program, sites);
+        const pageWidth = doc.internal.pageSize.getWidth();
+        const leftX = 14;
+        let headerBottomY = 12;
 
-        // Add Logo - compressed via canvas to prevent huge file sizes
+        // Company logo (render later inside the metadata section, under "Site")
+        const companyLogoAsset = company.logo ? await loadImageAsset(company.logo, 140) : null;
+
+        // iAudit logo (top-right)
         try {
-            const response = await fetch("/iAudit Global-01.png");
-            const blob = await response.blob();
-            const base64Compressed = await new Promise<string>((resolve, reject) => {
-                const img = new Image();
-                img.onload = () => {
-                    const MAX = 120;
-                    const canvas = document.createElement("canvas");
-                    let { width, height } = img;
-                    if (width > MAX || height > MAX) {
-                        if (width > height) { height = Math.round(height * MAX / width); width = MAX; }
-                        else { width = Math.round(width * MAX / height); height = MAX; }
-                    }
-                    canvas.width = width;
-                    canvas.height = height;
-                    const ctx = canvas.getContext("2d")!;
-                    ctx.fillStyle = "#ffffff";
-                    ctx.fillRect(0, 0, width, height);
-                    ctx.drawImage(img, 0, 0, width, height);
-                    resolve(canvas.toDataURL("image/jpeg", 0.6));
-                };
-                img.onerror = reject;
-                img.src = URL.createObjectURL(blob);
-            });
-            doc.addImage(base64Compressed, 'JPEG', 14, 10, 25, 25);
+            const iauditAsset = await loadImageAsset("/iAudit Global-01.png", 120);
+            if (iauditAsset) {
+                const logoW = 22;
+                const logoH = logoW * iauditAsset.ratio;
+                doc.addImage(
+                    iauditAsset.dataUrl,
+                    iauditAsset.format,
+                    pageWidth - logoW - 14,
+                    10,
+                    logoW,
+                    logoH,
+                );
+            }
         } catch (error) {
-            console.error("Failed to load logo for PDF", error);
+            console.error("Failed to load iAudit logo for PDF", error);
         }
 
-        // Title
+        let metaY = Math.max(headerBottomY + 8, 42);
         doc.setFontSize(20);
+        doc.setFont("helvetica", "bold");
         doc.setTextColor(40, 40, 40);
-        doc.text("Audit Program Schedule", 14, 45); // Moved down
+        doc.text("Audit Program Schedule", leftX, metaY);
+        metaY += 10;
 
-        // Metadata
         doc.setFontSize(10);
         doc.setTextColor(0, 0, 0);
-        doc.text(`Program Name: ${program.name}`, 14, 55);
-        doc.text(`Standard: ${program.isoStandard}`, 14, 61);
-        doc.text(`Frequency: ${program.frequency}`, 14, 67);
-        doc.text(`Site: ${program.site?.name || "N/A"}`, 14, 73);
+        const addMetaLine = (label: string, value: string) => {
+            doc.setFont("helvetica", "bold");
+            doc.text(`${label}:`, leftX, metaY);
+            doc.setFont("helvetica", "normal");
+            const lines = doc.splitTextToSize(value || "N/A", pageWidth - leftX - 42);
+            doc.text(lines, leftX + 32, metaY);
+            metaY += Math.max(6, lines.length * 5);
+        };
+
+        addMetaLine("Program Name", program.name);
+        addMetaLine("Standard", program.isoStandard || "N/A");
+        addMetaLine("Frequency", program.frequency || "N/A");
+        addMetaLine("Site", program.site?.name || "N/A");
+
+        // Company block: name first, then logo below
+        metaY += 3;
+        const valueX = leftX + 32;
+        const companyBlockTop = metaY;
+
+        doc.setFontSize(10);
+        doc.setTextColor(0, 0, 0);
+        doc.setFont("helvetica", "bold");
+        doc.text("Company:", leftX, companyBlockTop + 4);
+
+        let contentY = companyBlockTop;
+        const safeCompanyName = company.name || "N/A";
+
+        doc.setFont("helvetica", "bold");
+        doc.setFontSize(11);
+        doc.setTextColor(30, 41, 59);
+        const nameLines = doc.splitTextToSize(safeCompanyName, pageWidth - valueX - 14);
+        doc.text(nameLines, valueX, contentY);
+        contentY += nameLines.length * 5.5 + 5;
+
+        if (companyLogoAsset) {
+            const maxLogoW = 44;
+            const maxLogoH = 20;
+            let logoW = maxLogoW;
+            let logoH = logoW * companyLogoAsset.ratio;
+            if (logoH > maxLogoH) {
+                logoH = maxLogoH;
+                logoW = logoH / companyLogoAsset.ratio;
+            }
+            doc.addImage(
+                companyLogoAsset.dataUrl,
+                companyLogoAsset.format,
+                valueX,
+                contentY,
+                logoW,
+                logoH,
+            );
+            contentY += logoH + 4;
+        }
+
+        doc.setFontSize(10);
+        doc.setFont("helvetica", "normal");
+        doc.setTextColor(0, 0, 0);
+        metaY = Math.max(companyBlockTop + 8, contentY) + 5;
+
+        const tableStartY = metaY + 2;
 
         // Prepare table data - handles comma-separated standards string
         const standards: string[] = program.isoStandard ? program.isoStandard.split(', ').map((s: string) => s.trim()).filter(Boolean) : [];
@@ -624,7 +675,7 @@ const AuditPrograms = () => {
 
         // Generate Table
         autoTable(doc, {
-            startY: 85, // Moved down to accommodate logo and metadata
+            startY: tableStartY,
             head: tableHead,
             body: tableBody,
             theme: 'grid',
@@ -643,48 +694,37 @@ const AuditPrograms = () => {
     };
 
     const handleDownloadWord = async (program: any) => {
-        // Fetch full program details to ensure scheduleData is available
         let fullProgram = program;
-        if (!program.scheduleData) {
-            try {
-                const res = await apiFetch(`/audit-programs/${program.id}`);
-                if (res.ok) fullProgram = await res.json();
-            } catch (e) {
-                console.error("Failed to fetch full program details for Word", e);
-            }
+        try {
+            const res = await apiFetch(`/audit-programs/${program.id}`);
+            if (res.ok) fullProgram = await res.json();
+        } catch (e) {
+            console.error("Failed to fetch full program details for Word", e);
         }
         program = fullProgram;
         const loadData = program.scheduleData || {};
         const programPeriods = calculatePeriods(program.frequency, program.duration, loadData.startDate || program.createdAt);
-        // Fetch logo image for Docx - compressed via canvas to prevent huge file sizes
+        const company = resolveProgramCompany(program, sites);
+
+        const dataUrlToBuffer = async (src: string): Promise<ArrayBuffer | null> => {
+            const asset = await loadImageAsset(src, 140);
+            if (!asset) return null;
+            const res = await fetch(asset.dataUrl);
+            return res.arrayBuffer();
+        };
+
+        let companyLogoBuffer: ArrayBuffer | null = null;
+        if (company.logo) {
+            try {
+                companyLogoBuffer = await dataUrlToBuffer(company.logo);
+            } catch (error) {
+                console.error("Failed to fetch company logo for Word doc:", error);
+            }
+        }
+
         let logoBuffer: ArrayBuffer | null = null;
         try {
-            const response = await fetch("/iAudit Global-01.png");
-            const blob = await response.blob();
-            logoBuffer = await new Promise<ArrayBuffer>((resolve, reject) => {
-                const img = new Image();
-                img.onload = () => {
-                    const MAX = 120;
-                    const canvas = document.createElement("canvas");
-                    let { width, height } = img;
-                    if (width > MAX || height > MAX) {
-                        if (width > height) { height = Math.round(height * MAX / width); width = MAX; }
-                        else { width = Math.round(width * MAX / height); height = MAX; }
-                    }
-                    canvas.width = width;
-                    canvas.height = height;
-                    const ctx = canvas.getContext("2d")!;
-                    ctx.fillStyle = "#ffffff";
-                    ctx.fillRect(0, 0, width, height);
-                    ctx.drawImage(img, 0, 0, width, height);
-                    canvas.toBlob((compressedBlob) => {
-                        if (compressedBlob) compressedBlob.arrayBuffer().then(resolve).catch(reject);
-                        else reject(new Error("Canvas toBlob returned null"));
-                    }, "image/jpeg", 0.6);
-                };
-                img.onerror = reject;
-                img.src = URL.createObjectURL(blob);
-            });
+            logoBuffer = await dataUrlToBuffer("/iAudit Global-01.png");
         } catch (error) {
             console.error("Failed to fetch logo for Word doc:", error);
         }
@@ -803,20 +843,57 @@ const AuditPrograms = () => {
 
         const getChildren = () => {
             const children: any[] = [];
+
             if (logoBuffer) {
-                children.push(new Paragraph({
-                    children: [new ImageRun({ data: logoBuffer, transformation: { width: 80, height: 80 } })],
-                    spacing: { after: 200 }
-                }));
+                children.push(
+                    new Paragraph({
+                        children: [
+                            new ImageRun({ data: logoBuffer, transformation: { width: 70, height: 70 } }),
+                        ],
+                        spacing: { after: 200 },
+                    }),
+                );
             }
+
             children.push(
-                new Paragraph({ text: "Audit Program Schedule", heading: HeadingLevel.HEADING_1, spacing: { after: 200 } }),
+                new Paragraph({
+                    text: "Audit Program Schedule",
+                    heading: HeadingLevel.HEADING_1,
+                    spacing: { after: 200 },
+                }),
                 new Paragraph({ text: `Program Name: ${program.name}` }),
                 new Paragraph({ text: `Standard: ${program.isoStandard}` }),
                 new Paragraph({ text: `Frequency: ${program.frequency}` }),
-                new Paragraph({ text: `Site: ${program.site?.name || "N/A"}`, spacing: { after: 400 } }),
-                table
+                new Paragraph({ text: `Site: ${program.site?.name || "N/A"}`, spacing: { after: 160 } }),
+                new Paragraph({
+                    children: [new TextRun({ text: "Company:", bold: true })],
+                    spacing: { after: 80 },
+                }),
             );
+
+            children.push(
+                new Paragraph({
+                    children: [new TextRun({ text: company.name, bold: true, size: 28 })],
+                    indent: { left: 720 },
+                    spacing: { after: 120 },
+                }),
+            );
+            if (companyLogoBuffer) {
+                children.push(
+                    new Paragraph({
+                        children: [
+                            new ImageRun({
+                                data: companyLogoBuffer,
+                                transformation: { width: 180, height: 80 },
+                            }),
+                        ],
+                        indent: { left: 720 },
+                        spacing: { after: 240 },
+                    }),
+                );
+            }
+
+            children.push(table);
             return children;
         };
 
@@ -1232,60 +1309,66 @@ const AuditPrograms = () => {
                                 </Select>
                             </div>
 
-                            <div className="space-y-2">
+                            <div className="space-y-2 md:col-span-2">
                                 <Label>Auditors</Label>
-                                <Select
-                                    onValueChange={(val) => {
-                                        if (!selectedAuditors.includes(val)) {
-                                            setSelectedAuditors(prev => [...prev, val]);
-                                            if (selectedAuditors.length === 0) setLeadAuditorId(val);
-                                        }
-                                    }}
-                                    disabled={view === "view"}
-                                >
-                                    <SelectTrigger className="bg-white border-slate-200">
-                                        <SelectValue placeholder="Select auditors" />
-                                    </SelectTrigger>
-                                    <SelectContent>
-                                        {auditors.map((user) => (
-                                            <SelectItem key={user.id} value={user.id.toString()}>
-                                                {user.firstName} {user.lastName}
-                                            </SelectItem>
-                                        ))}
-                                    </SelectContent>
-                                </Select>
-                                <div className="flex flex-wrap gap-1 mt-2">
-                                    {selectedAuditors.map(id => {
-                                        const auditor = auditors.find(a => a.id.toString() === id);
-                                        const isLead = leadAuditorId === id;
-                                        return auditor ? (
-                                            <Badge
-                                                key={id}
-                                                variant={isLead ? "default" : "secondary"}
-                                                className={cn(
-                                                    "text-[10px] pl-1.5 pr-1 items-center gap-1 group transition-all",
-                                                    isLead ? "bg-amber-100 text-amber-900 border-amber-300" : ""
-                                                )}
-                                            >
-                                                {isLead && <Star className="w-2.5 h-2.5 fill-amber-500 text-amber-500" />}
-                                                {auditor.firstName}
-                                                {isLead && <span className="text-[8px] font-bold opacity-70 uppercase tracking-tight ml-0.5">Lead</span>}
-                                                {view !== "view" && (
-                                                    <button
-                                                        onClick={(e) => {
-                                                            e.stopPropagation();
-                                                            setSelectedAuditors(prev => prev.filter(aid => aid !== id));
-                                                            if (isLead) setLeadAuditorId(null);
+                                <div className="rounded-lg border border-slate-200 bg-white p-3 max-h-48 overflow-y-auto space-y-2">
+                                    {auditors.length === 0 ? (
+                                        <p className="text-sm text-slate-500">No users available</p>
+                                    ) : (
+                                        auditors.map((user) => {
+                                            const userId = user.id.toString();
+                                            const isChecked = selectedAuditors.includes(userId);
+                                            const isLead = leadAuditorId === userId;
+                                            return (
+                                                <label
+                                                    key={user.id}
+                                                    className={cn(
+                                                        "flex items-center gap-3 rounded-md px-2 py-2 cursor-pointer hover:bg-slate-50",
+                                                        view === "view" && "cursor-default opacity-80",
+                                                        isChecked && "bg-emerald-50/60",
+                                                    )}
+                                                >
+                                                    <Checkbox
+                                                        checked={isChecked}
+                                                        disabled={view === "view"}
+                                                        onCheckedChange={(checked) => {
+                                                            if (view === "view") return;
+                                                            const nextChecked = checked === true;
+                                                            if (nextChecked) {
+                                                                setSelectedAuditors((prev) => {
+                                                                    const next = prev.includes(userId) ? prev : [...prev, userId];
+                                                                    if (next.length === 1) setLeadAuditorId(userId);
+                                                                    return next;
+                                                                });
+                                                            } else {
+                                                                setSelectedAuditors((prev) => {
+                                                                    const next = prev.filter((id) => id !== userId);
+                                                                    if (leadAuditorId === userId) {
+                                                                        setLeadAuditorId(next[0] ?? null);
+                                                                    }
+                                                                    return next;
+                                                                });
+                                                            }
                                                         }}
-                                                        className="ml-1 hover:text-red-500 opacity-50 group-hover:opacity-100 transition-opacity"
-                                                    >
-                                                        ×
-                                                    </button>
-                                                )}
-                                            </Badge>
-                                        ) : null;
-                                    })}
+                                                    />
+                                                    <span className="text-sm font-medium text-slate-800 flex-1">
+                                                        {user.firstName} {user.lastName}
+                                                    </span>
+                                                    {isChecked && isLead && (
+                                                        <Badge variant="outline" className="text-[10px] border-amber-300 bg-amber-50 text-amber-800">
+                                                            Lead
+                                                        </Badge>
+                                                    )}
+                                                </label>
+                                            );
+                                        })
+                                    )}
                                 </div>
+                                {selectedAuditors.length > 0 && view !== "view" && (
+                                    <p className="text-xs text-slate-500">
+                                        {selectedAuditors.length} auditor{selectedAuditors.length === 1 ? "" : "s"} selected
+                                    </p>
+                                )}
                                  {selectedAuditors.length > 1 && (
                                     <div className="mt-4 p-3 sm:p-4 bg-slate-50/50 rounded-xl border border-dashed border-slate-300">
                                         <div className="flex items-center gap-2 mb-2">
