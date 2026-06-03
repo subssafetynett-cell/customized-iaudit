@@ -20,7 +20,7 @@ import {
     AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import {
-    MoreVertical, FileText, Trash2, Eye, Calendar, Clock, Search, Download, MapPin, Loader2
+    MoreVertical, FileText, Trash2, Calendar, Clock, Search, Download, MapPin, Loader2
 } from "lucide-react";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Progress } from "@/components/ui/progress";
@@ -436,10 +436,10 @@ const AuditList = () => {
                                                                     ? "tour-step-start-audit-eye"
                                                                     : undefined
                                                             }
-                                                            variant="ghost"
-                                                            size="icon"
+                                                            variant="outline"
+                                                            size="sm"
                                                             className={cn(
-                                                                "w-8 h-8 text-emerald-600 bg-emerald-50 hover:bg-emerald-100 hover:text-emerald-700 rounded-full",
+                                                                "h-8 px-3 text-emerald-700 border-emerald-200 bg-emerald-50 hover:bg-emerald-100 hover:text-emerald-800 rounded-md font-semibold",
                                                                 isTourTargetRow &&
                                                                     tourExecuteHighlight(3),
                                                             )}
@@ -454,7 +454,7 @@ const AuditList = () => {
                                                                 });
                                                             }}
                                                         >
-                                                            <Eye className="w-4 h-4" />
+                                                            Perform Audit
                                                         </Button>
                                                         <DropdownMenu>
                                                             <DropdownMenuTrigger asChild>

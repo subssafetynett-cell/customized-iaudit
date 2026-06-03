@@ -1,6 +1,6 @@
-import './loadEnv.js';
 import express from 'express';
 import cors from 'cors';
+import { loadServerEnv } from './loadEnv.js';
 import nodemailer from 'nodemailer';
 import crypto from 'node:crypto';
 import prisma, { handlePrismaError, pool } from './prisma.js';
@@ -26,12 +26,8 @@ import {
     sanitizeStringArray,
     escapeHtml
 } from './textSanitize.js';
-import {
-    companyLogoUpload,
-    handleCompanyLogoUploadError,
-    handleUploadCompanyLogo
-} from './uploadCompanyLogo.js';
-import { isCloudinaryConfigured } from './cloudinary.js';
+
+loadServerEnv();
 
 const PASSWORD_REGEX = /^(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*(),.?":{}|<>_+=\-\[\]\\\/~^]).{8,}$/;
 
@@ -1917,8 +1913,7 @@ app.delete('/departments/:id', authenticateToken, checkTrialExpiration, async (r
     }
 });
 
-mountedApiRouter.post('/uploads/company-logo', authenticateToken, checkTrialExpiration, companyLogoUpload.single('logo'), handleCompanyLogoUploadError, handleUploadCompanyLogo);
-
+// Example route to create a company
 app.post('/companies', authenticateToken, checkTrialExpiration, async (req, res) => {
     const userId = req.user.id;
     const {
@@ -1959,10 +1954,10 @@ app.post('/companies', authenticateToken, checkTrialExpiration, async (req, res)
                 ? undefined
                 : sanitizeLogoField(logo, COMPANY_TEXT_LIMITS.logo);
         if (logo && sanitizedLogo === null) {
-            return res.status(400).json({ error: 'Logo image is too large after compression. Use a smaller file (under 10 MB).' });
+            return res.status(400).json({ error: 'Logo image is too large. Use a smaller file (under 10MB).' });
         }
         if (logo && sanitizedLogo === '') {
-            return res.status(400).json({ error: 'Invalid logo image. Use PNG, JPEG, or WebP.' });
+            return res.status(400).json({ error: 'Invalid logo image. Use PNG or JPEG.' });
         }
 
         const company = await prisma.company.create({
@@ -2036,10 +2031,10 @@ app.put('/companies/:id', authenticateToken, checkTrialExpiration, async (req, r
             } else {
                 const sanitizedLogo = sanitizeLogoField(logo, COMPANY_TEXT_LIMITS.logo);
                 if (sanitizedLogo === null) {
-                    return res.status(400).json({ error: 'Logo image is too large after compression. Use a smaller file (under 10 MB).' });
+                    return res.status(400).json({ error: 'Logo image is too large. Use a smaller file (under 10MB).' });
                 }
                 if (sanitizedLogo === '') {
-                    return res.status(400).json({ error: 'Invalid logo image. Use PNG, JPEG, or WebP.' });
+                    return res.status(400).json({ error: 'Invalid logo image. Use PNG or JPEG.' });
                 }
                 data.logo = sanitizedLogo;
             }
@@ -3657,7 +3652,7 @@ app.get('/audit-programs/:id', authenticateToken, checkTrialExpiration, async (r
         const program = await prisma.auditProgram.findUnique({
             where: { id: Number.parseInt(id) },
             include: {
-                site: true,
+                site: { include: { company: true } },
                 auditors: true,
                 leadAuditor: true
             }
@@ -5068,11 +5063,6 @@ Promise.all([ensureDatabaseSchemaPatches(), ensureSuperAdminUser()])
     .finally(() => {
         app.listen(PORT, '0.0.0.0', () => {
             console.log(`Server is running on port ${PORT}`);
-            console.log(
-                isCloudinaryConfigured()
-                    ? '[Cloudinary] Configured — company logos upload to Cloudinary'
-                    : '[Cloudinary] Not configured — add CLOUDINARY_* to .env for cloud logo storage'
-            );
         });
     });
 

@@ -2,8 +2,10 @@
  * Adds User login timestamp columns when Prisma migrate used a different DATABASE_URL than the running server.
  * Usage: cd server && node scripts/apply-last-login-column.js
  */
-import '../src/loadEnv.js';
-import pg from 'pg';
+import pg from "pg";
+import { loadServerEnv } from "../src/loadEnv.js";
+
+loadServerEnv();
 
 const url = process.env.DATABASE_URL?.trim();
 if (!url) {

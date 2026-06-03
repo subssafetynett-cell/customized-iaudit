@@ -322,21 +322,20 @@ const Index = () => {
     return 0;
   };
 
-  // Upcoming audits: next 5 scheduled, not yet completed
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const upcomingAudits = [...auditPlans]
-    .filter((plan) => {
-      if (getProgress(plan) === 100) return false;
-      if (!plan.date) return false;
-      const auditDate = new Date(plan.date);
-      auditDate.setHours(0, 0, 0, 0);
-      return auditDate >= today;
-    })
-    .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
+  // Recent Activity logic: Get top 5 most recent audits
+  const recentActivity = [...auditPlans]
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
     .slice(0, 5);
 
   const stats = [
+    {
+      label: "Companies",
+      value: companies.length,
+      icon: Building2,
+      trend: "+12%",
+      trendColor: "text-emerald-500 bg-emerald-50",
+      iconColor: "text-emerald-600 bg-emerald-50"
+    },
     {
       label: "Sites",
       value: totalSites,
@@ -439,7 +438,7 @@ const Index = () => {
         />
 
         {/* Top Stats Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
           {stats.map((stat, i) => (
             <Card key={i} className="border-none shadow-sm rounded-xl overflow-hidden bg-white hover:shadow-md transition-all">
               <CardContent className="p-5">
@@ -464,7 +463,7 @@ const Index = () => {
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
 
           {/* Audit Trend Line Chart */}
-          <Card className="lg:col-span-8 border-none shadow-sm rounded-xl bg-white p-6">
+          <Card className="lg:col-span-7 border-none shadow-sm rounded-xl bg-white p-6">
             <div className="flex items-center justify-between mb-6">
               <div>
                 <h2 className="text-lg font-bold text-[#111827]">Audit Trend</h2>
@@ -551,56 +550,64 @@ const Index = () => {
             </div>
           </Card>
 
-          {/* Upcoming Audits List */}
-          <Card className="lg:col-span-4 border-none shadow-sm rounded-xl bg-white p-6">
+          {/* Finding Distribution Pie Chart */}
+          <Card className="lg:col-span-5 border-none shadow-sm rounded-xl bg-white p-6">
             <div className="flex items-center justify-between mb-6">
               <div>
-                <h2 className="text-lg font-bold text-[#111827]">Upcoming Audits</h2>
-                <p className="text-xs text-[#9CA3AF]">Next scheduled audit plans</p>
+                <h2 className="text-lg font-bold text-[#111827]">Finding Distribution</h2>
+                <p className="text-xs text-[#9CA3AF]">Audit non-conformances</p>
               </div>
               <button className="text-[#9CA3AF] hover:text-[#111827]">...</button>
             </div>
 
-            <div className="space-y-4">
-              {upcomingAudits.length > 0 ? (
-                upcomingAudits.map((plan, idx) => {
-                  const progress = getProgress(plan);
-                  const status = progress === 100 ? "Completed" : progress > 0 ? "In Progress" : "Planned";
-                  const leadAuditorName = plan.leadAuditor
-                    ? `${plan.leadAuditor.firstName} ${plan.leadAuditor.lastName}`
-                    : plan.leadAuditorEmail || "Unknown Auditor";
+            <div className="flex flex-col items-center justify-center py-2">
+              <div className="h-[200px] w-full relative">
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart>
+                    <Pie
+                      data={findingDistribution}
+                      cx="50%"
+                      cy="50%"
+                      innerRadius={55}
+                      outerRadius={80}
+                      paddingAngle={5}
+                      dataKey="value"
+                      stroke="none"
+                    >
+                      {findingDistribution.map((entry, index) => (
+                        <Cell key={`cell-${index}`} fill={entry.color} />
+                      ))}
+                      <Label
+                        content={({ viewBox }) => {
+                          const { cx, cy } = viewBox as any;
+                          return (
+                            <text x={cx} y={cy} textAnchor="middle" dominantBaseline="central">
+                              <tspan x={cx} dy="-0.5em" className="fill-slate-400 text-[10px] font-semibold">Total</tspan>
+                              <tspan x={cx} dy="1.4em" className="fill-[#111827] text-2xl font-black">{totalOfi + totalMinor + totalMajor}</tspan>
+                            </text>
+                          );
+                        }}
+                      />
+                    </Pie>
+                    <RechartsTooltip />
+                  </PieChart>
+                </ResponsiveContainer>
+              </div>
 
-                  return (
-                    <div key={idx} className="flex items-center justify-between p-3 rounded-xl hover:bg-slate-50 transition-colors group">
-                      <div className="flex items-center gap-4 min-w-0">
-                        <div className="w-10 h-10 rounded-full bg-slate-100 flex items-center justify-center text-slate-500 group-hover:bg-emerald-100 group-hover:text-emerald-600 transition-colors shrink-0">
-                          <FileText className="w-5 h-5" />
-                        </div>
-                        <div className="min-w-0">
-                          <h4 className="text-sm font-semibold text-[#111827] line-clamp-1">{plan.auditName || plan.auditType}</h4>
-                          <p className="text-[11px] font-medium text-[#9CA3AF] truncate">{leadAuditorName}</p>
-                        </div>
-                      </div>
-                      <Badge
-                        variant="outline"
-                        className={`border-none px-2.5 py-1 text-[10px] font-bold rounded-full shrink-0 ${status === 'Completed' ? 'bg-emerald-50 text-emerald-600' :
-                          status === 'In Progress' ? 'bg-amber-50 text-amber-600' :
-                            'bg-blue-50 text-blue-600'
-                          }`}
-                      >
-                        {status}
-                      </Badge>
+              <div className="w-full space-y-3 mt-6">
+                {findingDistribution.map((item, idx) => (
+                  <div key={idx} className="flex items-center justify-between group">
+                    <div className="flex items-center gap-2.5">
+                      <div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: item.color }} />
+                      <span className="text-xs font-bold text-[#6B7280]">{item.name}</span>
                     </div>
-                  );
-                })
-              ) : (
-                <div className="flex flex-col items-center justify-center py-10 text-center">
-                  <div className="w-12 h-12 rounded-full bg-slate-50 flex items-center justify-center text-slate-300 mb-3">
-                    <Clipboard className="w-6 h-6" />
+                    <div className="flex items-center gap-3">
+                      <span className="text-xs font-black text-[#111827]">{item.value}</span>
+                      <span className="text-[10px] font-bold text-[#9CA3AF] w-10 text-right">{item.percentage}</span>
+                    </div>
                   </div>
-                  <p className="text-xs font-medium text-slate-400">No upcoming audits</p>
-                </div>
-              )}
+                ))}
+              </div>
             </div>
           </Card>
 
@@ -731,71 +738,11 @@ const Index = () => {
           </Card>
         </div>
 
-        {/* Finding Distribution & Audit Status Overview */}
+        {/* Full-Width Bar Chart Section */}
+        {/* Bottom Row: Status Overview & Recent Audits */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-          {/* Finding Distribution Pie Chart */}
-          <Card className="lg:col-span-5 border-none shadow-sm rounded-xl bg-white p-6">
-            <div className="flex items-center justify-between mb-6">
-              <div>
-                <h2 className="text-lg font-bold text-[#111827]">Finding Distribution</h2>
-                <p className="text-xs text-[#9CA3AF]">Audit non-conformances</p>
-              </div>
-              <button className="text-[#9CA3AF] hover:text-[#111827]">...</button>
-            </div>
-
-            <div className="flex flex-col items-center justify-center py-2">
-              <div className="h-[200px] w-full relative">
-                <ResponsiveContainer width="100%" height="100%">
-                  <PieChart>
-                    <Pie
-                      data={findingDistribution}
-                      cx="50%"
-                      cy="50%"
-                      innerRadius={55}
-                      outerRadius={80}
-                      paddingAngle={5}
-                      dataKey="value"
-                      stroke="none"
-                    >
-                      {findingDistribution.map((entry, index) => (
-                        <Cell key={`cell-${index}`} fill={entry.color} />
-                      ))}
-                      <Label
-                        content={({ viewBox }) => {
-                          const { cx, cy } = viewBox as any;
-                          return (
-                            <text x={cx} y={cy} textAnchor="middle" dominantBaseline="central">
-                              <tspan x={cx} dy="-0.5em" className="fill-slate-400 text-[10px] font-semibold">Total</tspan>
-                              <tspan x={cx} dy="1.4em" className="fill-[#111827] text-2xl font-black">{totalOfi + totalMinor + totalMajor}</tspan>
-                            </text>
-                          );
-                        }}
-                      />
-                    </Pie>
-                    <RechartsTooltip />
-                  </PieChart>
-                </ResponsiveContainer>
-              </div>
-
-              <div className="w-full space-y-3 mt-6">
-                {findingDistribution.map((item, idx) => (
-                  <div key={idx} className="flex items-center justify-between group">
-                    <div className="flex items-center gap-2.5">
-                      <div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: item.color }} />
-                      <span className="text-xs font-bold text-[#6B7280]">{item.name}</span>
-                    </div>
-                    <div className="flex items-center gap-3">
-                      <span className="text-xs font-black text-[#111827]">{item.value}</span>
-                      <span className="text-[10px] font-bold text-[#9CA3AF] w-10 text-right">{item.percentage}</span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </Card>
-
           {/* Audit Status Overview Bar Chart */}
-          <Card className="lg:col-span-7 border-none shadow-sm rounded-xl bg-white p-6">
+          <Card className="lg:col-span-8 border-none shadow-sm rounded-xl bg-white p-6">
             <div className="flex items-center justify-between mb-8">
               <div>
                 <h2 className="text-lg font-bold text-[#111827]">Audit Status Overview</h2>
@@ -857,6 +804,59 @@ const Index = () => {
                 <div className="w-3 h-3 rounded-full bg-[#757D8A]" />
                 Completed
               </div>
+            </div>
+          </Card>
+
+          {/* Recent Audits List */}
+          <Card className="lg:col-span-4 border-none shadow-sm rounded-xl bg-white p-6">
+            <div className="flex items-center justify-between mb-6">
+              <div>
+                <h2 className="text-lg font-bold text-[#111827]">Scheduled Audits</h2>
+                <p className="text-xs text-[#9CA3AF]">Latest created audit plans</p>
+              </div>
+              <button className="text-[#9CA3AF] hover:text-[#111827]">...</button>
+            </div>
+
+            <div className="space-y-4">
+              {recentActivity.length > 0 ? (
+                recentActivity.map((plan, idx) => {
+                  const progress = getProgress(plan);
+                  const status = progress === 100 ? "Completed" : progress > 0 ? "In Progress" : "Planned";
+                  const leadAuditorName = plan.leadAuditor
+                    ? `${plan.leadAuditor.firstName} ${plan.leadAuditor.lastName}`
+                    : plan.leadAuditorEmail || "Unknown Auditor";
+
+                  return (
+                    <div key={idx} className="flex items-center justify-between p-3 rounded-xl hover:bg-slate-50 transition-colors group">
+                      <div className="flex items-center gap-4">
+                        <div className="w-10 h-10 rounded-full bg-slate-100 flex items-center justify-center text-slate-500 group-hover:bg-emerald-100 group-hover:text-emerald-600 transition-colors">
+                          <FileText className="w-5 h-5" />
+                        </div>
+                        <div>
+                          <h4 className="text-sm font-semibold text-[#111827] line-clamp-1">{plan.auditName || plan.auditType}</h4>
+                          <p className="text-[11px] font-medium text-[#9CA3AF]">{leadAuditorName}</p>
+                        </div>
+                      </div>
+                      <Badge
+                        variant="outline"
+                        className={`border-none px-2.5 py-1 text-[10px] font-bold rounded-full ${status === 'Completed' ? 'bg-emerald-50 text-emerald-600' :
+                          status === 'In Progress' ? 'bg-amber-50 text-amber-600' :
+                            'bg-blue-50 text-blue-600'
+                          }`}
+                      >
+                        {status}
+                      </Badge>
+                    </div>
+                  );
+                })
+              ) : (
+                <div className="flex flex-col items-center justify-center py-10 text-center">
+                  <div className="w-12 h-12 rounded-full bg-slate-50 flex items-center justify-center text-slate-300 mb-3">
+                    <Clipboard className="w-6 h-6" />
+                  </div>
+                  <p className="text-xs font-medium text-slate-400">No recent audits</p>
+                </div>
+              )}
             </div>
           </Card>
         </div>
