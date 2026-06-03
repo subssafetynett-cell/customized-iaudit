@@ -16,6 +16,15 @@ import { saveAs } from "file-saver";
 import * as XLSX from "xlsx";
 import { format } from "date-fns";
 import { auditTemplates, ChecklistContent } from "@/data/auditTemplates";
+import { sanitizeAuditEvidenceMediaMap, type AuditEvidenceMedia } from "@/lib/evidenceImageUpload";
+import { collectAuditEvidenceMedia } from "@/lib/auditEvidenceCollection";
+import {
+    collectReportEvidenceFileList,
+    collectReportEvidenceSources,
+    dataUrlToUint8Array,
+    prepareReportEvidenceImages,
+    reportImageDisplayMm,
+} from "@/lib/reportEvidenceImages";
 
 const PRIMARY_COLOR = "213847";
 const DARK_RGB: [number, number, number] = [33, 56, 71];
@@ -295,17 +304,46 @@ export async function generateAuditReportPdf(plan: Record<string, any>) {
         y = (doc as any).lastAutoTable.finalY + 8;
     }
 
+    const clauseFilesForReport = sanitizeAuditEvidenceMediaMap(
+        auditData.clauseFiles as Record<string, AuditEvidenceMedia[]> | undefined
+    );
+    const genericFilesForReport = sanitizeAuditEvidenceMediaMap(
+        auditData.genericFiles as Record<string, AuditEvidenceMedia[]> | undefined
+    );
+
     if (auditData.checklistData && template?.content) {
         const checklistRows: string[][] = [];
         Object.entries(auditData.checklistData as Record<string, any>)
             .filter(([, v]) => v?.findings)
             .forEach(([idx, v]) => {
-                const item = (template.content as ChecklistContent[])[Number(idx)];
+                const itemIndex = Number(idx);
+                const item = (template.content as ChecklistContent[])[itemIndex];
+                const clauseKey = item?.clause || String(idx);
+                const attached = collectAuditEvidenceMedia(
+                    clauseFilesForReport,
+                    genericFilesForReport,
+                    clauseKey,
+                    { checklistIndex: itemIndex },
+                );
+                const photoCount = attached.filter((m) => m.type.startsWith("image/")).length;
+                const pdfCount = attached.filter((m) => m.type === "application/pdf").length;
+                const attachmentNote = [
+                    photoCount > 0 ? `${photoCount} photo(s)` : "",
+                    pdfCount > 0 ? `${pdfCount} PDF(s)` : "",
+                ]
+                    .filter(Boolean)
+                    .join(", ");
+                const evidenceText = [
+                    v.evidence || "",
+                    attachmentNote ? `[${attachmentNote} in Evidence section]` : "",
+                ]
+                    .filter(Boolean)
+                    .join(" ");
                 checklistRows.push([
-                    item?.clause || idx,
+                    clauseKey,
                     item?.question || "—",
                     v.findings,
-                    v.evidence || "",
+                    evidenceText,
                     v.description || "",
                 ]);
             });
@@ -336,6 +374,76 @@ export async function generateAuditReportPdf(plan: Record<string, any>) {
                 pa.evidence || "—",
                 pa.conclusion || "—",
             ]),
+            headStyles: { fillColor: DARK_RGB, fontSize: 8 },
+            margin: { left: margin, right: margin },
+            theme: "grid",
+        });
+        y = (doc as any).lastAutoTable.finalY + 8;
+    }
+
+    const evidenceSources = collectReportEvidenceSources(auditData);
+    const pdfImages = await prepareReportEvidenceImages(evidenceSources);
+    const contentWidthMm = pageW - margin * 2;
+
+    const checkPage = (currentY: number, needMm: number) => {
+        if (currentY + needMm > pageH - 25) {
+            doc.addPage();
+            return margin;
+        }
+        return currentY;
+    };
+
+    if (pdfImages.length > 0) {
+        y = section("EVIDENCE & UPLOADED IMAGES", y);
+        doc.setFontSize(8);
+        doc.setTextColor(100, 100, 100);
+        doc.text(
+            `${pdfImages.length} photo(s) attached during the audit (compressed for download, high clarity).`,
+            margin,
+            y
+        );
+        y += 8;
+
+        for (const img of pdfImages) {
+            const { w, h } = reportImageDisplayMm(
+                img.widthPx,
+                img.heightPx,
+                contentWidthMm,
+                85
+            );
+            y = checkPage(y, h + 14);
+            doc.setFontSize(9);
+            doc.setFont("helvetica", "bold");
+            doc.setTextColor(33, 56, 71);
+            doc.text(`${img.context} — ${img.name}`, margin, y);
+            y += 5;
+            try {
+                doc.addImage(img.dataUrl, img.format, margin, y, w, h, undefined, "FAST");
+                y += h + 6;
+            } catch (e) {
+                console.warn("Report PDF image embed failed", img.name, e);
+                doc.setFont("helvetica", "normal");
+                doc.setFontSize(8);
+                doc.setTextColor(150, 150, 150);
+                doc.text(`(Could not embed ${img.name})`, margin, y);
+                y += 8;
+            }
+        }
+    }
+
+    const docAttachments: { context: string; name: string }[] = [];
+    for (const [key, list] of Object.entries({ ...clauseFilesForReport, ...genericFilesForReport })) {
+        for (const m of list) {
+            if (m.type === "application/pdf") docAttachments.push({ context: key, name: m.name });
+        }
+    }
+    if (docAttachments.length > 0) {
+        y = checkPage(y, 20);
+        y = section("ATTACHED DOCUMENTS (PDF)", y);
+        autoTable(doc, {
+            startY: y,
+            head: [["Location", "File name"]],
+            body: docAttachments.map((d) => [d.context, d.name]),
             headStyles: { fillColor: DARK_RGB, fontSize: 8 },
             margin: { left: margin, right: margin },
             theme: "grid",
@@ -510,6 +618,58 @@ export async function generateAuditReportDocx(plan: Record<string, any>) {
         }
     }
 
+    const evidenceSources = collectReportEvidenceSources(auditData);
+    const wordImages = await prepareReportEvidenceImages(evidenceSources);
+    if (wordImages.length > 0) {
+        children.push(heading("Evidence & Uploaded Images"));
+        children.push(
+            new Paragraph({
+                children: [
+                    new TextRun({
+                        text: `${wordImages.length} photo(s) from the audit (optimized for download, high clarity).`,
+                        size: 20,
+                        color: "666666",
+                    }),
+                ],
+                spacing: { after: 200 },
+            })
+        );
+        for (const img of wordImages) {
+            children.push(
+                new Paragraph({
+                    children: [
+                        new TextRun({ text: `${img.context} — ${img.name}`, bold: true, size: 22 }),
+                    ],
+                    spacing: { before: 200, after: 100 },
+                })
+            );
+            try {
+                const buffer = dataUrlToUint8Array(img.dataUrl);
+                const maxW = 520;
+                const aspect = img.widthPx / img.heightPx;
+                let w = maxW;
+                let h = Math.round(w / aspect);
+                if (h > 360) {
+                    h = 360;
+                    w = Math.round(h * aspect);
+                }
+                children.push(
+                    new Paragraph({
+                        children: [
+                            new ImageRun({
+                                data: buffer,
+                                transformation: { width: w, height: h },
+                            }),
+                        ],
+                        spacing: { after: 300 },
+                    })
+                );
+            } catch (e) {
+                console.warn("Report Word image embed failed", img.name, e);
+            }
+        }
+    }
+
     const doc = new Document({
         sections: [
             {
@@ -578,6 +738,13 @@ export function generateAuditReportExcel(plan: Record<string, any>) {
         XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(pData), "Participants");
     }
 
+    const clauseFilesForExcel = sanitizeAuditEvidenceMediaMap(
+        auditData.clauseFiles as Record<string, AuditEvidenceMedia[]> | undefined
+    );
+    const genericFilesForExcel = sanitizeAuditEvidenceMediaMap(
+        auditData.genericFiles as Record<string, AuditEvidenceMedia[]> | undefined
+    );
+
     if (auditData.checklistData && Object.keys(auditData.checklistData as object).length > 0 && template?.content) {
         const cData = [
             ["Clause", "Question", "Finding", "Evidence", "Description", "Correction", "Root Cause", "Corrective Action"],
@@ -585,12 +752,31 @@ export function generateAuditReportExcel(plan: Record<string, any>) {
         Object.entries(auditData.checklistData as Record<string, any>)
             .filter(([, v]) => v.findings)
             .forEach(([idx, v]) => {
-                const item = (template.content as ChecklistContent[])[Number(idx)];
+                const itemIndex = Number(idx);
+                const item = (template.content as ChecklistContent[])[itemIndex];
+                const clauseKey = item?.clause || String(idx);
+                const attached = collectAuditEvidenceMedia(
+                    clauseFilesForExcel,
+                    genericFilesForExcel,
+                    clauseKey,
+                    { checklistIndex: itemIndex },
+                );
+                const photoCount = attached.filter((m) => m.type.startsWith("image/")).length;
+                const pdfCount = attached.filter((m) => m.type === "application/pdf").length;
+                const attachmentNote = [
+                    photoCount > 0 ? `${photoCount} photo(s)` : "",
+                    pdfCount > 0 ? `${pdfCount} PDF(s)` : "",
+                ]
+                    .filter(Boolean)
+                    .join(", ");
+                const evidenceText = [v.evidence || "", attachmentNote ? `[${attachmentNote} — see Evidence Files sheet]` : ""]
+                    .filter(Boolean)
+                    .join(" ");
                 cData.push([
-                    item?.clause || idx,
+                    clauseKey,
                     item?.question || "-",
                     v.findings,
-                    v.evidence || "",
+                    evidenceText,
                     v.description || "",
                     v.correction || "",
                     v.rootCause || "",
@@ -630,6 +816,16 @@ export function generateAuditReportExcel(plan: Record<string, any>) {
             prData.push([pa.processArea, pa.auditees, pa.evidence, pa.conclusion])
         );
         XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(prData), "Process Audits");
+    }
+
+    const evidenceList = collectReportEvidenceFileList(auditData);
+    if (evidenceList.length > 0) {
+        const evData = [["Location", "File name", "Type"]];
+        evidenceList.forEach((e) => {
+            const typeLabel = e.type === "application/pdf" ? "PDF" : e.type.replace(/^image\//, "").toUpperCase() || "Image";
+            evData.push([e.context, e.name, typeLabel]);
+        });
+        XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(evData), "Evidence Files");
     }
 
     XLSX.writeFile(wb, `${fileName}.xlsx`);

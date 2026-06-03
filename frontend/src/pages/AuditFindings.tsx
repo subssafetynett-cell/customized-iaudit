@@ -20,8 +20,9 @@ import {
     DialogTitle,
     DialogFooter,
 } from "@/components/ui/dialog";
-import { AlertTriangle, ArrowRight, RefreshCw, SearchX, Search, Edit2, Upload, FileText, Trash2, Download } from "lucide-react";
+import { AlertTriangle, Eye, RefreshCw, SearchX, Search, Edit2, Upload, FileText, Trash2, Download, ExternalLink } from "lucide-react";
 import { auditTemplates, ChecklistContent } from "@/data/auditTemplates";
+import { collectAuditEvidenceFromData } from "@/lib/auditEvidenceCollection";
 import ReusablePagination from "@/components/ReusablePagination";
 import { toast } from "sonner";
 import jsPDF from "jspdf";
@@ -128,6 +129,12 @@ function extractFindings(plan: any): Finding[] {
         return input;
     };
 
+    const collectClauseMedia = (
+        data: any,
+        clauseKey: string,
+        options?: { checklistIndex?: number; processAuditIndex?: number },
+    ) => collectAuditEvidenceFromData(data, clauseKey, options);
+
     // ── clause-checklist (Integrated Checklist – clauseData) ──────────────────
     const clauseData = safeParse(data.clauseData);
     const editableChecklist = safeParse(data.editableChecklist);
@@ -163,6 +170,7 @@ function extractFindings(plan: any): Finding[] {
                     actionBy: entry.actionBy || "",
                     closeDate: entry.closeDate || "",
                     assignTo: entry.assignTo || "",
+                    media: collectClauseMedia(data, clauseId),
                 });
             }
         });
@@ -193,6 +201,7 @@ function extractFindings(plan: any): Finding[] {
                         ? `Clause ${templateItem.clause}`
                         : `Item ${itemIndex + 1}`;
 
+                const clauseKey = entry.clause || templateItem?.clause || String(itemIndex);
                 results.push({
                     id: `checklist-${plan.id}-${idx}`,
                     auditId: plan.id,
@@ -210,6 +219,7 @@ function extractFindings(plan: any): Finding[] {
                     actionBy: entry.actionBy || "",
                     closeDate: entry.closeDate || "",
                     assignTo: entry.assignTo || "",
+                    media: collectClauseMedia(data, clauseKey, { checklistIndex: itemIndex }),
                 });
             }
         });
@@ -235,6 +245,7 @@ function extractFindings(plan: any): Finding[] {
                             actionBy: item.actionBy || "",
                             closeDate: item.closeDate || "",
                             assignTo: item.assignTo || "",
+                            media: collectClauseMedia(data, clause, { checklistIndex: idx }),
                         });
                     }
                 });
@@ -266,6 +277,9 @@ function extractFindings(plan: any): Finding[] {
                     actionBy: audit.actionBy || "",
                     closeDate: audit.closeDate || "",
                     assignTo: audit.assignTo || "",
+                    media: collectClauseMedia(data, audit.refNo || audit.clauseNo || String(idx), {
+                        processAuditIndex: idx,
+                    }),
                 });
             }
         });
@@ -435,6 +449,7 @@ export default function AuditFindings() {
     const [loading, setLoading] = useState(true);
     const [activeFilter, setActiveFilter] = useState<FilterType>("All");
     const [searchQuery, setSearchQuery] = useState("");
+    const [viewingFinding, setViewingFinding] = useState<Finding | null>(null);
     const [editingFinding, setEditingFinding] = useState<Finding | null>(null);
     const [isSaving, setIsSaving] = useState(false);
 
@@ -919,8 +934,14 @@ export default function AuditFindings() {
                                                 </TableCell>
                                                 <TableCell className="text-slate-600 text-sm font-medium">{finding.actionBy || "—"}</TableCell>
                                                 <TableCell className="text-center">
-                                                    <Button variant="ghost" size="sm" onClick={() => navigate(`/audit/execute/${finding.auditId}`, { state: { focusFindings: true } })} className="h-8 w-8 p-0 text-slate-400 hover:text-slate-800">
-                                                        <ArrowRight className="w-4 h-4" />
+                                                    <Button
+                                                        variant="ghost"
+                                                        size="sm"
+                                                        title="View finding details"
+                                                        onClick={() => setViewingFinding(finding)}
+                                                        className="h-8 w-8 p-0 text-slate-400 hover:text-[#213847]"
+                                                    >
+                                                        <Eye className="w-4 h-4" />
                                                     </Button>
                                                 </TableCell>
                                             </TableRow>
@@ -958,6 +979,138 @@ export default function AuditFindings() {
                     }}
                 />
             )}
+
+            <Dialog open={!!viewingFinding} onOpenChange={(open) => !open && setViewingFinding(null)}>
+                <DialogContent className="max-w-2xl max-h-[90vh] flex flex-col">
+                    <DialogHeader>
+                        <DialogTitle className="flex items-center gap-2 pr-6">
+                            <Eye className="w-5 h-5 text-[#213847]" />
+                            Finding details
+                        </DialogTitle>
+                    </DialogHeader>
+
+                    {viewingFinding && (
+                        <div className="space-y-4 py-2 overflow-y-auto flex-1 pr-1">
+                            <div className="flex flex-wrap items-center gap-2">
+                                <span
+                                    className={`inline-block px-2.5 py-1 rounded-full text-xs font-bold ring-1 ${TYPE_CONFIG[viewingFinding.type].bg} ${TYPE_CONFIG[viewingFinding.type].text} ${TYPE_CONFIG[viewingFinding.type].ring}`}
+                                >
+                                    {TYPE_CONFIG[viewingFinding.type].label}
+                                </span>
+                                {viewingFinding.isOverridden && (
+                                    <Badge variant="outline" className="text-[10px] border-amber-300 text-amber-800">
+                                        Edited
+                                    </Badge>
+                                )}
+                            </div>
+
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                <div className="space-y-1">
+                                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Audit</p>
+                                    <p className="text-sm font-semibold text-slate-900">{viewingFinding.auditName}</p>
+                                </div>
+                                <div className="space-y-1">
+                                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Clause / item</p>
+                                    <p className="text-sm font-mono text-slate-800">{viewingFinding.clauseRef}</p>
+                                </div>
+                            </div>
+
+                            <div className="space-y-1">
+                                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Finding details</p>
+                                <p className="text-sm text-slate-700 whitespace-pre-wrap rounded-lg border border-slate-100 bg-slate-50/80 p-3 min-h-[2.5rem]">
+                                    {viewingFinding.details?.trim() || "—"}
+                                </p>
+                            </div>
+
+                            <div className="space-y-1">
+                                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Description</p>
+                                <p className="text-sm text-slate-700 whitespace-pre-wrap rounded-lg border border-slate-100 bg-slate-50/80 p-3 min-h-[2.5rem]">
+                                    {viewingFinding.description?.trim() || "—"}
+                                </p>
+                            </div>
+
+                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                                <div className="space-y-1">
+                                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Action by</p>
+                                    <p className="text-sm text-slate-800">{viewingFinding.actionBy?.trim() || "—"}</p>
+                                </div>
+                                <div className="space-y-1">
+                                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Target date</p>
+                                    <p className="text-sm text-slate-800">{viewingFinding.closeDate?.trim() || "—"}</p>
+                                </div>
+                                <div className="space-y-1">
+                                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Assigned to</p>
+                                    <p className="text-sm text-slate-800">{viewingFinding.assignTo?.trim() || "—"}</p>
+                                </div>
+                            </div>
+
+                            {viewingFinding.media && viewingFinding.media.length > 0 && (
+                                <div className="space-y-2 pt-2 border-t border-slate-100">
+                                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 flex items-center gap-2">
+                                        <Upload className="w-3.5 h-3.5" />
+                                        Evidence & attachments ({viewingFinding.media.length})
+                                    </p>
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                        {viewingFinding.media.map((m, idx) => (
+                                            <div key={idx} className="rounded-lg border border-slate-200 overflow-hidden bg-white">
+                                                {m.type.startsWith("image/") ? (
+                                                    <img
+                                                        src={m.data}
+                                                        alt={m.name}
+                                                        className="w-full max-h-48 object-contain bg-slate-50"
+                                                    />
+                                                ) : (
+                                                    <div className="flex items-center gap-2 p-4 text-slate-500">
+                                                        <FileText className="w-8 h-8 shrink-0" />
+                                                        <span className="text-sm truncate">{m.name}</span>
+                                                    </div>
+                                                )}
+                                                <p className="text-[10px] text-slate-500 px-2 py-1 border-t border-slate-100 truncate">
+                                                    {m.name}
+                                                </p>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    )}
+
+                    <DialogFooter className="flex-col-reverse sm:flex-row gap-2 sm:gap-0">
+                        <Button
+                            variant="outline"
+                            className="gap-2"
+                            onClick={() => {
+                                if (viewingFinding) {
+                                    navigate(`/audit/execute/${viewingFinding.auditId}`, {
+                                        state: { focusFindings: true },
+                                    });
+                                }
+                            }}
+                        >
+                            <ExternalLink className="w-4 h-4" />
+                            Open in audit
+                        </Button>
+                        <div className="flex gap-2 sm:ml-auto">
+                            <Button variant="outline" onClick={() => setViewingFinding(null)}>
+                                Close
+                            </Button>
+                            <Button
+                                className="bg-[#213847] hover:bg-[#213847]/90 text-white"
+                                onClick={() => {
+                                    if (viewingFinding) {
+                                        setEditingFinding(viewingFinding);
+                                        setViewingFinding(null);
+                                    }
+                                }}
+                            >
+                                <Edit2 className="w-4 h-4 mr-2" />
+                                Edit
+                            </Button>
+                        </div>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
 
             <Dialog open={!!editingFinding} onOpenChange={(open) => !open && setEditingFinding(null)}>
                 <DialogContent className="max-w-2xl">

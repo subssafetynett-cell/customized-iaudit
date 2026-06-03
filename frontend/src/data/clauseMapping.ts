@@ -6,6 +6,11 @@ export interface ClauseMatrixRow {
     iso14001: string;
 }
 
+/** Top-level section row only (e.g. "6"), not sub-sections like "6.1" or "6.2". */
+export function isMainClauseHeading(row: Pick<ClauseMatrixRow, "id">): boolean {
+    return /^\d+$/.test(row.id);
+}
+
 export const CLAUSE_MATRIX: ClauseMatrixRow[] = [
     {
         id: "4",
