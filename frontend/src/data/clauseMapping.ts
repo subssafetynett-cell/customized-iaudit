@@ -6,7 +6,12 @@ export interface ClauseMatrixRow {
     iso14001: string;
 }
 
-/** Top-level section row only (e.g. "6"), not sub-sections like "6.1" or "6.2". */
+/** Any matrix heading row (top-level "6" or sub-section "6.1", "6.2", etc.). */
+export function isClauseMatrixHeading(row: Pick<ClauseMatrixRow, "isHeading">): boolean {
+    return !!row.isHeading;
+}
+
+/** Top-level section only (e.g. "6"), not sub-section headings like "6.1". */
 export function isMainClauseHeading(row: Pick<ClauseMatrixRow, "id">): boolean {
     return /^\d+$/.test(row.id);
 }

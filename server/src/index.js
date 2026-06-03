@@ -2359,6 +2359,7 @@ async function sendOtpToEmailAddressUnderLock(normalizedEmail, purpose, options 
                 console.log(`[DEV OTP] ${purpose} for ${normalizedEmail}: ${otp}`);
                 console.log(`          Expires in ${ttlMinutes} minutes (SMTP not configured).`);
                 console.log('====================================================================\n');
+                emailTransmitted = true;
             } else {
                 await transporter.sendMail(mailOptions);
                 emailTransmitted = true;
@@ -2371,6 +2372,7 @@ async function sendOtpToEmailAddressUnderLock(normalizedEmail, purpose, options 
                 console.log(`[DEV OTP] ${purpose} for ${normalizedEmail}: ${otp}`);
                 console.log(`          Expires in ${ttlMinutes} minutes (email send failed; use code above).`);
                 console.log('====================================================================\n');
+                emailTransmitted = true;
             } else {
                 await prisma.otp.delete({ where: { email: normalizedEmail } }).catch(() => {});
                 if (String(emailError.message || '').includes('5.7.139')) {
