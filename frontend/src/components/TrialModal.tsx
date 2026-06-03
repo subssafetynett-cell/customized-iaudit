@@ -1,7 +1,7 @@
 import React from "react";
 import { Dialog, DialogContent, DialogOverlay, DialogPortal } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { Rocket, ShieldCheck, Sparkles, AlertTriangle } from "lucide-react";
+import { CalendarClock, Crown, ShieldCheck, AlertTriangle } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
   formatTrialDate,
@@ -86,13 +86,13 @@ const TrialModal: React.FC<TrialModalProps> = ({
                   <div
                     className={cn(
                       "absolute -top-2 -right-2 flex h-8 w-8 items-center justify-center rounded-full shadow-lg",
-                      isUrgent ? "bg-white text-red-600" : "bg-amber-400 text-amber-950"
+                      isUrgent ? "bg-white text-red-600" : "bg-white text-emerald-700"
                     )}
                   >
                     {isUrgent ? (
                       <AlertTriangle className="h-4 w-4" />
                     ) : (
-                      <Sparkles className="h-4 w-4" />
+                      <Crown className="h-4 w-4" />
                     )}
                   </div>
                   <div
@@ -158,7 +158,7 @@ const TrialModal: React.FC<TrialModalProps> = ({
                           : "bg-emerald-600 shadow-emerald-200/70"
                       )}
                     >
-                      <Rocket className="h-5 w-5" />
+                      <CalendarClock className="h-5 w-5" />
                     </div>
                     <p
                       className={cn(

@@ -22,7 +22,6 @@ import {
 import {
     MoreVertical, FileText, Trash2, Calendar, Clock, Search, Download, MapPin, Loader2
 } from "lucide-react";
-import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Progress } from "@/components/ui/progress";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -40,7 +39,6 @@ import { cn } from "@/lib/utils";
 const AuditList = () => {
     const [auditPlans, setAuditPlans] = useState<any[]>([]);
     const [searchQuery, setSearchQuery] = useState("");
-    const [statusFilter, setStatusFilter] = useState("all");
     const [selectedSite, setSelectedSite] = useState("all");
     const [loading, setLoading] = useState(true);
     /** e.g. "42-pdf" while generating a report for plan 42 */
@@ -187,20 +185,7 @@ const AuditList = () => {
         return siteName === selectedSite;
     });
 
-    const filteredPlans = filteredPlansBySite.filter(plan => {
-        if (statusFilter === "all") return true;
-        return getStatus(plan).toLowerCase() === statusFilter.toLowerCase();
-    });
-
-    const counts = {
-        all: filteredPlansBySite.length,
-        draft: filteredPlansBySite.filter(p => getStatus(p) === "Draft").length,
-        scheduled: filteredPlansBySite.filter(p => getStatus(p) === "Scheduled").length,
-        inProgress: filteredPlansBySite.filter(p => getStatus(p) === "In Progress").length,
-        completed: filteredPlansBySite.filter(p => getStatus(p) === "Completed").length,
-        cancelled: filteredPlansBySite.filter(p => getStatus(p) === "Cancelled").length,
-        postponed: filteredPlansBySite.filter(p => getStatus(p) === "Postponed").length,
-    };
+    const filteredPlans = filteredPlansBySite;
 
     const totalPages = Math.ceil(filteredPlans.length / itemsPerPage);
     const paginatedPlans = filteredPlans.slice(
@@ -246,7 +231,7 @@ const AuditList = () => {
     // Reset page to 1 when filters change
     useEffect(() => {
         setCurrentPage(1);
-    }, [searchQuery, statusFilter, selectedSite]);
+    }, [searchQuery, selectedSite]);
 
     return (
         <div className="flex-1 space-y-8 p-8 pt-6 min-h-screen bg-white relative">
@@ -299,33 +284,7 @@ const AuditList = () => {
                     </div>
                 )}
 
-                <Tabs defaultValue="all" onValueChange={setStatusFilter} className="w-full relative z-10 space-y-6">
-                    <div className="bg-slate-50/50 rounded-xl p-1.5 inline-block border border-slate-100">
-                        <TabsList className="bg-transparent h-auto p-0 space-x-2">
-                            <TabsTrigger value="all" className="data-[state=active]:bg-white data-[state=active]:shadow-sm rounded-lg px-4 py-2 text-sm font-medium text-slate-600 data-[state=active]:text-[#213847] border-b-2 border-transparent data-[state=active]:border-[#213847] data-[state=active]:rounded-b-none transition-none">
-                                All <span className="ml-2 bg-slate-200/50 text-slate-600 px-2 py-0.5 rounded-md text-xs">{counts.all}</span>
-                            </TabsTrigger>
-                            <TabsTrigger value="draft" className="data-[state=active]:bg-white data-[state=active]:shadow-sm rounded-lg px-4 py-2 text-sm font-medium text-slate-500 data-[state=active]:text-[#213847] data-[state=active]:border-b-2 data-[state=active]:border-[#213847] data-[state=active]:rounded-b-none transition-none">
-                                Draft <span className="ml-2 bg-slate-200/50 text-slate-600 px-2 py-0.5 rounded-md text-xs">{counts.draft}</span>
-                            </TabsTrigger>
-                            <TabsTrigger value="scheduled" className="data-[state=active]:bg-white data-[state=active]:shadow-sm rounded-lg px-4 py-2 text-sm font-medium text-slate-500 data-[state=active]:text-[#213847] data-[state=active]:border-b-2 data-[state=active]:border-[#213847] data-[state=active]:rounded-b-none transition-none">
-                                Scheduled <span className="ml-2 bg-slate-200/50 text-slate-600 px-2 py-0.5 rounded-md text-xs">{counts.scheduled}</span>
-                            </TabsTrigger>
-                            <TabsTrigger value="in progress" className="data-[state=active]:bg-white data-[state=active]:shadow-sm rounded-lg px-4 py-2 text-sm font-medium text-slate-500 data-[state=active]:text-[#213847] data-[state=active]:border-b-2 data-[state=active]:border-[#213847] data-[state=active]:rounded-b-none transition-none">
-                                In Progress <span className="ml-2 bg-slate-200/50 text-slate-600 px-2 py-0.5 rounded-md text-xs">{counts.inProgress}</span>
-                            </TabsTrigger>
-                            <TabsTrigger value="completed" className="data-[state=active]:bg-white data-[state=active]:shadow-sm rounded-lg px-4 py-2 text-sm font-medium text-slate-500 data-[state=active]:text-[#213847] data-[state=active]:border-b-2 data-[state=active]:border-[#213847] data-[state=active]:rounded-b-none transition-none">
-                                Completed <span className="ml-2 bg-slate-200/50 text-slate-600 px-2 py-0.5 rounded-md text-xs">{counts.completed}</span>
-                            </TabsTrigger>
-                            <TabsTrigger value="cancelled" className="data-[state=active]:bg-white data-[state=active]:shadow-sm rounded-lg px-4 py-2 text-sm font-medium text-slate-500 data-[state=active]:text-[#213847] data-[state=active]:border-b-2 data-[state=active]:border-[#213847] data-[state=active]:rounded-b-none transition-none">
-                                Cancelled <span className="ml-2 bg-slate-200/50 text-slate-600 px-2 py-0.5 rounded-md text-xs">{counts.cancelled}</span>
-                            </TabsTrigger>
-                            <TabsTrigger value="postponed" className="data-[state=active]:bg-white data-[state=active]:shadow-sm rounded-lg px-4 py-2 text-sm font-medium text-slate-500 data-[state=active]:text-[#213847] data-[state=active]:border-b-2 data-[state=active]:border-[#213847] data-[state=active]:rounded-b-none transition-none">
-                                Postponed <span className="ml-2 bg-slate-200/50 text-slate-600 px-2 py-0.5 rounded-md text-xs">{counts.postponed}</span>
-                            </TabsTrigger>
-                        </TabsList>
-                    </div>
-
+                <div className="w-full relative z-10 space-y-6">
                     <div
                         id="tour-step-audit-plans-list"
                         className={cn(
@@ -522,7 +481,7 @@ const AuditList = () => {
                         onPageChange={setCurrentPage}
                         className="mt-6"
                     />
-                </Tabs>
+                </div>
             </div>
             {/* Delete Confirmation Dialog */}
             <AlertDialog open={isDeleteDialogOpen} onOpenChange={setIsDeleteDialogOpen}>

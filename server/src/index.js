@@ -24,6 +24,7 @@ import {
     sanitizePlainText,
     sanitizeShortLabel,
     sanitizeStringArray,
+    sanitizeAuditDataPayload,
     escapeHtml
 } from './textSanitize.js';
 
@@ -2123,9 +2124,14 @@ app.delete('/companies/:id', authenticateToken, checkTrialExpiration, async (req
 // -------------------------
 
 function getOtpTtlMinutes(purpose) {
+    if (purpose === 'signup') return 1;
     if (purpose === 'password_reset' || purpose === 'email_change') return 15;
     if (purpose === 'user_invite') return 30;
     return 10;
+}
+
+function formatOtpExpiryLabel(ttlMinutes) {
+    return ttlMinutes === 1 ? '1 minute' : `${ttlMinutes} minutes`;
 }
 
 function isSmtpConfigured() {
@@ -2174,6 +2180,7 @@ async function sendOtpToEmailAddressUnderLock(normalizedEmail, purpose) {
             assertSmtpConfiguredForOtp();
         }
         const ttlMinutes = getOtpTtlMinutes(purpose);
+        const expireLabel = formatOtpExpiryLabel(ttlMinutes);
         const expiresAt = new Date(Date.now() + ttlMinutes * 60 * 1000);
 
         await prisma.otp.upsert({
@@ -2217,12 +2224,12 @@ async function sendOtpToEmailAddressUnderLock(normalizedEmail, purpose) {
         subject,
         headers: { 'X-Entity-Ref-ID': otp },
         text: isPasswordReset
-            ? `Your password reset code is: ${otp}. This code expires in ${ttlMinutes} minutes.`
+            ? `Your password reset code is: ${otp}. This code expires in ${expireLabel}.`
             : isEmailChange
-              ? `Your email verification code is: ${otp}. This code expires in ${ttlMinutes} minutes.`
+              ? `Your email verification code is: ${otp}. This code expires in ${expireLabel}.`
               : isUserInvite
-                ? `Your account activation code is: ${otp}. This code expires in ${ttlMinutes} minutes.`
-                : `Your verification code is: ${otp}. This code will expire in ${ttlMinutes} minutes.`,
+                ? `Your account activation code is: ${otp}. This code expires in ${expireLabel}.`
+                : `Your verification code is: ${otp}. This code will expire in ${expireLabel}.`,
         html: `
                 <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 24px; border: 1px solid #e5e7eb; border-radius: 12px; background-color: #ffffff;">
                     <div style="text-align: center; margin-bottom: 24px;">
@@ -2237,7 +2244,7 @@ async function sendOtpToEmailAddressUnderLock(normalizedEmail, purpose) {
                         <h2 style="font-size: 42px; font-weight: 800; color: #111827; letter-spacing: 8px; margin: 0;">${otp}</h2>
                     </div>
                     <p style="color: #4b5563; font-size: 14px; line-height: 1.5;">
-                        This code will expire in <strong>${ttlMinutes} minutes</strong>. If you did not request this, you can ignore this email.
+                        This code will expire in <strong>${expireLabel}</strong>. If you did not request this, you can ignore this email.
                     </p>
                     <hr style="border: 0; border-top: 1px solid #e5e7eb; margin: 32px 0;" />
                     <div style="text-align: center; color: #9ca3af; font-size: 12px;">
@@ -4052,7 +4059,9 @@ app.put('/audit-plans/:id', authenticateToken, checkTrialExpiration, async (req,
             };
         }
         if (itinerary !== undefined) updateData.itinerary = itinerary;
-        if (req.body.auditData !== undefined) updateData.auditData = req.body.auditData;
+        if (req.body.auditData !== undefined) {
+            updateData.auditData = sanitizeAuditDataPayload(req.body.auditData);
+        }
         if (req.body.findingsData !== undefined) updateData.findingsData = req.body.findingsData;
         updateData.updatedAt = new Date();
 

@@ -68,6 +68,13 @@ import {
 } from "@/lib/auditExecuteOnboardingTour";
 import { cn } from "@/lib/utils";
 import { useAuditExecutionAutosave } from "@/hooks/useAuditExecutionAutosave";
+import {
+  AUDIT_EVIDENCE_ACCEPT,
+  AUDIT_EVIDENCE_UNSUPPORTED_MESSAGE,
+  processAuditEvidenceFileList,
+  sanitizeAuditEvidenceMediaMap,
+  type AuditEvidenceMedia,
+} from "@/lib/evidenceImageUpload";
 
 import { CLAUSE_MATRIX, ClauseMatrixRow } from "@/data/clauseMapping";
 
@@ -383,8 +390,8 @@ const AuditExecute = () => {
             if (data.showExecutiveSummary !== undefined) setShowExecutiveSummary(data.showExecutiveSummary);
             if (data.showAuditParticipants !== undefined) setShowAuditParticipants(data.showAuditParticipants);
             if (data.showAuditFindings !== undefined) setShowAuditFindings(data.showAuditFindings);
-            if (data.clauseFiles) setClauseFiles(data.clauseFiles);
-            if (data.genericFiles) setGenericFiles(data.genericFiles);
+            if (data.clauseFiles) setClauseFiles(sanitizeAuditEvidenceMediaMap(data.clauseFiles));
+            if (data.genericFiles) setGenericFiles(sanitizeAuditEvidenceMediaMap(data.genericFiles));
             const currentTemplate = found.templateId ? auditTemplates.find(t => t.id === found.templateId) : null;
 
             if (data.editableChecklist && data.editableChecklist.length > 0) {
@@ -439,8 +446,8 @@ const AuditExecute = () => {
   }, []);
   const [sectionData, setSectionData] = useState<Record<number, string>>({});
   const [signatureData, setSignatureData] = useState<string | null>(null);
-  const [clauseFiles, setClauseFiles] = useState<Record<string, { name: string; data: string; type: string }[]>>({});
-  const [genericFiles, setGenericFiles] = useState<Record<string, { name: string; data: string; type: string }[]>>({});
+  const [clauseFiles, setClauseFiles] = useState<Record<string, AuditEvidenceMedia[]>>({});
+  const [genericFiles, setGenericFiles] = useState<Record<string, AuditEvidenceMedia[]>>({});
 
   // --------------------------------------------------------------------------
   // HANDLERS
@@ -644,6 +651,8 @@ const AuditExecute = () => {
       lastSaved: new Date().toISOString(),
       progress: progressValue,
       editableChecklist,
+      clauseFiles: sanitizeAuditEvidenceMediaMap(clauseFiles),
+      genericFiles: sanitizeAuditEvidenceMediaMap(genericFiles),
     }),
     [
       checklistData,
@@ -666,10 +675,12 @@ const AuditExecute = () => {
       showAuditFindings,
       progressValue,
       editableChecklist,
+      clauseFiles,
+      genericFiles,
     ],
   );
 
-  useAuditExecutionAutosave({
+  const { saveNow } = useAuditExecutionAutosave({
     planId: id,
     buildAuditData: buildAuditDataPayload,
     enabled: !!plan && !!template,
@@ -836,60 +847,96 @@ const AuditExecute = () => {
     }));
   };
 
-  const handleClauseFileUpload = async (clause: string, files: FileList | null) => {
-    if (!files || files.length === 0) return;
-
-    const newMedia: { name: string; data: string; type: string }[] = [];
-    for (let i = 0; i < files.length; i++) {
-      const file = files[i];
-      const base64 = await new Promise<string>((resolve) => {
-        const reader = new FileReader();
-        reader.onloadend = () => resolve(reader.result as string);
-        reader.readAsDataURL(file);
-      });
-      newMedia.push({ name: file.name, data: base64, type: file.type });
+  const reportRejectedEvidence = (
+    rejected: { fileName: string; error: string }[],
+    acceptedCount: number,
+  ) => {
+    for (const item of rejected) {
+      toast.error(`${item.fileName}: ${item.error}`, { duration: 6000 });
     }
+    if (rejected.length > 0 && acceptedCount === 0) {
+      toast.error(AUDIT_EVIDENCE_UNSUPPORTED_MESSAGE, {
+        description:
+          "Your audit text is still saved. Use PNG or JPEG photos (max 5 MB) or PDF documents (max 10 MB).",
+        duration: 8000,
+      });
+    }
+  };
 
-    setClauseFiles(prev => ({
-      ...prev,
-      [clause]: [...(prev[clause] || []), ...newMedia]
-    }));
-    toast.success(`${newMedia.length} file(s) attached for Clause ${clause}`);
+  const handleClauseFileUpload = async (clause: string, files: FileList | null) => {
+    const { accepted, rejected } = await processAuditEvidenceFileList(files);
+    reportRejectedEvidence(rejected, accepted.length);
+    if (accepted.length === 0) return;
+
+    let nextClauseFiles: Record<string, AuditEvidenceMedia[]>;
+    setClauseFiles((prev) => {
+      nextClauseFiles = {
+        ...prev,
+        [clause]: [...(prev[clause] || []), ...accepted],
+      };
+      return nextClauseFiles;
+    });
+    toast.success(`${accepted.length} file(s) attached for Clause ${clause}`);
+    const saved = await saveNow({
+      clauseFiles: sanitizeAuditEvidenceMediaMap(nextClauseFiles!),
+    });
+    if (!saved) {
+      toast.error("Photo attached locally but could not save to the server. Click Save Audit Progress.", {
+        duration: 8000,
+      });
+    }
   };
 
   const removeClauseFile = (clause: string, indexToRemove: number) => {
-    setClauseFiles(prev => ({
-      ...prev,
-      [clause]: prev[clause].filter((_, index) => index !== indexToRemove)
-    }));
+    let nextClauseFiles: Record<string, AuditEvidenceMedia[]>;
+    setClauseFiles((prev) => {
+      nextClauseFiles = {
+        ...prev,
+        [clause]: prev[clause].filter((_, index) => index !== indexToRemove),
+      };
+      return nextClauseFiles;
+    });
+    void saveNow({
+      clauseFiles: sanitizeAuditEvidenceMediaMap(nextClauseFiles!),
+    });
   };
 
   const handleGenericFileUpload = async (key: string, files: FileList | null) => {
-    if (!files || files.length === 0) return;
+    const { accepted, rejected } = await processAuditEvidenceFileList(files);
+    reportRejectedEvidence(rejected, accepted.length);
+    if (accepted.length === 0) return;
 
-    const newMedia: { name: string; data: string; type: string }[] = [];
-    for (let i = 0; i < files.length; i++) {
-      const file = files[i];
-      const base64 = await new Promise<string>((resolve) => {
-        const reader = new FileReader();
-        reader.onloadend = () => resolve(reader.result as string);
-        reader.readAsDataURL(file);
+    let nextGenericFiles: Record<string, AuditEvidenceMedia[]>;
+    setGenericFiles((prev) => {
+      nextGenericFiles = {
+        ...prev,
+        [key]: [...(prev[key] || []), ...accepted],
+      };
+      return nextGenericFiles;
+    });
+    toast.success(`${accepted.length} file(s) attached`);
+    const saved = await saveNow({
+      genericFiles: sanitizeAuditEvidenceMediaMap(nextGenericFiles!),
+    });
+    if (!saved) {
+      toast.error("File attached locally but could not save to the server. Click Save Audit Progress.", {
+        duration: 8000,
       });
-      newMedia.push({ name: file.name, data: base64, type: file.type });
     }
-
-    setGenericFiles(prev => ({
-      ...prev,
-      [key]: [...(prev[key] || []), ...newMedia]
-    }));
-    toast.success(`${newMedia.length} file(s) attached`);
   };
 
   const removeGenericFile = (key: string, indexToRemove: number) => {
-    setGenericFiles(prev => ({
-      ...prev,
-      [key]: prev[key].filter((_, index) => index !== indexToRemove)
-    }));
+    let nextGenericFiles: Record<string, AuditEvidenceMedia[]>;
+    setGenericFiles((prev) => {
+      nextGenericFiles = {
+        ...prev,
+        [key]: prev[key].filter((_, index) => index !== indexToRemove),
+      };
+      return nextGenericFiles;
+    });
+    void saveNow({
+      genericFiles: sanitizeAuditEvidenceMediaMap(nextGenericFiles!),
+    });
   };
 
   const handleSectionChange = (index: number, value: string) => {
@@ -919,33 +966,45 @@ const AuditExecute = () => {
   };
 
   const handleSubmit = async () => {
+    const toastId = toast.loading("Saving audit…");
     try {
-      const auditData = {
-        ...buildAuditDataPayload(),
-        clauseFiles,
-        genericFiles,
-      };
+      const auditData = buildAuditDataPayload();
 
       const res = await apiFetch(`/audit-plans/${id}`, {
         method: "PUT",
-        body: JSON.stringify({
-          auditData,
-        })
+        body: JSON.stringify({ auditData }),
       });
 
       if (res.ok) {
-        toast.success("Audit execution saved successfully!");
+        toast.success("Audit saved successfully.", { id: toastId });
         if (auditExecuteTourActive && auditExecuteTourStep === 5) {
           setAuditExecuteTourStep(6);
           return;
         }
         navigate("/audit");
-      } else {
-        throw new Error("Failed to save");
+        return;
       }
+
+      let message = "Could not save the audit. Please try again.";
+      const text = await res.text().catch(() => "");
+      try {
+        const body = text ? JSON.parse(text) : null;
+        if (body?.error && typeof body.error === "string") message = body.error;
+        else if (text) message = text.slice(0, 200);
+      } catch {
+        if (text) message = text.slice(0, 200);
+      }
+      if (res.status === 413) {
+        message =
+          "The audit is too large to save (often due to many photos). Remove some attachments or use smaller PNG/JPEG images, then save again.";
+      }
+      toast.error(message, { id: toastId, duration: 8000 });
     } catch (error) {
       console.error("Save error:", error);
-      toast.error("Failed to save audit progress");
+      toast.error(
+        "Network error while saving. Check your connection and click Save Audit Progress again.",
+        { id: toastId, duration: 8000 },
+      );
     }
   };
 
@@ -3176,8 +3235,12 @@ const AuditExecute = () => {
                         <input
                           type="file"
                           multiple
+                          accept={AUDIT_EVIDENCE_ACCEPT}
                           className="hidden"
-                          onChange={(e) => handleGenericFileUpload(`clause_checklist_${clause.id}`, e.target.files)}
+                          onChange={(e) => {
+                            void handleGenericFileUpload(`clause_checklist_${clause.id}`, e.target.files);
+                            e.target.value = "";
+                          }}
                         />
                         <div className="flex items-center gap-2 text-slate-500 group-hover:text-slate-700">
                           <Upload className="w-4 h-4" />
@@ -3233,8 +3296,12 @@ const AuditExecute = () => {
                       <input
                         type="file"
                         multiple
+                        accept={AUDIT_EVIDENCE_ACCEPT}
                         className="hidden"
-                        onChange={(e) => handleGenericFileUpload(`section_${index}`, e.target.files)}
+                        onChange={(e) => {
+                          void handleGenericFileUpload(`section_${index}`, e.target.files);
+                          e.target.value = "";
+                        }}
                       />
                       <Upload className="w-4 h-4" />
                       <span>Add / Upload / Insert record or picture</span>
@@ -3967,8 +4034,12 @@ const AuditExecute = () => {
                           <input
                             type="file"
                             multiple
+                            accept={AUDIT_EVIDENCE_ACCEPT}
                             className="hidden"
-                            onChange={(e) => handleGenericFileUpload(`process_audit_${index}`, e.target.files)}
+                            onChange={(e) => {
+                              void handleGenericFileUpload(`process_audit_${index}`, e.target.files);
+                              e.target.value = "";
+                            }}
                           />
                           <div className="flex items-center gap-3 text-slate-500 group-hover:text-slate-800 font-medium">
                             <div className="bg-slate-100 p-2 rounded-full group-hover:bg-slate-200 transition-colors">
@@ -4664,8 +4735,12 @@ const AuditExecute = () => {
                                     <input
                                       type="file"
                                       multiple
+                                      accept={AUDIT_EVIDENCE_ACCEPT}
                                       className="hidden"
-                                      onChange={(e) => handleClauseFileUpload(item.clause, e.target.files)}
+                                      onChange={(e) => {
+                                        void handleClauseFileUpload(item.clause, e.target.files);
+                                        e.target.value = "";
+                                      }}
                                     />
                                     <div className="flex flex-col items-center gap-1 text-slate-500 group-hover:text-slate-700">
                                       <div className="bg-white p-2 text-slate-400 group-hover:text-amber-600 rounded-full shadow-sm border border-slate-200 group-hover:border-amber-200 transition-all">

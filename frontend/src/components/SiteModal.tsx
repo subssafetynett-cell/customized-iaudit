@@ -50,6 +50,9 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
     const [error, setError] = useState("");
     const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
 
+    const statesForSelectedCountry = countryIso ? StateCity.getStatesOfCountry(countryIso) : [];
+    const hasStatesForCountry = statesForSelectedCountry.length > 0;
+
     useEffect(() => {
         if (open) {
             setName(initialData?.name || "");
@@ -99,7 +102,7 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
         const trimmedEmail = email.trim();
 
         const countryName = Country.getCountryByCode(countryIso)?.name || "";
-        const hasStates = StateCity.getStatesOfCountry(countryIso).length > 0;
+        const hasStates = hasStatesForCountry;
         const stateName = hasStates
             ? StateCity.getStateByCodeAndCountry(stateIso, countryIso)?.name || ""
             : stateText.trim();
@@ -117,9 +120,9 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
         if (!trimmedAddress) errors.address = "Address is required";
         if (!trimmedCity) errors.city = "City is required";
         if (!countryIso) errors.country = "Country is required";
-        if (hasStates && !stateIso) {
-            errors.state = "State/Region is required";
-        } else if (!hasStates && !stateText.trim()) {
+        if (hasStates) {
+            if (!stateIso) errors.state = "State/Region is required";
+        } else if (!stateText.trim()) {
             errors.state = "State/Region is required";
         }
         if (!trimmedPostalCode) errors.postalCode = "Postal code is required";
@@ -164,7 +167,12 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
     };
 
     const clearFieldError = (field: string) => {
-        if (fieldErrors[field]) setFieldErrors(prev => ({ ...prev, [field]: "" }));
+        setFieldErrors((prev) => {
+            if (!prev[field]) return prev;
+            const next = { ...prev };
+            delete next[field];
+            return next;
+        });
         setError("");
     };
 
@@ -304,6 +312,7 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
                                         setCountryIso(val);
                                         setStateIso("");
                                         setStateText("");
+                                        clearFieldError("state");
                                         clearFieldError("country");
                                     }}
                                     error={!!fieldErrors.country}
@@ -311,8 +320,17 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
                                 {fieldErrors.country && <p className="text-[10px] text-red-500 mt-1 pl-1 font-medium">{fieldErrors.country}</p>}
                             </div>
                             <div className="space-y-2">
-                                <Label htmlFor="site-state">State/Region *</Label>
-                                {countryIso && StateCity.getStatesOfCountry(countryIso).length > 0 ? (
+                                <Label htmlFor="site-state">
+                                    State/Region{countryIso ? " *" : ""}
+                                </Label>
+                                {!countryIso ? (
+                                    <Input
+                                        id="site-state"
+                                        disabled
+                                        placeholder="Select country first"
+                                        className="bg-muted text-muted-foreground"
+                                    />
+                                ) : hasStatesForCountry ? (
                                     <StateSelect
                                         id="site-state"
                                         countryIso={countryIso}
@@ -333,7 +351,6 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
                                             setStateText(e.target.value);
                                             clearFieldError("state");
                                         }}
-                                        disabled={!countryIso}
                                     />
                                 )}
                                 {fieldErrors.state && <p className="text-[10px] text-red-500 mt-1 pl-1 font-medium">{fieldErrors.state}</p>}
