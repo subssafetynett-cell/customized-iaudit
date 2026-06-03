@@ -129,14 +129,22 @@ const CompaniesPage = () => {
     if (!Number.isFinite(step)) return;
 
     setShowOnboardingGuide(true);
-    setOnboardingStep(step);
 
     const tourCompany =
       companies.find((c) => c.id === selectedCompanyId) ?? companies[0];
     const firstSiteId = tourCompany?.sites?.[0]?.id;
+    const tourCompanyHasSites = (tourCompany?.sites?.length ?? 0) > 0;
 
-    // Step 7 needs a site before the department form can open
-    setShowAddSite(step === 4 || (step === 7 && !firstSiteId));
+    // Step 4 is only for adding a first site; skip if the company already has sites
+    if (step === 4 && tourCompanyHasSites) {
+      setTourStep(5);
+      return;
+    }
+
+    setOnboardingStep(step);
+
+    // Step 4: open Add Site only when the company has no sites yet
+    setShowAddSite((step === 4 && !tourCompanyHasSites) || (step === 7 && !firstSiteId));
 
     if (step >= 6 && step <= 9) {
       setActiveTab("departments");
@@ -179,6 +187,7 @@ const CompaniesPage = () => {
   }, [filteredCompanies, currentPage, itemsPerPage]);
 
   const activeSite = selectedCompany?.sites.find((s) => s.id === addDeptSiteId);
+  const selectedCompanyHasSites = (selectedCompany?.sites?.length ?? 0) > 0;
 
   const openAddDepartmentModal = (siteId?: string) => {
     if (!selectedCompany) return;
@@ -358,8 +367,12 @@ const CompaniesPage = () => {
                         step={3}
                         totalSteps={ONBOARDING_TOTAL_STEPS}
                         title="Create Sites"
-                        description="Use Add Site to create locations for your company. You can skip this for now and continue with Next."
-                        onNext={() => goToTourStep(4)}
+                        description={
+                          selectedCompanyHasSites
+                            ? "You already have a site for this company. Press Next to continue the tour."
+                            : "Use Add Site to create locations for your company, then continue with Next."
+                        }
+                        onNext={() => goToTourStep(selectedCompanyHasSites ? 5 : 4)}
                         onBack={() => {
                           setShowOnboardingGuide(false);
                           navigate("/?restartOnboarding=true&step=2");
@@ -570,7 +583,7 @@ const CompaniesPage = () => {
                   : "This is where your sites will appear once created. You can manage them using the edit and delete buttons in the Actions column."
               }
               onNext={() => goToTourStep(6)}
-              onBack={() => goToTourStep(4)}
+              onBack={() => goToTourStep(selectedCompanyHasSites ? 3 : 4)}
               onClose={exitOnboardingTour}
               position="top"
               disableShadow={false}
@@ -625,6 +638,7 @@ const CompaniesPage = () => {
                     setAddDeptSiteId(res.site.id);
                   }
                 } else if (showOnboardingGuide && onboardingStep === 4) {
+                  setShowAddSite(false);
                   goToTourStep(5);
                 } else {
                   setShowAddSite(false);
@@ -634,18 +648,19 @@ const CompaniesPage = () => {
             mode="create"
           />
 
-          {showOnboardingGuide && onboardingStep === 4 && showAddSite && (
+          {showOnboardingGuide && onboardingStep === 4 && showAddSite && !selectedCompanyHasSites && (
             <TourStepPopover
               targetId="tour-step-site-modal"
               step={4}
               totalSteps={ONBOARDING_TOTAL_STEPS}
-              title="Add Site Details"
-              description="Fill in the site details and click Add Site when ready, or press Next to continue."
+              title="Step 4 — Add Site Details"
+              description="Fill in all the site details and click Add Site when ready. The next step will appear after your site is saved."
               onNext={() => goToTourStep(5)}
               onBack={() => goToTourStep(3)}
               onClose={exitOnboardingTour}
               position="right"
               disableShadow={true}
+              hideNext={true}
             />
           )}
 
@@ -655,12 +670,17 @@ const CompaniesPage = () => {
               step={7}
               totalSteps={ONBOARDING_TOTAL_STEPS}
               title="Add a Site First"
-              description="Create a site for this company, then the department form will open. Or press Next to continue the tour."
+              description={
+                selectedCompanyHasSites
+                  ? "Create another site if needed, then continue. The department form opens after you save a site."
+                  : "Create a site for this company, then the department form will open. The next step appears after your site is saved."
+              }
               onNext={() => goToTourStep(8)}
               onBack={() => goToTourStep(6)}
               onClose={exitOnboardingTour}
               position="right"
               disableShadow={true}
+              hideNext={!selectedCompanyHasSites}
             />
           )}
 

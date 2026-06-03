@@ -23,11 +23,15 @@ export function useAuditExecutionAutosave({
     const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const lastJsonRef = useRef<string>("");
 
-    const saveNow = useCallback(async () => {
-        if (!planId || !enabled) return;
-        const auditData = buildRef.current();
+    const saveNow = useCallback(async (
+        auditDataOverrides?: Record<string, unknown>,
+    ): Promise<boolean> => {
+        if (!planId || !enabled) return false;
+        const auditData = auditDataOverrides
+            ? { ...buildRef.current(), ...auditDataOverrides }
+            : buildRef.current();
         const json = JSON.stringify(auditData);
-        if (json === lastJsonRef.current) return;
+        if (json === lastJsonRef.current) return true;
         lastJsonRef.current = json;
         try {
             const res = await apiFetch(`/audit-plans/${planId}`, {
@@ -36,9 +40,14 @@ export function useAuditExecutionAutosave({
             });
             if (!res.ok) {
                 console.warn("Audit autosave failed", await res.text());
+                lastJsonRef.current = "";
+                return false;
             }
+            return true;
         } catch (e) {
             console.warn("Audit autosave error", e);
+            lastJsonRef.current = "";
+            return false;
         }
     }, [planId, enabled]);
 

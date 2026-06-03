@@ -23,6 +23,10 @@ import { COMPANY_INDUSTRIES } from "@/lib/industries";
 import { compressCompanyLogoFile } from "@/utils/companyLogo";
 import { uploadCompanyLogoFile } from "@/lib/uploadCompanyLogo";
 import { toast } from "sonner";
+import { Country, State as StateCity } from "country-state-city";
+import { CountrySelect } from "@/components/CountrySelect";
+import { StateSelect } from "@/components/StateSelect";
+import { resolveCountryIsoFromName } from "@/lib/worldCountries";
 
 interface Props {
   open: boolean;
@@ -111,6 +115,17 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
   }, [open, initialData]);
 
   const displayLogo = logoPreviewUrl || logo;
+  const statesForSelectedCountry = countryIso ? StateCity.getStatesOfCountry(countryIso) : [];
+  const hasStatesForCountry = statesForSelectedCountry.length > 0;
+
+  const clearFieldError = (field: string) => {
+    setFieldErrors((prev) => {
+      if (!prev[field]) return prev;
+      const next = { ...prev };
+      delete next[field];
+      return next;
+    });
+  };
 
   const revokeBlobPreview = (blobUrl: string | null | undefined) => {
     if (blobUrl?.startsWith("blob:")) {
@@ -220,8 +235,7 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
     if (!trimmedAddress) errors.streetAddress = "Street address is required";
     if (!city.trim()) errors.city = "City is required";
     const countryName = Country.getCountryByCode(countryIso)?.name || "";
-    const statesForCountry = countryIso ? StateCity.getStatesOfCountry(countryIso) : [];
-    const hasStates = statesForCountry.length > 0;
+    const hasStates = hasStatesForCountry;
     const stateName = hasStates
       ? StateCity.getStateByCodeAndCountry(stateIso, countryIso)?.name || ""
       : state.trim();
@@ -230,7 +244,7 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
     if (hasStates) {
       if (!stateIso) errors.state = "State is required";
     } else if (!state.trim()) {
-      errors.state = "State is required";
+      errors.state = "State/Province is required";
     }
     if (!postalCode.trim()) errors.postalCode = "Postal code is required";
 
@@ -550,7 +564,8 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
                   setCountryIso(val);
                   setStateIso("");
                   setState("");
-                  if (fieldErrors.country) setFieldErrors((prev) => ({ ...prev, country: "" }));
+                  clearFieldError("state");
+                  clearFieldError("country");
                   setError("");
                 }}
                 error={!!fieldErrors.country}
@@ -558,15 +573,24 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
               {fieldErrors.country && <p className="text-[10px] text-red-500 mt-1 pl-1 font-medium">{fieldErrors.country}</p>}
             </div>
             <div className="space-y-2">
-              <Label htmlFor="state" className="text-sm">State/Province *</Label>
-              {countryIso && StateCity.getStatesOfCountry(countryIso).length > 0 ? (
+              <Label htmlFor="state" className="text-sm">
+                State/Province{countryIso ? " *" : ""}
+              </Label>
+              {!countryIso ? (
+                <Input
+                  id="state"
+                  disabled
+                  placeholder="Select country first"
+                  className="bg-muted text-muted-foreground"
+                />
+              ) : hasStatesForCountry ? (
                 <StateSelect
                   id="state"
                   countryIso={countryIso}
                   value={stateIso}
                   onValueChange={(val) => {
                     setStateIso(val);
-                    if (fieldErrors.state) setFieldErrors((prev) => ({ ...prev, state: "" }));
+                    clearFieldError("state");
                     setError("");
                   }}
                   error={!!fieldErrors.state}
@@ -579,10 +603,9 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
                   value={state}
                   onChange={(e) => {
                     setState(e.target.value);
-                    if (fieldErrors.state) setFieldErrors((prev) => ({ ...prev, state: "" }));
+                    clearFieldError("state");
                     setError("");
                   }}
-                  disabled={!countryIso}
                 />
               )}
               {fieldErrors.state && <p className="text-[10px] text-red-500 mt-1 pl-1 font-medium">{fieldErrors.state}</p>}

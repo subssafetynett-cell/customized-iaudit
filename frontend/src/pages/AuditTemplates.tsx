@@ -65,7 +65,7 @@ const AuditTemplates = () => {
                 return;
             }
             navigate(
-                `/audit-templates/${tourFeaturedTemplate.id}/execute?auditTemplatesTour=true&auditTemplatesStep=6`,
+                `/audit-templates/${tourFeaturedTemplate.id}/execute?auditTemplatesTour=true&auditTemplatesStep=6&preview=true`,
             );
             return;
         }
@@ -120,7 +120,7 @@ const AuditTemplates = () => {
                 >
                     <div className="space-y-1">
                         <h2 className="text-3xl font-bold tracking-tight text-slate-900">Audit Templates</h2>
-                        <p className="text-slate-500">Select a template to start a new audit.</p>
+                        <p className="text-slate-500">Browse templates in view-only mode before starting an audit from Audit Programs.</p>
                     </div>
                 </div>
 
@@ -211,8 +211,8 @@ const AuditTemplates = () => {
                                         )}
                                         onClick={() => {
                                             const path = auditTemplatesTourActive
-                                                ? `/audit-templates/${template.id}/execute?auditTemplatesTour=true&auditTemplatesStep=6`
-                                                : `/audit-templates/${template.id}/execute`;
+                                                ? `/audit-templates/${template.id}/execute?auditTemplatesTour=true&auditTemplatesStep=6&preview=true`
+                                                : `/audit-templates/${template.id}/execute?preview=true`;
                                             navigate(path);
                                         }}
                                     >

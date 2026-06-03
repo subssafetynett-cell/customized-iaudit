@@ -104,9 +104,9 @@ export const AUDIT_TEMPLATES_TOUR_STEPS: AuditTemplatesTourStepConfig[] = [
     {
         step: 12,
         targetId: "tour-step-template-finding-buttons",
-        title: "Record findings",
+        title: "Finding types",
         description:
-            "Mark each item as Compliant (C), Opportunity for Improvement (OFI), Minor N/C, or Major N/C based on your audit results.",
+            "Templates show how findings are classified (Compliant, OFI, Minor, Major). During a live audit you select the type for each clause.",
         position: "left",
     },
     {
@@ -119,19 +119,19 @@ export const AUDIT_TEMPLATES_TOUR_STEPS: AuditTemplatesTourStepConfig[] = [
     },
     {
         step: 14,
-        targetId: "tour-step-template-upload-evidence",
-        title: "Upload evidence",
+        targetId: "tour-step-template-checklist",
+        title: "Full checklist layout",
         description:
-            "Attach images, documents, or PDFs as supporting evidence for the clause group you just completed.",
+            "Scroll through the complete checklist structure. Evidence uploads and submission happen when you execute an audit from Audit Programs.",
         position: "top",
     },
     {
         step: 15,
-        targetId: "tour-step-template-submit-audit",
-        title: "Submit audit",
+        targetId: "tour-step-template-execute-header",
+        title: "Template preview",
         description:
-            "When you have finished the checklist, click Submit Audit to save your responses and findings.",
-        position: "top",
+            "This page is view-only. Start an audit from Audit Programs to complete and submit responses.",
+        position: "bottom",
     },
     {
         step: 16,

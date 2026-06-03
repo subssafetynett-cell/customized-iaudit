@@ -210,3 +210,59 @@ export const DEPT_TEXT_LIMITS = {
     manager: 200,
     description: 10000
 };
+
+const SAFE_PDF_DATA_RE = /^data:application\/pdf;base64,[A-Za-z0-9+/=]+$/i;
+/** Base64 data URLs (~8 MB fits a 5 MiB raw PNG/JPEG). Keep in sync with frontend AUDIT_EVIDENCE_IMAGE_DATA_URL_MAX. */
+const AUDIT_EVIDENCE_IMAGE_MAX = 8_000_000;
+const AUDIT_EVIDENCE_PDF_MAX = 15_000_000;
+
+/** Single audit evidence attachment (PNG/JPEG data URL or PDF). */
+export function sanitizeAuditEvidenceMediaItem(item) {
+    if (!item || typeof item !== 'object') return null;
+    const name = sanitizePlainText(item.name, 255) || 'file';
+    const type = typeof item.type === 'string' ? item.type.toLowerCase() : '';
+    const rawData = typeof item.data === 'string' ? item.data.trim() : '';
+
+    if (type.startsWith('image/')) {
+        const data = sanitizeLogoField(rawData, AUDIT_EVIDENCE_IMAGE_MAX);
+        if (!data) return null;
+        const mime = data.startsWith('data:image/png') ? 'image/png' : 'image/jpeg';
+        return { name, type: mime, data };
+    }
+
+    if (type === 'application/pdf') {
+        if (!SAFE_PDF_DATA_RE.test(rawData) || rawData.length > AUDIT_EVIDENCE_PDF_MAX) return null;
+        return { name, type: 'application/pdf', data: rawData };
+    }
+
+    return null;
+}
+
+export function sanitizeAuditEvidenceMediaMap(map) {
+    if (!map || typeof map !== 'object' || Array.isArray(map)) return {};
+    const out = {};
+    for (const [key, list] of Object.entries(map)) {
+        if (!Array.isArray(list)) continue;
+        const safeKey = sanitizePlainText(String(key), 120) || 'evidence';
+        const items = list
+            .map((m) => sanitizeAuditEvidenceMediaItem(m))
+            .filter(Boolean);
+        if (items.length > 0) out[safeKey] = items;
+    }
+    return out;
+}
+
+/** Sanitize evidence file maps inside audit plan auditData JSON. */
+export function sanitizeAuditDataPayload(auditData) {
+    if (!auditData || typeof auditData !== 'object' || Array.isArray(auditData)) {
+        return auditData;
+    }
+    const out = { ...auditData };
+    if (out.clauseFiles !== undefined) {
+        out.clauseFiles = sanitizeAuditEvidenceMediaMap(out.clauseFiles);
+    }
+    if (out.genericFiles !== undefined) {
+        out.genericFiles = sanitizeAuditEvidenceMediaMap(out.genericFiles);
+    }
+    return out;
+}
