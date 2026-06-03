@@ -69,6 +69,7 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
   const [logoPreviewUrl, setLogoPreviewUrl] = useState<string | null>(null);
   const logoPreviewBlobRef = useRef<string | null>(null);
   const logoUploadSeqRef = useRef(0);
+  const displayLogo = logoPreviewUrl || logo;
 
   useEffect(() => {
     return () => {
@@ -114,7 +115,6 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
     }
   }, [open, initialData]);
 
-  const displayLogo = logoPreviewUrl || logo;
   const statesForSelectedCountry = countryIso ? StateCity.getStatesOfCountry(countryIso) : [];
   const hasStatesForCountry = statesForSelectedCountry.length > 0;
 

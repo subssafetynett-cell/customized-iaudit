@@ -118,6 +118,12 @@ const CompaniesPage = () => {
   const [addDeptSiteId, setAddDeptSiteId] = useState<string | null>(null);
   const [editDept, setEditDept] = useState<{ siteId: string; dept: Department } | null>(null);
 
+  const tourCompany = useMemo(
+    () => companies.find((c) => c.id === selectedCompanyId) ?? companies[0],
+    [companies, selectedCompanyId],
+  );
+  const tourCompanyHasSites = (tourCompany?.sites?.length ?? 0) > 0;
+
   useEffect(() => {
     const onboarding = searchParams.get("onboarding") === "true";
     if (!onboarding) {
@@ -130,36 +136,39 @@ const CompaniesPage = () => {
 
     setShowOnboardingGuide(true);
 
-    const tourCompany =
-      companies.find((c) => c.id === selectedCompanyId) ?? companies[0];
     const firstSiteId = tourCompany?.sites?.[0]?.id;
-    const tourCompanyHasSites = (tourCompany?.sites?.length ?? 0) > 0;
 
     // Step 4 is only for adding a first site; skip if the company already has sites
+    let effectiveStep = step;
     if (step === 4 && tourCompanyHasSites) {
-      setTourStep(5);
-      return;
+      effectiveStep = 5;
+      if (searchParams.get("step") !== "5") {
+        setTourStep(5);
+      }
     }
 
-    setOnboardingStep(step);
+    setOnboardingStep(effectiveStep);
 
     // Step 4: open Add Site only when the company has no sites yet
-    setShowAddSite((step === 4 && !tourCompanyHasSites) || (step === 7 && !firstSiteId));
+    setShowAddSite(
+      (effectiveStep === 4 && !tourCompanyHasSites) ||
+        (effectiveStep === 7 && !firstSiteId),
+    );
 
-    if (step >= 6 && step <= 9) {
+    if (effectiveStep >= 6 && effectiveStep <= 9) {
       setActiveTab("departments");
-    } else if (step >= 3 && step <= 5) {
+    } else if (effectiveStep >= 3 && effectiveStep <= 5) {
       setActiveTab("sites");
     }
 
-    if (step === 7 && firstSiteId) {
+    if (effectiveStep === 7 && firstSiteId) {
       setAddDeptSiteId(firstSiteId);
-    } else if (step !== 7) {
+    } else if (effectiveStep !== 7) {
       setAddDeptSiteId(null);
     } else {
       setAddDeptSiteId(null);
     }
-  }, [searchParams, companies, selectedCompanyId]);
+  }, [searchParams, tourCompany, tourCompanyHasSites]);
 
   // Deletion states
   const [companyToDelete, setCompanyToDelete] = useState<Company | null>(null);
@@ -355,7 +364,7 @@ const CompaniesPage = () => {
                       id="tour-step-add-site"
                       onClick={() => {
                         setShowAddSite(true);
-                        if (showOnboardingGuide) goToTourStep(4);
+                        if (showOnboardingGuide) goToTourStep(tourCompanyHasSites ? 5 : 4);
                       }}
                       className={`w-full sm:w-auto bg-[#213847] hover:bg-[#213847]/90 text-white gap-2 px-6 rounded-lg font-bold transition-all ${showOnboardingGuide && onboardingStep === 3 ? "relative z-[60] scale-105 shadow-2xl" : ""}`}
                     >
@@ -368,11 +377,11 @@ const CompaniesPage = () => {
                         totalSteps={ONBOARDING_TOTAL_STEPS}
                         title="Create Sites"
                         description={
-                          selectedCompanyHasSites
+                          tourCompanyHasSites
                             ? "You already have a site for this company. Press Next to continue the tour."
                             : "Use Add Site to create locations for your company, then continue with Next."
                         }
-                        onNext={() => goToTourStep(selectedCompanyHasSites ? 5 : 4)}
+                        onNext={() => goToTourStep(tourCompanyHasSites ? 5 : 4)}
                         onBack={() => {
                           setShowOnboardingGuide(false);
                           navigate("/?restartOnboarding=true&step=2");
@@ -583,7 +592,7 @@ const CompaniesPage = () => {
                   : "This is where your sites will appear once created. You can manage them using the edit and delete buttons in the Actions column."
               }
               onNext={() => goToTourStep(6)}
-              onBack={() => goToTourStep(selectedCompanyHasSites ? 3 : 4)}
+              onBack={() => goToTourStep(tourCompanyHasSites ? 3 : 4)}
               onClose={exitOnboardingTour}
               position="top"
               disableShadow={false}
@@ -648,7 +657,7 @@ const CompaniesPage = () => {
             mode="create"
           />
 
-          {showOnboardingGuide && onboardingStep === 4 && showAddSite && !selectedCompanyHasSites && (
+          {showOnboardingGuide && onboardingStep === 4 && showAddSite && !tourCompanyHasSites && (
             <TourStepPopover
               targetId="tour-step-site-modal"
               step={4}

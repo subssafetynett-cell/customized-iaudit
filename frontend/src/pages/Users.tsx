@@ -207,8 +207,10 @@ export default function Users() {
                     if (updatedUser.emailVerificationPending) {
                         toast.success(
                             updatedUser.verificationEmailSent
-                                ? "User created. A verification code was sent to their email — they must verify before signing in."
-                                : "User created but verification email could not be sent. Use Resend verification from the user menu.",
+                                ? updatedUser.welcomeEmailSent
+                                    ? "User created. A welcome email with login credentials and verification code was sent — they must verify before signing in."
+                                    : "User created. A verification code was sent to their email — they must verify before signing in."
+                                : "User created but the onboarding email could not be sent. Use Resend verification from the user menu.",
                             { duration: 8000 },
                         );
                     } else {

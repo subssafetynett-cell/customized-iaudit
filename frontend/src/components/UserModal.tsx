@@ -470,7 +470,7 @@ export default function UserModal({
                                 onCheckedChange={(checked) => setSendWelcomeEmail(!!checked)}
                             />
                             <Label htmlFor="welcome-email" className="text-sm cursor-pointer">
-                                Send welcome email
+                                Send welcome email with login credentials and verification code
                             </Label>
                         </div>
                     )}

@@ -2157,16 +2157,87 @@ function allowDevConsoleOtp() {
     return process.env.NODE_ENV !== 'production' && process.env.ALLOW_DEV_OTP_CONSOLE !== 'false';
 }
 
-/** normalizedEmail: lowercased + trimmed. purpose: signup | email_change | password_reset */
-async function sendOtpToEmailAddress(normalizedEmail, purpose) {
+/** normalizedEmail: lowercased + trimmed. purpose: signup | email_change | password_reset | user_invite */
+async function sendOtpToEmailAddress(normalizedEmail, purpose, options = {}) {
     return runOtpSendExclusive(normalizedEmail, () =>
         withPgOtpAdvisoryLock(normalizedEmail, () =>
-            sendOtpToEmailAddressUnderLock(normalizedEmail, purpose)
+            sendOtpToEmailAddressUnderLock(normalizedEmail, purpose, options)
         )
     );
 }
 
-async function sendOtpToEmailAddressUnderLock(normalizedEmail, purpose) {
+function getAppLoginUrl() {
+    const base = String(process.env.FRONTEND_URL || 'http://localhost:8080').trim().replace(/\/$/, '');
+    return `${base}/auth`;
+}
+
+/** Combined welcome email for admin-created users (credentials + verification code). */
+function buildUserInviteWelcomeMailContent({
+    normalizedEmail,
+    firstName,
+    lastName,
+    password,
+    otp,
+    expireLabel
+}) {
+    const loginUrl = getAppLoginUrl();
+    const safeName = escapeHtml(`${firstName} ${lastName}`.trim());
+    const safeEmail = escapeHtml(normalizedEmail);
+    const safePassword = escapeHtml(password);
+    const safeLoginUrl = escapeHtml(loginUrl);
+    const subject = 'Welcome to iAudit Global — verify your email and sign in';
+    const text = [
+        `Welcome to iAudit Global, ${firstName} ${lastName}!`,
+        '',
+        'An administrator created an account for you. Complete these steps:',
+        '1. Open the sign-in page and enter the verification code below to confirm your email.',
+        '2. After verification, sign in with the credentials below.',
+        '',
+        `Sign-in page: ${loginUrl}`,
+        `Email (username): ${normalizedEmail}`,
+        `Password: ${password}`,
+        '',
+        `Verification code: ${otp}`,
+        `This code expires in ${expireLabel}.`,
+        '',
+        'If you did not expect this account, ignore this email.'
+    ].join('\n');
+    const html = `
+                <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 24px; border: 1px solid #e5e7eb; border-radius: 12px; background-color: #ffffff;">
+                    <div style="text-align: center; margin-bottom: 24px;">
+                        <h1 style="color: #00875b; font-size: 28px; margin: 0;">Welcome to iAudit Global</h1>
+                    </div>
+                    <p style="color: #374151; font-size: 16px; line-height: 1.5; margin-bottom: 16px;">
+                        Hello ${safeName},<br><br>
+                        An administrator created an iAudit Global account for you. <strong>Verify your email first</strong>, then sign in with the credentials below.
+                    </p>
+                    <div style="background-color: #f0fdf4; border: 1px solid #bbf7d0; padding: 20px; border-radius: 8px; margin-bottom: 24px;">
+                        <p style="margin: 0 0 12px 0; font-size: 13px; font-weight: 700; color: #166534; text-transform: uppercase; letter-spacing: 0.5px;">Your sign-in credentials</p>
+                        <p style="margin: 0 0 8px 0; color: #374151; font-size: 14px;"><strong>Sign-in page:</strong> <a href="${safeLoginUrl}" style="color: #00875b;">${safeLoginUrl}</a></p>
+                        <p style="margin: 0 0 8px 0; color: #374151; font-size: 14px;"><strong>Email (username):</strong> ${safeEmail}</p>
+                        <p style="margin: 0; color: #374151; font-size: 14px;"><strong>Password:</strong> <code style="background: #fff; padding: 2px 6px; border-radius: 4px; font-size: 14px;">${safePassword}</code></p>
+                    </div>
+                    <p style="color: #374151; font-size: 15px; line-height: 1.5; margin-bottom: 16px;">
+                        On the sign-in page, enter this verification code to confirm you own this inbox. You <strong>cannot sign in</strong> until your email is verified.
+                    </p>
+                    <div style="background-color: #f3f4f6; padding: 24px; border-radius: 8px; text-align: center; margin-bottom: 24px;">
+                        <p style="text-transform: uppercase; font-size: 14px; font-weight: 600; color: #6b7280; margin: 0 0 12px 0; letter-spacing: 1px;">Verification code</p>
+                        <h2 style="font-size: 42px; font-weight: 800; color: #111827; letter-spacing: 8px; margin: 0;">${otp}</h2>
+                    </div>
+                    <p style="color: #4b5563; font-size: 14px; line-height: 1.5;">
+                        This code expires in <strong>${escapeHtml(expireLabel)}</strong>. After verification, sign in with your email and password above. For security, consider changing your password after your first login.
+                    </p>
+                    <hr style="border: 0; border-top: 1px solid #e5e7eb; margin: 32px 0;" />
+                    <div style="text-align: center; color: #9ca3af; font-size: 12px;">
+                        <p style="margin: 0;">&copy; ${new Date().getFullYear()} iAudit Global. All rights reserved.</p>
+                        <p style="margin: 4px 0 0 0;">This email was sent to ${safeEmail}. Please do not reply to this automated message.</p>
+                    </div>
+                </div>
+            `;
+    return { subject, text, html };
+}
+
+async function sendOtpToEmailAddressUnderLock(normalizedEmail, purpose, options = {}) {
     acquireOtpSendSlot(normalizedEmail);
     try {
         const lastOtp = await prisma.otp.findUnique({ where: { email: normalizedEmail } });
@@ -2197,45 +2268,58 @@ async function sendOtpToEmailAddressUnderLock(normalizedEmail, purpose) {
         const isPasswordReset = purpose === 'password_reset';
         const isEmailChange = purpose === 'email_change';
         const isUserInvite = purpose === 'user_invite';
-        const subject = isPasswordReset
-        ? 'Reset your iAudit Global password'
-        : isEmailChange
-          ? 'Verify your new iAudit email'
-          : isUserInvite
-            ? 'Verify your iAudit Global account'
-            : 'Your Account Verification Code';
-        const titleHtml = isPasswordReset
-        ? 'Password reset'
-        : isEmailChange
-          ? 'Confirm your email'
-          : isUserInvite
-            ? 'Activate your account'
-            : 'Welcome to iAudit Global';
-        const introHtml = isPasswordReset
-        ? 'You requested to reset your password. Use the verification code below to continue. If you did not request this, you can ignore this email.'
-        : isEmailChange
-          ? 'Use the verification code below to confirm you can receive email at this address. An administrator requested this address for your account.'
-          : isUserInvite
-            ? 'An administrator created an iAudit Global account for this email address. Enter the verification code below on the sign-in page to confirm you own this inbox. You must verify before you can sign in.'
-            : 'Please use the verification code below to confirm your email address and complete your signup securely:';
+        const welcomeCreds = options.welcomeCredentials;
+        const useInviteWelcome =
+            isUserInvite &&
+            welcomeCreds &&
+            typeof welcomeCreds.password === 'string' &&
+            welcomeCreds.password.length > 0;
 
-    const smtpFrom = String(process.env.SMTP_USER).trim();
-    const mailOptions = {
-        from: {
-            name: 'iAudit Global',
-            address: smtpFrom
-        },
-        to: normalizedEmail,
-        subject,
-        headers: { 'X-Entity-Ref-ID': otp },
-        text: isPasswordReset
-            ? `Your password reset code is: ${otp}. This code expires in ${expireLabel}.`
-            : isEmailChange
-              ? `Your email verification code is: ${otp}. This code expires in ${expireLabel}.`
-              : isUserInvite
-                ? `Your account activation code is: ${otp}. This code expires in ${expireLabel}.`
-                : `Your verification code is: ${otp}. This code will expire in ${expireLabel}.`,
-        html: `
+        let subject;
+        let text;
+        let html;
+        if (useInviteWelcome) {
+            const welcomeMail = buildUserInviteWelcomeMailContent({
+                normalizedEmail,
+                firstName: welcomeCreds.firstName || '',
+                lastName: welcomeCreds.lastName || '',
+                password: welcomeCreds.password,
+                otp,
+                expireLabel
+            });
+            subject = welcomeMail.subject;
+            text = welcomeMail.text;
+            html = welcomeMail.html;
+        } else {
+            subject = isPasswordReset
+                ? 'Reset your iAudit Global password'
+                : isEmailChange
+                  ? 'Verify your new iAudit email'
+                  : isUserInvite
+                    ? 'Verify your iAudit Global account'
+                    : 'Your Account Verification Code';
+            const titleHtml = isPasswordReset
+                ? 'Password reset'
+                : isEmailChange
+                  ? 'Confirm your email'
+                  : isUserInvite
+                    ? 'Activate your account'
+                    : 'Welcome to iAudit Global';
+            const introHtml = isPasswordReset
+                ? 'You requested to reset your password. Use the verification code below to continue. If you did not request this, you can ignore this email.'
+                : isEmailChange
+                  ? 'Use the verification code below to confirm you can receive email at this address. An administrator requested this address for your account.'
+                  : isUserInvite
+                    ? 'An administrator created an iAudit Global account for this email address. Enter the verification code below on the sign-in page to confirm you own this inbox. You must verify before you can sign in.'
+                    : 'Please use the verification code below to confirm your email address and complete your signup securely:';
+            text = isPasswordReset
+                ? `Your password reset code is: ${otp}. This code expires in ${expireLabel}.`
+                : isEmailChange
+                  ? `Your email verification code is: ${otp}. This code expires in ${expireLabel}.`
+                  : isUserInvite
+                    ? `Your account activation code is: ${otp}. This code expires in ${expireLabel}. Sign in at ${getAppLoginUrl()} after verification.`
+                    : `Your verification code is: ${otp}. This code will expire in ${expireLabel}.`;
+            html = `
                 <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 24px; border: 1px solid #e5e7eb; border-radius: 12px; background-color: #ffffff;">
                     <div style="text-align: center; margin-bottom: 24px;">
                         <h1 style="color: #00875b; font-size: 28px; margin: 0;">${titleHtml}</h1>
@@ -2257,9 +2341,23 @@ async function sendOtpToEmailAddressUnderLock(normalizedEmail, purpose) {
                         <p style="margin: 4px 0 0 0;">This email was sent to ${normalizedEmail}. Please do not reply to this automated message.</p>
                     </div>
                 </div>
-            `
+            `;
+        }
+
+    const smtpFrom = String(process.env.SMTP_USER).trim();
+    const mailOptions = {
+        from: {
+            name: 'iAudit Global',
+            address: smtpFrom
+        },
+        to: normalizedEmail,
+        subject,
+        headers: { 'X-Entity-Ref-ID': otp },
+        text,
+        html
     };
 
+        let emailTransmitted = false;
         try {
             if (devConsoleOnly) {
                 console.log('\n====================================================================');
@@ -2268,6 +2366,7 @@ async function sendOtpToEmailAddressUnderLock(normalizedEmail, purpose) {
                 console.log('====================================================================\n');
             } else {
                 await transporter.sendMail(mailOptions);
+                emailTransmitted = true;
                 console.log(`OTP successfully sent to ${normalizedEmail}`);
             }
         } catch (emailError) {
@@ -2301,6 +2400,7 @@ async function sendOtpToEmailAddressUnderLock(normalizedEmail, purpose) {
                 throw err;
             }
         }
+        return { emailTransmitted };
     } finally {
         releaseOtpSendSlot(normalizedEmail);
     }
@@ -3151,42 +3251,28 @@ app.post('/users', authenticateToken, async (req, res) => {
         });
 
         let verificationEmailSent = false;
+        let welcomeEmailSent = false;
+        const inviteEmailOptions = sendWelcomeEmail
+            ? { welcomeCredentials: { firstName: fn, lastName: ln, password } }
+            : {};
         try {
-            await sendOtpToEmailAddress(emailNorm, 'user_invite');
-            verificationEmailSent = true;
+            const { emailTransmitted } = await sendOtpToEmailAddress(
+                emailNorm,
+                'user_invite',
+                inviteEmailOptions
+            );
+            verificationEmailSent = emailTransmitted === true;
+            welcomeEmailSent = Boolean(sendWelcomeEmail && verificationEmailSent);
         } catch (otpErr) {
-            console.error('Failed to send invite verification OTP:', otpErr);
-            if (otpErr.message === 'EMAIL_NOT_CONFIGURED' && allowDevConsoleOtp()) {
-                verificationEmailSent = true;
-            }
-        }
-
-        if (sendWelcomeEmail) {
-            const mailOptions = {
-                from: process.env.SMTP_USER,
-                to: emailNorm,
-                subject: 'Your iAudit Global account',
-                html: `
-                        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 24px;">
-                            <h2 style="color: #213847;">Welcome to iAudit Global, ${fn} ${ln}!</h2>
-                            <p style="color: #4B5563;">An administrator created an account for you. Before you can sign in, you must verify this email address using the activation code we sent in a separate message.</p>
-                            <p style="color: #4B5563;">After verification, sign in at the iAudit Global login page with this email and the password your administrator provided.</p>
-                            <p style="color: #4B5563;">If you did not expect this account, ignore these emails.</p>
-                            <hr style="border: none; border-top: 1px solid #E5E7EB; margin: 24px 0;" />
-                            <p style="color: #9CA3AF; font-size: 12px;">This is an automated message from iAudit Global.</p>
-                        </div>
-                    `
-            };
-            transporter.sendMail(mailOptions)
-                .then(() => console.log(`Invite notice email sent to ${emailNorm}`))
-                .catch((emailError) => console.error('Failed to send invite notice email:', emailError));
+            console.error('Failed to send invite onboarding email:', otpErr);
         }
 
         const { password: _, ...userWithoutPassword } = user;
         res.status(201).json({
             ...userWithoutPassword,
             emailVerificationPending: true,
-            verificationEmailSent
+            verificationEmailSent,
+            welcomeEmailSent
         });
     } catch (error) {
         console.error('Error creating user:', error);

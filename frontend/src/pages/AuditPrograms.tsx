@@ -44,7 +44,7 @@ const ISO_STANDARDS = [
 
 const FREQUENCIES = ["Monthly", "Quarterly", "Bi-annually", "Annually"];
 
-import { CLAUSE_MATRIX, ClauseMatrixRow } from "@/data/clauseMapping";
+import { CLAUSE_MATRIX, ClauseMatrixRow, isMainClauseHeading } from "@/data/clauseMapping";
 
 const MONTHS = [
     "January", "February", "March", "April", "May", "June",
@@ -564,7 +564,7 @@ const AuditPrograms = () => {
         const tableBody: any[] = [];
 
         CLAUSE_MATRIX.forEach((clause, rowIndex) => {
-            if (standards.length === 1 && !clause.isHeading) {
+            if (standards.length === 1 && !isMainClauseHeading(clause)) {
                 const std = standards[0];
                 let text = "";
                 if (std.includes("9001")) text = clause.iso9001;
@@ -583,7 +583,7 @@ const AuditPrograms = () => {
                 else if (std.includes("45001")) cellText = clause.iso45001;
                 else cellText = clause.iso9001 || clause.iso14001 || clause.iso45001;
 
-                if (clause.isHeading) {
+                if (isMainClauseHeading(clause)) {
                     if (index === 0) {
                         row.push({
                             content: cellText,
@@ -600,7 +600,7 @@ const AuditPrograms = () => {
                 const key = `${rowIndex}-${colIndex}`;
                 const isSelected = program.scheduleData && program.scheduleData[key];
 
-                if (clause.isHeading) {
+                if (isMainClauseHeading(clause)) {
                     row.push({
                         content: isSelected ? "X" : "",
                         styles: { fillColor: [33, 56, 71], textColor: [255, 255, 255], fontStyle: 'bold', halign: 'center' }
@@ -713,7 +713,7 @@ const AuditPrograms = () => {
         const bodyRows: any[] = [];
 
         CLAUSE_MATRIX.forEach((clause, rowIndex) => {
-            if (standards.length === 1 && !clause.isHeading) {
+            if (standards.length === 1 && !isMainClauseHeading(clause)) {
                 const std = standards[0];
                 let text = "";
                 if (std.includes("9001")) text = clause.iso9001;
@@ -732,7 +732,7 @@ const AuditPrograms = () => {
                 else if (std.includes("45001")) cellText = clause.iso45001;
                 else cellText = clause.iso9001 || clause.iso14001 || clause.iso45001;
 
-                if (clause.isHeading) {
+                if (isMainClauseHeading(clause)) {
                     if (index === 0) {
                         cells.push(new DocxTableCell({
                             children: [new Paragraph({
@@ -753,7 +753,7 @@ const AuditPrograms = () => {
                 const key = `${rowIndex}-${colIndex}`;
                 const isSelected = program.scheduleData && program.scheduleData[key];
 
-                if (clause.isHeading) {
+                if (isMainClauseHeading(clause)) {
                     cells.push(new DocxTableCell({
                         children: [new Paragraph({ text: isSelected ? "X" : "", alignment: AlignmentType.CENTER, children: [new TextRun({ text: isSelected ? "X" : "", color: "FFFFFF", bold: true })] })],
                         shading: { fill: "213847" }
@@ -1465,7 +1465,7 @@ const AuditPrograms = () => {
                                         <tbody>
                                             {/* Matrix Body */}
                                             {CLAUSE_MATRIX.map((clause, rowIndex) => {
-                                                if (selectedStandards.length === 1 && !clause.isHeading) {
+                                                if (selectedStandards.length === 1 && !isMainClauseHeading(clause)) {
                                                     const std = selectedStandards[0];
                                                     let text = "";
                                                     if (std.includes("9001")) text = clause.iso9001;
@@ -1501,9 +1501,9 @@ const AuditPrograms = () => {
                                                                     className={cn(
                                                                         "text-[11px] py-3 px-4 border-r border-b border-slate-200 transition-colors align-middle",
                                                                         !isMobile && "sticky z-10",
-                                                                        clause.isHeading ? "bg-[#213847] text-white font-black uppercase tracking-wide border-[#213847]" : "font-semibold text-slate-600 bg-white group-hover:bg-slate-50",
-                                                                        !clause.isHeading && colIdx === 0 && "pl-6",
-                                                                        isMissing && !clause.isHeading && "italic text-slate-400 bg-slate-50 group-hover:bg-slate-100"
+                                                                        isMainClauseHeading(clause) ? "bg-[#213847] text-white font-black uppercase tracking-wide border-[#213847]" : "font-semibold text-slate-600 bg-white group-hover:bg-slate-50",
+                                                                        !isMainClauseHeading(clause) && colIdx === 0 && "pl-6",
+                                                                        isMissing && !isMainClauseHeading(clause) && "italic text-slate-400 bg-slate-50 group-hover:bg-slate-100"
                                                                     )}
                                                                     style={{ left: !isMobile ? `${leftOffset}px` : undefined, width: colWidth, minWidth: colWidth, maxWidth: colWidth }}
                                                                 >
@@ -1519,7 +1519,7 @@ const AuditPrograms = () => {
                                                                 <td key={`check-${colIndex}`} 
                                                                     className={cn(
                                                                         "p-1 border-b border-slate-100 align-middle",
-                                                                        clause.isHeading ? "bg-[#213847] border-[#213847]" : "bg-white"
+                                                                        isMainClauseHeading(clause) ? "bg-[#213847] border-[#213847]" : "bg-white"
                                                                     )}
                                                                 >
                                                                     <button
@@ -1530,14 +1530,14 @@ const AuditPrograms = () => {
                                                                             "w-full h-8 rounded-md border flex items-center justify-center transition-all duration-200",
                                                                             isChecked
                                                                                 ? "bg-emerald-100/80 border-emerald-400 border-2 text-emerald-600 shadow-sm shadow-emerald-500/10 hover:bg-emerald-200/80 cursor-pointer"
-                                                                                : clause.isHeading
+                                                                                : isMainClauseHeading(clause)
                                                                                     ? "bg-white/5 border-white border-2 hover:border-emerald-400 hover:bg-emerald-50/20 cursor-pointer"
                                                                                     : "bg-white border-slate-200 hover:border-emerald-400 hover:bg-emerald-50/50 cursor-pointer hover:shadow-inner"
                                                                         )}
                                                                     >
                                                                         {isChecked && (
                                                                             <div className="animate-in zoom-in-75 duration-200">
-                                                                                <Check className={cn("w-4 h-4 stroke-[4px]", clause.isHeading && "text-emerald-500")} />
+                                                                                <Check className={cn("w-4 h-4 stroke-[4px]", isMainClauseHeading(clause) && "text-emerald-500")} />
                                                                             </div>
                                                                         )}
                                                                     </button>
