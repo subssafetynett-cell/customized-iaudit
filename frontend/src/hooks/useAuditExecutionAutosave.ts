@@ -23,9 +23,13 @@ export function useAuditExecutionAutosave({
     const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const lastJsonRef = useRef<string>("");
 
-    const saveNow = useCallback(async (): Promise<boolean> => {
+    const saveNow = useCallback(async (
+        auditDataOverrides?: Record<string, unknown>,
+    ): Promise<boolean> => {
         if (!planId || !enabled) return false;
-        const auditData = buildRef.current();
+        const auditData = auditDataOverrides
+            ? { ...buildRef.current(), ...auditDataOverrides }
+            : buildRef.current();
         const json = JSON.stringify(auditData);
         if (json === lastJsonRef.current) return true;
         lastJsonRef.current = json;

@@ -167,7 +167,12 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
     };
 
     const clearFieldError = (field: string) => {
-        if (fieldErrors[field]) setFieldErrors(prev => ({ ...prev, [field]: "" }));
+        setFieldErrors((prev) => {
+            if (!prev[field]) return prev;
+            const next = { ...prev };
+            delete next[field];
+            return next;
+        });
         setError("");
     };
 

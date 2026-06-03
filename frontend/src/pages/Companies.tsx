@@ -129,12 +129,19 @@ const CompaniesPage = () => {
     if (!Number.isFinite(step)) return;
 
     setShowOnboardingGuide(true);
-    setOnboardingStep(step);
 
     const tourCompany =
       companies.find((c) => c.id === selectedCompanyId) ?? companies[0];
     const firstSiteId = tourCompany?.sites?.[0]?.id;
     const tourCompanyHasSites = (tourCompany?.sites?.length ?? 0) > 0;
+
+    // Step 4 is only for adding a first site; skip if the company already has sites
+    if (step === 4 && tourCompanyHasSites) {
+      setTourStep(5);
+      return;
+    }
+
+    setOnboardingStep(step);
 
     // Step 4: open Add Site only when the company has no sites yet
     setShowAddSite((step === 4 && !tourCompanyHasSites) || (step === 7 && !firstSiteId));
@@ -576,7 +583,7 @@ const CompaniesPage = () => {
                   : "This is where your sites will appear once created. You can manage them using the edit and delete buttons in the Actions column."
               }
               onNext={() => goToTourStep(6)}
-              onBack={() => goToTourStep(4)}
+              onBack={() => goToTourStep(selectedCompanyHasSites ? 3 : 4)}
               onClose={exitOnboardingTour}
               position="top"
               disableShadow={false}
@@ -654,21 +661,6 @@ const CompaniesPage = () => {
               position="right"
               disableShadow={true}
               hideNext={true}
-            />
-          )}
-
-          {showOnboardingGuide && onboardingStep === 4 && !showAddSite && selectedCompanyHasSites && (
-            <TourStepPopover
-              targetId="tour-step-sites-card"
-              step={4}
-              totalSteps={ONBOARDING_TOTAL_STEPS}
-              title="Step 4 — Sites"
-              description="You already have a site for this company. Press Next to continue the tour."
-              onNext={() => goToTourStep(5)}
-              onBack={() => goToTourStep(3)}
-              onClose={exitOnboardingTour}
-              position="right"
-              disableShadow={false}
             />
           )}
 

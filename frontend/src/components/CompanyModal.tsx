@@ -118,6 +118,15 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
   const statesForSelectedCountry = countryIso ? StateCity.getStatesOfCountry(countryIso) : [];
   const hasStatesForCountry = statesForSelectedCountry.length > 0;
 
+  const clearFieldError = (field: string) => {
+    setFieldErrors((prev) => {
+      if (!prev[field]) return prev;
+      const next = { ...prev };
+      delete next[field];
+      return next;
+    });
+  };
+
   const revokeBlobPreview = (blobUrl: string | null | undefined) => {
     if (blobUrl?.startsWith("blob:")) {
       URL.revokeObjectURL(blobUrl);
@@ -555,8 +564,8 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
                   setCountryIso(val);
                   setStateIso("");
                   setState("");
-                  if (fieldErrors.state) setFieldErrors((prev) => ({ ...prev, state: "" }));
-                  if (fieldErrors.country) setFieldErrors((prev) => ({ ...prev, country: "" }));
+                  clearFieldError("state");
+                  clearFieldError("country");
                   setError("");
                 }}
                 error={!!fieldErrors.country}
@@ -581,7 +590,7 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
                   value={stateIso}
                   onValueChange={(val) => {
                     setStateIso(val);
-                    if (fieldErrors.state) setFieldErrors((prev) => ({ ...prev, state: "" }));
+                    clearFieldError("state");
                     setError("");
                   }}
                   error={!!fieldErrors.state}
@@ -594,7 +603,7 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
                   value={state}
                   onChange={(e) => {
                     setState(e.target.value);
-                    if (fieldErrors.state) setFieldErrors((prev) => ({ ...prev, state: "" }));
+                    clearFieldError("state");
                     setError("");
                   }}
                 />

@@ -65,7 +65,7 @@ const AuditTemplates = () => {
                 return;
             }
             navigate(
-                `/audit-templates/${tourFeaturedTemplate.id}/execute?auditTemplatesTour=true&auditTemplatesStep=6`,
+                `/audit-templates/${tourFeaturedTemplate.id}/execute?auditTemplatesTour=true&auditTemplatesStep=6&preview=true`,
             );
             return;
         }
@@ -211,8 +211,8 @@ const AuditTemplates = () => {
                                         )}
                                         onClick={() => {
                                             const path = auditTemplatesTourActive
-                                                ? `/audit-templates/${template.id}/execute?auditTemplatesTour=true&auditTemplatesStep=6`
-                                                : `/audit-templates/${template.id}/execute`;
+                                                ? `/audit-templates/${template.id}/execute?auditTemplatesTour=true&auditTemplatesStep=6&preview=true`
+                                                : `/audit-templates/${template.id}/execute?preview=true`;
                                             navigate(path);
                                         }}
                                     >

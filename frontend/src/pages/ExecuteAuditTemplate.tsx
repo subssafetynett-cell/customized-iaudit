@@ -18,13 +18,12 @@ import {
 } from "@/lib/auditTemplatesOnboardingTour";
 import { cn } from "@/lib/utils";
 
-/** Audit Templates list opens this page for preview only (no edits, uploads, or submit). */
-const TEMPLATE_VIEW_ONLY = true;
-
 const ExecuteAuditTemplate = () => {
     const { id } = useParams();
     const navigate = useNavigate();
     const [searchParams, setSearchParams] = useSearchParams();
+    /** Set via ?preview=true from Audit Templates "View" (read-only layout tour). */
+    const templateViewOnly = searchParams.get("preview") === "true";
     const auditTemplatesTourActive = searchParams.get("auditTemplatesTour") === "true";
     const auditTemplatesTourStep = Math.min(
         AUDIT_TEMPLATES_TOUR_TOTAL_STEPS,
@@ -180,7 +179,7 @@ const ExecuteAuditTemplate = () => {
         return <div className="p-8">Template not found</div>;
     }
 
-    const showEditMode = !TEMPLATE_VIEW_ONLY && isEditMode;
+    const showEditMode = !templateViewOnly && isEditMode;
 
     const handleChecklistChange = (index: number, field: string, value: string) => {
         const newData = { ...checklistData };
@@ -410,14 +409,14 @@ const ExecuteAuditTemplate = () => {
                     <div>
                         <h1 className="text-2xl font-bold text-slate-900">{template.title}</h1>
                         <p className="text-slate-500 mt-1">{template.description}</p>
-                        {TEMPLATE_VIEW_ONLY && (
+                        {templateViewOnly && (
                             <p className="text-sm text-amber-700 mt-2 font-medium">
                                 View only — start an audit from Audit Programs to fill in responses and submit.
                             </p>
                         )}
                     </div>
                     <div className="flex flex-col items-end gap-2">
-                        {TEMPLATE_VIEW_ONLY && (
+                        {templateViewOnly && (
                             <Badge variant="outline" className="border-amber-200 text-amber-800 bg-amber-50">
                                 Preview
                             </Badge>
@@ -427,7 +426,7 @@ const ExecuteAuditTemplate = () => {
                 </div>
 
                 <fieldset
-                    disabled={TEMPLATE_VIEW_ONLY}
+                    disabled={templateViewOnly}
                     className="border-0 p-0 m-0 min-w-0 space-y-6 [&_button]:disabled:pointer-events-none [&_input]:disabled:opacity-100 [&_textarea]:disabled:opacity-100"
                 >
                 {/* --- NEW EXTENDED SECTIONS --- */}
@@ -534,7 +533,7 @@ const ExecuteAuditTemplate = () => {
                                         ))}
                                     </TableBody>
                                 </Table>
-                                {!TEMPLATE_VIEW_ONLY && (
+                                {!templateViewOnly && (
                                 <div className="bg-slate-50 p-2 border-t border-slate-200">
                                     <Button variant="outline" size="sm" onClick={addParticipant} className="gap-2 text-slate-700 border-slate-200 hover:bg-slate-50">
                                         <Plus className="w-4 h-4" /> Add Participant
@@ -581,7 +580,7 @@ const ExecuteAuditTemplate = () => {
                                                 ))}
                                             </TableBody>
                                         </Table>
-                                        {!TEMPLATE_VIEW_ONLY && (
+                                        {!templateViewOnly && (
                                         <div className="bg-slate-50 p-2 border-t border-slate-200">
                                             <Button variant="outline" size="sm" onClick={addPositiveAspect} className="gap-2 text-slate-700 border-slate-200 hover:bg-slate-50">
                                                 <Plus className="w-4 h-4" /> Add Row
@@ -624,7 +623,7 @@ const ExecuteAuditTemplate = () => {
                                                 ))}
                                             </TableBody>
                                         </Table>
-                                        {!TEMPLATE_VIEW_ONLY && (
+                                        {!templateViewOnly && (
                                         <div className="bg-slate-50 p-2 border-t border-slate-200">
                                             <Button variant="outline" size="sm" onClick={addOpportunity} className="gap-2 text-slate-700 border-slate-200 hover:bg-slate-50">
                                                 <Plus className="w-4 h-4" /> Add Row
@@ -670,7 +669,7 @@ const ExecuteAuditTemplate = () => {
                                                 ))}
                                             </TableBody>
                                         </Table>
-                                        {!TEMPLATE_VIEW_ONLY && (
+                                        {!templateViewOnly && (
                                         <div className="bg-slate-50 p-2 border-t border-slate-200">
                                             <Button variant="outline" size="sm" onClick={addNonConformance} className="gap-2 text-slate-700 border-slate-200 hover:bg-slate-50">
                                                 <Plus className="w-4 h-4" /> Add Row
@@ -946,7 +945,7 @@ const ExecuteAuditTemplate = () => {
                                                     ))}
                                                 </TableBody>
                                             </Table>
-                                            {!TEMPLATE_VIEW_ONLY && (
+                                            {!templateViewOnly && (
                                             <div className="bg-slate-50 p-2 border-t border-slate-200 flex justify-center">
                                                 <Button
                                                     variant="ghost"
@@ -1041,7 +1040,7 @@ const ExecuteAuditTemplate = () => {
                                                     ))}
                                                 </TableBody>
                                             </Table>
-                                            {!TEMPLATE_VIEW_ONLY && (
+                                            {!templateViewOnly && (
                                             <div className="bg-slate-50 p-2 border-t border-slate-200 flex justify-center">
                                                 <Button
                                                     variant="ghost"
@@ -1160,7 +1159,7 @@ const ExecuteAuditTemplate = () => {
                                                 </div>
                                             )}
 
-                                            {!TEMPLATE_VIEW_ONLY && (
+                                            {!templateViewOnly && (
                                             <label className="flex items-center justify-center p-4 border-2 border-dashed border-slate-200 bg-white rounded-xl hover:bg-slate-50 hover:border-slate-300 cursor-pointer transition-all group">
                                                 <div className="flex items-center gap-3 text-slate-500 group-hover:text-slate-800 font-medium">
                                                     <div className="bg-slate-100 p-2 rounded-full group-hover:bg-slate-200 transition-colors">
@@ -1177,7 +1176,7 @@ const ExecuteAuditTemplate = () => {
                         })}
                         </div>
 
-                        {!TEMPLATE_VIEW_ONLY && (
+                        {!templateViewOnly && (
                         <Button
                             variant="outline"
                             className="w-full py-8 border-dashed border-emerald-300 bg-emerald-50/50 hover:bg-emerald-100/50 text-emerald-700 font-bold hover:text-emerald-800 hover:border-emerald-400 transition-all gap-2"
@@ -1197,7 +1196,7 @@ const ExecuteAuditTemplate = () => {
                     >
                         <div className="flex justify-between items-center bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
                             <h3 className="text-lg font-bold text-slate-800">Clause Checklist Details</h3>
-                            {!TEMPLATE_VIEW_ONLY && (
+                            {!templateViewOnly && (
                             <Button 
                                 variant={isEditMode ? "default" : "outline"} 
                                 onClick={() => setIsEditMode(!isEditMode)}
@@ -1346,7 +1345,7 @@ const ExecuteAuditTemplate = () => {
                                             </div>
                                         )}
 
-                                        {!TEMPLATE_VIEW_ONLY && (
+                                        {!templateViewOnly && (
                                         <div className="border-t border-slate-200 pt-3 mt-2 flex flex-col gap-3">
                                             <label
                                                 id={index === 0 ? "tour-step-template-upload-evidence" : undefined}
@@ -1419,7 +1418,7 @@ const ExecuteAuditTemplate = () => {
                                         value={sectionData[index] || ""}
                                         onChange={e => handleSectionChange(index, e.target.value)}
                                     />
-                                    {!TEMPLATE_VIEW_ONLY && (
+                                    {!templateViewOnly && (
                                     <div className="border-t border-slate-100 bg-slate-50 flex flex-col items-center justify-center">
                                         <label
                                             id={index === 0 ? "tour-step-template-upload-evidence" : undefined}
@@ -1467,7 +1466,7 @@ const ExecuteAuditTemplate = () => {
                     <div id="tour-step-template-checklist" className={cn("space-y-4", tourTemplateHighlight(11))}>
                         <div className="flex justify-between items-center bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
                             <h3 className="text-lg font-bold text-slate-800">Checklist Questions</h3>
-                            {!TEMPLATE_VIEW_ONLY && (
+                            {!templateViewOnly && (
                             <Button 
                                 variant={isEditMode ? "default" : "outline"} 
                                 onClick={() => setIsEditMode(!isEditMode)}
@@ -1656,7 +1655,7 @@ const ExecuteAuditTemplate = () => {
                                                 )}
 
                                                 {/* Upload Evidence / Add Question per Clause Group */}
-                                                {isLastInGroup && !TEMPLATE_VIEW_ONLY && (
+                                                {isLastInGroup && !templateViewOnly && (
                                                     <>
                                                         {!showEditMode ? (
                                                             <>

@@ -835,12 +835,18 @@ const AuditExecute = () => {
     reportRejectedEvidence(rejected, accepted.length);
     if (accepted.length === 0) return;
 
-    setClauseFiles((prev) => ({
-      ...prev,
-      [clause]: [...(prev[clause] || []), ...accepted],
-    }));
+    let nextClauseFiles: Record<string, AuditEvidenceMedia[]>;
+    setClauseFiles((prev) => {
+      nextClauseFiles = {
+        ...prev,
+        [clause]: [...(prev[clause] || []), ...accepted],
+      };
+      return nextClauseFiles;
+    });
     toast.success(`${accepted.length} file(s) attached for Clause ${clause}`);
-    const saved = await saveNow();
+    const saved = await saveNow({
+      clauseFiles: sanitizeAuditEvidenceMediaMap(nextClauseFiles!),
+    });
     if (!saved) {
       toast.error("Photo attached locally but could not save to the server. Click Save Audit Progress.", {
         duration: 8000,
@@ -849,11 +855,17 @@ const AuditExecute = () => {
   };
 
   const removeClauseFile = (clause: string, indexToRemove: number) => {
-    setClauseFiles(prev => ({
-      ...prev,
-      [clause]: prev[clause].filter((_, index) => index !== indexToRemove)
-    }));
-    void saveNow();
+    let nextClauseFiles: Record<string, AuditEvidenceMedia[]>;
+    setClauseFiles((prev) => {
+      nextClauseFiles = {
+        ...prev,
+        [clause]: prev[clause].filter((_, index) => index !== indexToRemove),
+      };
+      return nextClauseFiles;
+    });
+    void saveNow({
+      clauseFiles: sanitizeAuditEvidenceMediaMap(nextClauseFiles!),
+    });
   };
 
   const handleGenericFileUpload = async (key: string, files: FileList | null) => {
@@ -861,12 +873,18 @@ const AuditExecute = () => {
     reportRejectedEvidence(rejected, accepted.length);
     if (accepted.length === 0) return;
 
-    setGenericFiles((prev) => ({
-      ...prev,
-      [key]: [...(prev[key] || []), ...accepted],
-    }));
+    let nextGenericFiles: Record<string, AuditEvidenceMedia[]>;
+    setGenericFiles((prev) => {
+      nextGenericFiles = {
+        ...prev,
+        [key]: [...(prev[key] || []), ...accepted],
+      };
+      return nextGenericFiles;
+    });
     toast.success(`${accepted.length} file(s) attached`);
-    const saved = await saveNow();
+    const saved = await saveNow({
+      genericFiles: sanitizeAuditEvidenceMediaMap(nextGenericFiles!),
+    });
     if (!saved) {
       toast.error("File attached locally but could not save to the server. Click Save Audit Progress.", {
         duration: 8000,
@@ -875,11 +893,17 @@ const AuditExecute = () => {
   };
 
   const removeGenericFile = (key: string, indexToRemove: number) => {
-    setGenericFiles(prev => ({
-      ...prev,
-      [key]: prev[key].filter((_, index) => index !== indexToRemove)
-    }));
-    void saveNow();
+    let nextGenericFiles: Record<string, AuditEvidenceMedia[]>;
+    setGenericFiles((prev) => {
+      nextGenericFiles = {
+        ...prev,
+        [key]: prev[key].filter((_, index) => index !== indexToRemove),
+      };
+      return nextGenericFiles;
+    });
+    void saveNow({
+      genericFiles: sanitizeAuditEvidenceMediaMap(nextGenericFiles!),
+    });
   };
 
   const handleSectionChange = (index: number, value: string) => {
