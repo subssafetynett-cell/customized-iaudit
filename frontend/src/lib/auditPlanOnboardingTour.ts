@@ -39,7 +39,7 @@ export const AUDIT_PLAN_TOUR_STEPS: AuditPlanTourStepConfig[] = [
         targetId: "tour-step-audit-plan-form",
         title: "Fill in the fields",
         description:
-            "Enter the audit name, date, criteria, and location. Scope and objectives can be refined below.",
+            "Enter the audit name, date, criteria, and location. Click Next to review the template, plan your itinerary, then save the plan.",
         position: "top",
     },
     {
@@ -63,8 +63,8 @@ export const AUDIT_PLAN_TOUR_STEPS: AuditPlanTourStepConfig[] = [
         targetId: "tour-step-save-audit-plan",
         title: "Save the audit plan",
         description:
-            "When everything looks good, click Save Audit Plan to store your plan and continue to running audits.",
-        position: "left",
+            "Click Save Audit Plan (top right) to store your plan. The tour continues automatically after a successful save.",
+        position: "bottom",
     },
     {
         step: 8,
