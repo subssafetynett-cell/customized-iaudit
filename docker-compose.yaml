@@ -30,18 +30,8 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      # Always use the compose Postgres service (host .env often has localhost:5432 for native dev).
-      DATABASE_URL: postgresql://${POSTGRES_USER:-appuser}:${POSTGRES_PASSWORD:-apppassword}@postgres:5432/${POSTGRES_DB:-appdb}?sslmode=disable
-      PORT: ${PORT:-3001}
-      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY}
-      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET}
-      CLOUDINARY_URL: ${CLOUDINARY_URL:-}
-      CLOUDINARY_CLOUD_NAME: ${CLOUDINARY_CLOUD_NAME:-}
-      CLOUDINARY_API_KEY: ${CLOUDINARY_API_KEY:-}
-      CLOUDINARY_API_SECRET: ${CLOUDINARY_API_SECRET:-}
-      CLOUDINARY_UPLOAD_FOLDER: ${CLOUDINARY_UPLOAD_FOLDER:-iaudit/company-logos}
-      SUPERADMIN_EMAIL: ${SUPERADMIN_EMAIL:-admin@iaudit.global}
-      SUPERADMIN_PASSWORD: ${SUPERADMIN_PASSWORD:-123}
+      # Host .env often uses localhost:5433 (safetynet on the machine). In Compose, DB is the postgres service.
+      DATABASE_URL: postgresql://${POSTGRES_USER:-appuser}:${POSTGRES_PASSWORD:-apppassword}@postgres:5432/${POSTGRES_DB:-appdb}?schema=public
     ports:
       - "3001:3001"
 

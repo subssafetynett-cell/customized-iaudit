@@ -1,11 +1,11 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Company } from "@/types/company";
-import { Building2, Phone, MapPin, Info, Pencil, Loader2, CheckCircle2, ImageIcon } from "lucide-react";
+import { Building2, Phone, MapPin, Info, Pencil } from "lucide-react";
 import {
   isTenDigitPhone,
   normalizePhone10Digits,
@@ -15,8 +15,6 @@ import {
   COMPANY_DESCRIPTION_MAX,
   COMPANY_DESCRIPTION_ERROR_MESSAGE,
   COMPANY_LOGO_MAX_CHARS,
-  COMPANY_LOGO_MAX_MB,
-  getCompanyLogoFileSizeError,
   isWithinMaxLength,
 } from "@/lib/validation";
 import { COMPANY_INDUSTRIES } from "@/lib/industries";
@@ -62,32 +60,12 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
   const [countryIso, setCountryIso] = useState("");
   const [postalCode, setPostalCode] = useState("");
   const [error, setError] = useState("");
-  const [logoError, setLogoError] = useState("");
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
-  const [logoUploading, setLogoUploading] = useState(false);
-  const [logoUploaded, setLogoUploaded] = useState(false);
-  const [logoPreviewUrl, setLogoPreviewUrl] = useState<string | null>(null);
-  const logoPreviewBlobRef = useRef<string | null>(null);
-  const logoUploadSeqRef = useRef(0);
-
-  useEffect(() => {
-    return () => {
-      if (logoPreviewBlobRef.current?.startsWith("blob:")) {
-        URL.revokeObjectURL(logoPreviewBlobRef.current);
-      }
-    };
-  }, []);
 
   useEffect(() => {
     if (open) {
       setName(initialData?.name || "");
       setLogo(initialData?.logo || undefined);
-      if (logoPreviewBlobRef.current?.startsWith("blob:")) {
-        URL.revokeObjectURL(logoPreviewBlobRef.current);
-      }
-      logoPreviewBlobRef.current = null;
-      setLogoPreviewUrl(null);
-      setLogoUploaded(Boolean(initialData?.logo));
       setIndustry(initialData?.industry || "");
       setContactNumber(initialData?.contactNumber || "");
       setDescription(initialData?.description || "");
@@ -108,9 +86,7 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
       }
       setPostalCode(initialData?.postalCode || "");
       setError("");
-      setLogoError("");
       setFieldErrors({});
-      setLogoUploading(false);
     }
   }, [open, initialData]);
 
@@ -151,67 +127,52 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
 
   const handleLogoChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    e.target.value = "";
-    if (!file) return;
-
-    const sizeError = getCompanyLogoFileSizeError(file.size);
-    if (sizeError) {
-      setLogoError(sizeError);
-      setLogoUploaded(false);
-      toast.error(sizeError);
-      return;
-    }
-
-    const uploadSeq = ++logoUploadSeqRef.current;
-    clearLogoPreview();
-    const localPreview = URL.createObjectURL(file);
-    logoPreviewBlobRef.current = localPreview;
-    setLogoPreviewUrl(localPreview);
-    setLogoUploaded(false);
-    setLogoUploading(true);
-    setLogoError("");
-    try {
-      const { url } = await uploadCompanyLogoFile(file);
-      if (uploadSeq !== logoUploadSeqRef.current) return;
-      releaseBlobPreview(localPreview, uploadSeq);
-      setLogo(url);
-      setLogoUploaded(true);
-      setLogoError("");
-      toast.success("Company logo uploaded successfully");
-    } catch (err: unknown) {
-      if (uploadSeq !== logoUploadSeqRef.current) return;
-      const code = err && typeof err === "object" && "code" in err ? String((err as { code?: string }).code) : "";
-      if (code === "CLOUDINARY_NOT_CONFIGURED") {
-        try {
-          const dataUrl = await compressCompanyLogoFile(file);
-          if (uploadSeq !== logoUploadSeqRef.current) return;
-          releaseBlobPreview(localPreview, uploadSeq);
+    if (file) {
+      // Allow up to 10MB
+      if (!/^image\/(jpeg|jpg|png|webp)$/i.test(file.type)) {
+        setError("Logo must be a PNG, JPEG, or WebP image.");
+        return;
+      }
+      if (file.size > 10 * 1024 * 1024) {
+        setError("Logo must be less than 10MB");
+        return;
+      }
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        const img = new Image();
+        img.onload = () => {
+          // Auto-compress: resize to max 512x512 to keep storage manageable
+          const MAX = 512;
+          const canvas = document.createElement("canvas");
+          let { width, height } = img;
+          if (width > MAX || height > MAX) {
+            if (width > height) {
+              height = Math.round((height * MAX) / width);
+              width = MAX;
+            } else {
+              width = Math.round((width * MAX) / height);
+              height = MAX;
+            }
+          }
+          canvas.width = width;
+          canvas.height = height;
+          canvas.getContext("2d")!.drawImage(img, 0, 0, width, height);
+          let quality = 0.85;
+          let dataUrl = canvas.toDataURL("image/jpeg", quality);
+          while (dataUrl.length > COMPANY_LOGO_MAX_CHARS && quality > 0.4) {
+            quality -= 0.1;
+            dataUrl = canvas.toDataURL("image/jpeg", quality);
+          }
+          if (dataUrl.length > COMPANY_LOGO_MAX_CHARS) {
+            setError("Logo is too large after compression. Try a smaller image.");
+            return;
+          }
           setLogo(dataUrl);
-          setLogoUploaded(true);
-          setLogoError("");
-          toast.success("Company logo ready");
-          return;
-        } catch (fallbackErr: unknown) {
-          if (uploadSeq !== logoUploadSeqRef.current) return;
-          releaseBlobPreview(localPreview, uploadSeq);
-          setLogo(undefined);
-          setLogoUploaded(false);
-          const message = fallbackErr instanceof Error ? fallbackErr.message : "Failed to upload logo";
-          setLogoError(message);
-          toast.error(message);
-          return;
-        }
-      }
-      releaseBlobPreview(localPreview, uploadSeq);
-      setLogo(undefined);
-      setLogoUploaded(false);
-      const message = err instanceof Error ? err.message : "Failed to upload logo";
-      setLogoError(message);
-      toast.error(message);
-    } finally {
-      if (uploadSeq === logoUploadSeqRef.current) {
-        setLogoUploading(false);
-      }
+          setError("");
+        };
+        img.src = reader.result as string;
+      };
+      reader.readAsDataURL(file);
     }
   };
 
@@ -225,8 +186,8 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
     if (!isWithinMaxLength(description.trim(), COMPANY_DESCRIPTION_MAX)) {
       errors.description = COMPANY_DESCRIPTION_ERROR_MESSAGE;
     }
-    if (logo && logo.startsWith("data:") && logo.length > COMPANY_LOGO_MAX_CHARS) {
-      setLogoError("Logo is too large. Use a smaller image.");
+    if (logo && logo.length > COMPANY_LOGO_MAX_CHARS) {
+      setError("Logo is too large. Use a smaller image.");
       return;
     }
     if (!industry) errors.industry = "Industry is required";
@@ -255,16 +216,11 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
       return;
     }
 
-    if (logoUploading) {
-      setLogoError("Please wait for the logo to finish uploading.");
-      return;
-    }
-
     try {
       await Promise.resolve(
         onSubmit({
           name: trimmedName,
-          logo: logo || undefined,
+          logo,
           industry,
           contactNumber: normalizePhone10Digits(contactNumber),
           description: description.trim(),
@@ -279,11 +235,7 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
       onClose();
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "Failed to save company";
-      if (/logo/i.test(message)) {
-        setLogoError(message);
-      } else {
-        setError(message);
-      }
+      setError(message);
     }
   };
 
@@ -322,117 +274,40 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
           </div>
         )}
         {/* Logo Upload Section */}
-        <div
-          id="company-logo-section"
-          className={`flex items-start gap-6 p-4 border rounded-xl transition-colors ${
-            logoError
-              ? "border-destructive/40 bg-destructive/5"
-              : logoUploaded && displayLogo
-                ? "border-emerald-300/80 bg-emerald-50/40"
-                : "border-border bg-accent/5"
-          }`}
-        >
-          <div className="flex flex-col items-center gap-2 shrink-0">
-            <div
-              className={`relative h-28 w-28 rounded-xl border-2 bg-white flex items-center justify-center overflow-hidden group ${
-                logoUploaded && displayLogo && !logoUploading
-                  ? "border-emerald-400 border-solid"
-                  : "border-dashed border-muted-foreground/25"
-              }`}
-            >
-              {displayLogo ? (
+        <div className="flex items-start gap-6 p-4 border rounded-xl bg-accent/5">
+          <div className="flex flex-col items-center gap-3">
+            <div className="h-24 w-24 rounded-xl border-2 border-dashed border-muted-foreground/25 bg-background flex items-center justify-center overflow-hidden group relative">
+              {logo ? (
                 <>
-                  <img
-                    src={displayLogo}
-                    alt="Company logo preview"
-                    className="h-full w-full object-contain p-2"
-                    onError={() => {
-                      setLogoError("Could not display the uploaded logo. Try uploading again.");
-                      setLogoUploaded(false);
-                    }}
-                  />
-                  {logoUploading && (
-                    <div className="absolute inset-0 bg-white/80 flex flex-col items-center justify-center gap-1.5">
-                      <Loader2 className="h-6 w-6 animate-spin text-emerald-600" />
-                      <span className="text-[10px] font-medium text-emerald-700">Uploading…</span>
-                    </div>
-                  )}
-                  {!logoUploading && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        clearLogoPreview();
-                        setLogo(undefined);
-                        setLogoError("");
-                        setLogoUploaded(false);
-                      }}
-                      className="absolute inset-0 bg-destructive/80 text-destructive-foreground opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-xs font-semibold"
-                    >
-                      Remove
-                    </button>
-                  )}
+                  <img src={logo} alt="Preview" className="h-full w-full object-contain p-2" />
+                  <button
+                    onClick={() => setLogo("")}
+                    className="absolute inset-0 bg-destructive/80 text-destructive-foreground opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center"
+                  >
+                    Remove
+                  </button>
                 </>
-              ) : logoUploading ? (
-                <div className="flex flex-col items-center justify-center gap-1.5 px-2">
-                  <Loader2 className="h-6 w-6 animate-spin text-emerald-600" />
-                  <span className="text-[10px] font-medium text-muted-foreground text-center">Uploading…</span>
-                </div>
               ) : (
-                <ImageIcon className="h-10 w-10 text-muted-foreground/30" />
+                <Building2 className="h-10 w-10 text-muted-foreground/30" />
               )}
             </div>
-            {logoUploaded && displayLogo && !logoUploading && !logoError && (
-              <div className="flex items-center gap-1 text-[10px] font-semibold text-emerald-700">
-                <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
-                Logo uploaded
-              </div>
-            )}
           </div>
-          <div className="flex-1 space-y-2 min-w-0">
+          <div className="flex-1 space-y-2">
             <h4 className="font-medium text-sm">Company Logo</h4>
-            <p className="text-xs text-muted-foreground">
-              Upload your company logo (PNG, JPG, or WebP — maximum {COMPANY_LOGO_MAX_MB} MB). A preview appears as soon as you choose a file.
-            </p>
+            <p className="text-xs text-muted-foreground">Upload your company logo (PNG, JPG, up to 10MB — auto-compressed for storage).</p>
             <Label
               htmlFor="logo-upload"
-              className={`relative inline-flex items-center justify-center rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 border bg-background hover:bg-accent hover:text-accent-foreground h-9 px-4 py-2 cursor-pointer ${logoUploading ? "pointer-events-none opacity-50" : ""} ${logoError ? "border-red-500 text-red-700" : "border-input"}`}
+              className="inline-flex items-center justify-center rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 border border-input bg-background hover:bg-accent hover:text-accent-foreground h-9 px-4 py-2 cursor-pointer"
             >
-              {logoUploading ? (
-                <>
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  Uploading…
-                </>
-              ) : displayLogo ? (
-                "Change Logo"
-              ) : (
-                "Choose Logo"
-              )}
-              <Input
-                id="logo-upload"
-                type="file"
-                accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp"
-                onChange={handleLogoChange}
-                disabled={logoUploading}
-                className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
-              />
+              Choose Logo
             </Label>
-            {logoUploaded && displayLogo && !logoUploading && !logoError && (
-              <div
-                className="flex items-start gap-2 p-3 rounded-lg border border-emerald-200 bg-emerald-50 text-emerald-800 text-xs font-medium leading-relaxed"
-                role="status"
-              >
-                <CheckCircle2 className="h-4 w-4 shrink-0 mt-0.5 text-emerald-600" />
-                <span>Your company logo is uploaded and ready. It will be saved when you create or update the company.</span>
-              </div>
-            )}
-            {logoError && (
-              <div
-                className="p-3 rounded-lg border border-destructive/30 bg-destructive/10 text-destructive text-xs font-medium leading-relaxed"
-                role="alert"
-              >
-                {logoError}
-              </div>
-            )}
+            <Input
+              id="logo-upload"
+              type="file"
+              accept="image/*"
+              onChange={handleLogoChange}
+              className="hidden"
+            />
           </div>
         </div>
 
@@ -659,11 +534,7 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
               Cancel
             </Button>
           )}
-          <Button
-            onClick={handleSubmit}
-            disabled={logoUploading}
-            className="px-8 shadow-sm bg-[#213847] hover:bg-[#213847]/90 text-white"
-          >
+          <Button onClick={handleSubmit} className="px-8 shadow-sm bg-[#213847] hover:bg-[#213847]/90 text-white">
             {mode === "create" ? "Create Company" : "Save Changes"}
           </Button>
         </DialogFooter >
