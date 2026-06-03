@@ -24,6 +24,7 @@ import {
     sanitizePlainText,
     sanitizeShortLabel,
     sanitizeStringArray,
+    sanitizeAuditDataPayload,
     escapeHtml
 } from './textSanitize.js';
 import {
@@ -4063,7 +4064,9 @@ app.put('/audit-plans/:id', authenticateToken, checkTrialExpiration, async (req,
             };
         }
         if (itinerary !== undefined) updateData.itinerary = itinerary;
-        if (req.body.auditData !== undefined) updateData.auditData = req.body.auditData;
+        if (req.body.auditData !== undefined) {
+            updateData.auditData = sanitizeAuditDataPayload(req.body.auditData);
+        }
         if (req.body.findingsData !== undefined) updateData.findingsData = req.body.findingsData;
         updateData.updatedAt = new Date();
 

@@ -1,5 +1,5 @@
-# Stage 1: Build
-FROM node:20-alpine AS builder
+# Official images via AWS Public ECR (Docker Hub often TLS-times out on some networks).
+FROM public.ecr.aws/docker/library/node:22-alpine AS builder
 
 WORKDIR /app
 
@@ -15,8 +15,7 @@ RUN DATABASE_URL=postgresql://dummy:dummy@localhost:5432/dummy npx prisma genera
 
 COPY . .
 
-# Stage 2: Production Runtime
-FROM node:20-alpine
+FROM public.ecr.aws/docker/library/node:22-alpine
 
 WORKDIR /app
 
