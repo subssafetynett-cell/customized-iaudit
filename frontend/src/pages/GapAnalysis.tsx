@@ -42,6 +42,7 @@ import {
 } from "@/lib/evidenceImageUpload";
 import {
     fetchGapAnalysesPersisted,
+    getStoredUserId,
     migrateLocalGapAnalysesToServer,
     persistGapAnalysesList,
     persistGapAnalysisDraft,
@@ -259,8 +260,10 @@ const GapAnalysis = () => {
             return;
         }
 
+        const userId = getStoredUserId();
         const newAnalysis = sanitizeSavedGapAnalysis({
             id: currentId || crypto.randomUUID(),
+            ...(userId ? { createdByUserId: userId, userId } : {}),
             companyName,
             auditDate,
             standard: standard as Standard,

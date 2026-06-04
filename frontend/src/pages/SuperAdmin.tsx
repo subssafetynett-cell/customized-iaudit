@@ -71,6 +71,16 @@ function formatLoginDate(value: string | null | undefined): string {
     });
 }
 
+/** Newest users first so row #1 is the latest signup. */
+function sortUsersNewestFirst(list: any[]): any[] {
+    return [...list].sort((a, b) => {
+        const aTime = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+        const bTime = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+        if (bTime !== aTime) return bTime - aTime;
+        return (Number(b.id) || 0) - (Number(a.id) || 0);
+    });
+}
+
 export default function SuperAdmin() {
     const navigate = useNavigate();
     const [users, setUsers] = useState<any[]>([]);
@@ -124,7 +134,9 @@ export default function SuperAdmin() {
 
             if (usersRes.ok) {
                 const usersData = await usersRes.json();
-                setUsers(Array.isArray(usersData) ? usersData : []);
+                setUsers(
+                    Array.isArray(usersData) ? sortUsersNewestFirst(usersData) : [],
+                );
             } else {
                 const usersErr = await usersRes.json().catch(() => ({}));
                 setUsers([]);
@@ -183,7 +195,7 @@ export default function SuperAdmin() {
             if (response.ok) {
                 const updatedUser = await response.json();
                 if (modalMode === "create") {
-                    setUsers([...users, updatedUser]);
+                    setUsers(sortUsersNewestFirst([updatedUser, ...users]));
                     toast.success("User created successfully!");
                 } else {
                     setUsers(users.map(u => u.id === updatedUser.id ? updatedUser : u));

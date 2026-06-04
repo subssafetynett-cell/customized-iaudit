@@ -322,20 +322,18 @@ const Index = () => {
     return 0;
   };
 
-  // Recent Activity logic: Get top 5 most recent audits
-  const recentActivity = [...auditPlans]
-    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+  // Upcoming audits: soonest scheduled first, excluding completed
+  const upcomingAudits = [...auditPlans]
+    .filter((p) => getProgress(p) !== 100)
+    .sort((a, b) => {
+      const aTime = a.date ? new Date(a.date).getTime() : Number.MAX_SAFE_INTEGER;
+      const bTime = b.date ? new Date(b.date).getTime() : Number.MAX_SAFE_INTEGER;
+      if (aTime !== bTime) return aTime - bTime;
+      return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+    })
     .slice(0, 5);
 
   const stats = [
-    {
-      label: "Companies",
-      value: companies.length,
-      icon: Building2,
-      trend: "+12%",
-      trendColor: "text-emerald-500 bg-emerald-50",
-      iconColor: "text-emerald-600 bg-emerald-50"
-    },
     {
       label: "Sites",
       value: totalSites,
@@ -438,7 +436,7 @@ const Index = () => {
         />
 
         {/* Top Stats Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4">
           {stats.map((stat, i) => (
             <Card key={i} className="border-none shadow-sm rounded-xl overflow-hidden bg-white hover:shadow-md transition-all">
               <CardContent className="p-5">
@@ -550,7 +548,62 @@ const Index = () => {
             </div>
           </Card>
 
-          {/* Finding Distribution Pie Chart */}
+          {/* Upcoming Audits */}
+          <Card className="lg:col-span-5 border-none shadow-sm rounded-xl bg-white p-6">
+            <div className="flex items-center justify-between mb-6">
+              <div>
+                <h2 className="text-lg font-bold text-[#111827]">Upcoming Audits</h2>
+                <p className="text-xs text-[#9CA3AF]">Next scheduled audit plans</p>
+              </div>
+              <button className="text-[#9CA3AF] hover:text-[#111827]">...</button>
+            </div>
+
+            <div className="space-y-4">
+              {upcomingAudits.length > 0 ? (
+                upcomingAudits.map((plan, idx) => {
+                  const progress = getProgress(plan);
+                  const status = progress === 100 ? "Completed" : progress > 0 ? "In Progress" : "Planned";
+                  const leadAuditorName = plan.leadAuditor
+                    ? `${plan.leadAuditor.firstName} ${plan.leadAuditor.lastName}`
+                    : plan.leadAuditorEmail || "Unknown Auditor";
+
+                  return (
+                    <div key={idx} className="flex items-center justify-between p-3 rounded-xl hover:bg-slate-50 transition-colors group">
+                      <div className="flex items-center gap-4">
+                        <div className="w-10 h-10 rounded-full bg-slate-100 flex items-center justify-center text-slate-500 group-hover:bg-emerald-100 group-hover:text-emerald-600 transition-colors">
+                          <FileText className="w-5 h-5" />
+                        </div>
+                        <div>
+                          <h4 className="text-sm font-semibold text-[#111827] line-clamp-1">{plan.auditName || plan.auditType}</h4>
+                          <p className="text-[11px] font-medium text-[#9CA3AF]">{leadAuditorName}</p>
+                        </div>
+                      </div>
+                      <Badge
+                        variant="outline"
+                        className={`border-none px-2.5 py-1 text-[10px] font-bold rounded-full ${status === 'Completed' ? 'bg-emerald-50 text-emerald-600' :
+                          status === 'In Progress' ? 'bg-amber-50 text-amber-600' :
+                            'bg-blue-50 text-blue-600'
+                          }`}
+                      >
+                        {status}
+                      </Badge>
+                    </div>
+                  );
+                })
+              ) : (
+                <div className="flex flex-col items-center justify-center py-10 text-center">
+                  <div className="w-12 h-12 rounded-full bg-slate-50 flex items-center justify-center text-slate-300 mb-3">
+                    <Clipboard className="w-6 h-6" />
+                  </div>
+                  <p className="text-xs font-medium text-slate-400">No upcoming audits</p>
+                </div>
+              )}
+            </div>
+          </Card>
+        </div>
+
+        {/* Finding Distribution */}
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
           <Card className="lg:col-span-5 border-none shadow-sm rounded-xl bg-white p-6">
             <div className="flex items-center justify-between mb-6">
               <div>
@@ -738,11 +791,9 @@ const Index = () => {
           </Card>
         </div>
 
-        {/* Full-Width Bar Chart Section */}
-        {/* Bottom Row: Status Overview & Recent Audits */}
+        {/* Audit Status Overview */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-          {/* Audit Status Overview Bar Chart */}
-          <Card className="lg:col-span-8 border-none shadow-sm rounded-xl bg-white p-6">
+          <Card className="lg:col-span-12 border-none shadow-sm rounded-xl bg-white p-6">
             <div className="flex items-center justify-between mb-8">
               <div>
                 <h2 className="text-lg font-bold text-[#111827]">Audit Status Overview</h2>
@@ -804,59 +855,6 @@ const Index = () => {
                 <div className="w-3 h-3 rounded-full bg-[#757D8A]" />
                 Completed
               </div>
-            </div>
-          </Card>
-
-          {/* Recent Audits List */}
-          <Card className="lg:col-span-4 border-none shadow-sm rounded-xl bg-white p-6">
-            <div className="flex items-center justify-between mb-6">
-              <div>
-                <h2 className="text-lg font-bold text-[#111827]">Scheduled Audits</h2>
-                <p className="text-xs text-[#9CA3AF]">Latest created audit plans</p>
-              </div>
-              <button className="text-[#9CA3AF] hover:text-[#111827]">...</button>
-            </div>
-
-            <div className="space-y-4">
-              {recentActivity.length > 0 ? (
-                recentActivity.map((plan, idx) => {
-                  const progress = getProgress(plan);
-                  const status = progress === 100 ? "Completed" : progress > 0 ? "In Progress" : "Planned";
-                  const leadAuditorName = plan.leadAuditor
-                    ? `${plan.leadAuditor.firstName} ${plan.leadAuditor.lastName}`
-                    : plan.leadAuditorEmail || "Unknown Auditor";
-
-                  return (
-                    <div key={idx} className="flex items-center justify-between p-3 rounded-xl hover:bg-slate-50 transition-colors group">
-                      <div className="flex items-center gap-4">
-                        <div className="w-10 h-10 rounded-full bg-slate-100 flex items-center justify-center text-slate-500 group-hover:bg-emerald-100 group-hover:text-emerald-600 transition-colors">
-                          <FileText className="w-5 h-5" />
-                        </div>
-                        <div>
-                          <h4 className="text-sm font-semibold text-[#111827] line-clamp-1">{plan.auditName || plan.auditType}</h4>
-                          <p className="text-[11px] font-medium text-[#9CA3AF]">{leadAuditorName}</p>
-                        </div>
-                      </div>
-                      <Badge
-                        variant="outline"
-                        className={`border-none px-2.5 py-1 text-[10px] font-bold rounded-full ${status === 'Completed' ? 'bg-emerald-50 text-emerald-600' :
-                          status === 'In Progress' ? 'bg-amber-50 text-amber-600' :
-                            'bg-blue-50 text-blue-600'
-                          }`}
-                      >
-                        {status}
-                      </Badge>
-                    </div>
-                  );
-                })
-              ) : (
-                <div className="flex flex-col items-center justify-center py-10 text-center">
-                  <div className="w-12 h-12 rounded-full bg-slate-50 flex items-center justify-center text-slate-300 mb-3">
-                    <Clipboard className="w-6 h-6" />
-                  </div>
-                  <p className="text-xs font-medium text-slate-400">No recent audits</p>
-                </div>
-              )}
             </div>
           </Card>
         </div>

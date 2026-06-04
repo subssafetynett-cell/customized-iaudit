@@ -14,6 +14,9 @@ export interface AuditQuestion {
 
 export interface SavedGapAnalysis {
     id: string;
+    /** Account that created this analysis (server-enforced). */
+    createdByUserId?: number;
+    userId?: number;
     companyName: string;
     auditDate: string;
     standard: Standard;

@@ -129,11 +129,14 @@ model User {
   subscriptions     Subscription[]
   payments          Payment[]
   sessions          Session[]
-  orgGapAnalysisStore     OrgGapAnalysisStore?     @relation("OrgGapStore")
-  orgSelfAssessmentStore  OrgSelfAssessmentStore?  @relation("OrgSelfAssessmentStore")
+  orgGapAnalysisStore        OrgGapAnalysisStore?        @relation("OrgGapStore")
+  orgSelfAssessmentStore     OrgSelfAssessmentStore?     @relation("OrgSelfAssessmentStore")
+  userGapAnalysisStore       UserGapAnalysisStore?
+  userSelfAssessmentStore    UserSelfAssessmentStore?
 }
 
 /// Organization-wide gap analysis history and in-progress draft (shared by all org members).
+/// @deprecated Gap analyses are per-user (UserGapAnalysisStore); org store is legacy only.
 model OrgGapAnalysisStore {
   orgRootUserId     Int      @id
   analyses          Json     @default("[]")
@@ -143,7 +146,17 @@ model OrgGapAnalysisStore {
   orgRoot           User     @relation("OrgGapStore", fields: [orgRootUserId], references: [id], onDelete: Cascade)
 }
 
+/// Per-user gap analysis history and in-progress draft (private to each user).
+model UserGapAnalysisStore {
+  userId      Int      @id
+  analyses    Json     @default("[]")
+  draft       Json?
+  updatedAt   DateTime @updatedAt
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
 /// Organization-wide self assessment history and in-progress draft.
+/// @deprecated Self assessments are per-user (UserSelfAssessmentStore); org store is legacy only.
 model OrgSelfAssessmentStore {
   orgRootUserId     Int      @id
   assessments       Json     @default("[]")
@@ -151,6 +164,15 @@ model OrgSelfAssessmentStore {
   updatedAt         DateTime @updatedAt
   updatedByUserId   Int?
   orgRoot           User     @relation("OrgSelfAssessmentStore", fields: [orgRootUserId], references: [id], onDelete: Cascade)
+}
+
+/// Per-user self assessment history and in-progress draft (private to each user).
+model UserSelfAssessmentStore {
+  userId        Int      @id
+  assessments   Json     @default("[]")
+  draft         Json?
+  updatedAt     DateTime @updatedAt
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
 /// Server-side session (opaque bearer token). Replaces stateless JWT for request authentication.

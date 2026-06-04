@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect } from "react";
 import { Company, Site, Department, ISOStandard } from "@/types/company";
 import { apiFetch } from "@/lib/api";
+import { toast } from "sonner";
 
 let globalCompanies: Company[] = [];
 let listeners: Array<() => void> = [];
@@ -182,9 +183,22 @@ export function useCompanyStore() {
             : c
         );
         notify();
+        toast.success("Company updated successfully");
+        return;
       }
+      const errBody = await response.json().catch(() => ({}));
+      const message =
+        (typeof errBody.error === "string" && errBody.error) ||
+        (typeof errBody.message === "string" && errBody.message) ||
+        "Failed to update company";
+      toast.error(message);
+      throw new Error(message);
     } catch (error) {
       console.error("Failed to update company:", error);
+      if (error instanceof Error) throw error;
+      const message = "Failed to update company";
+      toast.error(message);
+      throw new Error(message);
     }
   };
 

@@ -1468,30 +1468,158 @@ async function migrateLegacyUserSelfAssessmentStores(orgRootUserId, subtreeIds) 
     }
 }
 
-async function ensureOrgGapStore(actorId) {
-    const orgRootUserId = await resolveActorOrgRootId(actorId);
-    const subtreeIds = await collectOrgSubtreeUserIds(orgRootUserId);
-    await migrateLegacyUserGapStores(orgRootUserId, subtreeIds);
-    let row = await prisma.orgGapAnalysisStore.findUnique({ where: { orgRootUserId } });
-    if (!row) {
-        row = await prisma.orgGapAnalysisStore.create({
-            data: { orgRootUserId, analyses: [], draft: null, updatedByUserId: actorId }
-        });
-    }
-    return { orgRootUserId, row };
+function gapAnalysisOwnerId(record) {
+    const id = record?.createdByUserId ?? record?.userId;
+    const n = Number(id);
+    return Number.isInteger(n) && n > 0 ? n : null;
 }
 
-async function ensureOrgSelfAssessmentStore(actorId) {
+function filterGapAnalysesForUser(analyses, userId) {
+    if (!Array.isArray(analyses)) return [];
+    return analyses.filter((a) => gapAnalysisOwnerId(a) === userId);
+}
+
+function stampGapAnalysesForUser(analyses, userId) {
+    if (!Array.isArray(analyses)) return [];
+    return analyses.map((a) => ({
+        ...a,
+        createdByUserId: gapAnalysisOwnerId(a) ?? userId,
+        userId,
+    }));
+}
+
+function gapAnalysisDraftForUser(draft, userId) {
+    if (!draft || typeof draft !== 'object') return null;
+    const owner = Number(draft.ownerUserId);
+    if (Number.isInteger(owner) && owner > 0 && owner !== userId) return null;
+    return { ...draft, ownerUserId: userId };
+}
+
+async function importOwnedGapAnalysesFromOrgStore(actorId) {
     const orgRootUserId = await resolveActorOrgRootId(actorId);
-    const subtreeIds = await collectOrgSubtreeUserIds(orgRootUserId);
-    await migrateLegacyUserSelfAssessmentStores(orgRootUserId, subtreeIds);
-    let row = await prisma.orgSelfAssessmentStore.findUnique({ where: { orgRootUserId } });
+    const orgRow = await prisma.orgGapAnalysisStore.findUnique({
+        where: { orgRootUserId },
+    });
+    if (!orgRow) return [];
+    return filterGapAnalysesForUser(orgRow.analyses, actorId);
+}
+
+async function ensureUserGapAnalysisStore(actorId) {
+    let row = await prisma.userGapAnalysisStore.findUnique({ where: { userId: actorId } });
     if (!row) {
-        row = await prisma.orgSelfAssessmentStore.create({
-            data: { orgRootUserId, assessments: [], draft: null, updatedByUserId: actorId }
+        let analyses = await importOwnedGapAnalysesFromOrgStore(actorId);
+        let draft = null;
+        try {
+            const legacyRows = await prisma.$queryRaw`
+                SELECT analyses, draft FROM "UserGapAnalysisStore" WHERE "userId" = ${actorId}
+            `;
+            if (legacyRows?.length) {
+                const legacy = legacyRows[0];
+                analyses = stampGapAnalysesForUser(
+                    filterGapAnalysesForUser(legacy.analyses, actorId),
+                    actorId,
+                );
+                draft = gapAnalysisDraftForUser(legacy.draft, actorId);
+            }
+        } catch (err) {
+            if (err?.code !== 'P2010' && err?.code !== '42P01') {
+                console.warn('Legacy user gap analysis read skipped:', err?.message || err);
+            }
+        }
+        row = await prisma.userGapAnalysisStore.create({
+            data: { userId: actorId, analyses, draft },
         });
     }
-    return { orgRootUserId, row };
+    let analyses = filterGapAnalysesForUser(row.analyses, actorId);
+    const draft = gapAnalysisDraftForUser(row.draft, actorId);
+    const storedLen = Array.isArray(row.analyses) ? row.analyses.length : 0;
+    if (analyses.length !== storedLen || draft !== row.draft) {
+        row = await prisma.userGapAnalysisStore.update({
+            where: { userId: actorId },
+            data: { analyses: stampGapAnalysesForUser(analyses, actorId), draft },
+        });
+        analyses = filterGapAnalysesForUser(row.analyses, actorId);
+    }
+    return { userId: actorId, analyses, draft, row };
+}
+
+function selfAssessmentOwnerId(record) {
+    const id = record?.createdByUserId ?? record?.userId;
+    const n = Number(id);
+    return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+function filterSelfAssessmentsForUser(assessments, userId) {
+    if (!Array.isArray(assessments)) return [];
+    return assessments.filter((a) => selfAssessmentOwnerId(a) === userId);
+}
+
+function stampSelfAssessmentsForUser(assessments, userId) {
+    if (!Array.isArray(assessments)) return [];
+    return assessments.map((a) => ({
+        ...a,
+        createdByUserId: selfAssessmentOwnerId(a) ?? userId,
+        userId,
+    }));
+}
+
+function selfAssessmentDraftForUser(draft, userId) {
+    if (!draft || typeof draft !== 'object') return null;
+    const owner = Number(draft.ownerUserId);
+    if (Number.isInteger(owner) && owner > 0 && owner !== userId) return null;
+    return { ...draft, ownerUserId: userId };
+}
+
+/** One-time import: only records explicitly owned by this user (never unowned org-wide rows). */
+async function importOwnedSelfAssessmentsFromOrgStore(actorId) {
+    const orgRootUserId = await resolveActorOrgRootId(actorId);
+    const orgRow = await prisma.orgSelfAssessmentStore.findUnique({
+        where: { orgRootUserId },
+    });
+    if (!orgRow) return [];
+    return filterSelfAssessmentsForUser(orgRow.assessments, actorId);
+}
+
+async function ensureUserSelfAssessmentStore(actorId) {
+    let row = await prisma.userSelfAssessmentStore.findUnique({ where: { userId: actorId } });
+    if (!row) {
+        let assessments = await importOwnedSelfAssessmentsFromOrgStore(actorId);
+        let draft = null;
+        try {
+            const legacyRows = await prisma.$queryRaw`
+                SELECT assessments, draft FROM "UserSelfAssessmentStore" WHERE "userId" = ${actorId}
+            `;
+            if (legacyRows?.length) {
+                const legacy = legacyRows[0];
+                assessments = stampSelfAssessmentsForUser(
+                    filterSelfAssessmentsForUser(legacy.assessments, actorId),
+                    actorId,
+                );
+                draft = selfAssessmentDraftForUser(legacy.draft, actorId);
+            }
+        } catch (err) {
+            if (err?.code !== 'P2010' && err?.code !== '42P01') {
+                console.warn('Legacy user self-assessment read skipped:', err?.message || err);
+            }
+        }
+        row = await prisma.userSelfAssessmentStore.create({
+            data: { userId: actorId, assessments, draft },
+        });
+    }
+    let assessments = filterSelfAssessmentsForUser(row.assessments, actorId);
+    const draft = selfAssessmentDraftForUser(row.draft, actorId);
+    const storedLen = Array.isArray(row.assessments) ? row.assessments.length : 0;
+    if (assessments.length !== storedLen || draft !== row.draft) {
+        row = await prisma.userSelfAssessmentStore.update({
+            where: { userId: actorId },
+            data: {
+                assessments: stampSelfAssessmentsForUser(assessments, actorId),
+                draft,
+            },
+        });
+        assessments = filterSelfAssessmentsForUser(row.assessments, actorId);
+    }
+    return { userId: actorId, assessments, draft, row };
 }
 
 /** Org-wide visibility for audit programs. */
@@ -2963,7 +3091,7 @@ app.get('/super-admin/users', authenticateToken, async (req, res) => {
         if (!(await requirePlatformSuperAdmin(req, res))) return;
         const users = await prisma.user.findMany({
             select: SUPER_ADMIN_USER_LIST_SELECT,
-            orderBy: { id: 'asc' }
+            orderBy: [{ createdAt: 'desc' }, { id: 'desc' }]
         });
         res.json(users);
     } catch (error) {
@@ -3059,7 +3187,7 @@ app.get('/users', authenticateToken, async (req, res) => {
                 emailVerifiedAt: true,
                 createdAt: true
             },
-            orderBy: { id: 'asc' }
+            orderBy: [{ createdAt: 'desc' }, { id: 'desc' }]
         });
         res.json(users);
     } catch (error) {
@@ -4169,14 +4297,12 @@ app.put('/audit-plans/:id', authenticateToken, checkTrialExpiration, async (req,
 app.get('/gap-analyses', authenticateToken, async (req, res) => {
     try {
         const actorId = Number(req.user.id);
-        const { orgRootUserId, row } = await ensureOrgGapStore(actorId);
-        if (!(await actorCanReadOrgAssessmentStore(actorId, orgRootUserId))) {
-            return res.status(403).json({ error: 'Forbidden' });
-        }
+        const { userId, analyses, draft, row } = await ensureUserGapAnalysisStore(actorId);
         res.json({
-            orgRootUserId,
-            analyses: row.analyses ?? [],
-            draft: row.draft ?? null,
+            userId,
+            orgRootUserId: userId,
+            analyses,
+            draft,
             updatedAt: row.updatedAt,
             canWrite: await actorCanWriteOrgAssessmentStore(actorId),
         });
@@ -4192,20 +4318,30 @@ app.put('/gap-analyses', authenticateToken, async (req, res) => {
         if (!(await actorCanWriteOrgAssessmentStore(actorId))) {
             return res.status(403).json({ error: 'Forbidden', message: 'Read-only role cannot modify gap analyses.' });
         }
-        const { orgRootUserId } = await ensureOrgGapStore(actorId);
+        await ensureUserGapAnalysisStore(actorId);
         const { analyses, draft } = req.body ?? {};
-        const existing = await prisma.orgGapAnalysisStore.findUnique({ where: { orgRootUserId } });
+        const existing = await prisma.userGapAnalysisStore.findUnique({
+            where: { userId: actorId },
+        });
+        const ownedExisting = filterGapAnalysesForUser(existing?.analyses, actorId);
         const data = {
-            analyses: analyses !== undefined ? analyses : (existing?.analyses ?? []),
-            draft: draft !== undefined ? draft : (existing?.draft ?? null),
-            updatedByUserId: actorId,
+            analyses:
+                analyses !== undefined
+                    ? stampGapAnalysesForUser(filterGapAnalysesForUser(analyses, actorId), actorId)
+                    : ownedExisting,
+            draft:
+                draft !== undefined
+                    ? draft === null
+                        ? null
+                        : gapAnalysisDraftForUser({ ...draft, ownerUserId: actorId }, actorId)
+                    : (existing?.draft ?? null),
         };
-        const row = await prisma.orgGapAnalysisStore.upsert({
-            where: { orgRootUserId },
-            create: { orgRootUserId, ...data },
+        const row = await prisma.userGapAnalysisStore.upsert({
+            where: { userId: actorId },
+            create: { userId: actorId, ...data },
             update: data,
         });
-        res.json({ ok: true, orgRootUserId, updatedAt: row.updatedAt });
+        res.json({ ok: true, userId: actorId, orgRootUserId: actorId, updatedAt: row.updatedAt });
     } catch (error) {
         console.error('Error saving gap analyses:', error);
         res.status(500).json({ error: 'Failed to save gap analyses' });
@@ -4218,16 +4354,15 @@ app.delete('/gap-analyses/:externalId', authenticateToken, async (req, res) => {
         if (!(await actorCanWriteOrgAssessmentStore(actorId))) {
             return res.status(403).json({ error: 'Forbidden' });
         }
-        const { orgRootUserId, row } = await ensureOrgGapStore(actorId);
+        const { analyses } = await ensureUserGapAnalysisStore(actorId);
         const externalId = String(req.params.externalId || '');
-        const analyses = Array.isArray(row.analyses) ? row.analyses : [];
         const next = analyses.filter((a) => String(a?.id) !== externalId);
         if (next.length === analyses.length) {
             return res.status(404).json({ error: 'Gap analysis not found' });
         }
-        await prisma.orgGapAnalysisStore.update({
-            where: { orgRootUserId },
-            data: { analyses: next, updatedByUserId: actorId },
+        await prisma.userGapAnalysisStore.update({
+            where: { userId: actorId },
+            data: { analyses: stampGapAnalysesForUser(next, actorId) },
         });
         res.status(204).send();
     } catch (error) {
@@ -4239,14 +4374,12 @@ app.delete('/gap-analyses/:externalId', authenticateToken, async (req, res) => {
 app.get('/self-assessments', authenticateToken, async (req, res) => {
     try {
         const actorId = Number(req.user.id);
-        const { orgRootUserId, row } = await ensureOrgSelfAssessmentStore(actorId);
-        if (!(await actorCanReadOrgAssessmentStore(actorId, orgRootUserId))) {
-            return res.status(403).json({ error: 'Forbidden' });
-        }
+        const { userId, assessments, draft, row } = await ensureUserSelfAssessmentStore(actorId);
         res.json({
-            orgRootUserId,
-            assessments: row.assessments ?? [],
-            draft: row.draft ?? null,
+            userId,
+            orgRootUserId: userId,
+            assessments,
+            draft,
             updatedAt: row.updatedAt,
             canWrite: await actorCanWriteOrgAssessmentStore(actorId),
         });
@@ -4262,20 +4395,33 @@ app.put('/self-assessments', authenticateToken, async (req, res) => {
         if (!(await actorCanWriteOrgAssessmentStore(actorId))) {
             return res.status(403).json({ error: 'Forbidden', message: 'Read-only role cannot modify self assessments.' });
         }
-        const { orgRootUserId } = await ensureOrgSelfAssessmentStore(actorId);
+        await ensureUserSelfAssessmentStore(actorId);
         const { assessments, draft } = req.body ?? {};
-        const existing = await prisma.orgSelfAssessmentStore.findUnique({ where: { orgRootUserId } });
+        const existing = await prisma.userSelfAssessmentStore.findUnique({
+            where: { userId: actorId },
+        });
+        const ownedExisting = filterSelfAssessmentsForUser(existing?.assessments, actorId);
         const data = {
-            assessments: assessments !== undefined ? assessments : (existing?.assessments ?? []),
-            draft: draft !== undefined ? draft : (existing?.draft ?? null),
-            updatedByUserId: actorId,
+            assessments:
+                assessments !== undefined
+                    ? stampSelfAssessmentsForUser(
+                          filterSelfAssessmentsForUser(assessments, actorId),
+                          actorId,
+                      )
+                    : ownedExisting,
+            draft:
+                draft !== undefined
+                    ? draft === null
+                        ? null
+                        : selfAssessmentDraftForUser({ ...draft, ownerUserId: actorId }, actorId)
+                    : (existing?.draft ?? null),
         };
-        const row = await prisma.orgSelfAssessmentStore.upsert({
-            where: { orgRootUserId },
-            create: { orgRootUserId, ...data },
+        const row = await prisma.userSelfAssessmentStore.upsert({
+            where: { userId: actorId },
+            create: { userId: actorId, ...data },
             update: data,
         });
-        res.json({ ok: true, orgRootUserId, updatedAt: row.updatedAt });
+        res.json({ ok: true, userId: actorId, orgRootUserId: actorId, updatedAt: row.updatedAt });
     } catch (error) {
         console.error('Error saving self assessments:', error);
         res.status(500).json({ error: 'Failed to save self assessments' });
@@ -4288,16 +4434,15 @@ app.delete('/self-assessments/:externalId', authenticateToken, async (req, res) 
         if (!(await actorCanWriteOrgAssessmentStore(actorId))) {
             return res.status(403).json({ error: 'Forbidden' });
         }
-        const { orgRootUserId, row } = await ensureOrgSelfAssessmentStore(actorId);
+        const { assessments } = await ensureUserSelfAssessmentStore(actorId);
         const externalId = String(req.params.externalId || '');
-        const assessments = Array.isArray(row.assessments) ? row.assessments : [];
         const next = assessments.filter((a) => String(a?.id) !== externalId);
         if (next.length === assessments.length) {
             return res.status(404).json({ error: 'Self assessment not found' });
         }
-        await prisma.orgSelfAssessmentStore.update({
-            where: { orgRootUserId },
-            data: { assessments: next, updatedByUserId: actorId },
+        await prisma.userSelfAssessmentStore.update({
+            where: { userId: actorId },
+            data: { assessments: stampSelfAssessmentsForUser(next, actorId) },
         });
         res.status(204).send();
     } catch (error) {
@@ -4310,11 +4455,8 @@ app.delete('/self-assessments/:externalId', authenticateToken, async (req, res) 
 app.get('/user-persisted/gap-analyses', authenticateToken, async (req, res) => {
     try {
         const actorId = Number(req.user.id);
-        const { row } = await ensureOrgGapStore(actorId);
-        res.json({
-            analyses: row.analyses ?? [],
-            draft: row.draft ?? null,
-        });
+        const { analyses, draft } = await ensureUserGapAnalysisStore(actorId);
+        res.json({ analyses, draft });
     } catch (error) {
         console.error('Error loading gap analyses:', error);
         res.status(500).json({ error: 'Failed to load gap analyses' });
@@ -4326,17 +4468,26 @@ app.put('/user-persisted/gap-analyses', authenticateToken, async (req, res) => {
         if (!(await actorCanWriteOrgAssessmentStore(actorId))) {
             return res.status(403).json({ error: 'Forbidden' });
         }
-        const { orgRootUserId } = await ensureOrgGapStore(actorId);
+        await ensureUserGapAnalysisStore(actorId);
         const { analyses, draft } = req.body ?? {};
-        const existing = await prisma.orgGapAnalysisStore.findUnique({ where: { orgRootUserId } });
+        const existing = await prisma.userGapAnalysisStore.findUnique({
+            where: { userId: actorId },
+        });
         const data = {
-            analyses: analyses !== undefined ? analyses : (existing?.analyses ?? []),
-            draft: draft !== undefined ? draft : (existing?.draft ?? null),
-            updatedByUserId: actorId,
+            analyses:
+                analyses !== undefined
+                    ? stampGapAnalysesForUser(analyses, actorId)
+                    : filterGapAnalysesForUser(existing?.analyses, actorId),
+            draft:
+                draft !== undefined
+                    ? draft === null
+                        ? null
+                        : gapAnalysisDraftForUser({ ...draft, ownerUserId: actorId }, actorId)
+                    : (existing?.draft ?? null),
         };
-        const row = await prisma.orgGapAnalysisStore.upsert({
-            where: { orgRootUserId },
-            create: { orgRootUserId, ...data },
+        const row = await prisma.userGapAnalysisStore.upsert({
+            where: { userId: actorId },
+            create: { userId: actorId, ...data },
             update: data,
         });
         res.json({ ok: true, updatedAt: row.updatedAt });
@@ -4348,11 +4499,8 @@ app.put('/user-persisted/gap-analyses', authenticateToken, async (req, res) => {
 app.get('/user-persisted/self-assessments', authenticateToken, async (req, res) => {
     try {
         const actorId = Number(req.user.id);
-        const { orgRootUserId, row } = await ensureOrgSelfAssessmentStore(actorId);
-        res.json({
-            assessments: row.assessments ?? [],
-            draft: row.draft ?? null,
-        });
+        const { assessments, draft } = await ensureUserSelfAssessmentStore(actorId);
+        res.json({ assessments, draft });
     } catch (error) {
         console.error('Error loading self assessments:', error);
         res.status(500).json({ error: 'Failed to load self assessments' });
@@ -4364,17 +4512,30 @@ app.put('/user-persisted/self-assessments', authenticateToken, async (req, res) 
         if (!(await actorCanWriteOrgAssessmentStore(actorId))) {
             return res.status(403).json({ error: 'Forbidden' });
         }
-        const { orgRootUserId } = await ensureOrgSelfAssessmentStore(actorId);
+        await ensureUserSelfAssessmentStore(actorId);
         const { assessments, draft } = req.body ?? {};
-        const existing = await prisma.orgSelfAssessmentStore.findUnique({ where: { orgRootUserId } });
+        const existing = await prisma.userSelfAssessmentStore.findUnique({
+            where: { userId: actorId },
+        });
+        const ownedExisting = filterSelfAssessmentsForUser(existing?.assessments, actorId);
         const data = {
-            assessments: assessments !== undefined ? assessments : (existing?.assessments ?? []),
-            draft: draft !== undefined ? draft : (existing?.draft ?? null),
-            updatedByUserId: actorId,
+            assessments:
+                assessments !== undefined
+                    ? stampSelfAssessmentsForUser(
+                          filterSelfAssessmentsForUser(assessments, actorId),
+                          actorId,
+                      )
+                    : ownedExisting,
+            draft:
+                draft !== undefined
+                    ? draft === null
+                        ? null
+                        : selfAssessmentDraftForUser({ ...draft, ownerUserId: actorId }, actorId)
+                    : (existing?.draft ?? null),
         };
-        const row = await prisma.orgSelfAssessmentStore.upsert({
-            where: { orgRootUserId },
-            create: { orgRootUserId, ...data },
+        const row = await prisma.userSelfAssessmentStore.upsert({
+            where: { userId: actorId },
+            create: { userId: actorId, ...data },
             update: data,
         });
         res.json({ ok: true, updatedAt: row.updatedAt });

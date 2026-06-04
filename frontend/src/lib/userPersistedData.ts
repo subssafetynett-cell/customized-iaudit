@@ -26,147 +26,323 @@ export function getStoredUserId(): number | null {
 
 
 
-let cachedOrgRootId: number | null = null;
+function gapLocalKey(userId: number) {
 
-
-
-function gapLocalKey(orgRootId: number) {
-
-    return `gapAnalyses_org_${orgRootId}`;
+    return `gapAnalyses_${userId}`;
 
 }
 
 
 
-function selfLocalKey(orgRootId: number) {
+function gapOrgLocalKey(orgRootUserId: number) {
 
-    return `selfAssessments_org_${orgRootId}`;
+    return `gapAnalyses_org_${orgRootUserId}`;
 
 }
 
 
 
-/** Collect legacy per-user localStorage blobs for one-time migration. */
+function gapAnalysisOwnerId(record: unknown): number | null {
+
+    const a = record as { createdByUserId?: number; userId?: number };
+
+    const id = Number(a?.createdByUserId ?? a?.userId);
+
+    return Number.isFinite(id) && id > 0 ? id : null;
+
+}
+
+
+
+function filterGapAnalysesForUser<T>(list: T[], userId: number): T[] {
+
+    return list.filter((item) => gapAnalysisOwnerId(item) === userId);
+
+}
+
+
+
+function stampGapAnalysesForUser<T>(list: T[], userId: number): T[] {
+
+    return list.map((item) => ({
+
+        ...(item as object),
+
+        createdByUserId: gapAnalysisOwnerId(item) ?? userId,
+
+        userId,
+
+    })) as T[];
+
+}
+
+
+
+function selfLocalKey(userId: number) {
+
+    return `selfAssessments_${userId}`;
+
+}
+
+
+
+function selfOrgLocalKey(orgRootUserId: number) {
+
+    return `selfAssessments_org_${orgRootUserId}`;
+
+}
+
+
+
+function selfAssessmentOwnerId(record: unknown): number | null {
+
+    const a = record as { createdByUserId?: number; userId?: number };
+
+    const id = Number(a?.createdByUserId ?? a?.userId);
+
+    return Number.isFinite(id) && id > 0 ? id : null;
+
+}
+
+
+
+function filterSelfAssessmentsForUser<T>(list: T[], userId: number): T[] {
+
+    return list.filter((item) => selfAssessmentOwnerId(item) === userId);
+
+}
+
+
+
+function stampSelfAssessmentsForUser<T>(list: T[], userId: number): T[] {
+
+    return list.map((item) => ({
+
+        ...(item as object),
+
+        createdByUserId: selfAssessmentOwnerId(item) ?? userId,
+
+        userId,
+
+    })) as T[];
+
+}
+
+
+
+function parseLocalStorageJsonArray(key: string): unknown[] {
+
+    const saved = localStorage.getItem(key);
+
+    if (!saved) return [];
+
+    try {
+
+        const parsed = JSON.parse(saved);
+
+        return Array.isArray(parsed) ? parsed : [];
+
+    } catch {
+
+        return [];
+
+    }
+
+}
+
+
+
+/** Best-effort org root from stored profile (creatorId null => self is root). */
+
+function resolveStoredOrgRootUserId(): number | null {
+
+    try {
+
+        const raw = localStorage.getItem("user");
+
+        if (!raw) return null;
+
+        const user = JSON.parse(raw) as { id?: number; creatorId?: number | null };
+
+        const id = Number(user?.id);
+
+        if (!Number.isFinite(id) || id <= 0) return null;
+
+        if (user.creatorId == null || user.creatorId === undefined) return id;
+
+        const creatorId = Number(user.creatorId);
+
+        return Number.isFinite(creatorId) && creatorId > 0 ? creatorId : id;
+
+    } catch {
+
+        return null;
+
+    }
+
+}
+
+
+
+function mergeLegacyRecordsById(items: unknown[]): unknown[] {
+
+    const byId = new Map<string, unknown>();
+
+    for (const item of items) {
+
+        const id = (item as { id?: string })?.id;
+
+        if (id) byId.set(String(id), item);
+
+    }
+
+    return Array.from(byId.values());
+
+}
+
+
+
+/** Org-store rows: owned by user, or legacy unowned rows when user is org root. */
+
+function filterGapAnalysesFromOrgLegacy<T>(list: T[], userId: number, orgRootUserId: number): T[] {
+
+    if (!Array.isArray(list)) return [];
+
+    return list.filter((item) => {
+
+        const owner = gapAnalysisOwnerId(item);
+
+        if (owner === userId) return true;
+
+        if (owner === null && userId === orgRootUserId) return true;
+
+        return false;
+
+    });
+
+}
+
+
+
+function filterSelfAssessmentsFromOrgLegacy<T>(
+
+    list: T[],
+
+    userId: number,
+
+    orgRootUserId: number,
+
+): T[] {
+
+    if (!Array.isArray(list)) return [];
+
+    return list.filter((item) => {
+
+        const owner = selfAssessmentOwnerId(item);
+
+        if (owner === userId) return true;
+
+        if (owner === null && userId === orgRootUserId) return true;
+
+        return false;
+
+    });
+
+}
+
+
+
+/** Per-user key plus pre-migration org keys; other org keys only if rows are owned by this user. */
 
 function collectLegacyGapLocal(userId: number): unknown[] {
 
     const lists: unknown[] = [];
 
-    const orgKey = cachedOrgRootId ? gapLocalKey(cachedOrgRootId) : null;
+    lists.push(...parseLocalStorageJsonArray(gapLocalKey(userId)));
 
-    const legacyUserKey = `gapAnalyses_${userId}`;
+    const orgRootId = resolveStoredOrgRootUserId();
 
+    if (orgRootId) {
 
+        lists.push(
+
+            ...filterGapAnalysesFromOrgLegacy(
+
+                parseLocalStorageJsonArray(gapOrgLocalKey(orgRootId)) as unknown[],
+
+                userId,
+
+                orgRootId,
+
+            ),
+
+        );
+
+    }
+
+    const primaryOrgKey = orgRootId ? gapOrgLocalKey(orgRootId) : null;
 
     for (let i = 0; i < localStorage.length; i++) {
 
         const key = localStorage.key(i);
 
-        if (!key?.startsWith("gapAnalyses_")) continue;
+        if (!key?.startsWith("gapAnalyses_org_")) continue;
 
-        if (orgKey && key === orgKey) continue;
+        if (key === primaryOrgKey) continue;
 
-        try {
-
-            const parsed = JSON.parse(localStorage.getItem(key) || "[]");
-
-            if (Array.isArray(parsed)) lists.push(...parsed);
-
-        } catch {
-
-            /* ignore */
-
-        }
+        lists.push(...filterGapAnalysesForUser(parseLocalStorageJsonArray(key), userId));
 
     }
 
-
-
-    if (!lists.length) {
-
-        const saved = localStorage.getItem(legacyUserKey);
-
-        if (saved) {
-
-            try {
-
-                const parsed = JSON.parse(saved);
-
-                if (Array.isArray(parsed)) lists.push(...parsed);
-
-            } catch {
-
-                /* ignore */
-
-            }
-
-        }
-
-    }
-
-    return lists;
+    return mergeLegacyRecordsById(lists);
 
 }
 
 
 
+/** Per-user key plus pre-migration org keys; other org keys only if rows are owned by this user. */
+
 function collectLegacySelfLocal(userId: number): unknown[] {
 
     const lists: unknown[] = [];
 
-    const orgKey = cachedOrgRootId ? selfLocalKey(cachedOrgRootId) : null;
+    lists.push(...parseLocalStorageJsonArray(selfLocalKey(userId)));
 
-    const legacyUserKey = `selfAssessments_${userId}`;
+    const orgRootId = resolveStoredOrgRootUserId();
 
+    if (orgRootId) {
 
+        lists.push(
+
+            ...filterSelfAssessmentsFromOrgLegacy(
+
+                parseLocalStorageJsonArray(selfOrgLocalKey(orgRootId)) as unknown[],
+
+                userId,
+
+                orgRootId,
+
+            ),
+
+        );
+
+    }
+
+    const primaryOrgKey = orgRootId ? selfOrgLocalKey(orgRootId) : null;
 
     for (let i = 0; i < localStorage.length; i++) {
 
         const key = localStorage.key(i);
 
-        if (!key?.startsWith("selfAssessments_")) continue;
+        if (!key?.startsWith("selfAssessments_org_")) continue;
 
-        if (orgKey && key === orgKey) continue;
+        if (key === primaryOrgKey) continue;
 
-        try {
-
-            const parsed = JSON.parse(localStorage.getItem(key) || "[]");
-
-            if (Array.isArray(parsed)) lists.push(...parsed);
-
-        } catch {
-
-            /* ignore */
-
-        }
+        lists.push(...filterSelfAssessmentsForUser(parseLocalStorageJsonArray(key), userId));
 
     }
 
-
-
-    if (!lists.length) {
-
-        const saved = localStorage.getItem(legacyUserKey);
-
-        if (saved) {
-
-            try {
-
-                const parsed = JSON.parse(saved);
-
-                if (Array.isArray(parsed)) lists.push(...parsed);
-
-            } catch {
-
-                /* ignore */
-
-            }
-
-        }
-
-    }
-
-    return lists;
+    return mergeLegacyRecordsById(lists);
 
 }
 
@@ -204,41 +380,43 @@ export async function fetchGapAnalysesPersisted<T>(): Promise<{
 
             const data = await res.json();
 
-            if (typeof data.orgRootUserId === "number") {
-
-                cachedOrgRootId = data.orgRootUserId;
-
-            }
-
             if (Array.isArray(data.analyses)) {
 
-                analyses = data.analyses as T[];
+                analyses = filterGapAnalysesForUser(data.analyses as T[], userId);
 
             }
 
             if (data.draft && typeof data.draft === "object") {
 
-                draft = data.draft as Record<string, unknown>;
+                const owner = Number(
+
+                    (data.draft as { ownerUserId?: number }).ownerUserId,
+
+                );
+
+                if (!Number.isFinite(owner) || owner === userId) {
+
+                    draft = data.draft as Record<string, unknown>;
+
+                }
 
             }
 
             canWrite = data.canWrite !== false;
 
-            if (cachedOrgRootId) {
-
-                localStorage.setItem(
-
-                    gapLocalKey(cachedOrgRootId),
-
-                    JSON.stringify(analyses),
-
-                );
-
-            }
+            localStorage.setItem(gapLocalKey(userId), JSON.stringify(analyses));
 
             const merged = await migrateLocalGapAnalysesToServer(analyses);
 
-            return { analyses: merged, draft, canWrite };
+            return {
+
+                analyses: filterGapAnalysesForUser(merged, userId),
+
+                draft,
+
+                canWrite,
+
+            };
 
         }
 
@@ -250,19 +428,13 @@ export async function fetchGapAnalysesPersisted<T>(): Promise<{
 
 
 
-    const orgId = cachedOrgRootId;
-
-    const saved = orgId
-
-        ? localStorage.getItem(gapLocalKey(orgId))
-
-        : null;
+    const saved = localStorage.getItem(gapLocalKey(userId));
 
     if (saved) {
 
         try {
 
-            analyses = JSON.parse(saved) as T[];
+            analyses = filterGapAnalysesForUser(JSON.parse(saved) as T[], userId);
 
         } catch {
 
@@ -270,11 +442,17 @@ export async function fetchGapAnalysesPersisted<T>(): Promise<{
 
         }
 
-    } else {
+    }
+
+    if (!analyses.length) {
 
         const legacy = collectLegacyGapLocal(userId);
 
-        if (legacy.length) analyses = legacy as T[];
+        if (legacy.length) {
+
+            analyses = filterGapAnalysesForUser(legacy as T[], userId);
+
+        }
 
     }
 
@@ -292,17 +470,11 @@ export async function persistGapAnalysesList<T>(analyses: T[]): Promise<void> {
 
 
 
-    if (cachedOrgRootId) {
+    const owned = filterGapAnalysesForUser(analyses, userId);
 
-        localStorage.setItem(
+    const stamped = stampGapAnalysesForUser(owned, userId);
 
-            gapLocalKey(cachedOrgRootId),
-
-            JSON.stringify(analyses),
-
-        );
-
-    }
+    localStorage.setItem(gapLocalKey(userId), JSON.stringify(stamped));
 
 
 
@@ -312,23 +484,13 @@ export async function persistGapAnalysesList<T>(analyses: T[]): Promise<void> {
 
             method: "PUT",
 
-            body: JSON.stringify({ analyses }),
+            body: JSON.stringify({ analyses: stamped }),
 
         });
 
         if (!res.ok) {
 
             console.warn("Failed to persist gap analyses to server", await res.text());
-
-        } else {
-
-            const data = await res.json().catch(() => ({}));
-
-            if (typeof data.orgRootUserId === "number") {
-
-                cachedOrgRootId = data.orgRootUserId;
-
-            }
 
         }
 
@@ -348,7 +510,9 @@ export async function persistGapAnalysisDraft(
 
 ): Promise<void> {
 
-    if (!getStoredUserId()) return;
+    const userId = getStoredUserId();
+
+    if (!userId) return;
 
 
 
@@ -358,7 +522,17 @@ export async function persistGapAnalysisDraft(
 
             method: "PUT",
 
-            body: JSON.stringify({ draft }),
+            body: JSON.stringify({
+
+                draft:
+
+                    draft === null
+
+                        ? null
+
+                        : { ...draft, ownerUserId: userId },
+
+            }),
 
         });
 
@@ -436,41 +610,55 @@ export async function fetchSelfAssessmentsPersisted<T>(): Promise<{
 
             const data = await res.json();
 
-            if (typeof data.orgRootUserId === "number") {
-
-                cachedOrgRootId = data.orgRootUserId;
-
-            }
-
             if (Array.isArray(data.assessments)) {
 
-                assessments = data.assessments as T[];
+                assessments = filterSelfAssessmentsForUser(
 
-            }
+                    data.assessments as T[],
 
-            if (data.draft && typeof data.draft === "object") {
-
-                draft = data.draft as Record<string, unknown>;
-
-            }
-
-            canWrite = data.canWrite !== false;
-
-            if (cachedOrgRootId) {
-
-                localStorage.setItem(
-
-                    selfLocalKey(cachedOrgRootId),
-
-                    JSON.stringify(assessments),
+                    userId,
 
                 );
 
             }
 
+            if (data.draft && typeof data.draft === "object") {
+
+                const owner = Number(
+
+                    (data.draft as { ownerUserId?: number }).ownerUserId,
+
+                );
+
+                if (!Number.isFinite(owner) || owner === userId) {
+
+                    draft = data.draft as Record<string, unknown>;
+
+                }
+
+            }
+
+            canWrite = data.canWrite !== false;
+
+            localStorage.setItem(
+
+                selfLocalKey(userId),
+
+                JSON.stringify(assessments),
+
+            );
+
             const merged = await migrateLocalSelfAssessmentsToServer(assessments);
 
-            return { assessments: merged, draft, canWrite };
+            return {
+
+                assessments: filterSelfAssessmentsForUser(merged, userId),
+
+                draft,
+
+                canWrite,
+
+            };
 
         }
 
@@ -482,19 +670,19 @@ export async function fetchSelfAssessmentsPersisted<T>(): Promise<{
 
 
 
-    const orgId = cachedOrgRootId;
-
-    const saved = orgId
-
-        ? localStorage.getItem(selfLocalKey(orgId))
-
-        : null;
+    const saved = localStorage.getItem(selfLocalKey(userId));
 
     if (saved) {
 
         try {
 
-            assessments = JSON.parse(saved) as T[];
+            assessments = filterSelfAssessmentsForUser(
+
+                JSON.parse(saved) as T[],
+
+                userId,
+
+            );
 
         } catch {
 
@@ -502,11 +690,17 @@ export async function fetchSelfAssessmentsPersisted<T>(): Promise<{
 
         }
 
-    } else {
+    }
+
+    if (!assessments.length) {
 
         const legacy = collectLegacySelfLocal(userId);
 
-        if (legacy.length) assessments = legacy as T[];
+        if (legacy.length) {
+
+            assessments = filterSelfAssessmentsForUser(legacy as T[], userId);
+
+        }
 
     }
 
@@ -524,17 +718,11 @@ export async function persistSelfAssessmentsList<T>(assessments: T[]): Promise<v
 
 
 
-    if (cachedOrgRootId) {
+    const owned = filterSelfAssessmentsForUser(assessments, userId);
 
-        localStorage.setItem(
+    const stamped = stampSelfAssessmentsForUser(owned, userId);
 
-            selfLocalKey(cachedOrgRootId),
-
-            JSON.stringify(assessments),
-
-        );
-
-    }
+    localStorage.setItem(selfLocalKey(userId), JSON.stringify(stamped));
 
 
 
@@ -544,7 +732,7 @@ export async function persistSelfAssessmentsList<T>(assessments: T[]): Promise<v
 
             method: "PUT",
 
-            body: JSON.stringify({ assessments }),
+            body: JSON.stringify({ assessments: stamped }),
 
         });
 
@@ -557,16 +745,6 @@ export async function persistSelfAssessmentsList<T>(assessments: T[]): Promise<v
                 await res.text(),
 
             );
-
-        } else {
-
-            const data = await res.json().catch(() => ({}));
-
-            if (typeof data.orgRootUserId === "number") {
-
-                cachedOrgRootId = data.orgRootUserId;
-
-            }
 
         }
 
@@ -586,7 +764,9 @@ export async function persistSelfAssessmentDraft(
 
 ): Promise<void> {
 
-    if (!getStoredUserId()) return;
+    const userId = getStoredUserId();
+
+    if (!userId) return;
 
 
 
@@ -596,7 +776,17 @@ export async function persistSelfAssessmentDraft(
 
             method: "PUT",
 
-            body: JSON.stringify({ draft }),
+            body: JSON.stringify({
+
+                draft:
+
+                    draft === null
+
+                        ? null
+
+                        : { ...draft, ownerUserId: userId },
+
+            }),
 
         });
 
@@ -660,13 +850,21 @@ export async function migrateLocalGapAnalysesToServer<T extends { id: string }>(
 
 
 
-    const legacyItems = collectLegacyGapLocal(userId) as T[];
+    const legacyItems = stampGapAnalysesForUser(
+
+        collectLegacyGapLocal(userId) as T[],
+
+        userId,
+
+    );
 
     if (!legacyItems.length) return serverList;
 
 
 
-    const byId = new Map(serverList.map((a) => [a.id, a]));
+    const ownedServer = filterGapAnalysesForUser(serverList, userId);
+
+    const byId = new Map(ownedServer.map((a) => [a.id, a]));
 
     let changed = false;
 
@@ -684,7 +882,7 @@ export async function migrateLocalGapAnalysesToServer<T extends { id: string }>(
 
     const merged = Array.from(byId.values());
 
-    if (changed && merged.length > serverList.length) {
+    if (changed && merged.length > ownedServer.length) {
 
         await persistGapAnalysesList(merged);
 
@@ -708,13 +906,21 @@ export async function migrateLocalSelfAssessmentsToServer<T extends { id: string
 
 
 
-    const legacyItems = collectLegacySelfLocal(userId) as T[];
+    const legacyItems = stampSelfAssessmentsForUser(
+
+        collectLegacySelfLocal(userId) as T[],
+
+        userId,
+
+    );
 
     if (!legacyItems.length) return serverList;
 
 
 
-    const byId = new Map(serverList.map((a) => [a.id, a]));
+    const ownedServer = filterSelfAssessmentsForUser(serverList, userId);
+
+    const byId = new Map(ownedServer.map((a) => [a.id, a]));
 
     let changed = false;
 
@@ -732,7 +938,7 @@ export async function migrateLocalSelfAssessmentsToServer<T extends { id: string
 
     const merged = Array.from(byId.values());
 
-    if (changed && merged.length > serverList.length) {
+    if (changed && merged.length > ownedServer.length) {
 
         await persistSelfAssessmentsList(merged);
 
