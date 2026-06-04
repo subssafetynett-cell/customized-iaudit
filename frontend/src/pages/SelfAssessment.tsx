@@ -49,6 +49,7 @@ import {
 } from "@/lib/plainTextInput";
 import {
     fetchSelfAssessmentsPersisted,
+    getStoredUserId,
     migrateLocalSelfAssessmentsToServer,
     persistSelfAssessmentsList,
     persistSelfAssessmentDraft,
@@ -457,7 +458,11 @@ const SelfAssessment = () => {
     }, []);
 
     const saveToHistory = (newAssessment: SavedAssessment) => {
-        const safe = sanitizeSavedSelfAssessment(newAssessment) as SavedAssessment;
+        const userId = getStoredUserId();
+        const safe = sanitizeSavedSelfAssessment({
+            ...newAssessment,
+            ...(userId ? { createdByUserId: userId, userId } : {}),
+        }) as SavedAssessment;
         const updated = [safe, ...savedAssessments];
         setSavedAssessments(updated);
         void persistSelfAssessmentsList(updated);

@@ -157,6 +157,9 @@ export interface SelfAssessmentQuestion {
 
 export interface SelfAssessmentRecord {
     id: string;
+    /** Account that created this assessment (server-enforced). */
+    createdByUserId?: number;
+    userId?: number;
     companyName: string;
     auditorName: string;
     auditCompany?: string;
