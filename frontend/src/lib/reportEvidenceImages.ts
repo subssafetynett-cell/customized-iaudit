@@ -1,7 +1,20 @@
 import { sanitizeAuditEvidenceMediaMap, type AuditEvidenceMedia } from "@/lib/evidenceImageUpload";
+import * as pdfjs from "pdfjs-dist";
+import pdfjsWorker from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 
 /** Target total encoded size for all embedded photos (~2–3 MB report). */
 export const REPORT_IMAGES_BUDGET_BYTES = 2_400_000;
+
+/** Max PDF pages rendered per uploaded document in exported reports. */
+export const REPORT_PDF_MAX_PAGES_PER_FILE = 5;
+
+let pdfWorkerConfigured = false;
+
+function ensurePdfWorker() {
+    if (pdfWorkerConfigured) return;
+    pdfjs.GlobalWorkerOptions.workerSrc = pdfjsWorker;
+    pdfWorkerConfigured = true;
+}
 
 export type ReportEvidenceSource = {
     name: string;
@@ -31,6 +44,11 @@ function loadImage(src: string): Promise<HTMLImageElement> {
 function estimateDataUrlBytes(dataUrl: string): number {
     const base64 = dataUrl.includes(",") ? dataUrl.split(",")[1] : dataUrl;
     return Math.ceil((base64.length * 3) / 4);
+}
+
+export function dataUrlToUint8Array(dataUrl: string): Uint8Array {
+    const base64 = dataUrl.includes(",") ? dataUrl.split(",")[1] : dataUrl;
+    return Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
 }
 
 function scaleToMaxDim(
@@ -112,16 +130,95 @@ export function collectReportEvidenceFileList(
     return out;
 }
 
-/** Gather image attachments only (for embedded photos in PDF/Word). */
+/** Gather image + PDF attachments for embedded visuals in PDF/Word exports. */
 export function collectReportEvidenceSources(
     auditData: Record<string, unknown>
 ): ReportEvidenceSource[] {
-    return collectReportEvidenceFileList(auditData).filter((e) => e.type.startsWith("image/"));
+    return collectReportEvidenceFileList(auditData);
+}
+
+async function renderPdfPagesAsJpegs(
+    pdfDataUrl: string,
+    maxPages: number = REPORT_PDF_MAX_PAGES_PER_FILE,
+    maxDim: number = 1400,
+    quality: number = 0.88,
+): Promise<PreparedReportImage[]> {
+    ensurePdfWorker();
+    const bytes = dataUrlToUint8Array(pdfDataUrl);
+    const pdf = await pdfjs.getDocument({ data: bytes }).promise;
+    const pageCount = Math.min(pdf.numPages, Math.max(1, maxPages));
+    const out: PreparedReportImage[] = [];
+
+    for (let pageNum = 1; pageNum <= pageCount; pageNum++) {
+        const page = await pdf.getPage(pageNum);
+        const baseViewport = page.getViewport({ scale: 1 });
+        const scale = maxDim / Math.max(baseViewport.width, baseViewport.height);
+        const viewport = page.getViewport({ scale });
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, Math.round(viewport.width));
+        canvas.height = Math.max(1, Math.round(viewport.height));
+        const ctx = canvas.getContext("2d");
+        if (!ctx) continue;
+
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        await page.render({ canvasContext: ctx, viewport }).promise;
+
+        out.push({
+            name: "",
+            context: "",
+            dataUrl: canvas.toDataURL("image/jpeg", quality),
+            format: "JPEG",
+            widthPx: canvas.width,
+            heightPx: canvas.height,
+        });
+    }
+
+    return out;
+}
+
+async function buildVisualsFromSources(
+    sources: ReportEvidenceSource[],
+    maxDim: number,
+    quality: number,
+): Promise<PreparedReportImage[]> {
+    const results: PreparedReportImage[] = [];
+
+    for (const src of sources) {
+        if (src.type.startsWith("image/")) {
+            const item = await renderCompressedJpeg(src.data, maxDim, quality);
+            results.push({
+                ...item,
+                name: src.name,
+                context: src.context,
+            });
+            continue;
+        }
+
+        if (src.type === "application/pdf") {
+            try {
+                const pages = await renderPdfPagesAsJpegs(src.data, REPORT_PDF_MAX_PAGES_PER_FILE, maxDim, quality);
+                pages.forEach((page, index) => {
+                    const pageLabel =
+                        pages.length > 1 ? `${src.name} (page ${index + 1})` : src.name;
+                    results.push({
+                        ...page,
+                        name: pageLabel,
+                        context: `${src.context} — PDF`,
+                    });
+                });
+            } catch (error) {
+                console.warn("Report PDF preview render failed", src.name, error);
+            }
+        }
+    }
+
+    return results;
 }
 
 /**
- * Resize and compress photos for PDF/Word export — sharp enough for audit evidence,
- * total size kept near REPORT_IMAGES_BUDGET_BYTES.
+ * Resize/compress photos and render PDF pages for PDF/Word export.
+ * Total size kept near REPORT_IMAGES_BUDGET_BYTES.
  */
 export async function prepareReportEvidenceImages(
     sources: ReportEvidenceSource[],
@@ -132,40 +229,22 @@ export async function prepareReportEvidenceImages(
     let maxDim = 1400;
     let quality = 0.88;
 
-    const compressAll = async () => {
-        const results: PreparedReportImage[] = [];
-        for (const src of sources) {
-            const item = await renderCompressedJpeg(src.data, maxDim, quality);
-            results.push({
-                ...item,
-                name: src.name,
-                context: src.context,
-            });
-        }
-        return results;
-    };
-
-    let prepared = await compressAll();
+    let prepared = await buildVisualsFromSources(sources, maxDim, quality);
     let total = prepared.reduce((sum, p) => sum + estimateDataUrlBytes(p.dataUrl), 0);
 
     while (total > budgetBytes && quality > 0.58) {
         quality -= 0.06;
-        prepared = await compressAll();
+        prepared = await buildVisualsFromSources(sources, maxDim, quality);
         total = prepared.reduce((sum, p) => sum + estimateDataUrlBytes(p.dataUrl), 0);
     }
 
     while (total > budgetBytes && maxDim > 880) {
         maxDim -= 120;
-        prepared = await compressAll();
+        prepared = await buildVisualsFromSources(sources, maxDim, quality);
         total = prepared.reduce((sum, p) => sum + estimateDataUrlBytes(p.dataUrl), 0);
     }
 
     return prepared;
-}
-
-export function dataUrlToUint8Array(dataUrl: string): Uint8Array {
-    const base64 = dataUrl.includes(",") ? dataUrl.split(",")[1] : dataUrl;
-    return Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
 }
 
 /** Display size in mm for jsPDF (max width ~content, preserve aspect). */

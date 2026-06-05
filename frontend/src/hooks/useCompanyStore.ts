@@ -368,6 +368,7 @@ export function useCompanyStore() {
     updateDepartment,
     deleteDepartment,
     updateCompany,
+    refetchCompanies: fetchCompanies,
     isLoading: globalLoading,
     getCompany: (id: string) => globalCompanies.find((c) => c.id === id),
   };

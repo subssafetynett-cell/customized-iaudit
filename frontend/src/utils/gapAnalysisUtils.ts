@@ -11,6 +11,9 @@ export const generatePDF = async (
     barChartRef: HTMLElement | null,
     userLogo?: string | null
 ) => {
+    // Yield once so the UI (toast/spinner) can render before heavy work begins.
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
     const doc = new jsPDF();
     const pageWidth = doc.internal.pageSize.getWidth();
     const pageHeight = doc.internal.pageSize.getHeight();
@@ -391,8 +394,12 @@ export const generatePDF = async (
         margin: { bottom: 25, top: 40 }
     });
 
-    // Save the PDF
-    doc.save(`gap-analysis-report-${analysisData.companyName.replace(/\s+/g, '-').toLowerCase()}.pdf`);
+    // Save the PDF (Blob download avoids `doc.save()` sync spikes).
+    const filename = `gap-analysis-report-${String(analysisData.companyName || "report")
+        .replace(/\s+/g, "-")
+        .toLowerCase()}.pdf`;
+    const blob = doc.output("blob");
+    saveAs(blob, filename);
 };
 
 export const generateWord = async (

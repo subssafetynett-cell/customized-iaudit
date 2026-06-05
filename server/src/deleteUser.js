@@ -2,7 +2,8 @@ import prisma from './prisma.js';
 
 /**
  * Removes a user and rows that block FK deletion (payments, subscriptions, sessions, OTP).
- * Company/site rows owned by the user are kept; their userId is nulled by the DB (ON DELETE SET NULL).
+ * Company rows owned by the user are kept (userId nulled by DB ON DELETE SET NULL).
+ * Site auditee assignments are cleared explicitly before user delete.
  */
 export async function deleteUserCompletely(userId) {
     const targetId = Number.parseInt(String(userId), 10);
@@ -38,6 +39,12 @@ export async function deleteUserCompletely(userId) {
                 auditPrograms: { set: [] },
                 auditPlans: { set: [] }
             }
+        });
+
+        // Clear auditee (or any user) site assignments before delete — same as PATCH /auditee-site.
+        await tx.site.updateMany({
+            where: { userId: targetId },
+            data: { userId: null },
         });
 
         await tx.user.delete({ where: { id: targetId } });

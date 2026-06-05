@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { useSearchParams, useNavigate } from "react-router-dom";
+import { useSearchParams, useNavigate, Navigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -154,6 +154,10 @@ export default function Users() {
             setSelectedUser(null);
         }
     }, [searchParams]);
+
+    if (searchParams.get("inviteAuditee") === "true") {
+        return <Navigate to="/invite-auditee" replace />;
+    }
 
     const fetchUsers = async () => {
         try {

@@ -496,11 +496,18 @@ const GapAnalysis = () => {
         };
 
         if (format === 'pdf') {
-            toast.promise(generatePDF(data, pieChartRef.current, barChartRef.current, userCompany?.logo), {
+            toast.promise(
+                (async () => {
+                    // Let the toast paint before PDF generation blocks the main thread.
+                    await new Promise<void>((r) => setTimeout(r, 0));
+                    await generatePDF(data, pieChartRef.current, barChartRef.current, userCompany?.logo);
+                })(),
+                {
                 loading: 'Generating PDF Report...',
                 success: 'PDF Report downloaded!',
                 error: 'Failed to generate PDF.'
-            });
+                },
+            );
         } else {
             toast.promise(generateWord(data, pieChartRef.current, barChartRef.current, userCompany?.logo), {
                 loading: 'Generating Word Report...',

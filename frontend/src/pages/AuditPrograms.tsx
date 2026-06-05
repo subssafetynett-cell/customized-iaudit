@@ -2,6 +2,8 @@ import React, { useState, useEffect } from "react";
 import { useSearchParams, useNavigate } from "react-router-dom";
 import { TopNav } from "@/components/TopNav";
 import { apiFetch } from "@/lib/api";
+import { sitesFromCompanies } from "@/lib/orgSites";
+import { isAuditeeRole, usersEligibleAsAuditors } from "@/lib/userRoles";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -209,12 +211,14 @@ const AuditPrograms = () => {
         const fetchData = async () => {
             try {
                 const user = JSON.parse(localStorage.getItem('user') || '{}');
-                const [sitesRes, usersRes, programsRes] = await Promise.all([
-                    apiFetch(`/sites?userId=${user.id}`),
+                const [sitesRes, companiesRes, usersRes, programsRes] = await Promise.all([
+                    apiFetch("/sites"),
+                    apiFetch("/companies"),
                     apiFetch(`/users?creatorId=${user.id}`),
-                    apiFetch(`/audit-programs?scope=org`)
+                    apiFetch(`/audit-programs?scope=org`),
                 ]);
                 const sitesData = sitesRes.ok ? await sitesRes.json() : [];
+                const companiesData = companiesRes.ok ? await companiesRes.json() : [];
                 let usersData = usersRes.ok ? await usersRes.json() : [];
                 const programsData = programsRes.ok ? await programsRes.json() : [];
 
@@ -228,8 +232,12 @@ const AuditPrograms = () => {
                     }
                 }
 
-                setSites(Array.isArray(sitesData) ? sitesData : []);
-                setAuditors(Array.isArray(usersData) ? usersData : []);
+                let sitesList = Array.isArray(sitesData) ? sitesData : [];
+                if (sitesList.length === 0 && Array.isArray(companiesData) && companiesData.length > 0) {
+                    sitesList = sitesFromCompanies(companiesData);
+                }
+                setSites(sitesList);
+                setAuditors(usersEligibleAsAuditors(Array.isArray(usersData) ? usersData : []));
                 setAuditPrograms(Array.isArray(programsData) ? programsData : []);
 
                 if (!sitesRes.ok || !usersRes.ok || !programsRes.ok) {
@@ -389,6 +397,33 @@ const AuditPrograms = () => {
         }
     };
 
+    const applyProgramAuditorsFromLoaded = (fullProgram: {
+        leadAuditorId?: number | null;
+        auditors?: { id: number; role?: string }[];
+    }) => {
+        const programAuditorIds = (fullProgram.auditors ?? [])
+            .filter((a) => !isAuditeeRole(a.role))
+            .map((a) => a.id.toString());
+        const leadId = fullProgram.leadAuditorId?.toString() ?? null;
+        const resolvedLeadId =
+            leadId && programAuditorIds.includes(leadId) ? leadId : programAuditorIds[0] ?? null;
+
+        setSelectedAuditors(programAuditorIds);
+        setLeadAuditorId(resolvedLeadId);
+
+        if (leadId && resolvedLeadId !== leadId) {
+            const originalLeadIsAuditee = (fullProgram.auditors ?? []).some(
+                (a) => a.id.toString() === leadId && isAuditeeRole(a.role),
+            );
+            toast.warn(
+                originalLeadIsAuditee
+                    ? "The originally assigned lead auditor is an auditee and cannot be selected. A suitable auditor has been chosen instead."
+                    : "The originally assigned lead auditor is no longer available. A suitable auditor has been chosen instead.",
+                { id: "lead-auditor-fallback-warning" },
+            );
+        }
+    };
+
     const handleEditProgram = async (program: any) => {
         const loadingToast = toast.loading("Fetching program details...");
         try {
@@ -402,8 +437,7 @@ const AuditPrograms = () => {
             setFrequency(fullProgram.frequency);
             setDuration(fullProgram.duration);
             setSelectedSite(fullProgram.siteId.toString());
-            setSelectedAuditors(fullProgram.auditors?.map((a: any) => a.id.toString()) || []);
-            setLeadAuditorId(fullProgram.leadAuditorId?.toString() || null);
+            applyProgramAuditorsFromLoaded(fullProgram);
             const loadData = fullProgram.scheduleData || {};
             const { customRows: loadedCustomRows, startDate: loadedStartDate, ...restCells } = loadData;
             setSelectedCells(restCells);
@@ -432,8 +466,7 @@ const AuditPrograms = () => {
             setFrequency(fullProgram.frequency);
             setDuration(fullProgram.duration);
             setSelectedSite(fullProgram.siteId.toString());
-            setSelectedAuditors(fullProgram.auditors?.map((a: any) => a.id.toString()) || []);
-            setLeadAuditorId(fullProgram.leadAuditorId?.toString() || null);
+            applyProgramAuditorsFromLoaded(fullProgram);
             const loadData = fullProgram.scheduleData || {};
             const { customRows: loadedCustomRows, startDate: loadedStartDate, ...restCells } = loadData;
             setSelectedCells(restCells);
@@ -674,6 +707,8 @@ const AuditPrograms = () => {
         const tableBody: any[] = [];
 
         CLAUSE_MATRIX.forEach((clause, rowIndex) => {
+            const isHeading = isClauseMatrixHeading(clause);
+            const isMainHeading = isMainClauseHeading(clause);
             if (standards.length === 1 && !isMainClauseHeading(clause)) {
                 const std = standards[0];
                 let text = "";
@@ -693,12 +728,17 @@ const AuditPrograms = () => {
                 else if (std.includes("45001")) cellText = clause.iso45001;
                 else cellText = clause.iso9001 || clause.iso14001 || clause.iso45001;
 
-                if (isClauseMatrixHeading(clause)) {
+                if (isHeading) {
                     if (index === 0) {
                         row.push({
                             content: cellText,
                             colSpan: stds.length,
-                            styles: { fillColor: [33, 56, 71], textColor: [255, 255, 255], fontStyle: 'bold', halign: 'left' }
+                            styles: {
+                                fillColor: isMainHeading ? [33, 56, 71] : [240, 240, 240],
+                                textColor: isMainHeading ? [255, 255, 255] : [33, 56, 71],
+                                fontStyle: "bold",
+                                halign: "left",
+                            },
                         });
                     }
                 } else {
@@ -710,10 +750,15 @@ const AuditPrograms = () => {
                 const key = `${rowIndex}-${colIndex}`;
                 const isSelected = program.scheduleData && program.scheduleData[key];
 
-                if (isClauseMatrixHeading(clause)) {
+                if (isHeading) {
                     row.push({
                         content: isSelected ? "X" : "",
-                        styles: { fillColor: [33, 56, 71], textColor: [255, 255, 255], fontStyle: 'bold', halign: 'center' }
+                        styles: {
+                            fillColor: isMainHeading ? [33, 56, 71] : [240, 240, 240],
+                            textColor: isMainHeading ? [255, 255, 255] : [33, 56, 71],
+                            fontStyle: "bold",
+                            halign: "center",
+                        },
                     });
                 } else {
                     row.push(isSelected ? "X" : "");
@@ -822,6 +867,8 @@ const AuditPrograms = () => {
         const bodyRows: any[] = [];
 
         CLAUSE_MATRIX.forEach((clause, rowIndex) => {
+            const isHeading = isClauseMatrixHeading(clause);
+            const isMainHeading = isMainClauseHeading(clause);
             if (standards.length === 1 && !isMainClauseHeading(clause)) {
                 const std = standards[0];
                 let text = "";
@@ -841,14 +888,20 @@ const AuditPrograms = () => {
                 else if (std.includes("45001")) cellText = clause.iso45001;
                 else cellText = clause.iso9001 || clause.iso14001 || clause.iso45001;
 
-                if (isClauseMatrixHeading(clause)) {
+                if (isHeading) {
                     if (index === 0) {
                         cells.push(new DocxTableCell({
                             children: [new Paragraph({
-                                children: [new TextRun({ text: cellText, color: "FFFFFF", bold: true })]
+                                children: [
+                                    new TextRun({
+                                        text: cellText,
+                                        color: isMainHeading ? "FFFFFF" : "213847",
+                                        bold: true,
+                                    }),
+                                ]
                             })],
                             columnSpan: stds.length,
-                            shading: { fill: "213847" }
+                            shading: { fill: isMainHeading ? "213847" : "F1F5F9" }
                         }));
                     }
                 } else {
@@ -862,10 +915,22 @@ const AuditPrograms = () => {
                 const key = `${rowIndex}-${colIndex}`;
                 const isSelected = program.scheduleData && program.scheduleData[key];
 
-                if (isClauseMatrixHeading(clause)) {
+                if (isHeading) {
                     cells.push(new DocxTableCell({
-                        children: [new Paragraph({ text: isSelected ? "X" : "", alignment: AlignmentType.CENTER, children: [new TextRun({ text: isSelected ? "X" : "", color: "FFFFFF", bold: true })] })],
-                        shading: { fill: "213847" }
+                        children: [
+                            new Paragraph({
+                                text: isSelected ? "X" : "",
+                                alignment: AlignmentType.CENTER,
+                                children: [
+                                    new TextRun({
+                                        text: isSelected ? "X" : "",
+                                        color: isMainHeading ? "FFFFFF" : "213847",
+                                        bold: true,
+                                    }),
+                                ],
+                            }),
+                        ],
+                        shading: { fill: isMainHeading ? "213847" : "F1F5F9" }
                     }));
                 } else {
                     cells.push(new DocxTableCell({
@@ -1376,11 +1441,17 @@ const AuditPrograms = () => {
                                         <SelectValue placeholder="Select site" />
                                     </SelectTrigger>
                                     <SelectContent>
-                                        {sites.map((site) => (
-                                            <SelectItem key={site.id} value={site.id.toString()}>
-                                                {site.name} ({site.company?.name})
+                                        {sites.length === 0 ? (
+                                            <SelectItem value="__none" disabled>
+                                                No sites — add a site under Companies first
                                             </SelectItem>
-                                        ))}
+                                        ) : (
+                                            sites.map((site) => (
+                                                <SelectItem key={site.id} value={site.id.toString()}>
+                                                    {site.name} ({site.company?.name ?? "Company"})
+                                                </SelectItem>
+                                            ))
+                                        )}
                                     </SelectContent>
                                 </Select>
                             </div>
@@ -1660,9 +1731,9 @@ const AuditPrograms = () => {
                                                                     className={cn(
                                                                         "text-[11px] py-3 px-4 border-r border-b border-slate-200 transition-colors align-middle",
                                                                         !isMobile && "sticky z-10",
-                                                                        isClauseMatrixHeading(clause) ? "bg-[#213847] text-white font-black uppercase tracking-wide border-[#213847]" : "font-semibold text-slate-600 bg-white group-hover:bg-slate-50",
-                                                                        !isClauseMatrixHeading(clause) && colIdx === 0 && "pl-6",
-                                                                        isMissing && !isClauseMatrixHeading(clause) && "italic text-slate-400 bg-slate-50 group-hover:bg-slate-100"
+                                                                        isMainClauseHeading(clause) ? "bg-[#213847] text-white font-black uppercase tracking-wide border-[#213847]" : "font-semibold text-slate-600 bg-white group-hover:bg-slate-50",
+                                                                        !isMainClauseHeading(clause) && colIdx === 0 && "pl-6",
+                                                                        isMissing && !isMainClauseHeading(clause) && "italic text-slate-400 bg-slate-50 group-hover:bg-slate-100"
                                                                     )}
                                                                     style={{ left: !isMobile ? `${leftOffset}px` : undefined, width: colWidth, minWidth: colWidth, maxWidth: colWidth }}
                                                                 >
@@ -1678,7 +1749,7 @@ const AuditPrograms = () => {
                                                                 <td key={`check-${colIndex}`} 
                                                                     className={cn(
                                                                         "p-1 border-b border-slate-100 align-middle",
-                                                                        isClauseMatrixHeading(clause) ? "bg-[#213847] border-[#213847]" : "bg-white"
+                                                                        isMainClauseHeading(clause) ? "bg-[#213847] border-[#213847]" : "bg-white"
                                                                     )}
                                                                 >
                                                                     <button
@@ -1689,14 +1760,14 @@ const AuditPrograms = () => {
                                                                             "w-full h-8 rounded-md border flex items-center justify-center transition-all duration-200",
                                                                             isChecked
                                                                                 ? "bg-emerald-100/80 border-emerald-400 border-2 text-emerald-600 shadow-sm shadow-emerald-500/10 hover:bg-emerald-200/80 cursor-pointer"
-                                                                                : isClauseMatrixHeading(clause)
+                                                                                : isMainClauseHeading(clause)
                                                                                     ? "bg-white/5 border-white border-2 hover:border-emerald-400 hover:bg-emerald-50/20 cursor-pointer"
                                                                                     : "bg-white border-slate-200 hover:border-emerald-400 hover:bg-emerald-50/50 cursor-pointer hover:shadow-inner"
                                                                         )}
                                                                     >
                                                                         {isChecked && (
                                                                             <div className="animate-in zoom-in-75 duration-200">
-                                                                                <Check className={cn("w-4 h-4 stroke-[4px]", isClauseMatrixHeading(clause) && "text-emerald-500")} />
+                                                                                <Check className={cn("w-4 h-4 stroke-[4px]", isMainClauseHeading(clause) && "text-emerald-500")} />
                                                                             </div>
                                                                         )}
                                                                     </button>

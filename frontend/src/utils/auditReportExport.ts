@@ -393,23 +393,33 @@ export async function generateAuditReportPdf(plan: Record<string, any>) {
         return currentY;
     };
 
+    const pdfSourceNames = new Set(
+        evidenceSources.filter((e) => e.type === "application/pdf").map((e) => e.name),
+    );
+    const renderedPdfNames = new Set(
+        pdfImages
+            .filter((img) => img.context.includes("— PDF"))
+            .map((img) => img.name.replace(/ \(page \d+\)$/i, "")),
+    );
+
     if (pdfImages.length > 0) {
-        y = section("EVIDENCE & UPLOADED IMAGES", y);
+        y = section("EVIDENCE & UPLOADED FILES", y);
         doc.setFontSize(8);
         doc.setTextColor(100, 100, 100);
         doc.text(
-            `${pdfImages.length} photo(s) attached during the audit (compressed for download, high clarity).`,
+            `${pdfImages.length} evidence file preview(s) from the audit (photos and PDF pages, compressed for download).`,
             margin,
             y
         );
         y += 8;
 
         for (const img of pdfImages) {
+            const isPdfPreview = img.context.includes("— PDF");
             const { w, h } = reportImageDisplayMm(
                 img.widthPx,
                 img.heightPx,
                 contentWidthMm,
-                85
+                isPdfPreview ? 120 : 85
             );
             y = checkPage(y, h + 14);
             doc.setFontSize(9);
@@ -431,19 +441,21 @@ export async function generateAuditReportPdf(plan: Record<string, any>) {
         }
     }
 
-    const docAttachments: { context: string; name: string }[] = [];
+    const failedPdfAttachments: { context: string; name: string }[] = [];
     for (const [key, list] of Object.entries({ ...clauseFilesForReport, ...genericFilesForReport })) {
         for (const m of list) {
-            if (m.type === "application/pdf") docAttachments.push({ context: key, name: m.name });
+            if (m.type === "application/pdf" && pdfSourceNames.has(m.name) && !renderedPdfNames.has(m.name)) {
+                failedPdfAttachments.push({ context: key, name: m.name });
+            }
         }
     }
-    if (docAttachments.length > 0) {
+    if (failedPdfAttachments.length > 0) {
         y = checkPage(y, 20);
-        y = section("ATTACHED DOCUMENTS (PDF)", y);
+        y = section("PDF FILES (COULD NOT PREVIEW)", y);
         autoTable(doc, {
             startY: y,
             head: [["Location", "File name"]],
-            body: docAttachments.map((d) => [d.context, d.name]),
+            body: failedPdfAttachments.map((d) => [d.context, d.name]),
             headStyles: { fillColor: DARK_RGB, fontSize: 8 },
             margin: { left: margin, right: margin },
             theme: "grid",
@@ -621,12 +633,12 @@ export async function generateAuditReportDocx(plan: Record<string, any>) {
     const evidenceSources = collectReportEvidenceSources(auditData);
     const wordImages = await prepareReportEvidenceImages(evidenceSources);
     if (wordImages.length > 0) {
-        children.push(heading("Evidence & Uploaded Images"));
+        children.push(heading("Evidence & Uploaded Files"));
         children.push(
             new Paragraph({
                 children: [
                     new TextRun({
-                        text: `${wordImages.length} photo(s) from the audit (optimized for download, high clarity).`,
+                        text: `${wordImages.length} evidence preview(s) from the audit (photos and PDF pages).`,
                         size: 20,
                         color: "666666",
                     }),

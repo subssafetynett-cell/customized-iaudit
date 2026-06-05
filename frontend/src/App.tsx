@@ -34,6 +34,7 @@ const ProfileSettings = lazy(() => import("./pages/ProfileSettings"));
 const AccountSettings = lazy(() => import("./pages/AccountSettings"));
 const SuperAdmin = lazy(() => import("./pages/SuperAdmin"));
 const GettingStarted = lazy(() => import("./pages/GettingStarted"));
+const InviteAuditee = lazy(() => import("./pages/InviteAuditee"));
 
 const queryClient = new QueryClient();
 
@@ -70,6 +71,7 @@ const App = () => (
               <Route path="/companies" element={<Companies />} />
               <Route path="/company/:id" element={<CompanyDetail />} />
               <Route path="/users" element={<Users />} />
+              <Route path="/invite-auditee" element={<InviteAuditee />} />
               <Route path="/audits" element={<AuditPrograms />} />
               <Route path="/audit-program" element={<AuditProgramPage />} />
               <Route path="/audit-program/create-plan" element={<CreateAuditPlanPage />} />

@@ -1,5 +1,7 @@
-import { Building2, LayoutDashboard, FileText, ClipboardCheck, BookOpen, FileCheck, BarChart3, CreditCard, ChevronRight, Users, ClipboardList, AlertTriangle, ShieldCheck, MessageSquare, Rocket } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Building2, LayoutDashboard, FileText, ClipboardCheck, BookOpen, FileCheck, BarChart3, CreditCard, ChevronRight, Users, ClipboardList, AlertTriangle, ShieldCheck, MessageSquare, Rocket, UserPlus } from "lucide-react";
 import { useLocation } from "react-router-dom";
+import { apiFetch } from "@/lib/api";
 import { NavLink } from "@/components/NavLink";
 import { cn } from "@/lib/utils";
 import { TrialSidebarBadge } from "@/components/TrialSidebarBadge";
@@ -32,6 +34,7 @@ const managementNav = [
   { title: "Audit Plan", url: "/audit-program", icon: ClipboardCheck },
   { title: "Audit", url: "/audit", icon: ClipboardList },
   { title: "Findings", url: "/audit-findings", icon: AlertTriangle },
+  { title: "Invite Auditee", url: "/invite-auditee", icon: UserPlus },
   { title: "Audit Templates", url: "/audit-templates", icon: FileText },
 ];
 
@@ -43,11 +46,34 @@ const billingNav = [
 export function AppSidebar() {
   const location = useLocation();
   const currentPath = location.pathname;
+  const [canInviteAuditee, setCanInviteAuditee] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await apiFetch("/users/invite-auditee/access");
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!cancelled) setCanInviteAuditee(data.allowed === true);
+      } catch {
+        if (!cancelled) setCanInviteAuditee(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const visibleManagementNav = managementNav.filter(
+    (item) => item.title !== "Invite Auditee" || canInviteAuditee,
+  );
 
   const isActive = (path: string) => {
     if (path === "/companies") return currentPath === "/companies" || currentPath.startsWith("/company/");
     if (path === "/getting-started") return currentPath === "/getting-started";
-    return currentPath === path;
+    const pathOnly = path.split("?")[0];
+    return currentPath === pathOnly;
   };
 
   const isSuperAdminPage = currentPath === "/super-admin";
@@ -116,7 +142,7 @@ export function AppSidebar() {
               </SidebarGroupLabel>
               <SidebarGroupContent>
                 <SidebarMenu className="gap-0.5">
-                  {managementNav.map((item) => {
+                  {visibleManagementNav.map((item) => {
                     const active = isActive(item.url);
                     return (
                       <SidebarMenuItem key={item.title}>
@@ -148,7 +174,9 @@ export function AppSidebar() {
                                             ? "tour-step-audit-nav"
                                             : item.title === "Findings"
                                               ? "tour-step-findings-nav"
-                                              : item.title === "Audit Templates"
+                                              : item.title === "Invite Auditee"
+                                                ? "tour-step-invite-auditee-nav"
+                                                : item.title === "Audit Templates"
                                                 ? "tour-step-audit-templates-nav"
                                                 : undefined
                             }

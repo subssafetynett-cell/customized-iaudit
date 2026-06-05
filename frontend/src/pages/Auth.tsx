@@ -586,8 +586,6 @@ export default function Auth() {
                     lastName: signupLastName,
                     mobile: normalizePhone10Digits(signupPhone),
                     password: signupPassword,
-                    role: 'auditor', // Default role
-                    isActive: true
                 })
             });
 

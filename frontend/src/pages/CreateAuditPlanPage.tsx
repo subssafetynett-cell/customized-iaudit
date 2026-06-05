@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { apiFetch } from "@/lib/api";
+import { usersEligibleAsAuditors } from "@/lib/userRoles";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -175,7 +176,7 @@ const CreateAuditPlanPage = () => {
                             usersList.unshift(user);
                         }
                     }
-                    setUsers(usersList);
+                    setUsers(usersEligibleAsAuditors(usersList));
                 }
             } catch (error) {
                 console.error("Failed to fetch users", error);

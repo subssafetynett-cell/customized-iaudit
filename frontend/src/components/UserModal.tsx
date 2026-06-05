@@ -23,6 +23,8 @@ interface Props {
     hideCancel?: boolean;
     /** Only org admins may assign roles or toggle account status. */
     canManageRoles?: boolean;
+    /** Pre-select role when opening create mode (e.g. auditee invite flow). */
+    defaultCreateRole?: string;
 }
 
 export default function UserModal({
@@ -34,6 +36,7 @@ export default function UserModal({
     hideOverlay = false,
     hideCancel = false,
     canManageRoles = false,
+    defaultCreateRole,
 }: Props) {
     const [firstName, setFirstName] = useState("");
     const [lastName, setLastName] = useState("");
@@ -87,7 +90,7 @@ export default function UserModal({
                 setEmail("");
                 setOriginalEmail("");
                 setMobile("");
-                setRole("auditor");
+                setRole(defaultCreateRole || "auditor");
                 setCustomRoleName("");
                 setIsActive(true);
                 setSendWelcomeEmail(true);
@@ -101,7 +104,7 @@ export default function UserModal({
             setResendTimer(0);
             setError("");
         }
-    }, [open, mode, initialData, isEditMode, isViewMode]);
+    }, [open, mode, initialData, isEditMode, isViewMode, defaultCreateRole]);
 
     const emailChangedInEdit =
         isEditMode &&
@@ -249,9 +252,14 @@ export default function UserModal({
         }
     };
 
+    const isAuditeeUser =
+        String(initialData?.role ?? "").toLowerCase() === "auditee" ||
+        defaultCreateRole === "auditee";
+
     const getTitle = () => {
-        if (isViewMode) return "User Details";
-        if (isEditMode) return "Edit User";
+        if (isViewMode) return isAuditeeUser ? "Auditee Details" : "User Details";
+        if (isEditMode) return isAuditeeUser ? "Edit Auditee" : "Edit User";
+        if (defaultCreateRole === "auditee") return "Invite Auditee";
         return "Create New User";
     };
 
@@ -263,7 +271,8 @@ export default function UserModal({
 
     const getSubmitLabel = () => {
         if (isViewMode) return "Close";
-        if (isEditMode) return "Update User";
+        if (isEditMode) return isAuditeeUser ? "Save changes" : "Update User";
+        if (defaultCreateRole === "auditee") return "Send Invite";
         return "Create User";
     };
 

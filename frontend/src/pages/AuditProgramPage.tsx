@@ -2,6 +2,7 @@ import React, { useState, useEffect } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { format } from "date-fns";
 import { apiFetch } from "@/lib/api";
+import { sitesFromCompanies } from "@/lib/orgSites";
 import { TopNav } from "@/components/TopNav";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -108,16 +109,21 @@ const AuditProgramPage = () => {
         const fetchData = async () => {
             try {
                 const user = JSON.parse(localStorage.getItem('user') || '{}');
-                const [sitesRes, programsRes, plansRes] = await Promise.all([
-                    apiFetch(`/sites?userId=${user.id}`),
+                const [sitesRes, companiesRes, programsRes, plansRes] = await Promise.all([
+                    apiFetch("/sites"),
+                    apiFetch("/companies"),
                     apiFetch(`/audit-programs?scope=org&full=true`),
-                    apiFetch(`/audit-plans?scope=org`)
+                    apiFetch(`/audit-plans?scope=org`),
                 ]);
-                const sitesData = await sitesRes.json();
-                const programsData = await programsRes.json();
-                const plansData = await plansRes.json();
+                const sitesData = sitesRes.ok ? await sitesRes.json() : [];
+                const companiesData = companiesRes.ok ? await companiesRes.json() : [];
+                const programsData = programsRes.ok ? await programsRes.json() : [];
+                const plansData = plansRes.ok ? await plansRes.json() : [];
 
-                const validSites = Array.isArray(sitesData) ? sitesData : [];
+                let validSites = Array.isArray(sitesData) ? sitesData : [];
+                if (validSites.length === 0 && Array.isArray(companiesData) && companiesData.length > 0) {
+                    validSites = sitesFromCompanies(companiesData);
+                }
                 const validPrograms = Array.isArray(programsData) ? programsData : [];
                 const validPlans = Array.isArray(plansData) ? plansData : [];
 

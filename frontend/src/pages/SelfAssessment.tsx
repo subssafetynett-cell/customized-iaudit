@@ -696,38 +696,62 @@ const SelfAssessment = () => {
         setEmail(safeEmail);
         saveToHistory(newAssessment);
 
-        // Send report as PDF email if user ticked the checkbox
+        // Send report email if user opted in (HTML summary + PDF attachment when generation succeeds)
         if (marketingConsent) {
-            generatePDF(newAssessment, true)
-                .then(async (blob) => {
-                    if (!blob) return;
-                    // Convert blob to base64
-                    const reader = new FileReader();
-                    reader.onloadend = async () => {
-                        const base64 = (reader.result as string).split(',')[1];
-                        try {
-                            await apiFetch(`/send-assessment-report`, {
-                                method: "POST",
-                                body: JSON.stringify({
-                                    to: email,
-                                    companyName,
-                                    auditorName,
-                                    auditCompany,
-                                    standard,
-                                    score,
-                                    date: newDate,
-                                    questions,
-                                    pdfBase64: base64
-                                })
-                            });
-                            toast.success("Report PDF sent to your email!");
-                        } catch {
-                            toast.error("Could not send email, but your results are saved.");
-                        }
-                    };
-                    reader.readAsDataURL(blob);
-                })
-                .catch(() => toast.error("Could not send email, but your results are saved."));
+            void (async () => {
+                let pdfBase64: string | undefined;
+                try {
+                    const blob = await generatePDF(newAssessment, true);
+                    if (blob) {
+                        pdfBase64 = await new Promise<string>((resolve, reject) => {
+                            const reader = new FileReader();
+                            reader.onloadend = () => {
+                                const result = reader.result;
+                                if (typeof result !== "string") {
+                                    reject(new Error("Failed to encode PDF"));
+                                    return;
+                                }
+                                resolve(result.split(",")[1] ?? "");
+                            };
+                            reader.onerror = () => reject(reader.error ?? new Error("Failed to read PDF"));
+                            reader.readAsDataURL(blob);
+                        });
+                    }
+                } catch (err) {
+                    console.warn("PDF generation failed; sending HTML-only report email", err);
+                }
+
+                try {
+                    const res = await apiFetch("/send-assessment-report", {
+                        method: "POST",
+                        body: JSON.stringify({
+                            to: safeEmail,
+                            companyName,
+                            auditorName,
+                            auditCompany,
+                            standard,
+                            score,
+                            date: newDate,
+                            questions,
+                            ...(pdfBase64 ? { pdfBase64 } : {}),
+                        }),
+                    });
+                    if (!res.ok) {
+                        const data = await res.json().catch(() => ({}));
+                        throw new Error(
+                            typeof data?.error === "string" ? data.error : "Failed to send report email",
+                        );
+                    }
+                    toast.success(
+                        pdfBase64
+                            ? "Report PDF sent to your email!"
+                            : "Assessment report sent to your email!",
+                    );
+                } catch (err) {
+                    console.error("Assessment report email failed", err);
+                    toast.error("Could not send email, but your results are saved.");
+                }
+            })();
         }
 
         setStep("result");

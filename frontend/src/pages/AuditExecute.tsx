@@ -75,6 +75,11 @@ import {
   sanitizeAuditEvidenceMediaMap,
   type AuditEvidenceMedia,
 } from "@/lib/evidenceImageUpload";
+import {
+  prepareReportEvidenceImages,
+  reportImageDisplayMm,
+  collectReportEvidenceSources,
+} from "@/lib/reportEvidenceImages";
 
 import { CLAUSE_MATRIX, ClauseMatrixRow } from "@/data/clauseMapping";
 
@@ -1463,22 +1468,37 @@ const AuditExecute = () => {
       }
     }
 
-    // ---- 9. Evidence & Images ----
-    const allMedia = [...Object.values(clauseFiles).flat(), ...Object.values(genericFiles).flat()];
-    if (allMedia.length > 0) {
-      y = section('9. EVIDENCE & IMAGES', y);
-      for (const m of allMedia) {
-        y = checkPage(y, 60);
-        if (m.type.startsWith('image/')) {
-          try {
-            doc.addImage(m.data, m.type.split('/')[1].toUpperCase(), margin, y, 80, 60);
-            doc.setFontSize(8); doc.setTextColor(100, 100, 100);
-            doc.text(m.name, margin, y + 63);
-            y += 70;
-          } catch (e) { console.error('PDF image embed failed', e); }
-        } else {
-          doc.setFontSize(9); doc.setTextColor(60, 60, 60);
-          doc.text(`• ${m.name} (${m.type})`, margin, y); y += 7;
+    // ---- 9. Evidence & uploaded files (images + PDF page previews) ----
+    // Use the same humanized evidence labels logic as other code paths.
+    const evidenceSources = collectReportEvidenceSources({ clauseFiles, genericFiles });
+    const evidenceVisuals = await prepareReportEvidenceImages(evidenceSources);
+    if (evidenceVisuals.length > 0) {
+      y = section("9. EVIDENCE & UPLOADED FILES", y);
+      const contentWidthMm = pageW - margin * 2;
+      for (const img of evidenceVisuals) {
+        const isPdfPreview = img.context.includes("— PDF");
+        const { w, h } = reportImageDisplayMm(
+          img.widthPx,
+          img.heightPx,
+          contentWidthMm,
+          isPdfPreview ? 120 : 85,
+        );
+        y = checkPage(y, h + 14);
+        doc.setFontSize(9);
+        doc.setFont("helvetica", "bold");
+        doc.setTextColor(33, 56, 71);
+        doc.text(`${img.context} — ${img.name}`, margin, y);
+        y += 5;
+        try {
+          doc.addImage(img.dataUrl, img.format, margin, y, w, h, undefined, "FAST");
+          y += h + 6;
+        } catch (e) {
+          console.error("PDF evidence embed failed", img.name, e);
+          doc.setFont("helvetica", "normal");
+          doc.setFontSize(8);
+          doc.setTextColor(150, 150, 150);
+          doc.text(`(Could not embed ${img.name})`, margin, y);
+          y += 8;
         }
       }
     }
@@ -1874,20 +1894,37 @@ const AuditExecute = () => {
     }
     content.push(spacer());
 
-    // 9. Evidence & Images
-    const allMediaW = [...Object.values(clauseFiles).flat(), ...Object.values(genericFiles).flat()];
-    if (allMediaW.length > 0) {
-      content.push(makeHeader('9. EVIDENCE & IMAGES'));
-      for (const m of allMediaW) {
-        if (m.type.startsWith('image/')) {
-          try {
-            const base64Data = m.data.split(',')[1];
-            const buffer = Uint8Array.from(atob(base64Data), c => c.charCodeAt(0));
-            content.push(new Paragraph({ children: [new ImageRun({ data: buffer, transformation: { width: 400, height: 300 } })] }));
-            content.push(new Paragraph({ children: [new TextRun({ text: m.name, italics: true, size: 16 })] }));
-          } catch (e) { console.error('Word image failed', e); }
-        } else {
-          content.push(new Paragraph({ children: [new TextRun({ text: `• ${m.name} (${m.type})`, size: 18 })] }));
+    // 9. Evidence & uploaded files (images + PDF page previews)
+    const evidenceSourcesWord = collectReportEvidenceSources({ clauseFiles, genericFiles });
+    const evidenceVisualsWord = await prepareReportEvidenceImages(evidenceSourcesWord);
+    if (evidenceVisualsWord.length > 0) {
+      content.push(makeHeader("9. EVIDENCE & UPLOADED FILES"));
+      for (const img of evidenceVisualsWord) {
+        content.push(
+          new Paragraph({
+            children: [new TextRun({ text: `${img.context} — ${img.name}`, bold: true, size: 20 })],
+            spacing: { before: 200, after: 100 },
+          }),
+        );
+        try {
+          const base64Data = img.dataUrl.split(",")[1];
+          const buffer = Uint8Array.from(atob(base64Data), (c) => c.charCodeAt(0));
+          const maxW = 520;
+          const aspect = img.widthPx / img.heightPx;
+          let w = maxW;
+          let h = Math.round(w / aspect);
+          if (h > 360) {
+            h = 360;
+            w = Math.round(h * aspect);
+          }
+          content.push(
+            new Paragraph({
+              children: [new ImageRun({ data: buffer, transformation: { width: w, height: h } })],
+              spacing: { after: 200 },
+            }),
+          );
+        } catch (e) {
+          console.error("Word evidence embed failed", img.name, e);
         }
       }
     }
