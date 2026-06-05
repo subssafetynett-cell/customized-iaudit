@@ -3449,23 +3449,18 @@ app.post('/users/invite-auditee', authenticateToken, async (req, res) => {
     const ln = sanitizePersonName(rawLast, PERSON_NAME_MAX) || defaults.lastName;
 
     try {
-        const site = await prisma.site.findUnique({
-            where: { id: parsedSiteId },
-            select: { id: true, userId: true },
-        });
-        if (!site) {
-            return res.status(404).json({ error: 'Site not found' });
-        }
-        if (site.userId != null) {
-            return res.status(409).json({
-                error: 'Site already assigned',
-                message:
-                    'This site is already assigned to another auditee. Unassign them or choose a different site.',
-            });
-        }
-
         const hashedPassword = await bcrypt.hash(password, 10);
         const user = await prisma.$transaction(async (tx) => {
+            const site = await tx.site.findUnique({
+                where: { id: parsedSiteId },
+                select: { id: true },
+            });
+            if (!site) {
+                const err = new Error('Site not found');
+                err.code = 'SITE_NOT_FOUND';
+                throw err;
+            }
+
             const created = await tx.user.create({
                 data: {
                     firstName: fn,
@@ -3480,10 +3475,16 @@ app.post('/users/invite-auditee', authenticateToken, async (req, res) => {
                 },
             });
 
-            await tx.site.update({
-                where: { id: parsedSiteId },
+            // Assign only if still unassigned — atomic guard against concurrent invites.
+            const assigned = await tx.site.updateMany({
+                where: { id: parsedSiteId, userId: null },
                 data: { userId: created.id },
             });
+            if (assigned.count !== 1) {
+                const err = new Error('Site already assigned');
+                err.code = 'SITE_ALREADY_ASSIGNED';
+                throw err;
+            }
 
             return created;
         });
@@ -3515,6 +3516,16 @@ app.post('/users/invite-auditee', authenticateToken, async (req, res) => {
         });
     } catch (error) {
         console.error('Error inviting auditee:', error);
+        if (error.code === 'SITE_NOT_FOUND') {
+            return res.status(404).json({ error: 'Site not found' });
+        }
+        if (error.code === 'SITE_ALREADY_ASSIGNED') {
+            return res.status(409).json({
+                error: 'Site already assigned',
+                message:
+                    'This site is already assigned to another auditee. Unassign them or choose a different site.',
+            });
+        }
         if (error.code === 'P2002') {
             return res.status(400).json({ error: 'Email already exists' });
         }
