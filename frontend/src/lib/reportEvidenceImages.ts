@@ -10,10 +10,8 @@ export const REPORT_PDF_MAX_PAGES_PER_FILE = 5;
 
 let pdfWorkerReady: Promise<void> | null = null;
 
-async function ensurePdfWorker(): Promise<void> {
-    if (pdfWorkerReady) return pdfWorkerReady;
-
-    pdfWorkerReady = (async () => {
+function initPdfWorker(): Promise<void> {
+    return (async () => {
         const workerSrc = typeof pdfjsWorker === "string" ? pdfjsWorker.trim() : "";
         if (!workerSrc) {
             throw new Error("[reportEvidenceImages] PDF.js worker URL is missing or invalid");
@@ -30,12 +28,20 @@ async function ensurePdfWorker(): Promise<void> {
         }
 
         pdfjs.GlobalWorkerOptions.workerSrc = workerSrc;
-    })().catch((err) => {
+    })();
+}
+
+async function ensurePdfWorker(): Promise<void> {
+    if (!pdfWorkerReady) {
+        pdfWorkerReady = initPdfWorker();
+    }
+
+    try {
+        await pdfWorkerReady;
+    } catch (err) {
         pdfWorkerReady = null;
         throw err;
-    });
-
-    return pdfWorkerReady;
+    }
 }
 
 export type ReportEvidenceSource = {

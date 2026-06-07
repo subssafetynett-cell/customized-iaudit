@@ -39,13 +39,16 @@ const InviteAuditee = lazy(() => import("./pages/InviteAuditee"));
 const queryClient = new QueryClient();
 
 function FindingAuditRedirect() {
-  const { auditId } = useParams<{ auditId: string }>();
+  const { auditId, findingId } = useParams<{ auditId: string; findingId: string }>();
   if (!auditId) return <Navigate to="/audit-findings" replace />;
   return (
     <Navigate
       to={`/audit/execute/${auditId}`}
       replace
-      state={{ focusFindings: true }}
+      state={{
+        focusFindings: true,
+        ...(findingId ? { focusFindingId: decodeURIComponent(findingId) } : {}),
+      }}
     />
   );
 }

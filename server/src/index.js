@@ -4922,9 +4922,11 @@ app.get('/audit-plans', authenticateToken, checkTrialExpiration, async (req, res
         // Calculate progress on backend to reduce logic on frontend and keep it consistent
         const optimizedPlans = plans.map(plan => {
             let progress = 0;
+            let auditCompleted = false;
             if (plan.auditData) {
                 const data = typeof plan.auditData === 'string' ? JSON.parse(plan.auditData) : plan.auditData;
                 progress = data.progress ?? 0;
+                auditCompleted = data.auditCompleted === true;
             }
 
             const includeData = req.query.includeData === 'true';
@@ -4934,13 +4936,15 @@ app.get('/audit-plans', authenticateToken, checkTrialExpiration, async (req, res
                 const { auditData: _, ...planWithoutData } = plan;
                 return {
                     ...planWithoutData,
-                    progress
+                    progress,
+                    auditCompleted,
                 };
             }
 
             return {
                 ...plan,
-                progress
+                progress,
+                auditCompleted,
             };
         });
 

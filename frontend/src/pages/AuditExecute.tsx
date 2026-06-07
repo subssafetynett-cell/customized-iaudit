@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { useParams, useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { apiFetch } from "@/lib/api";
 import {
@@ -69,6 +69,8 @@ import {
 } from "@/lib/auditExecuteOnboardingTour";
 import { cn } from "@/lib/utils";
 import { useAuditeeReadOnly } from "@/lib/auditeeAccess";
+import { findingIdToExecuteDomId } from "@/lib/auditFindings";
+import { computeAuditCompletionStatus } from "@/lib/auditCompletion";
 import { useAuditExecutionAutosave } from "@/hooks/useAuditExecutionAutosave";
 import { useAssigneeEmailLookup } from "@/hooks/useAssigneeEmailLookup";
 import { AssigneeEmailFields } from "@/components/AssigneeEmailFields";
@@ -199,6 +201,10 @@ const AuditExecute = () => {
   const [focusFindings, setFocusFindings] = useState<boolean>(
     location.state?.focusFindings === true
   );
+  const focusFindingId =
+    typeof location.state?.focusFindingId === "string"
+      ? location.state.focusFindingId
+      : undefined;
 
   // Use the template attached to the plan, or fallback
   const templateId = plan?.templateId;
@@ -456,6 +462,16 @@ const AuditExecute = () => {
     fetchPlanDetails();
   }, [id]);
 
+  useEffect(() => {
+    if (!focusFindingId || !plan) return;
+    const domId = findingIdToExecuteDomId(focusFindingId);
+    if (!domId) return;
+    const timer = window.setTimeout(() => {
+      document.getElementById(domId)?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }, 400);
+    return () => window.clearTimeout(timer);
+  }, [focusFindingId, plan?.id, focusFindings]);
+
   const {
     handleAssigneeEmailChange,
     getFieldError,
@@ -657,31 +673,51 @@ const AuditExecute = () => {
   } = calculateProgress();
 
   const buildAuditDataPayload = useCallback(
-    () => ({
-      checklistData,
-      sectionData,
-      clauseData,
-      previousFindings,
-      detailsOfChanges,
-      participants,
-      positiveAspects,
-      opportunities,
-      nonConformances,
-      executiveSummary,
-      summaryCounts,
-      auditFindings,
-      auditGlobalInfo,
-      processAudits,
-      extraChecklistItems,
-      showExecutiveSummary,
-      showAuditParticipants,
-      showAuditFindings,
-      lastSaved: new Date().toISOString(),
-      progress: progressValue,
-      editableChecklist,
-      clauseFiles: sanitizeAuditEvidenceMediaMap(clauseFiles),
-      genericFiles: sanitizeAuditEvidenceMediaMap(genericFiles),
-    }),
+    () => {
+      const payload = {
+        checklistData,
+        sectionData,
+        clauseData,
+        previousFindings,
+        detailsOfChanges,
+        participants,
+        positiveAspects,
+        opportunities,
+        nonConformances,
+        executiveSummary,
+        summaryCounts,
+        auditFindings,
+        auditGlobalInfo,
+        processAudits,
+        extraChecklistItems,
+        showExecutiveSummary,
+        showAuditParticipants,
+        showAuditFindings,
+        lastSaved: new Date().toISOString(),
+        progress: progressValue,
+        editableChecklist,
+        clauseFiles: sanitizeAuditEvidenceMediaMap(clauseFiles),
+        genericFiles: sanitizeAuditEvidenceMediaMap(genericFiles),
+      };
+
+      if (!plan?.id) {
+        return { ...payload, auditCompleted: false, completedAt: null };
+      }
+
+      const completion = computeAuditCompletionStatus({
+        id: plan.id,
+        auditName: plan.auditName,
+        templateId: plan.templateId,
+        findingsData: plan.findingsData,
+        auditData: payload,
+      });
+
+      return {
+        ...payload,
+        auditCompleted: completion.auditCompleted,
+        completedAt: completion.auditCompleted ? new Date().toISOString() : null,
+      };
+    },
     [
       checklistData,
       sectionData,
@@ -705,8 +741,30 @@ const AuditExecute = () => {
       editableChecklist,
       clauseFiles,
       genericFiles,
+      plan?.id,
+      plan?.auditName,
+      plan?.templateId,
+      plan?.findingsData,
     ],
   );
+
+  const auditCompletion = useMemo(() => {
+    if (!plan?.id || !template) {
+      return {
+        progress: progressValue,
+        auditCompleted: false,
+        allConformity: false,
+        openFindings: [],
+      };
+    }
+    return computeAuditCompletionStatus({
+      id: plan.id,
+      auditName: plan.auditName,
+      templateId: plan.templateId,
+      findingsData: plan.findingsData,
+      auditData: buildAuditDataPayload(),
+    });
+  }, [plan, template, buildAuditDataPayload, progressValue]);
 
   const { saveNow } = useAuditExecutionAutosave({
     planId: id,
@@ -1005,7 +1063,12 @@ const AuditExecute = () => {
       });
 
       if (res.ok) {
-        toast.success("Audit saved successfully.", { id: toastId });
+        const savedPayload = buildAuditDataPayload();
+        if (savedPayload.auditCompleted) {
+          toast.success("Audit completed — all clauses assessed and findings closed.", { id: toastId });
+        } else {
+          toast.success("Audit saved successfully.", { id: toastId });
+        }
         if (auditExecuteTourActive && auditExecuteTourStep === 5) {
           setAuditExecuteTourStep(6);
           return;
@@ -1974,8 +2037,31 @@ const AuditExecute = () => {
             >
               <ArrowLeft className="w-4 h-4" /> Back to Audit List
             </Button>
+            {auditCompletion.auditCompleted && (
+              <Badge className="bg-emerald-50 text-emerald-700 border-emerald-200 gap-1.5 px-3 py-1">
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                Audit Completed
+              </Badge>
+            )}
           </div>
         </div>
+
+        {auditCompletion.auditCompleted && (
+          <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
+            {auditCompletion.allConformity
+              ? "All clauses are marked conformity — this audit is complete."
+              : "All findings are closed — this audit is complete."}
+          </div>
+        )}
+
+        {!auditCompletion.auditCompleted &&
+          progressValue === 100 &&
+          auditCompletion.openFindings.length > 0 && (
+            <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+              All clauses are assessed. Close {auditCompletion.openFindings.length} open finding
+              {auditCompletion.openFindings.length === 1 ? "" : "s"} on the Findings page to mark this audit complete.
+            </div>
+          )}
 
         {isAuditeeReadOnly && (
           <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
@@ -2124,14 +2210,18 @@ const AuditExecute = () => {
               <div className="space-y-3">
                 <div className="flex justify-between items-end">
                   <span className="text-sm font-medium text-slate-500">
-                    Completion
+                    {auditCompletion.auditCompleted ? "Status" : "Completion"}
                   </span>
-                  <span className="text-3xl font-bold text-emerald-500 leading-none">
-                    {progressValue}%
+                  <span
+                    className={`text-3xl font-bold leading-none ${
+                      auditCompletion.auditCompleted ? "text-emerald-600" : "text-emerald-500"
+                    }`}
+                  >
+                    {auditCompletion.auditCompleted ? "Done" : `${progressValue}%`}
                   </span>
                 </div>
                 <Progress
-                  value={progressValue}
+                  value={auditCompletion.auditCompleted ? 100 : progressValue}
                   className="h-2 bg-slate-100 [&>div]:bg-emerald-500 rounded-full"
                 />
               </div>
@@ -2961,6 +3051,7 @@ const AuditExecute = () => {
               return (
                 <Card
                   key={clause.id}
+                  id={`finding-clause-${clause.id}`}
                   className="overflow-hidden border border-slate-200 shadow-sm hover:shadow-md transition-shadow"
                 >
                   {/* Header */}
@@ -3772,6 +3863,7 @@ const AuditExecute = () => {
               return (
                 <Card
                   key={audit.id}
+                  id={`finding-process-${index}`}
                   className="overflow-hidden border border-slate-200 shadow-sm hover:shadow-md transition-shadow"
                 >
                   <div className="flex items-center justify-between bg-slate-800 text-white p-4">
@@ -4196,7 +4288,10 @@ const AuditExecute = () => {
 
                       return (
                         <React.Fragment key={`${row.id}-${qIndex}`}>
-                          <TableRow className="divide-x divide-slate-100 bg-white hover:bg-slate-50/50 transition-colors">
+                          <TableRow
+                            id={`finding-checklist-${dataIndex}`}
+                            className="divide-x divide-slate-100 bg-white hover:bg-slate-50/50 transition-colors"
+                          >
                             <TableCell colSpan={isEditMode ? activeCount : activeCount} className="text-[12px] leading-relaxed py-4 px-4 align-top text-slate-800 font-medium whitespace-pre-wrap">
                               <div className="flex flex-col gap-1">
                                 <div className="flex items-center justify-between">

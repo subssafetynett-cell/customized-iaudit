@@ -152,7 +152,7 @@ function buildStructuredFindingFields(entry: {
 }
 
 
-function parseFindingsOverrides(plan: { findingsData?: unknown }) {
+export function parseFindingsOverrides(plan: { findingsData?: unknown }) {
     if (!plan.findingsData) return {};
     return typeof plan.findingsData === "string"
         ? JSON.parse(plan.findingsData)
@@ -173,6 +173,19 @@ export function mergeFindingWithOverrides(
     merged.status =
         normalizeFindingStatus(override.status) ?? resolveFindingStatus(merged);
     return merged;
+}
+
+export function getMergedPlanFindings(plan: {
+    id: number;
+    auditName?: string;
+    auditData?: unknown;
+    templateId?: string;
+    findingsData?: unknown;
+}): Finding[] {
+    const overrides = parseFindingsOverrides(plan);
+    return extractFindings(plan).map((finding) =>
+        mergeFindingWithOverrides(finding, overrides),
+    );
 }
 
 export function extractFindings(plan: {
@@ -479,6 +492,14 @@ export function extractFindings(plan: {
     return Array.from(seen.values());
 }
 
+/** Maps stored finding id (e.g. clause-5-4.1) to AuditExecute scroll target element id. */
+export function findingIdToExecuteDomId(findingId: string): string | null {
+    const match = findingId.match(/^(clause|checklist|process)-\d+-(.+)$/);
+    if (!match) return null;
+    const [, source, key] = match;
+    return `finding-${source}-${key}`;
+}
+
 export async function fetchFindingById(
     auditId: number,
     findingId: string,
@@ -515,9 +536,39 @@ export async function saveFindingOverride(updated: Finding): Promise<void> {
         },
     };
 
+    let existingAuditData: Record<string, unknown> = {};
+    try {
+        existingAuditData =
+            typeof plan.auditData === "string"
+                ? JSON.parse(plan.auditData)
+                : ((plan.auditData as Record<string, unknown>) ?? {});
+    } catch {
+        existingAuditData = {};
+    }
+
+    const completionPlan = {
+        id: plan.id,
+        auditName: plan.auditName,
+        templateId: plan.templateId,
+        findingsData: newOverrides,
+        auditData: existingAuditData,
+    };
+    const mergedFindings = getMergedPlanFindings(completionPlan);
+    const progress = Number(existingAuditData.progress ?? 0);
+    const auditCompleted =
+        progress >= 100 &&
+        (mergedFindings.length === 0 || mergedFindings.every((f) => f.status === "Closed"));
+
     const resUpdate = await apiFetch(`/audit-plans/${updated.auditId}`, {
         method: "PUT",
-        body: JSON.stringify({ findingsData: newOverrides }),
+        body: JSON.stringify({
+            findingsData: newOverrides,
+            auditData: {
+                ...existingAuditData,
+                auditCompleted,
+                completedAt: auditCompleted ? new Date().toISOString() : null,
+            },
+        }),
     });
 
     if (!resUpdate.ok) throw new Error("Failed to update");

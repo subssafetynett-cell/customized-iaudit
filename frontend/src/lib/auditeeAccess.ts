@@ -15,6 +15,7 @@ export function useAuditeeReadOnly(): boolean {
 
 const AUDITEE_EXACT_PATHS = new Set([
     "/",
+    "/companies",
     "/audits",
     "/audit-program",
     "/audit",
@@ -27,20 +28,20 @@ const AUDITEE_EXACT_PATHS = new Set([
     "/subscription/success",
 ]);
 
-const AUDITEE_PREFIX_PATHS = ["/audit/execute/", "/company/"];
+const AUDITEE_PREFIX_PATHS = ["/audit/execute/", "/audit-findings/", "/company/"];
 
 export function isPathAllowedForAuditee(pathname: string): boolean {
     if (AUDITEE_EXACT_PATHS.has(pathname)) return true;
     return AUDITEE_PREFIX_PATHS.some((prefix) => pathname.startsWith(prefix));
 }
 
-/** Sidebar items visible to auditee accounts. */
-export const AUDITEE_SIDEBAR_TITLES = new Set([
-    "Dashboard",
-    "Companies",
-    "Audit Program",
-    "Audit Plan",
-    "Audit",
-    "Findings",
-    "Feedback",
+/** Sidebar nav URLs visible to auditee accounts (matched on path, not display title). */
+export const AUDITEE_SIDEBAR_URLS = new Set([
+    "/",
+    "/companies",
+    "/audits",
+    "/audit-program",
+    "/audit",
+    "/audit-findings",
+    "/feedback",
 ]);

@@ -46,6 +46,12 @@ import {
   isTrialWelcomeDismissedForUser,
   shouldAwaitTrialWelcome,
 } from "@/lib/trialUtils";
+import {
+  getAuditAssessmentProgress,
+  getAuditPlanStatusLabel,
+  isAuditPlanCompleted,
+} from "@/lib/auditCompletion";
+import { getMergedPlanFindings } from "@/lib/auditFindings";
 
 const Index = () => {
     const navigate = useNavigate();
@@ -164,7 +170,7 @@ const Index = () => {
         const user = JSON.parse(localStorage.getItem('user') || '{}');
         const [usersRes, plansRes, programsRes] = await Promise.all([
           apiFetch(`/users?creatorId=${user.id}`),
-          apiFetch(`/audit-plans?scope=org`),
+          apiFetch(`/audit-plans?scope=org&includeData=true`),
           apiFetch(`/audit-programs?scope=org`)
         ]);
 
@@ -234,102 +240,72 @@ const Index = () => {
     { name: 'Non-Compliant (<40%)', value: gapNonCompliant, color: '#EF4444', percentage: totalGap > 0 ? `${Math.round((gapNonCompliant / totalGap) * 100)}%` : "0%" },
   ];
 
-  // Findings Calculation (Matching AuditFindings.tsx extraction logic)
-  const allFindings: any[] = [];
-  auditPlans.forEach(plan => {
-    try {
-      const auditData = typeof plan.auditData === 'string' ? JSON.parse(plan.auditData) : (plan.auditData || {});
-      const results: any[] = [];
+  // Findings across all audits (same extraction as Audit Findings page)
+  const allFindings = auditPlans.flatMap((plan) =>
+    plan.auditData && plan.id ? getMergedPlanFindings(plan) : [],
+  );
 
-      // 1. Extract from clauseData
-      if (auditData.clauseData && typeof auditData.clauseData === 'object') {
-        Object.entries(auditData.clauseData).forEach(([clauseId, entry]: any) => {
-          const ft = entry?.findingType;
-          if (!ft || ft === "C") return;
-          if (["OFI", "Minor", "Major"].includes(ft)) {
-            results.push({
-              auditId: plan.id,
-              clauseRef: `Clause ${clauseId}`,
-              type: ft
-            });
-          }
-        });
-      }
+  const totalOfi = allFindings.filter((f) => f.type === "OFI").length;
+  const totalMinor = allFindings.filter((f) => f.type === "Minor").length;
+  const totalMajor = allFindings.filter((f) => f.type === "Major").length;
+  const totalFindings = totalOfi + totalMinor + totalMajor;
 
-      // 2. Extract from checklistData
-      if (auditData.checklistData && typeof auditData.checklistData === 'object') {
-        Object.entries(auditData.checklistData).forEach(([idx, entry]: any) => {
-          const raw = entry?.findings;
-          if (!raw || raw === "C" || raw.trim() === "") return;
-
-          let type = null;
-          if (raw === "OFI") type = "OFI";
-          else if (raw === "Min" || raw === "Minor") type = "Minor";
-          else if (raw === "Maj" || raw === "Major") type = "Major";
-
-          if (type) {
-            const clauseRef = entry.clause ? `Clause ${entry.clause}` : `Item ${Number(idx) + 1}`;
-            results.push({
-              auditId: plan.id,
-              clauseRef,
-              type
-            });
-          }
-        });
-      }
-
-      // Deduplicate by (auditId, clauseRef) – keep highest severity
-      const SEVERITY: Record<string, number> = { OFI: 1, Minor: 2, Major: 3 };
-      const seen = new Map<string, any>();
-      results.forEach((f) => {
-        const key = `${f.auditId}::${f.clauseRef}`;
-        const existing = seen.get(key);
-        if (!existing || SEVERITY[f.type] > SEVERITY[existing.type]) {
-          seen.set(key, f);
-        }
-      });
-
-      allFindings.push(...Array.from(seen.values()));
-    } catch (e) {
-      console.error("Error parsing auditData for plan", plan.id, e);
-    }
-  });
-
-  const totalOfi = allFindings.filter(f => f.type === 'OFI').length;
-  const totalMinor = allFindings.filter(f => f.type === 'Minor').length;
-  const totalMajor = allFindings.filter(f => f.type === 'Major').length;
-
-  const findingsData = [
-    { name: 'OFI', value: totalOfi, color: '#f59e0b' },
-    { name: 'Minor N/C', value: totalMinor, color: '#ea580c' },
-    { name: 'Major N/C', value: totalMajor, color: '#dc2626' },
-  ].filter(f => f.value > 0);
-
-  // If no findings yet, show dummy for demo
-  const displayFindingsData = findingsData.length > 0 ? findingsData : [
-    { name: 'OFI', value: 0, color: '#f59e0b' },
-    { name: 'Minor N/C', value: 0, color: '#ea580c' },
-    { name: 'Major N/C', value: 0, color: '#dc2626' },
+  const findingDistribution = [
+    {
+      name: "OFI",
+      value: totalOfi,
+      color: "#FCD34D",
+      percentage:
+        totalFindings > 0 ? `${Math.round((totalOfi / totalFindings) * 100)}%` : "0%",
+    },
+    {
+      name: "Minor N/C",
+      value: totalMinor,
+      color: "#F97316",
+      percentage:
+        totalFindings > 0 ? `${Math.round((totalMinor / totalFindings) * 100)}%` : "0%",
+    },
+    {
+      name: "Major N/C",
+      value: totalMajor,
+      color: "#E11D48",
+      percentage:
+        totalFindings > 0 ? `${Math.round((totalMajor / totalFindings) * 100)}%` : "0%",
+    },
   ];
 
-  const getProgress = (plan: any) => {
-    if (plan.auditData) {
-      try {
-        const data = typeof plan.auditData === 'string' ? JSON.parse(plan.auditData) : plan.auditData;
-        return data.progress ?? 0;
-      } catch (e) { return 0; }
-    }
-    return 0;
-  };
+  const findingPieData = findingDistribution.filter((item) => item.value > 0);
+
+  const getProgress = (plan: { id: number; auditData?: unknown; progress?: number }) =>
+    plan.progress ?? getAuditAssessmentProgress(plan);
 
   // Upcoming audits: soonest scheduled first, excluding completed
   const upcomingAudits = [...auditPlans]
-    .filter((p) => getProgress(p) !== 100)
+    .filter((p) => !isAuditPlanCompleted(p))
     .sort((a, b) => {
       const aTime = a.date ? new Date(a.date).getTime() : Number.MAX_SAFE_INTEGER;
       const bTime = b.date ? new Date(b.date).getTime() : Number.MAX_SAFE_INTEGER;
       if (aTime !== bTime) return aTime - bTime;
       return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+    })
+    .slice(0, 5);
+
+  const completedAudits = [...auditPlans]
+    .filter((p) => isAuditPlanCompleted(p))
+    .sort((a, b) => {
+      const parseCompletedAt = (plan: (typeof auditPlans)[0]) => {
+        try {
+          const data =
+            typeof plan.auditData === "string"
+              ? JSON.parse(plan.auditData)
+              : plan.auditData;
+          if (data?.completedAt) return new Date(data.completedAt).getTime();
+        } catch {
+          /* ignore */
+        }
+        return new Date(plan.updatedAt).getTime();
+      };
+      return parseCompletedAt(b) - parseCompletedAt(a);
     })
     .slice(0, 5);
 
@@ -377,14 +353,10 @@ const Index = () => {
   ];
 
   // Status Calculations
-  const totalScheduledCount = auditPlans.filter(p => !p.auditData || getProgress(p) === 0).length;
-  const totalCompletedCount = auditPlans.filter(p => getProgress(p) === 100).length;
-
-  const findingDistribution = [
-    { name: 'OFI', value: totalOfi, color: '#FCD34D', percentage: totalOfi + totalMinor + totalMajor > 0 ? `${Math.round((totalOfi / (totalOfi + totalMinor + totalMajor)) * 100)}%` : "0%" },
-    { name: 'Minor N/C', value: totalMinor, color: '#F97316', percentage: totalOfi + totalMinor + totalMajor > 0 ? `${Math.round((totalMinor / (totalOfi + totalMinor + totalMajor)) * 100)}%` : "0%" },
-    { name: 'Major N/C', value: totalMajor, color: '#E11D48', percentage: totalOfi + totalMinor + totalMajor > 0 ? `${Math.round((totalMajor / (totalOfi + totalMinor + totalMajor)) * 100)}%` : "0%" },
-  ];
+  const totalScheduledCount = auditPlans.filter(
+    (p) => !isAuditPlanCompleted(p) && getProgress(p) === 0,
+  ).length;
+  const totalCompletedCount = auditPlans.filter((p) => isAuditPlanCompleted(p)).length;
 
   // Dynamic Trend Data: Show months from Jan to July
   const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -401,7 +373,7 @@ const Index = () => {
     return {
       month: monthName,
       scheduled: auditsInMonth.length,
-      completed: auditsInMonth.filter(p => getProgress(p) === 100).length
+      completed: auditsInMonth.filter((p) => isAuditPlanCompleted(p)).length,
     };
   });
 
@@ -562,7 +534,7 @@ const Index = () => {
               {upcomingAudits.length > 0 ? (
                 upcomingAudits.map((plan, idx) => {
                   const progress = getProgress(plan);
-                  const status = progress === 100 ? "Completed" : progress > 0 ? "In Progress" : "Planned";
+                  const status = getAuditPlanStatusLabel(plan);
                   const leadAuditorName = plan.leadAuditor
                     ? `${plan.leadAuditor.firstName} ${plan.leadAuditor.lastName}`
                     : plan.leadAuditorEmail || "Unknown Auditor";
@@ -600,63 +572,145 @@ const Index = () => {
               )}
             </div>
           </Card>
+
+          {/* Completed Audits */}
+          <Card className="lg:col-span-12 border-none shadow-sm rounded-xl bg-white p-6">
+            <div className="flex items-center justify-between mb-6">
+              <div>
+                <h2 className="text-lg font-bold text-[#111827]">Completed Audits</h2>
+                <p className="text-xs text-[#9CA3AF]">
+                  Audits where all clauses are assessed and findings are closed
+                </p>
+              </div>
+            </div>
+
+            <div className="space-y-4">
+              {completedAudits.length > 0 ? (
+                completedAudits.map((plan) => {
+                  const leadAuditorName = plan.leadAuditor
+                    ? `${plan.leadAuditor.firstName} ${plan.leadAuditor.lastName}`
+                    : "Unknown Auditor";
+                  return (
+                    <div
+                      key={plan.id}
+                      className="flex items-center justify-between p-3 rounded-xl hover:bg-slate-50 transition-colors group cursor-pointer"
+                      onClick={() => navigate(`/audit/execute/${plan.id}`, { state: { plan } })}
+                    >
+                      <div className="flex items-center gap-4">
+                        <div className="w-10 h-10 rounded-full bg-emerald-100 flex items-center justify-center text-emerald-600">
+                          <ClipboardCheck className="w-5 h-5" />
+                        </div>
+                        <div>
+                          <h4 className="text-sm font-semibold text-[#111827] line-clamp-1">
+                            {plan.auditName || plan.auditType}
+                          </h4>
+                          <p className="text-[11px] font-medium text-[#9CA3AF]">{leadAuditorName}</p>
+                        </div>
+                      </div>
+                      <Badge className="bg-emerald-50 text-emerald-700 border-none px-2.5 py-1 text-[10px] font-bold rounded-full">
+                        Completed
+                      </Badge>
+                    </div>
+                  );
+                })
+              ) : (
+                <div className="flex flex-col items-center justify-center py-10 text-center">
+                  <div className="w-12 h-12 rounded-full bg-slate-50 flex items-center justify-center text-slate-300 mb-3">
+                    <ClipboardCheck className="w-6 h-6" />
+                  </div>
+                  <p className="text-xs font-medium text-slate-400">
+                    Completed audits appear here when all clauses are assessed and findings are closed
+                  </p>
+                </div>
+              )}
+            </div>
+          </Card>
         </div>
 
-        {/* Finding Distribution */}
+        {/* Finding Distribution + Audit Status Overview */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
           <Card className="lg:col-span-5 border-none shadow-sm rounded-xl bg-white p-6">
             <div className="flex items-center justify-between mb-6">
               <div>
                 <h2 className="text-lg font-bold text-[#111827]">Finding Distribution</h2>
-                <p className="text-xs text-[#9CA3AF]">Audit non-conformances</p>
+                <p className="text-xs text-[#9CA3AF]">OFI, Minor and Major N/C across all audits</p>
               </div>
-              <button className="text-[#9CA3AF] hover:text-[#111827]">...</button>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="text-xs font-semibold text-emerald-700 hover:text-emerald-800"
+                onClick={() => navigate("/audit-findings")}
+              >
+                View all
+              </Button>
             </div>
 
             <div className="flex flex-col items-center justify-center py-2">
-              <div className="h-[200px] w-full relative">
-                <ResponsiveContainer width="100%" height="100%">
-                  <PieChart>
-                    <Pie
-                      data={findingDistribution}
-                      cx="50%"
-                      cy="50%"
-                      innerRadius={55}
-                      outerRadius={80}
-                      paddingAngle={5}
-                      dataKey="value"
-                      stroke="none"
-                    >
-                      {findingDistribution.map((entry, index) => (
-                        <Cell key={`cell-${index}`} fill={entry.color} />
-                      ))}
-                      <Label
-                        content={({ viewBox }) => {
-                          const { cx, cy } = viewBox as any;
-                          return (
-                            <text x={cx} y={cy} textAnchor="middle" dominantBaseline="central">
-                              <tspan x={cx} dy="-0.5em" className="fill-slate-400 text-[10px] font-semibold">Total</tspan>
-                              <tspan x={cx} dy="1.4em" className="fill-[#111827] text-2xl font-black">{totalOfi + totalMinor + totalMajor}</tspan>
-                            </text>
-                          );
-                        }}
-                      />
-                    </Pie>
-                    <RechartsTooltip />
-                  </PieChart>
-                </ResponsiveContainer>
+              <div className="h-[220px] w-full relative">
+                {totalFindings === 0 ? (
+                  <div className="h-full flex flex-col items-center justify-center text-center px-4">
+                    <div className="w-14 h-14 rounded-full bg-slate-50 flex items-center justify-center text-slate-300 mb-3">
+                      <AlertOctagon className="w-7 h-7" />
+                    </div>
+                    <p className="text-sm font-semibold text-slate-600">No findings yet</p>
+                    <p className="text-xs text-slate-400 mt-1 max-w-[240px]">
+                      Record OFI, Minor or Major N/C during audit execution to see them here.
+                    </p>
+                  </div>
+                ) : (
+                  <ResponsiveContainer width="100%" height="100%">
+                    <PieChart>
+                      <Pie
+                        data={findingPieData}
+                        cx="50%"
+                        cy="50%"
+                        innerRadius={58}
+                        outerRadius={82}
+                        paddingAngle={findingPieData.length > 1 ? 4 : 0}
+                        dataKey="value"
+                        stroke="none"
+                      >
+                        {findingPieData.map((entry, index) => (
+                          <Cell key={`finding-cell-${index}`} fill={entry.color} />
+                        ))}
+                        <Label
+                          content={({ viewBox }) => {
+                            const { cx, cy } = viewBox as { cx?: number; cy?: number };
+                            if (cx == null || cy == null) return null;
+                            return (
+                              <text x={cx} y={cy} textAnchor="middle" dominantBaseline="central">
+                                <tspan x={cx} dy="-0.5em" className="fill-slate-400 text-[10px] font-semibold">
+                                  Total
+                                </tspan>
+                                <tspan x={cx} dy="1.4em" className="fill-[#111827] text-2xl font-black">
+                                  {totalFindings}
+                                </tspan>
+                              </text>
+                            );
+                          }}
+                        />
+                      </Pie>
+                      <RechartsTooltip />
+                    </PieChart>
+                  </ResponsiveContainer>
+                )}
               </div>
 
-              <div className="w-full space-y-3 mt-6">
-                {findingDistribution.map((item, idx) => (
-                  <div key={idx} className="flex items-center justify-between group">
+              <div className="w-full space-y-3 mt-4">
+                {findingDistribution.map((item) => (
+                  <div key={item.name} className="flex items-center justify-between group">
                     <div className="flex items-center gap-2.5">
-                      <div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: item.color }} />
+                      <div
+                        className="w-2.5 h-2.5 rounded-full"
+                        style={{ backgroundColor: item.color }}
+                      />
                       <span className="text-xs font-bold text-[#6B7280]">{item.name}</span>
                     </div>
                     <div className="flex items-center gap-3">
                       <span className="text-xs font-black text-[#111827]">{item.value}</span>
-                      <span className="text-[10px] font-bold text-[#9CA3AF] w-10 text-right">{item.percentage}</span>
+                      <span className="text-[10px] font-bold text-[#9CA3AF] w-10 text-right">
+                        {item.percentage}
+                      </span>
                     </div>
                   </div>
                 ))}
@@ -664,6 +718,70 @@ const Index = () => {
             </div>
           </Card>
 
+          <Card className="lg:col-span-7 border-none shadow-sm rounded-xl bg-white p-6">
+            <div className="flex items-center justify-between mb-8">
+              <div>
+                <h2 className="text-lg font-bold text-[#111827]">Audit Status Overview</h2>
+                <p className="text-xs text-[#9CA3AF]">Monthly breakdown by status</p>
+              </div>
+              <button className="text-[#9CA3AF] hover:text-[#111827]">...</button>
+            </div>
+
+            <div className="h-[300px] w-full mt-4">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart
+                  data={trendData}
+                  margin={{ top: 20, right: 30, left: 0, bottom: 0 }}
+                  barGap={8}
+                >
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E2E8F0" />
+                  <XAxis
+                    dataKey="month"
+                    axisLine={false}
+                    tickLine={false}
+                    tick={{ fill: '#9CA3AF', fontSize: 12, fontWeight: 500 }}
+                    dy={10}
+                  />
+                  <YAxis
+                    axisLine={false}
+                    tickLine={false}
+                    tick={{ fill: '#9CA3AF', fontSize: 12, fontWeight: 500 }}
+                    ticks={chartTicks}
+                    domain={[0, chartMax]}
+                  />
+                  <RechartsTooltip
+                    cursor={{ fill: '#F8FAFC' }}
+                    contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.1)' }}
+                  />
+                  <Bar
+                    dataKey="scheduled"
+                    name="Scheduled"
+                    fill="#3BA082"
+                    radius={[4, 4, 0, 0]}
+                    barSize={40}
+                  />
+                  <Bar
+                    dataKey="completed"
+                    name="Completed"
+                    fill="#757D8A"
+                    radius={[4, 4, 0, 0]}
+                    barSize={40}
+                  />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+
+            <div className="flex items-center gap-6 mt-6">
+              <div className="flex items-center gap-2 text-xs font-bold text-[#6B7280]">
+                <div className="w-3 h-3 rounded-full bg-[#3BA082]" />
+                Scheduled
+              </div>
+              <div className="flex items-center gap-2 text-xs font-bold text-[#6B7280]">
+                <div className="w-3 h-3 rounded-full bg-[#757D8A]" />
+                Completed
+              </div>
+            </div>
+          </Card>
         </div>
 
         {/* Self Assessment & Gap Analysis Charts */}
@@ -791,73 +909,6 @@ const Index = () => {
           </Card>
         </div>
 
-        {/* Audit Status Overview */}
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-          <Card className="lg:col-span-12 border-none shadow-sm rounded-xl bg-white p-6">
-            <div className="flex items-center justify-between mb-8">
-              <div>
-                <h2 className="text-lg font-bold text-[#111827]">Audit Status Overview</h2>
-                <p className="text-xs text-[#9CA3AF]">Monthly breakdown by status</p>
-              </div>
-              <button className="text-[#9CA3AF] hover:text-[#111827]">...</button>
-            </div>
-
-            <div className="h-[300px] w-full mt-4">
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart
-                  data={trendData}
-                  margin={{ top: 20, right: 30, left: 0, bottom: 0 }}
-                  barGap={8}
-                >
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E2E8F0" />
-                  <XAxis
-                    dataKey="month"
-                    axisLine={false}
-                    tickLine={false}
-                    tick={{ fill: '#9CA3AF', fontSize: 12, fontWeight: 500 }}
-                    dy={10}
-                  />
-                  <YAxis
-                    axisLine={false}
-                    tickLine={false}
-                    tick={{ fill: '#9CA3AF', fontSize: 12, fontWeight: 500 }}
-                    ticks={chartTicks}
-                    domain={[0, chartMax]}
-                  />
-                  <RechartsTooltip
-                    cursor={{ fill: '#F8FAFC' }}
-                    contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.1)' }}
-                  />
-                  <Bar
-                    dataKey="scheduled"
-                    name="Scheduled"
-                    fill="#3BA082"
-                    radius={[4, 4, 0, 0]}
-                    barSize={40}
-                  />
-                  <Bar
-                    dataKey="completed"
-                    name="Completed"
-                    fill="#757D8A"
-                    radius={[4, 4, 0, 0]}
-                    barSize={40}
-                  />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-
-            <div className="flex items-center gap-6 mt-6">
-              <div className="flex items-center gap-2 text-xs font-bold text-[#6B7280]">
-                <div className="w-3 h-3 rounded-full bg-[#3BA082]" />
-                Scheduled
-              </div>
-              <div className="flex items-center gap-2 text-xs font-bold text-[#6B7280]">
-                <div className="w-3 h-3 rounded-full bg-[#757D8A]" />
-                Completed
-              </div>
-            </div>
-          </Card>
-        </div>
       </div>
 
       {/* Onboarding Modals */}

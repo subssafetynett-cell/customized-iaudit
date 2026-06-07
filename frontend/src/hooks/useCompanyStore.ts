@@ -6,7 +6,7 @@ import { toast } from "sonner";
 let globalCompanies: Company[] = [];
 let listeners: Array<() => void> = [];
 let isInitialized = false;
-let globalLoading = true;
+let globalLoading = false;
 let initializedUserId: string | null = null;
 
 function notify() {
@@ -58,6 +58,9 @@ async function fetchCompaniesFromApi() {
       notify();
       return;
     }
+
+    globalLoading = true;
+    notify();
 
     const response = await apiFetch(`/companies?_t=${Date.now()}`);
     if (response.ok) {

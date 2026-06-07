@@ -5,7 +5,8 @@ import { apiFetch } from "@/lib/api";
 import { NavLink } from "@/components/NavLink";
 import { cn } from "@/lib/utils";
 import { TrialSidebarBadge } from "@/components/TrialSidebarBadge";
-import { isAuditeeUser, AUDITEE_SIDEBAR_TITLES } from "@/lib/auditeeAccess";
+import { isAuditeeUser, AUDITEE_SIDEBAR_URLS } from "@/lib/auditeeAccess";
+import { useStoredUser } from "@/hooks/useStoredUser";
 
 
 import {
@@ -48,17 +49,8 @@ export function AppSidebar() {
   const location = useLocation();
   const currentPath = location.pathname;
   const [canInviteAuditee, setCanInviteAuditee] = useState(false);
-  const [isAuditee, setIsAuditee] = useState(false);
-
-  useEffect(() => {
-    try {
-      const userStr = localStorage.getItem("user");
-      const user = userStr ? JSON.parse(userStr) : null;
-      setIsAuditee(isAuditeeUser(user));
-    } catch {
-      setIsAuditee(false);
-    }
-  }, [location.pathname]);
+  const { user } = useStoredUser();
+  const isAuditee = isAuditeeUser(user as { role?: string } | null);
 
   useEffect(() => {
     let cancelled = false;
@@ -79,7 +71,8 @@ export function AppSidebar() {
   }, []);
 
   const visibleManagementNav = managementNav.filter((item) => {
-    if (isAuditee && !AUDITEE_SIDEBAR_TITLES.has(item.title)) {
+    const path = item.url.split("?")[0];
+    if (isAuditee && !AUDITEE_SIDEBAR_URLS.has(path)) {
       return false;
     }
     if (item.title === "Invite Auditee" && !canInviteAuditee) {
@@ -89,14 +82,16 @@ export function AppSidebar() {
   });
 
   const visibleDashboardNav = dashboardNav.filter((item) => {
-    if (isAuditee && item.title === "Start Onboarding") {
+    const path = item.url.split("?")[0];
+    if (isAuditee && !AUDITEE_SIDEBAR_URLS.has(path)) {
       return false;
     }
     return true;
   });
 
   const visibleBillingNav = billingNav.filter((item) => {
-    if (isAuditee && item.title === "Subscription") {
+    const path = item.url.split("?")[0];
+    if (isAuditee && !AUDITEE_SIDEBAR_URLS.has(path)) {
       return false;
     }
     return true;

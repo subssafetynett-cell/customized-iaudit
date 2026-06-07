@@ -33,7 +33,10 @@ import {
     getAuditExecuteTourStepConfig,
 } from "@/lib/auditExecuteOnboardingTour";
 import { cn } from "@/lib/utils";
-import { useAuditeeReadOnly } from "@/lib/auditeeAccess";
+import {
+  getAuditPlanStatusLabel,
+  isAuditPlanCompleted,
+} from "@/lib/auditCompletion";
 
 const AuditList = () => {
     const [auditPlans, setAuditPlans] = useState<any[]>([]);
@@ -94,7 +97,7 @@ const AuditList = () => {
         const fetchPlans = async () => {
             try {
                 const user = JSON.parse(localStorage.getItem('user') || '{}');
-                const res = await apiFetch(`/audit-plans?scope=org`);
+                const res = await apiFetch(`/audit-plans?scope=org&includeData=true`);
                 const data = await res.json();
                 setAuditPlans(Array.isArray(data) ? data : []);
             } catch (error) {
@@ -289,13 +292,14 @@ const AuditList = () => {
                                     <TableHead className="font-medium text-white h-12 py-3">Site</TableHead>
                                     <TableHead className="font-medium text-white h-12 py-3">Date & Time</TableHead>
                                     <TableHead className="font-medium text-white h-12 py-3">Lead Auditor</TableHead>
+                                    <TableHead className="font-medium text-white h-12 py-3">Status</TableHead>
                                     <TableHead className="text-right font-medium text-white h-12 py-3">Actions</TableHead>
                                 </TableRow>
                             </TableHeader>
                             <TableBody>
                                 {loading ? (
                                     <TableRow>
-                                        <TableCell colSpan={6} className="h-48 text-center">
+                                        <TableCell colSpan={7} className="h-48 text-center">
                                             <div className="flex flex-col items-center justify-center gap-3">
                                                 <div className="w-8 h-8 border-2 border-emerald-200 border-t-emerald-600 rounded-full animate-spin" />
                                                 <p className="text-sm font-medium text-slate-500">Loading audit plans...</p>
@@ -361,6 +365,25 @@ const AuditList = () => {
                                                 </TableCell>
                                                 <TableCell className="font-bold text-slate-600 py-5">
                                                     {plan.leadAuditor ? `${plan.leadAuditor.firstName} ${plan.leadAuditor.lastName}` : "-"}
+                                                </TableCell>
+                                                <TableCell className="py-5">
+                                                    {(() => {
+                                                        const status = getAuditPlanStatusLabel(plan);
+                                                        return (
+                                                            <span
+                                                                className={cn(
+                                                                    "inline-flex px-2.5 py-1 rounded-full text-[10px] font-bold",
+                                                                    status === "Completed"
+                                                                        ? "bg-emerald-50 text-emerald-700"
+                                                                        : status === "In Progress"
+                                                                          ? "bg-amber-50 text-amber-700"
+                                                                          : "bg-blue-50 text-blue-700",
+                                                                )}
+                                                            >
+                                                                {status}
+                                                            </span>
+                                                        );
+                                                    })()}
                                                 </TableCell>
                                                 <TableCell className="text-right py-5">
                                                     <div className="flex justify-end items-center gap-2 pr-2">

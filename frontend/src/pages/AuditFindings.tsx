@@ -741,9 +741,9 @@ export default function AuditFindings() {
                                                                   : "Complete finding"
                                                         }
                                                         onClick={() =>
-                                                            navigate(`/audit/execute/${finding.auditId}`, {
-                                                                state: { focusFindings: true },
-                                                            })
+                                                            navigate(
+                                                                `/audit-findings/${finding.auditId}/${encodeURIComponent(finding.id)}`,
+                                                            )
                                                         }
                                                         className="h-8 w-8 p-0 text-slate-400 hover:text-[#213847]"
                                                     >
