@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { toast } from "sonner";
-import { Mail, Lock, Eye, EyeOff, UserPlus, MapPin } from "lucide-react";
+import { Mail, Lock, Eye, EyeOff, UserPlus } from "lucide-react";
 import {
     Dialog,
     DialogContent,
@@ -13,12 +13,9 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
-    Select,
-    SelectContent,
-    SelectItem,
-    SelectTrigger,
-    SelectValue,
-} from "@/components/ui/select";
+    AuditeeSiteMultiSelect,
+    AuditeeSiteSelectionSummary,
+} from "@/components/AuditeeSiteMultiSelect";
 import { PhoneInputWithCountryCode } from "@/components/PhoneInputWithCountryCode";
 import { DEFAULT_PHONE_COUNTRY_CODE } from "@/lib/phoneCountries";
 import {
@@ -54,7 +51,7 @@ export function InviteAuditeeModal({
     const [confirmPassword, setConfirmPassword] = useState("");
     const [mobile, setMobile] = useState("");
     const [mobileCountry, setMobileCountry] = useState(DEFAULT_PHONE_COUNTRY_CODE);
-    const [siteId, setSiteId] = useState("");
+    const [siteIds, setSiteIds] = useState<string[]>([]);
     const [showPassword, setShowPassword] = useState(false);
     const [showConfirmPassword, setShowConfirmPassword] = useState(false);
     const [error, setError] = useState("");
@@ -66,7 +63,7 @@ export function InviteAuditeeModal({
         setConfirmPassword("");
         setMobile("");
         setMobileCountry(DEFAULT_PHONE_COUNTRY_CODE);
-        setSiteId("");
+        setSiteIds([]);
         setError("");
         setShowPassword(false);
         setShowConfirmPassword(false);
@@ -80,8 +77,12 @@ export function InviteAuditeeModal({
     const handleSubmit = async () => {
         setError("");
         const trimmedEmail = email.trim().toLowerCase();
-        if (!trimmedEmail || !password.trim() || !siteId) {
-            setError("Email, password, and site are required.");
+        if (!trimmedEmail || !password.trim() || siteIds.length === 0) {
+            setError("Email, password, and at least one site are required.");
+            return;
+        }
+        if (!mobile.trim()) {
+            setError("Phone number is required.");
             return;
         }
         const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -110,7 +111,7 @@ export function InviteAuditeeModal({
                     email: trimmedEmail,
                     password,
                     mobile: normalizePhone10Digits(mobile),
-                    siteId: Number(siteId),
+                    siteIds: siteIds.map((id) => Number(id)),
                     sendWelcomeEmail: true,
                 }),
             });
@@ -157,7 +158,7 @@ export function InviteAuditeeModal({
                         Invite Auditee
                     </DialogTitle>
                     <DialogDescription>
-                        Create an auditee account, assign them to a site, and email their login details.
+                        Create an auditee account, assign them to one or more sites, and email their login details.
                     </DialogDescription>
                 </DialogHeader>
 
@@ -236,31 +237,14 @@ export function InviteAuditeeModal({
                     </div>
 
                     <div className="space-y-2">
-                        <Label>Site *</Label>
-                        <Select value={siteId} onValueChange={setSiteId}>
-                            <SelectTrigger>
-                                <SelectValue placeholder="Select a site" />
-                            </SelectTrigger>
-                            <SelectContent>
-                                {sites.length === 0 ? (
-                                    <SelectItem value="__none" disabled>
-                                        No sites available — add a site under Companies first
-                                    </SelectItem>
-                                ) : (
-                                    sites.map((site) => (
-                                        <SelectItem key={site.id} value={site.id}>
-                                            <span className="flex items-center gap-2">
-                                                <MapPin className="h-3.5 w-3.5 text-slate-400 shrink-0" />
-                                                {site.name}
-                                                <span className="text-slate-400 text-xs">
-                                                    ({site.companyName})
-                                                </span>
-                                            </span>
-                                        </SelectItem>
-                                    ))
-                                )}
-                            </SelectContent>
-                        </Select>
+                        <Label>Sites *</Label>
+                        <AuditeeSiteMultiSelect
+                            sites={sites}
+                            selectedSiteIds={siteIds}
+                            onChange={setSiteIds}
+                            emptyMessage="No sites available — add a site under Companies first"
+                        />
+                        <AuditeeSiteSelectionSummary count={siteIds.length} />
                     </div>
 
                     {error ? (

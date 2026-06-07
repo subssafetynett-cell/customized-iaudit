@@ -1311,22 +1311,259 @@ async function actorCanViewUserBillingStatus(actorId, targetUserId) {
     return false;
 }
 
+async function actorIsAuditee(actorId) {
+    const actor = await prisma.user.findUnique({
+        where: { id: Number(actorId) },
+        select: { role: true },
+    });
+    return normalizeUserRole(actor?.role) === 'auditee';
+}
+
+async function getAuditeeAssignedSiteIds(auditeeId) {
+    const sites = await prisma.site.findMany({
+        where: { userId: Number(auditeeId) },
+        select: { id: true },
+    });
+    return sites.map((s) => s.id);
+}
+
+async function auditeeCanAccessSiteId(auditeeId, siteId) {
+    const parsedSiteId = Number(siteId);
+    if (!Number.isInteger(parsedSiteId) || parsedSiteId < 1) return false;
+    const site = await prisma.site.findFirst({
+        where: { id: parsedSiteId, userId: Number(auditeeId) },
+        select: { id: true },
+    });
+    return Boolean(site);
+}
+
+async function rejectIfAuditee(actorId, res, message = 'Forbidden') {
+    if (await actorIsAuditee(actorId)) {
+        res.status(403).json({ error: message });
+        return true;
+    }
+    return false;
+}
+
 async function actorCanAccessAuditProgram(actorId, program) {
     if (!program) return false;
+    if (await actorIsAuditee(actorId)) {
+        return auditeeCanAccessSiteId(actorId, program.siteId);
+    }
     if (program.userId != null && (await actorCanAccessTargetUser(actorId, program.userId))) return true;
     if (program.leadAuditorId === actorId) return true;
     if (Array.isArray(program.auditors) && program.auditors.some((a) => a.id === actorId)) return true;
     return false;
 }
 
+/** Collect all assignToEmail values nested anywhere in saved audit execution JSON. */
+function collectAssigneeEmailsFromAuditData(auditData) {
+    const emails = new Set();
+    if (auditData == null) return emails;
+
+    let data = auditData;
+    if (typeof data === 'string') {
+        try {
+            data = JSON.parse(data);
+        } catch {
+            return emails;
+        }
+    }
+    if (!data || typeof data !== 'object') return emails;
+
+    const visit = (node) => {
+        if (node == null) return;
+        if (Array.isArray(node)) {
+            node.forEach(visit);
+            return;
+        }
+        if (typeof node !== 'object') return;
+        if (typeof node.assignToEmail === 'string') {
+            const normalized = node.assignToEmail.toLowerCase().trim();
+            if (normalized) emails.add(normalized);
+        }
+        Object.values(node).forEach(visit);
+    };
+    visit(data);
+    return emails;
+}
+
+async function actorIsFindingAssignee(actorId, plan) {
+    if (!plan?.auditData) return false;
+    const actor = await prisma.user.findUnique({
+        where: { id: Number(actorId) },
+        select: { email: true },
+    });
+    if (!actor?.email) return false;
+    const actorEmail = actor.email.toLowerCase().trim();
+    return collectAssigneeEmailsFromAuditData(plan.auditData).has(actorEmail);
+}
+
+function applyFindingAssignmentToAuditData(auditData, assignment, assignToEmail, assignToName) {
+    let data = auditData;
+    if (typeof data === 'string') {
+        try {
+            data = JSON.parse(data);
+        } catch {
+            data = {};
+        }
+    }
+    if (!data || typeof data !== 'object') {
+        data = {};
+    } else {
+        data = { ...data };
+    }
+
+    const email = String(assignToEmail || '').trim();
+    const name = String(assignToName || '').trim();
+    const patch = {
+        assignToEmail: email,
+        assignToName: name,
+        assignTo: name && email ? `${name} (${email})` : name || email,
+    };
+
+    const source = String(assignment?.source || '').trim();
+    const key = assignment?.key;
+
+    if (source === 'clause' && key != null && String(key).trim()) {
+        const clauseKey = String(key);
+        data.clauseData = { ...(data.clauseData || {}) };
+        data.clauseData[clauseKey] = { ...(data.clauseData[clauseKey] || {}), ...patch };
+    } else if (source === 'checklist' && key != null && String(key).trim() !== '') {
+        const checklistKey = String(key);
+        data.checklistData = { ...(data.checklistData || {}) };
+        data.checklistData[checklistKey] = { ...(data.checklistData[checklistKey] || {}), ...patch };
+    } else if (source === 'process' && key != null && String(key).trim() !== '') {
+        const idx = Number.parseInt(String(key), 10);
+        if (!Number.isNaN(idx) && Array.isArray(data.processAudits) && data.processAudits[idx]) {
+            data.processAudits = [...data.processAudits];
+            data.processAudits[idx] = { ...data.processAudits[idx], ...patch };
+        }
+    }
+
+    return data;
+}
+
+const ASSIGNED_FINDINGS_PLAN_SELECT = {
+    id: true,
+    executionId: true,
+    auditType: true,
+    auditName: true,
+    date: true,
+    location: true,
+    createdAt: true,
+    updatedAt: true,
+    templateId: true,
+    auditProgramId: true,
+    userId: true,
+    leadAuditorId: true,
+    auditData: true,
+    findingsData: true,
+    auditProgram: {
+        select: {
+            siteId: true,
+        },
+    },
+};
+
 async function actorCanAccessAuditPlan(actorId, plan) {
     if (!plan) return false;
+    if (await actorIsAuditee(actorId)) {
+        const siteId = plan.auditProgram?.siteId ?? plan.siteId;
+        if (siteId != null && (await auditeeCanAccessSiteId(actorId, siteId))) return true;
+        if (await actorIsFindingAssignee(actorId, plan)) return true;
+        return false;
+    }
     if (plan.userId != null && (await actorCanAccessTargetUser(actorId, plan.userId))) return true;
     if (plan.userId === actorId) return true;
     if (plan.leadAuditorId === actorId) return true;
     if (Array.isArray(plan.auditors) && plan.auditors.some((a) => a.id === actorId)) return true;
     if (plan.auditProgram && await actorCanAccessAuditProgram(actorId, plan.auditProgram)) return true;
+    if (await actorIsFindingAssignee(actorId, plan)) return true;
     return false;
+}
+
+async function findUserByEmail(rawEmail) {
+    const email = String(rawEmail || '').toLowerCase().trim();
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        return { error: 'Valid email is required', status: 400 };
+    }
+
+    const user = await prisma.user.findFirst({
+        where: {
+            email: { equals: email, mode: 'insensitive' },
+        },
+        select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+        },
+    });
+
+    if (!user) {
+        return { found: false };
+    }
+
+    const name = `${user.firstName || ''} ${user.lastName || ''}`.trim() || user.email;
+    return { found: true, id: user.id, name, email: user.email };
+}
+
+async function sendFindingAssignmentEmail({
+    assignToEmail,
+    assignToName,
+    assignerName,
+    auditName,
+    findingRef,
+    findingType,
+    auditPlanId,
+}) {
+    if (!isSmtpConfigured()) {
+        console.warn('[FINDING-ASSIGN] SMTP not configured; skipping assignment email.');
+        return { sent: false, skipped: true };
+    }
+
+    const safeAssignee = escapeHtml(assignToName || assignToEmail);
+    const safeAssigner = escapeHtml(assignerName || 'A team member');
+    const safeAudit = escapeHtml(auditName || 'an audit');
+    const safeRef = escapeHtml(findingRef || 'Finding');
+    const safeType = escapeHtml(findingType || '');
+    const loginUrl = getAppLoginUrl();
+    const findingsUrl = `${String(process.env.FRONTEND_URL || 'http://localhost:8080').trim().replace(/\/$/, '')}/audit-findings`;
+
+    const subject = `${safeAssigner} assigned you an audit finding`;
+    const html = `
+        <div style="font-family: Arial, sans-serif; max-width: 560px; margin: 0 auto; color: #1e293b;">
+            <h2 style="color: #213847; margin-bottom: 8px;">Audit finding assigned to you</h2>
+            <p style="font-size: 15px; line-height: 1.6;">
+                <strong>${safeAssigner}</strong> assigned you a finding on <strong>${safeAudit}</strong>.
+                Please log in to iAudit Global and complete it.
+            </p>
+            <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px; margin: 20px 0;">
+                <p style="margin: 0 0 6px 0; font-size: 13px; color: #64748b;">Finding</p>
+                <p style="margin: 0; font-size: 15px; font-weight: bold;">${safeRef}${safeType ? ` (${safeType})` : ''}</p>
+            </div>
+            <p style="margin: 24px 0;">
+                <a href="${findingsUrl}" style="display: inline-block; background: #1e855e; color: #ffffff; text-decoration: none; padding: 12px 24px; border-radius: 8px; font-weight: bold;">
+                    View my findings
+                </a>
+            </p>
+            <p style="font-size: 13px; color: #64748b;">
+                Or sign in at <a href="${loginUrl}" style="color: #1e855e;">${loginUrl}</a>
+            </p>
+            <p style="margin-top: 24px; font-size: 11px; color: #94a3b8;">Audit plan #${Number(auditPlanId) || ''} · This is an automated message.</p>
+        </div>
+    `;
+
+    await transporter.sendMail({
+        from: getSmtpFromAddress(),
+        to: assignToEmail,
+        subject,
+        html,
+        text: `${assignerName || 'A team member'} assigned you a finding (${findingRef || 'Finding'}) on ${auditName || 'an audit'}. Please log in to our app and complete it: ${findingsUrl}`,
+    });
+
+    return { sent: true };
 }
 
 async function resolveActorOrgRootId(actorId) {
@@ -1347,7 +1584,7 @@ async function actorCanReadOrgAssessmentStore(actorId, orgRootUserId) {
     return actorIsInOrgSubtree(actorId, orgRootUserId);
 }
 
-const USER_ASSIGNABLE_ROLES = new Set(['admin', 'auditor', 'auditee', 'other']);
+const USER_ASSIGNABLE_ROLES = new Set(['admin', 'auditor', 'lead_auditor', 'other']);
 
 function normalizeUserRole(role) {
     return String(role ?? '').trim().toLowerCase();
@@ -1362,7 +1599,8 @@ async function actorCanManageOrgUsers(actorId) {
     if (!actor) return false;
     const r = normalizeUserRole(actor.role);
     if (r === 'superadmin' || r === 'admin') return true;
-    if (actor.creatorId == null) return true;
+    // Organization root (no creator) may manage users in their org; auditees never may.
+    if (actor.creatorId == null && r !== 'auditee') return true;
     return false;
 }
 
@@ -1377,10 +1615,15 @@ async function actorIsLeadAuditor(actorId) {
     return programCount > 0 || planCount > 0;
 }
 
-/** Company admin (org root / admin role) or lead auditor on an audit program/plan. */
+/** Company admin (org root / admin role), lead auditor role, or lead on an audit program/plan. */
 async function actorCanInviteAuditee(actorId) {
     if (await actorCanManageOrgUsers(actorId)) return true;
-    return actorIsLeadAuditor(actorId);
+    if (await actorIsLeadAuditor(actorId)) return true;
+    const actor = await prisma.user.findUnique({
+        where: { id: Number(actorId) },
+        select: { role: true },
+    });
+    return normalizeUserRole(actor?.role) === 'lead_auditor';
 }
 
 async function siteIdsInActorOrg(actorId) {
@@ -1399,6 +1642,105 @@ async function actorCanAssignAuditeeToSite(actorId, siteId) {
     if (Number.isNaN(parsed) || parsed < 1) return false;
     const allowed = await siteIdsInActorOrg(actorId);
     return allowed.has(parsed);
+}
+
+/** True when Site.userId references an auditee (not a legacy creator id from older site creation). */
+function siteUserIsAuditee(site) {
+    if (site?.userId == null) return false;
+    return normalizeUserRole(site.user?.role) === 'auditee';
+}
+
+function parseAuditeeSiteIds(body) {
+    const raw = body?.siteIds ?? (body?.siteId != null ? [body.siteId] : []);
+    if (!Array.isArray(raw)) return null;
+    const ids = [
+        ...new Set(
+            raw
+                .map((id) => Number.parseInt(String(id), 10))
+                .filter((id) => Number.isInteger(id) && id >= 1),
+        ),
+    ];
+    return ids.length > 0 ? ids : null;
+}
+
+async function assignAuditeeToSites(tx, auditeeId, siteIds) {
+    const sites = await tx.site.findMany({
+        where: { id: { in: siteIds } },
+        select: { id: true, userId: true, user: { select: { role: true } } },
+    });
+    if (sites.length !== siteIds.length) {
+        const err = new Error('Site not found');
+        err.code = 'SITE_NOT_FOUND';
+        throw err;
+    }
+
+    for (const site of sites) {
+        if (siteUserIsAuditee(site) && Number(site.userId) !== auditeeId) {
+            const err = new Error('Site already assigned');
+            err.code = 'SITE_ALREADY_ASSIGNED';
+            throw err;
+        }
+        if (site.userId != null && !siteUserIsAuditee(site)) {
+            await tx.site.update({
+                where: { id: site.id },
+                data: { userId: null },
+            });
+        }
+    }
+
+    await tx.site.updateMany({
+        where: { userId: auditeeId, id: { notIn: siteIds } },
+        data: { userId: null },
+    });
+
+    for (const siteId of siteIds) {
+        const assigned = await tx.site.updateMany({
+            where: { id: siteId, OR: [{ userId: null }, { userId: auditeeId }] },
+            data: { userId: auditeeId },
+        });
+        if (assigned.count !== 1) {
+            const err = new Error('Site already assigned');
+            err.code = 'SITE_ALREADY_ASSIGNED';
+            throw err;
+        }
+    }
+}
+
+async function formatAuditeeSiteLabels(siteIds) {
+    if (!siteIds.length) return [];
+    const sites = await prisma.site.findMany({
+        where: { id: { in: siteIds } },
+        select: { id: true, name: true, company: { select: { name: true } } },
+        orderBy: { name: 'asc' },
+    });
+    return sites.map((s) => `${s.name} (${s.company?.name ?? 'Company'})`);
+}
+
+/**
+ * Clear Site.userId when it still points at a non-auditee user (legacy rows stored the creator).
+ * Pass ownerUserIds to limit cleanup to one org's companies; omit for a full migration pass.
+ */
+async function clearLegacySiteUserIds(client = prisma, ownerUserIds = null) {
+    if (Array.isArray(ownerUserIds) && ownerUserIds.length === 0) return 0;
+
+    const where = { userId: { not: null } };
+    if (Array.isArray(ownerUserIds)) {
+        where.company = { userId: { in: ownerUserIds } };
+    }
+
+    const occupied = await client.site.findMany({
+        where,
+        select: { id: true, userId: true, user: { select: { role: true } } },
+    });
+    const legacyIds = occupied
+        .filter((s) => !siteUserIsAuditee(s))
+        .map((s) => s.id);
+    if (legacyIds.length === 0) return 0;
+    const result = await client.site.updateMany({
+        where: { id: { in: legacyIds } },
+        data: { userId: null },
+    });
+    return result.count;
 }
 
 function defaultAuditeeNamesFromEmail(email) {
@@ -1422,6 +1764,11 @@ async function actorCanManageAuditee(actorId, targetId) {
     if (!target || normalizeUserRole(target.role) !== 'auditee') return false;
     if (await actorCanManageOrgUsers(actorId)) return true;
     return actorCanInviteAuditee(actorId);
+}
+
+/** Per-user self assessment store — any signed-in user may read/write their own row. */
+function actorCanWriteSelfAssessmentStore(actorId) {
+    return Number.isInteger(actorId) && actorId > 0;
 }
 
 /** Gap/self assessment writes: org members except read-only auditors. */
@@ -1705,7 +2052,7 @@ function buildOrgSubtreePlanVisibilityOr(subtreeIds) {
 
 // Basic health check endpoint
 app.get('/health', (req, res) => {
-    res.json({ status: 'ok' });
+    res.status(200).json({ status: 'ok' });
 });
 
 // Root route to prevent 404
@@ -1779,6 +2126,29 @@ app.get('/companies', authenticateToken, checkTrialExpiration, async (req, res) 
             });
             console.log(`[DEBUG] Fetched ${companies.length} companies for superadmin (admin=all).`);
             return res.json(companies);
+        }
+
+        if (normalizeUserRole(viewer.role) === 'auditee') {
+            const assignedSites = await prisma.site.findMany({
+                where: { userId: actorId },
+                include: {
+                    departments: true,
+                    company: true,
+                },
+                orderBy: [{ name: 'asc' }],
+            });
+            const companyMap = new Map();
+            for (const site of assignedSites) {
+                const company = site.company;
+                if (!company) continue;
+                if (!companyMap.has(company.id)) {
+                    const { sites: _s, ...companyBase } = company;
+                    companyMap.set(company.id, { ...companyBase, sites: [] });
+                }
+                const { company: _c, ...siteRow } = site;
+                companyMap.get(company.id).sites.push(siteRow);
+            }
+            return res.json(Array.from(companyMap.values()));
         }
 
         let ownerUserIds;
@@ -1887,6 +2257,15 @@ app.get('/sites', authenticateToken, checkTrialExpiration, async (req, res) => {
     }
 
     try {
+        if (await actorIsAuditee(actorId)) {
+            const sites = await prisma.site.findMany({
+                where: { userId: actorId },
+                include: { company: true },
+                orderBy: [{ name: 'asc' }],
+            });
+            return res.json(sites);
+        }
+
         const orgRootId = await getOrgRootUserId(actorId);
         const ownerUserIds =
             orgRootId != null ? await collectOrgSubtreeUserIds(orgRootId) : [actorId];
@@ -2326,6 +2705,17 @@ function isSmtpConfigured() {
     const user = String(process.env.SMTP_USER || '').trim();
     const pass = String(process.env.SMTP_PASS || '').trim();
     return Boolean(user && pass);
+}
+
+const SMTP_FROM_DEFAULT = 'noreply@iaudit.global';
+
+/** Envelope "from" address — SMTP_USER is auth credentials and may not be an email. */
+function getSmtpFromAddress() {
+    const explicit = String(process.env.SMTP_FROM_ADDRESS || '').trim();
+    if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(explicit)) return explicit;
+    const authUser = String(process.env.SMTP_USER || '').trim();
+    if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(authUser)) return authUser;
+    return SMTP_FROM_DEFAULT;
 }
 
 function assertSmtpConfiguredForOtp() {
@@ -3195,6 +3585,10 @@ app.get('/users', authenticateToken, async (req, res) => {
             return res.status(401).json({ error: 'User not found.' });
         }
 
+        if (normalizeUserRole(viewer.role) === 'auditee') {
+            return res.json([]);
+        }
+
         const scopeAll =
             viewer.role === 'superadmin' &&
             (String(req.query.scope || '') === 'all' ||
@@ -3229,7 +3623,10 @@ app.get('/users', authenticateToken, async (req, res) => {
             return res.json([]);
         }
 
-        const whereBase = { id: { in: allowedIds } };
+        const whereBase = {
+            id: { in: allowedIds },
+            role: { not: 'auditee' },
+        };
         const where =
             filterCreatorId != null ? { ...whereBase, creatorId: filterCreatorId } : whereBase;
 
@@ -3253,6 +3650,23 @@ app.get('/users', authenticateToken, async (req, res) => {
     } catch (error) {
         console.error('Failed to fetch users:', error);
         res.status(500).json({ error: 'Failed to fetch users' });
+    }
+});
+
+app.get('/users/lookup-by-email', authenticateToken, async (req, res) => {
+    const actorId = Number(req.user?.id);
+    if (!Number.isInteger(actorId) || actorId < 1) {
+        return res.status(401).json({ error: 'Invalid session. Please log in again.' });
+    }
+    try {
+        const result = await findUserByEmail(req.query.email);
+        if (result.error) {
+            return res.status(result.status || 400).json({ error: result.error });
+        }
+        return res.json(result);
+    } catch (error) {
+        console.error('Failed to lookup user by email:', error);
+        return res.status(500).json({ error: 'Failed to lookup user' });
     }
 });
 
@@ -3394,6 +3808,84 @@ app.get('/users/invite-auditee/access', authenticateToken, async (req, res) => {
     }
 });
 
+app.get('/users/auditees', authenticateToken, async (req, res) => {
+    const actorId = Number(req.user.id);
+    if (!(await actorCanInviteAuditee(actorId))) {
+        return res.status(403).json({ error: 'Forbidden' });
+    }
+    try {
+        const orgRootId = await getOrgRootUserId(actorId);
+        const allowedIds =
+            orgRootId != null ? await collectOrgSubtreeUserIds(orgRootId) : [actorId];
+        if (allowedIds.length === 0) {
+            return res.json([]);
+        }
+
+        const auditees = await prisma.user.findMany({
+            where: {
+                id: { in: allowedIds },
+                role: 'auditee',
+            },
+            select: {
+                id: true,
+                firstName: true,
+                lastName: true,
+                email: true,
+                mobile: true,
+                role: true,
+                isActive: true,
+                emailVerifiedAt: true,
+                createdAt: true,
+            },
+            orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        });
+
+        if (auditees.length === 0) {
+            return res.json([]);
+        }
+
+        const auditeeIds = auditees.map((u) => u.id);
+        const sites = await prisma.site.findMany({
+            where: { userId: { in: auditeeIds } },
+            select: {
+                id: true,
+                name: true,
+                userId: true,
+                company: { select: { name: true } },
+            },
+            orderBy: { name: 'asc' },
+        });
+        const sitesByAuditeeId = new Map();
+        for (const site of sites) {
+            if (site.userId == null) continue;
+            const uid = Number(site.userId);
+            if (!sitesByAuditeeId.has(uid)) sitesByAuditeeId.set(uid, []);
+            sitesByAuditeeId.get(uid).push(site);
+        }
+
+        res.json(
+            auditees.map((u) => {
+                const assigned = sitesByAuditeeId.get(u.id) ?? [];
+                const siteIds = assigned.map((s) => s.id);
+                const siteLabels = assigned.map(
+                    (s) => `${s.name} (${s.company?.name ?? 'Company'})`,
+                );
+                const primary = assigned[0];
+                return {
+                    ...u,
+                    siteIds,
+                    siteLabels,
+                    siteId: primary?.id ?? null,
+                    siteLabel: siteLabels.length > 0 ? siteLabels.join(', ') : null,
+                };
+            }),
+        );
+    } catch (error) {
+        console.error('Error listing auditees:', error);
+        res.status(500).json({ error: 'Failed to list auditees' });
+    }
+});
+
 app.post('/users/invite-auditee', authenticateToken, async (req, res) => {
     const creatorId = Number(req.user.id);
     if (!(await actorCanInviteAuditee(creatorId))) {
@@ -3408,6 +3900,7 @@ app.post('/users/invite-auditee', authenticateToken, async (req, res) => {
         mobile,
         password,
         siteId,
+        siteIds: rawSiteIds,
         firstName: rawFirst,
         lastName: rawLast,
         sendWelcomeEmail,
@@ -3436,12 +3929,14 @@ app.post('/users/invite-auditee', authenticateToken, async (req, res) => {
         });
     }
 
-    const parsedSiteId = Number.parseInt(String(siteId), 10);
-    if (Number.isNaN(parsedSiteId) || parsedSiteId < 1) {
-        return res.status(400).json({ error: 'A valid site is required' });
+    const parsedSiteIds = parseAuditeeSiteIds({ siteIds: rawSiteIds, siteId });
+    if (!parsedSiteIds) {
+        return res.status(400).json({ error: 'At least one valid site is required' });
     }
-    if (!(await actorCanAssignAuditeeToSite(creatorId, parsedSiteId))) {
-        return res.status(403).json({ error: 'You cannot assign an auditee to this site' });
+    for (const sid of parsedSiteIds) {
+        if (!(await actorCanAssignAuditeeToSite(creatorId, sid))) {
+            return res.status(403).json({ error: 'You cannot assign an auditee to one or more selected sites' });
+        }
     }
 
     const defaults = defaultAuditeeNamesFromEmail(emailNorm);
@@ -3451,14 +3946,29 @@ app.post('/users/invite-auditee', authenticateToken, async (req, res) => {
     try {
         const hashedPassword = await bcrypt.hash(password, 10);
         const user = await prisma.$transaction(async (tx) => {
-            const site = await tx.site.findUnique({
-                where: { id: parsedSiteId },
-                select: { id: true },
+            const sites = await tx.site.findMany({
+                where: { id: { in: parsedSiteIds } },
+                select: { id: true, userId: true, user: { select: { role: true } } },
             });
-            if (!site) {
+            if (sites.length !== parsedSiteIds.length) {
                 const err = new Error('Site not found');
                 err.code = 'SITE_NOT_FOUND';
                 throw err;
+            }
+            for (const site of sites) {
+                if (siteUserIsAuditee(site)) {
+                    const err = new Error('Site already assigned');
+                    err.code = 'SITE_ALREADY_ASSIGNED';
+                    throw err;
+                }
+            }
+            for (const site of sites) {
+                if (site.userId != null) {
+                    await tx.site.update({
+                        where: { id: site.id },
+                        data: { userId: null },
+                    });
+                }
             }
 
             const created = await tx.user.create({
@@ -3475,16 +3985,7 @@ app.post('/users/invite-auditee', authenticateToken, async (req, res) => {
                 },
             });
 
-            // Assign only if still unassigned — atomic guard against concurrent invites.
-            const assigned = await tx.site.updateMany({
-                where: { id: parsedSiteId, userId: null },
-                data: { userId: created.id },
-            });
-            if (assigned.count !== 1) {
-                const err = new Error('Site already assigned');
-                err.code = 'SITE_ALREADY_ASSIGNED';
-                throw err;
-            }
+            await assignAuditeeToSites(tx, created.id, parsedSiteIds);
 
             return created;
         });
@@ -3506,10 +4007,13 @@ app.post('/users/invite-auditee', authenticateToken, async (req, res) => {
             console.error('Failed to send auditee invite email:', otpErr);
         }
 
+        const siteLabels = await formatAuditeeSiteLabels(parsedSiteIds);
         const { password: _, ...userWithoutPassword } = user;
         res.status(201).json({
             ...userWithoutPassword,
-            siteId: parsedSiteId,
+            siteIds: parsedSiteIds,
+            siteLabels,
+            siteId: parsedSiteIds[0] ?? null,
             emailVerificationPending: true,
             verificationEmailSent,
             welcomeEmailSent,
@@ -3523,7 +4027,7 @@ app.post('/users/invite-auditee', authenticateToken, async (req, res) => {
             return res.status(409).json({
                 error: 'Site already assigned',
                 message:
-                    'This site is already assigned to another auditee. Unassign them or choose a different site.',
+                    'One or more selected sites are already assigned to another auditee. Unassign them or choose different sites.',
             });
         }
         if (error.code === 'P2002') {
@@ -3543,40 +4047,40 @@ app.patch('/users/:id/auditee-site', authenticateToken, async (req, res) => {
         return res.status(403).json({ error: 'Forbidden' });
     }
 
-    const parsedSiteId = Number.parseInt(String(req.body?.siteId ?? ''), 10);
-    if (Number.isNaN(parsedSiteId) || parsedSiteId < 1) {
-        return res.status(400).json({ error: 'A valid site is required' });
+    const parsedSiteIds = parseAuditeeSiteIds(req.body);
+    if (!parsedSiteIds) {
+        return res.status(400).json({ error: 'At least one valid site is required' });
     }
-    if (!(await actorCanAssignAuditeeToSite(actorId, parsedSiteId))) {
-        return res.status(403).json({ error: 'You cannot assign an auditee to this site' });
+    for (const sid of parsedSiteIds) {
+        if (!(await actorCanAssignAuditeeToSite(actorId, sid))) {
+            return res.status(403).json({ error: 'You cannot assign an auditee to one or more selected sites' });
+        }
     }
 
     try {
-        const site = await prisma.site.findUnique({
-            where: { id: parsedSiteId },
-            include: { company: { select: { name: true } } },
-        });
-        if (!site) {
-            return res.status(404).json({ error: 'Site not found' });
-        }
-
         await prisma.$transaction(async (tx) => {
-            await tx.site.updateMany({
-                where: { userId: targetId },
-                data: { userId: null },
-            });
-            await tx.site.update({
-                where: { id: parsedSiteId },
-                data: { userId: targetId },
-            });
+            await assignAuditeeToSites(tx, targetId, parsedSiteIds);
         });
 
+        const siteLabels = await formatAuditeeSiteLabels(parsedSiteIds);
         res.json({
-            siteId: parsedSiteId,
-            siteLabel: `${site.name} (${site.company.name})`,
+            siteIds: parsedSiteIds,
+            siteLabels,
+            siteId: parsedSiteIds[0] ?? null,
+            siteLabel: siteLabels.join(', ') || null,
         });
     } catch (error) {
         console.error('Error assigning auditee site:', error);
+        if (error.code === 'SITE_NOT_FOUND') {
+            return res.status(404).json({ error: 'Site not found' });
+        }
+        if (error.code === 'SITE_ALREADY_ASSIGNED') {
+            return res.status(409).json({
+                error: 'Site already assigned',
+                message:
+                    'One or more selected sites are already assigned to another auditee. Unassign them or choose different sites.',
+            });
+        }
         res.status(500).json({ error: 'Failed to assign site' });
     }
 });
@@ -3639,7 +4143,7 @@ app.post('/users', authenticateToken, async (req, res) => {
 
         let verificationEmailSent = false;
         let welcomeEmailSent = false;
-        const inviteEmailOptions = sendWelcomeEmail
+        const inviteEmailOptions = sendWelcomeEmail !== false
             ? { welcomeCredentials: { firstName: fn, lastName: ln, password } }
             : {};
         try {
@@ -3649,7 +4153,7 @@ app.post('/users', authenticateToken, async (req, res) => {
                 inviteEmailOptions
             );
             verificationEmailSent = emailTransmitted === true;
-            welcomeEmailSent = Boolean(sendWelcomeEmail && verificationEmailSent);
+            welcomeEmailSent = Boolean(sendWelcomeEmail !== false && verificationEmailSent);
         } catch (otpErr) {
             console.error('Failed to send invite onboarding email:', otpErr);
         }
@@ -4046,13 +4550,18 @@ app.get('/audit-programs', authenticateToken, checkTrialExpiration, async (req, 
 
     try {
         const actorId = req.user.id;
+        let programWhere;
+
+        if (await actorIsAuditee(actorId)) {
+            const siteIds = await getAuditeeAssignedSiteIds(actorId);
+            programWhere = siteIds.length > 0 ? { siteId: { in: siteIds } } : { id: -1 };
+        } else {
         const useOrgScope =
             String(req.query.scope || '') === 'org' ||
             !userId ||
             userId === 'undefined' ||
             userId === 'null';
 
-        let programWhere;
         if (useOrgScope && req.user.role !== 'superadmin') {
             const orgRootId = await resolveActorOrgRootId(actorId);
             if (!(await actorCanReadOrgAssessmentStore(actorId, orgRootId))) {
@@ -4088,6 +4597,7 @@ app.get('/audit-programs', authenticateToken, checkTrialExpiration, async (req, 
                     { user: { is: { creatorId: effectiveAdminId } } }
                 ]
             };
+        }
         }
 
         const programs = await prisma.auditProgram.findMany({
@@ -4176,6 +4686,9 @@ app.post('/audit-programs', authenticateToken, checkTrialExpiration, async (req,
     const { name, isoStandard, frequency, duration, siteId, auditorIds, leadAuditorId, scheduleData, userId } = req.body;
     try {
         const actorId = req.user.id;
+        if (await rejectIfAuditee(actorId, res, 'Auditees cannot create audit programs')) {
+            return;
+        }
         const ownerId = userId != null ? Number.parseInt(String(userId), 10) : actorId;
         if (Number.isNaN(ownerId)) {
             return res.status(400).json({ error: 'Invalid userId' });
@@ -4307,6 +4820,13 @@ app.get('/audit-plans', authenticateToken, checkTrialExpiration, async (req, res
 
         if (!superAll) {
             const actorId = req.user.id;
+
+            if (await actorIsAuditee(actorId)) {
+                const siteIds = await getAuditeeAssignedSiteIds(actorId);
+                whereClause.auditProgram = {
+                    is: siteIds.length > 0 ? { siteId: { in: siteIds } } : { siteId: -1 },
+                };
+            } else {
             const useOrgScope =
                 String(req.query.scope || '') === 'org' ||
                 !userId ||
@@ -4345,6 +4865,7 @@ app.get('/audit-plans', authenticateToken, checkTrialExpiration, async (req, res
                     { auditProgram: { is: { auditors: { some: { id: uId } } } } }
                 ];
             }
+            }
         }
 
         const plans = await prisma.auditPlan.findMany({
@@ -4362,8 +4883,10 @@ app.get('/audit-plans', authenticateToken, checkTrialExpiration, async (req, res
                 templateId: true,
                 auditProgramId: true,
                 userId: true,
+                leadAuditorId: true,
                 // We fetch auditData only to calculate progress on server
                 auditData: true,
+                findingsData: true,
                 leadAuditor: {
                     select: {
                         id: true,
@@ -4538,6 +5061,11 @@ app.put('/audit-plans/:id', authenticateToken, checkTrialExpiration, async (req,
         if (!(await actorCanAccessAuditPlan(req.user.id, existing))) {
             return res.status(403).json({ error: 'Forbidden' });
         }
+        if (await actorIsAuditee(Number(req.user.id))) {
+            return res.status(403).json({
+                error: 'Auditees can view and download audits only',
+            });
+        }
 
         const updateData = {};
         if (auditType !== undefined) updateData.auditType = auditType;
@@ -4573,11 +5101,139 @@ app.put('/audit-plans/:id', authenticateToken, checkTrialExpiration, async (req,
     }
 });
 
+app.get('/assigned-audit-findings', authenticateToken, checkTrialExpiration, async (req, res) => {
+    const actorId = Number(req.user?.id);
+    try {
+        const actor = await prisma.user.findUnique({
+            where: { id: actorId },
+            select: { email: true },
+        });
+        if (!actor?.email) {
+            return res.json([]);
+        }
+
+        const actorEmail = actor.email.toLowerCase().trim();
+        const isAuditee = await actorIsAuditee(actorId);
+        const auditeeSiteIds = isAuditee ? await getAuditeeAssignedSiteIds(actorId) : null;
+
+        const plans = await prisma.auditPlan.findMany({
+            where: { auditData: { not: null } },
+            select: ASSIGNED_FINDINGS_PLAN_SELECT,
+            orderBy: { updatedAt: 'desc' },
+        });
+
+        const assignedPlans = plans.filter((plan) => {
+            if (!collectAssigneeEmailsFromAuditData(plan.auditData).has(actorEmail)) {
+                return false;
+            }
+            if (isAuditee && auditeeSiteIds) {
+                const siteId = plan.auditProgram?.siteId;
+                return siteId != null && auditeeSiteIds.includes(Number(siteId));
+            }
+            return true;
+        });
+
+        res.json(assignedPlans);
+    } catch (error) {
+        console.error('Failed to fetch assigned audit findings:', error);
+        res.status(500).json({ error: 'Failed to fetch assigned findings' });
+    }
+});
+
+app.post('/audit-plans/:id/notify-finding-assignment', authenticateToken, checkTrialExpiration, async (req, res) => {
+    const planId = Number.parseInt(req.params.id, 10);
+    if (Number.isNaN(planId)) {
+        return res.status(400).json({ error: 'Invalid audit plan id' });
+    }
+
+    const { assignToEmail, assignToName, findingRef, findingType, assignment } = req.body || {};
+    const actorId = Number(req.user?.id);
+
+    try {
+        const existing = await prisma.auditPlan.findUnique({
+            where: { id: planId },
+            include: {
+                auditors: true,
+                auditProgram: { include: { auditors: true, leadAuditor: true } },
+            },
+        });
+        if (!existing) return res.status(404).json({ error: 'Audit plan not found' });
+        if (!(await actorCanAccessAuditPlan(actorId, existing))) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
+
+        const lookup = await findUserByEmail(assignToEmail);
+        if (lookup.error) {
+            return res.status(lookup.status || 400).json({ error: lookup.error });
+        }
+        if (!lookup.found) {
+            return res.status(404).json({ error: 'User does not exist. Please create the user.' });
+        }
+
+        const resolvedName = assignToName || lookup.name;
+        let persistedAuditData = existing.auditData;
+        if (assignment?.source && assignment?.key != null) {
+            persistedAuditData = applyFindingAssignmentToAuditData(
+                existing.auditData,
+                assignment,
+                lookup.email,
+                resolvedName,
+            );
+            await prisma.auditPlan.update({
+                where: { id: planId },
+                data: {
+                    auditData: sanitizeAuditDataPayload(persistedAuditData),
+                    updatedAt: new Date(),
+                },
+            });
+        }
+
+        const assigner = await prisma.user.findUnique({
+            where: { id: actorId },
+            select: { firstName: true, lastName: true, email: true },
+        });
+        const assignerName =
+            `${assigner?.firstName || ''} ${assigner?.lastName || ''}`.trim() ||
+            assigner?.email ||
+            'A team member';
+
+        const result = await sendFindingAssignmentEmail({
+            assignToEmail: lookup.email,
+            assignToName: resolvedName,
+            assignerName,
+            auditName: existing.auditName,
+            findingRef,
+            findingType,
+            auditPlanId: planId,
+        });
+
+        return res.json({
+            ok: true,
+            notified: result.sent === true,
+            persisted: Boolean(assignment?.source && assignment?.key != null),
+            assignee: { id: lookup.id, name: lookup.name, email: lookup.email },
+        });
+    } catch (error) {
+        console.error('Failed to notify finding assignment:', error);
+        return res.status(500).json({ error: 'Failed to send assignment notification' });
+    }
+});
+
 // --- Organization-scoped gap analysis & self assessment (not blocked by trial expiry) ---
 
 app.get('/gap-analyses', authenticateToken, async (req, res) => {
     try {
         const actorId = Number(req.user.id);
+        if (await actorIsAuditee(actorId)) {
+            return res.json({
+                userId: actorId,
+                orgRootUserId: actorId,
+                analyses: [],
+                draft: null,
+                updatedAt: null,
+                canWrite: false,
+            });
+        }
         const { userId, analyses, draft, row } = await ensureUserGapAnalysisStore(actorId);
         res.json({
             userId,
@@ -4655,6 +5311,16 @@ app.delete('/gap-analyses/:externalId', authenticateToken, async (req, res) => {
 app.get('/self-assessments', authenticateToken, async (req, res) => {
     try {
         const actorId = Number(req.user.id);
+        if (await actorIsAuditee(actorId)) {
+            return res.json({
+                userId: actorId,
+                orgRootUserId: actorId,
+                assessments: [],
+                draft: null,
+                updatedAt: null,
+                canWrite: false,
+            });
+        }
         const { userId, assessments, draft, row } = await ensureUserSelfAssessmentStore(actorId);
         res.json({
             userId,
@@ -4662,7 +5328,7 @@ app.get('/self-assessments', authenticateToken, async (req, res) => {
             assessments,
             draft,
             updatedAt: row.updatedAt,
-            canWrite: await actorCanWriteOrgAssessmentStore(actorId),
+            canWrite: actorCanWriteSelfAssessmentStore(actorId),
         });
     } catch (error) {
         console.error('Error loading self assessments:', error);
@@ -4673,8 +5339,8 @@ app.get('/self-assessments', authenticateToken, async (req, res) => {
 app.put('/self-assessments', authenticateToken, async (req, res) => {
     try {
         const actorId = Number(req.user.id);
-        if (!(await actorCanWriteOrgAssessmentStore(actorId))) {
-            return res.status(403).json({ error: 'Forbidden', message: 'Read-only role cannot modify self assessments.' });
+        if (!actorCanWriteSelfAssessmentStore(actorId)) {
+            return res.status(403).json({ error: 'Forbidden', message: 'Cannot modify self assessments.' });
         }
         await ensureUserSelfAssessmentStore(actorId);
         const { assessments, draft } = req.body ?? {};
@@ -4712,7 +5378,7 @@ app.put('/self-assessments', authenticateToken, async (req, res) => {
 app.delete('/self-assessments/:externalId', authenticateToken, async (req, res) => {
     try {
         const actorId = Number(req.user.id);
-        if (!(await actorCanWriteOrgAssessmentStore(actorId))) {
+        if (!actorCanWriteSelfAssessmentStore(actorId)) {
             return res.status(403).json({ error: 'Forbidden' });
         }
         const { assessments } = await ensureUserSelfAssessmentStore(actorId);
@@ -4790,7 +5456,7 @@ app.get('/user-persisted/self-assessments', authenticateToken, async (req, res) 
 app.put('/user-persisted/self-assessments', authenticateToken, async (req, res) => {
     try {
         const actorId = Number(req.user.id);
-        if (!(await actorCanWriteOrgAssessmentStore(actorId))) {
+        if (!actorCanWriteSelfAssessmentStore(actorId)) {
             return res.status(403).json({ error: 'Forbidden' });
         }
         await ensureUserSelfAssessmentStore(actorId);
@@ -4916,14 +5582,13 @@ app.post('/send-assessment-report', authenticateToken, async (req, res) => {
         const scoreColor = percentage >= 70 ? '#16a34a' : percentage >= 40 ? '#d97706' : '#dc2626';
         const stage = score >= 38 ? 'Mature Stage' : score >= 25 ? 'Moderate Stage' : 'Early Stage';
 
-        const smtpFrom = String(process.env.SMTP_USER || 'noreply@iaudit.global').trim();
         if (!isSmtpConfigured()) {
             console.error('[assessment-report] SMTP_USER and SMTP_PASS must both be set to send report emails.');
             return res.status(503).json({ error: 'Email service is not configured. Please contact your administrator.' });
         }
 
         const mailOptions = {
-            from: { name: 'iAudit Global', address: smtpFrom },
+            from: { name: 'iAudit Global', address: getSmtpFromAddress() },
             to,
             subject: `Your ${escapeHtml(standard)} Self Assessment Report — ${escapeHtml(companyName)}`,
             html: `
@@ -4981,8 +5646,11 @@ app.post('/send-assessment-report', authenticateToken, async (req, res) => {
             }];
         }
 
-        await transporter.sendMail(mailOptions);
-        console.log(`Assessment report sent to ${to}`);
+        // Fire-and-forget: report is already saved client-side; do not block on SMTP latency.
+        transporter.sendMail(mailOptions)
+            .then(() => console.log(`Assessment report sent to ${to}`))
+            .catch((err) => console.error('Failed to send assessment report email:', err));
+
         res.json({ success: true });
     } catch (error) {
         console.error('Error sending assessment report:', error);
@@ -5595,7 +6263,19 @@ async function ensureDatabaseSchemaPatches() {
     }
 }
 
-Promise.all([ensureDatabaseSchemaPatches(), ensureSuperAdminUser()])
+/** One-time legacy data fix: old sites stored creator id in Site.userId instead of auditee id. */
+async function ensureLegacySiteUserIdsCleared() {
+    try {
+        const cleared = await clearLegacySiteUserIds();
+        if (cleared > 0) {
+            console.log(`[bootstrap] Cleared legacy Site.userId on ${cleared} site(s)`);
+        }
+    } catch (err) {
+        console.error('[bootstrap] Legacy site userId cleanup failed:', err.message);
+    }
+}
+
+Promise.all([ensureDatabaseSchemaPatches(), ensureSuperAdminUser(), ensureLegacySiteUserIdsCleared()])
     .then(([, user]) => {
         console.log(`[bootstrap] Super admin ready: ${user.email}`);
     })

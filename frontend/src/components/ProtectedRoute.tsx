@@ -4,6 +4,7 @@ import { useUserStatus } from "@/hooks/useUserStatus";
 import { useSessionExpiry } from "@/hooks/useSessionExpiry";
 import { hasValidSuperAdminSession, isSuperAdminRole } from "@/lib/superAdminAuth";
 import { isPathAllowedForExpiredTrial, isTrialExpired } from "@/lib/trialUtils";
+import { isAuditeeUser, isPathAllowedForAuditee } from "@/lib/auditeeAccess";
 
 export function ProtectedRoute({ children }: { children: React.ReactNode }) {
     const location = useLocation();
@@ -27,6 +28,10 @@ export function ProtectedRoute({ children }: { children: React.ReactNode }) {
         if (!isPathAllowedForExpiredTrial(location.pathname)) {
             return <Navigate to="/" replace />;
         }
+    }
+
+    if (isAuditeeUser(user) && !isPathAllowedForAuditee(location.pathname)) {
+        return <Navigate to="/audit-findings" replace />;
     }
 
     return <>{children}</>;

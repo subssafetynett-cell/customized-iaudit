@@ -70,6 +70,30 @@ export interface AuditTemplate {
     content: SectionContent[] | ChecklistContent[] | ClauseChecklistContent[] | ProcessAuditContent[];
 }
 
+/** Section divider / heading copy on the audit execution page — varies by template type. */
+export function getAuditExecuteSectionLabels(
+    template: Pick<AuditTemplate, "type" | "isTripleMapping">,
+): { divider: string; detailsTitle: string | null } {
+    if (template.isTripleMapping) {
+        return {
+            divider: "Integrated Audit Checklist",
+            detailsTitle: "Integrated Audit Checklist",
+        };
+    }
+    switch (template.type) {
+        case "checklist":
+            return { divider: "Audit Checklist", detailsTitle: null };
+        case "clause-checklist":
+            return { divider: "Clause Audit", detailsTitle: "Clause Audit Details" };
+        case "process-audit":
+            return { divider: "Process Audit", detailsTitle: null };
+        case "section":
+            return { divider: "Audit Sections", detailsTitle: null };
+        default:
+            return { divider: "Audit Execution", detailsTitle: null };
+    }
+}
+
 export const auditTemplates: AuditTemplate[] = [
     {
         id: "iso-14001-clause-audit",

@@ -22,8 +22,6 @@ import {
 import {
     MoreVertical, FileText, Trash2, Calendar, Clock, Search, Download, MapPin, Loader2
 } from "lucide-react";
-import { Progress } from "@/components/ui/progress";
-import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
 import { format } from "date-fns";
@@ -35,6 +33,7 @@ import {
     getAuditExecuteTourStepConfig,
 } from "@/lib/auditExecuteOnboardingTour";
 import { cn } from "@/lib/utils";
+import { useAuditeeReadOnly } from "@/lib/auditeeAccess";
 
 const AuditList = () => {
     const [auditPlans, setAuditPlans] = useState<any[]>([]);
@@ -44,6 +43,7 @@ const AuditList = () => {
     /** e.g. "42-pdf" while generating a report for plan 42 */
     const [downloadingKey, setDownloadingKey] = useState<string | null>(null);
     const navigate = useNavigate();
+    const isAuditeeReadOnly = useAuditeeReadOnly();
     const [searchParams, setSearchParams] = useSearchParams();
     const auditExecuteTourActive = searchParams.get("auditExecuteTour") === "true";
     const auditExecuteTourStep = Math.min(
@@ -162,17 +162,6 @@ const AuditList = () => {
         (plan.executionId && plan.executionId.toLowerCase().includes(searchQuery.toLowerCase())) ||
         (plan.location && plan.location.toLowerCase().includes(searchQuery.toLowerCase()))
     );
-
-    const getStatus = (plan: any) => {
-        // Dummy logic for status, assuming available. 
-        // In real app it comes from backend plan.status
-        return plan.status || "In Progress";
-    };
-
-    const getProgress = (plan: any) => {
-        // Use pre-calculated progress from backend for speed
-        return plan.progress ?? 0;
-    };
 
     const uniqueSites = React.useMemo(() => {
         const sites = auditPlans.map(plan => plan.auditProgram?.site?.name || plan.location).filter(Boolean);
@@ -300,15 +289,13 @@ const AuditList = () => {
                                     <TableHead className="font-medium text-white h-12 py-3">Site</TableHead>
                                     <TableHead className="font-medium text-white h-12 py-3">Date & Time</TableHead>
                                     <TableHead className="font-medium text-white h-12 py-3">Lead Auditor</TableHead>
-                                    <TableHead className="font-medium text-white h-12 py-3">Status</TableHead>
-                                    <TableHead className="font-medium text-white h-12 py-3">Progress</TableHead>
                                     <TableHead className="text-right font-medium text-white h-12 py-3">Actions</TableHead>
                                 </TableRow>
                             </TableHeader>
                             <TableBody>
                                 {loading ? (
                                     <TableRow>
-                                        <TableCell colSpan={8} className="h-48 text-center">
+                                        <TableCell colSpan={6} className="h-48 text-center">
                                             <div className="flex flex-col items-center justify-center gap-3">
                                                 <div className="w-8 h-8 border-2 border-emerald-200 border-t-emerald-600 rounded-full animate-spin" />
                                                 <p className="text-sm font-medium text-slate-500">Loading audit plans...</p>
@@ -317,13 +304,12 @@ const AuditList = () => {
                                     </TableRow>
                                 ) : filteredPlans.length === 0 ? (
                                     <TableRow>
-                                        <TableCell colSpan={8} className="h-48 text-center text-slate-500 font-medium">
+                                        <TableCell colSpan={6} className="h-48 text-center text-slate-500 font-medium">
                                             No audit plans found matching your criteria.
                                         </TableCell>
                                     </TableRow>
                                 ) : (
                                     paginatedPlans.map((plan) => {
-                                        const status = getStatus(plan);
                                         let timeString = "-";
                                         try {
                                             if (plan.itinerary) {
@@ -376,17 +362,6 @@ const AuditList = () => {
                                                 <TableCell className="font-bold text-slate-600 py-5">
                                                     {plan.leadAuditor ? `${plan.leadAuditor.firstName} ${plan.leadAuditor.lastName}` : "-"}
                                                 </TableCell>
-                                                <TableCell className="py-5">
-                                                    <Badge variant="outline" className={`border-0 uppercase tracking-wider text-[10px] font-black px-2.5 py-1 ${status === 'In Progress' ? 'bg-amber-100 text-amber-700' : status === 'Scheduled' ? 'bg-blue-100 text-blue-700' : status === 'Completed' ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-600'}`}>
-                                                        {status}
-                                                    </Badge>
-                                                </TableCell>
-                                                <TableCell className="py-5">
-                                                    <div className="flex items-center gap-3">
-                                                        <span className="text-xs font-bold text-slate-500 min-w-[20px]">{getProgress(plan)}%</span>
-                                                        <Progress value={getProgress(plan)} className={`w-16 h-1.5 bg-slate-100 ${getProgress(plan) === 100 ? "[&>div]:bg-emerald-500" : "[&>div]:bg-emerald-400"}`} />
-                                                    </div>
-                                                </TableCell>
                                                 <TableCell className="text-right py-5">
                                                     <div className="flex justify-end items-center gap-2 pr-2">
                                                         <Button
@@ -402,7 +377,7 @@ const AuditList = () => {
                                                                 isTourTargetRow &&
                                                                     tourExecuteHighlight(3),
                                                             )}
-                                                            title="Perform Audit"
+                                                            title={isAuditeeReadOnly ? "View audit" : "Perform Audit"}
                                                             onClick={() => {
                                                                 const path =
                                                                     auditExecuteTourActive
@@ -413,7 +388,7 @@ const AuditList = () => {
                                                                 });
                                                             }}
                                                         >
-                                                            Perform Audit
+                                                            {isAuditeeReadOnly ? "View Audit" : "Perform Audit"}
                                                         </Button>
                                                         <DropdownMenu>
                                                             <DropdownMenuTrigger asChild>
@@ -453,6 +428,7 @@ const AuditList = () => {
                                                                 >
                                                                     <FileText className="w-4 h-4 text-emerald-500" /> Download Excel
                                                                 </DropdownMenuItem>
+                                                                {!isAuditeeReadOnly && (
                                                                 <DropdownMenuItem 
                                                                     className="text-red-600 focus:text-red-600 focus:bg-red-50 gap-2 cursor-pointer"
                                                                     onClick={() => {
@@ -462,6 +438,7 @@ const AuditList = () => {
                                                                 >
                                                                     <Trash2 className="w-4 h-4" /> Delete Plan
                                                                 </DropdownMenuItem>
+                                                                )}
                                                             </DropdownMenuContent>
                                                         </DropdownMenu>
                                                     </div>

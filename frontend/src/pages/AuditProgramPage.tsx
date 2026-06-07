@@ -29,6 +29,7 @@ import {
     Globe, LayoutGrid, List, MoreVertical, FileText, Trash2, Download, Eye, Edit
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useAuditeeReadOnly } from "@/lib/auditeeAccess";
 import { toast } from "sonner";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
@@ -61,6 +62,7 @@ const AuditProgramPage = () => {
     const [viewMode, setViewMode] = useState<"card" | "list">("card");
     const [activeSiteId, setActiveSiteId] = useState<string>("");
     const navigate = useNavigate();
+    const isAuditeeReadOnly = useAuditeeReadOnly();
     const [searchParams, setSearchParams] = useSearchParams();
     const auditPlanTourActive = searchParams.get("auditPlanTour") === "true";
     const auditPlanTourStep = Math.min(
@@ -840,9 +842,11 @@ const AuditProgramPage = () => {
                                                                     </Button>
                                                                 </DropdownMenuTrigger>
                                                                 <DropdownMenuContent align="end" className="w-48">
-                                                                    <DropdownMenuItem onClick={() => navigate("/audit-program/create-plan", { state: { execution: exec, program: siteProgram, site: exec.site, plan } })}>
-                                                                        <Edit className="mr-2 h-4 w-4" /> Edit Plan
-                                                                    </DropdownMenuItem>
+                                                                    {!isAuditeeReadOnly && (
+                                                                        <DropdownMenuItem onClick={() => navigate("/audit-program/create-plan", { state: { execution: exec, program: siteProgram, site: exec.site, plan } })}>
+                                                                            <Edit className="mr-2 h-4 w-4" /> Edit Plan
+                                                                        </DropdownMenuItem>
+                                                                    )}
                                                                     <DropdownMenuItem onClick={() => navigate("/audit-program/create-plan", { state: { execution: exec, program: siteProgram, site: exec.site, plan } })}>
                                                                         <Eye className="mr-2 h-4 w-4" /> View Details
                                                                     </DropdownMenuItem>
@@ -852,9 +856,11 @@ const AuditProgramPage = () => {
                                                                     <DropdownMenuItem onClick={() => handleDownloadDocx(plan, exec.title, siteProgram)}>
                                                                         <FileText className="mr-2 h-4 w-4" /> Download DOCX
                                                                     </DropdownMenuItem>
-                                                                    <DropdownMenuItem onClick={() => handleDeletePlan(plan.id)} className="text-red-600 focus:text-red-600 focus:bg-red-50">
-                                                                        <Trash2 className="mr-2 h-4 w-4" /> Delete Plan
-                                                                    </DropdownMenuItem>
+                                                                    {!isAuditeeReadOnly && (
+                                                                        <DropdownMenuItem onClick={() => handleDeletePlan(plan.id)} className="text-red-600 focus:text-red-600 focus:bg-red-50">
+                                                                            <Trash2 className="mr-2 h-4 w-4" /> Delete Plan
+                                                                        </DropdownMenuItem>
+                                                                    )}
                                                                 </DropdownMenuContent>
                                                             </DropdownMenu>
                                                         )}
@@ -897,6 +903,7 @@ const AuditProgramPage = () => {
                                                     </div>
                                                 </div>
 
+                                                {(planExists || !isAuditeeReadOnly) && (
                                                 <Button
                                                     id={
                                                         isCreatePlanTourTarget
@@ -928,10 +935,13 @@ const AuditProgramPage = () => {
                                                 >
                                                     <div className="relative z-10 flex items-center justify-center gap-2">
                                                         {planExists ? <LayoutDashboard className="w-4 h-4" /> : <Calendar className="w-4 h-4 transition-transform duration-500 group-hover/btn:rotate-12" />}
-                                                        {planExists ? "VIEW / EDIT PLAN" : "CREATE PLAN"}
+                                                        {planExists
+                                                            ? (isAuditeeReadOnly ? "View Plan" : "VIEW / EDIT PLAN")
+                                                            : "CREATE PLAN"}
                                                         {!planExists && <ArrowRight className="w-4 h-4 opacity-0 -translate-x-4 group-hover/btn:opacity-100 group-hover/btn:translate-x-0 transition-all duration-300" />}
                                                     </div>
                                                 </Button>
+                                                )}
                                             </Card>
                                         ) : (
                                             <div key={idx} className="group flex flex-col sm:flex-row sm:items-center justify-between p-5 bg-white rounded-2xl border border-slate-100 shadow-sm hover:shadow-md transition-all duration-300 gap-4">
@@ -978,6 +988,7 @@ const AuditProgramPage = () => {
                                                     <div className="px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-sm font-bold text-slate-600 shadow-sm whitespace-nowrap">
                                                         {exec.clauseCount} Sections
                                                     </div>
+                                                    {(planExists || !isAuditeeReadOnly) && (
                                                     <Button
                                                         id={
                                                             isCreatePlanTourTarget
@@ -1008,10 +1019,13 @@ const AuditProgramPage = () => {
                                                     >
                                                         <div className="relative z-10 flex items-center justify-center gap-2">
                                                             {planExists ? <LayoutDashboard className="w-4 h-4" /> : <Calendar className="w-4 h-4 transition-transform duration-500 group-hover/btn:rotate-12" />}
-                                                            {planExists ? "View / Edit" : "Create Plan"}
+                                                            {planExists
+                                                                ? (isAuditeeReadOnly ? "View Plan" : "View / Edit")
+                                                                : "Create Plan"}
                                                             {!planExists && <ArrowRight className="w-4 h-4 opacity-0 -translate-x-2 group-hover/btn:opacity-100 group-hover/btn:translate-x-0 transition-all duration-300" />}
                                                         </div>
                                                     </Button>
+                                                    )}
                                                     {planExists && (
                                                         <DropdownMenu>
                                                             <DropdownMenuTrigger asChild>
@@ -1020,9 +1034,11 @@ const AuditProgramPage = () => {
                                                                 </Button>
                                                             </DropdownMenuTrigger>
                                                             <DropdownMenuContent align="end" className="w-48">
-                                                                <DropdownMenuItem onClick={() => navigate("/audit-program/create-plan", { state: { execution: exec, program: siteProgram, site: exec.site, plan } })}>
-                                                                    <Edit className="mr-2 h-4 w-4" /> Edit Plan
-                                                                </DropdownMenuItem>
+                                                                {!isAuditeeReadOnly && (
+                                                                    <DropdownMenuItem onClick={() => navigate("/audit-program/create-plan", { state: { execution: exec, program: siteProgram, site: exec.site, plan } })}>
+                                                                        <Edit className="mr-2 h-4 w-4" /> Edit Plan
+                                                                    </DropdownMenuItem>
+                                                                )}
                                                                 <DropdownMenuItem onClick={() => navigate("/audit-program/create-plan", { state: { execution: exec, program: siteProgram, site: exec.site, plan } })}>
                                                                     <Eye className="mr-2 h-4 w-4" /> View Details
                                                                 </DropdownMenuItem>
@@ -1032,6 +1048,7 @@ const AuditProgramPage = () => {
                                                                 <DropdownMenuItem onClick={() => handleDownloadDocx(plan, exec.title, siteProgram)}>
                                                                     <FileText className="mr-2 h-4 w-4" /> Download DOCX
                                                                 </DropdownMenuItem>
+                                                                {!isAuditeeReadOnly && (
                                                                 <DropdownMenuItem 
                                                                     className="text-red-600 focus:text-red-600 focus:bg-red-50"
                                                                     onClick={() => {
@@ -1041,6 +1058,7 @@ const AuditProgramPage = () => {
                                                                 >
                                                                     <Trash2 className="mr-2 h-4 w-4" /> Delete Plan
                                                                 </DropdownMenuItem>
+                                                                )}
                                                             </DropdownMenuContent>
                                                         </DropdownMenu>
                                                     )}

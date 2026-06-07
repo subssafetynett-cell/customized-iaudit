@@ -3,6 +3,7 @@ import { useSearchParams, useNavigate } from "react-router-dom";
 import { TopNav } from "@/components/TopNav";
 import { apiFetch } from "@/lib/api";
 import { sitesFromCompanies } from "@/lib/orgSites";
+import { useAuditeeReadOnly } from "@/lib/auditeeAccess";
 import { isAuditeeRole, usersEligibleAsAuditors } from "@/lib/userRoles";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -115,6 +116,7 @@ const YEARS = Array.from({ length: 10 }, (_, i) => (new Date().getFullYear() + i
 
 const AuditPrograms = () => {
     const navigate = useNavigate();
+    const isAuditeeReadOnly = useAuditeeReadOnly();
     const [searchParams, setSearchParams] = useSearchParams();
     const auditTourActive = searchParams.get("auditTour") === "true";
     const auditTourStep = Math.min(
@@ -1067,7 +1069,7 @@ const AuditPrograms = () => {
                         Plan and schedule your ISO audits across multiple periods.
                     </p>
                 </div>
-                {view === "list" && (
+                {view === "list" && !isAuditeeReadOnly && (
                     <div className="relative">
                         <div className={cn("relative", (showOnboardingGuide || auditTourActive) && auditTourStep === 2 ? "z-[60]" : "")}>
                             {(showOnboardingGuide || (auditTourActive && auditTourStep === 2)) && (
@@ -1248,13 +1250,15 @@ const AuditPrograms = () => {
                                                                 <Eye className="mr-2 h-4 w-4" />
                                                                 View Details
                                                             </DropdownMenuItem>
-                                                            <DropdownMenuItem
-                                                                onClick={() => handleEditProgram(program)}
-                                                                className="cursor-pointer"
-                                                            >
-                                                                <Edit className="mr-2 h-4 w-4" />
-                                                                Edit Program
-                                                            </DropdownMenuItem>
+                                                            {!isAuditeeReadOnly && (
+                                                                <DropdownMenuItem
+                                                                    onClick={() => handleEditProgram(program)}
+                                                                    className="cursor-pointer"
+                                                                >
+                                                                    <Edit className="mr-2 h-4 w-4" />
+                                                                    Edit Program
+                                                                </DropdownMenuItem>
+                                                            )}
                                                             <DropdownMenuItem
                                                                 onClick={() => handleDownloadPDF(program)}
                                                                 className="cursor-pointer"
@@ -1269,13 +1273,15 @@ const AuditPrograms = () => {
                                                                 <FileText className="mr-2 h-4 w-4" />
                                                                 Download Word
                                                             </DropdownMenuItem>
-                                                            <DropdownMenuItem
-                                                                onClick={() => { setDeleteId(program.id); setIsDeleteDialogOpen(true); }}
-                                                                className="text-red-600 cursor-pointer focus:text-red-600"
-                                                            >
-                                                                <Trash2 className="mr-2 h-4 w-4" />
-                                                                Delete
-                                                            </DropdownMenuItem>
+                                                            {!isAuditeeReadOnly && (
+                                                                <DropdownMenuItem
+                                                                    onClick={() => { setDeleteId(program.id); setIsDeleteDialogOpen(true); }}
+                                                                    className="text-red-600 cursor-pointer focus:text-red-600"
+                                                                >
+                                                                    <Trash2 className="mr-2 h-4 w-4" />
+                                                                    Delete
+                                                                </DropdownMenuItem>
+                                                            )}
                                                         </DropdownMenuContent>
                                                     </DropdownMenu>
                                                 </TableCell>

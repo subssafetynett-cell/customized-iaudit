@@ -3,7 +3,7 @@ import { Toaster } from "@/components/ui/toaster";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate, useParams } from "react-router-dom";
 import { AppLayout } from "./components/AppLayout";
 import { ProtectedRoute } from "./components/ProtectedRoute";
 import { SuperAdminProtectedRoute } from "./components/SuperAdminProtectedRoute";
@@ -37,6 +37,18 @@ const GettingStarted = lazy(() => import("./pages/GettingStarted"));
 const InviteAuditee = lazy(() => import("./pages/InviteAuditee"));
 
 const queryClient = new QueryClient();
+
+function FindingAuditRedirect() {
+  const { auditId } = useParams<{ auditId: string }>();
+  if (!auditId) return <Navigate to="/audit-findings" replace />;
+  return (
+    <Navigate
+      to={`/audit/execute/${auditId}`}
+      replace
+      state={{ focusFindings: true }}
+    />
+  );
+}
 
 const App = () => (
   <QueryClientProvider client={queryClient}>
@@ -81,6 +93,7 @@ const App = () => (
               <Route path="/audit-templates" element={<AuditTemplates />} />
               <Route path="/audit-templates/:id/execute" element={<ExecuteAuditTemplate />} />
               <Route path="/audit/execute/:id" element={<AuditExecute />} />
+              <Route path="/audit-findings/:auditId/:findingId" element={<FindingAuditRedirect />} />
               <Route path="/audit-findings" element={<AuditFindings />} />
               <Route path="/feedback" element={<Feedback />} />
               <Route path="/subscription" element={<Subscription />} />

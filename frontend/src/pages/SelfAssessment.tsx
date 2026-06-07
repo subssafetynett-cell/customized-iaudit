@@ -20,7 +20,6 @@ import { Progress } from "@/components/ui/progress";
 import { Trash2, Plus, CheckCircle2, AlertCircle, ArrowRight, ArrowLeft, ClipboardList, RotateCcw, Award, Search, ClipboardCheck } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
-import { Checkbox } from "@/components/ui/checkbox";
 import { Eye, Download, History, FileText, Minus } from "lucide-react";
 import { format } from "date-fns";
 import { useCompanyStore } from "@/hooks/useCompanyStore";
@@ -47,6 +46,11 @@ import {
     sanitizeSelfAssessmentScope,
     SELF_ASSESSMENT_REP_MAX,
 } from "@/lib/plainTextInput";
+import {
+    PDF_EXPORT_JPEG_QUALITY,
+    PDF_LOGO_MAX_PX,
+    rasterizeForPdf,
+} from "@/lib/pdfImageUtils";
 import {
     fetchSelfAssessmentsPersisted,
     getStoredUserId,
@@ -371,7 +375,11 @@ const SelfAssessment = () => {
     const [savedAssessments, setSavedAssessments] = useState<SavedAssessment[]>([]);
     const [showValidationErrors, setShowValidationErrors] = useState(false);
     const [email, setEmail] = useState("");
-    const [marketingConsent, setMarketingConsent] = useState(false);
+    const [isSendingReport, setIsSendingReport] = useState(false);
+    /** Frozen question set for the results view (decoupled from live `questions` state). */
+    const [resultQuestions, setResultQuestions] = useState<Question[] | null>(null);
+    /** Frozen assessment snapshot for results display and exports. */
+    const [resultAssessment, setResultAssessment] = useState<SavedAssessment | null>(null);
 
     const [currentClauseIndex, setCurrentClauseIndex] = useState(0);
     const draftSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -418,55 +426,65 @@ const SelfAssessment = () => {
         }, 1500);
     }, [buildSelfAssessmentDraft]);
 
-    useEffect(() => {
-        let cancelled = false;
-        (async () => {
-            const { assessments, draft } = await fetchSelfAssessmentsPersisted<SavedAssessment>();
-            if (cancelled) return;
-            const merged = await migrateLocalSelfAssessmentsToServer(
-                assessments.map((a) => sanitizeSavedSelfAssessment(a) as SavedAssessment),
-            );
-            if (cancelled) return;
-            setSavedAssessments(merged);
+    const loadSavedAssessments = useCallback(async (restoreDraft = false) => {
+        const { assessments, draft } = await fetchSelfAssessmentsPersisted<SavedAssessment>();
+        const merged = await migrateLocalSelfAssessmentsToServer(
+            assessments.map((a) => sanitizeSavedSelfAssessment(a) as SavedAssessment),
+        );
+        setSavedAssessments(merged);
 
-            if (
-                draft &&
-                typeof draft === "object" &&
-                draft.step === "assessment" &&
-                Array.isArray(draft.questions)
-            ) {
-                setStandard((draft.standard as typeof standard) || "");
-                setCompanyName(String(draft.companyName ?? ""));
-                setAuditorName(String(draft.auditorName ?? ""));
-                setAuditorPosition(String(draft.auditorPosition ?? ""));
-                setAuditCompany(String(draft.auditCompany ?? ""));
-                setAuditLocation(String(draft.auditLocation ?? ""));
-                setAuditRepresentatives(String(draft.auditRepresentatives ?? ""));
-                setContactEmail(String(draft.contactEmail ?? ""));
-                setAuditScope(String(draft.auditScope ?? ""));
-                setAuditDate(String(draft.auditDate ?? format(new Date(), "yyyy-MM-dd")));
-                setQuestions(draft.questions as Question[]);
-                setCurrentClauseIndex(
-                    typeof draft.currentClauseIndex === "number" ? draft.currentClauseIndex : 0,
-                );
-                setStep("assessment");
-            }
-        })();
-        return () => {
-            cancelled = true;
-        };
+        if (
+            restoreDraft &&
+            draft &&
+            typeof draft === "object" &&
+            draft.step === "assessment" &&
+            Array.isArray(draft.questions)
+        ) {
+            setStandard((draft.standard as typeof standard) || "");
+            setCompanyName(String(draft.companyName ?? ""));
+            setAuditorName(String(draft.auditorName ?? ""));
+            setAuditorPosition(String(draft.auditorPosition ?? ""));
+            setAuditCompany(String(draft.auditCompany ?? ""));
+            setAuditLocation(String(draft.auditLocation ?? ""));
+            setAuditRepresentatives(String(draft.auditRepresentatives ?? ""));
+            setContactEmail(String(draft.contactEmail ?? ""));
+            setAuditScope(String(draft.auditScope ?? ""));
+            setAuditDate(String(draft.auditDate ?? format(new Date(), "yyyy-MM-dd")));
+            setQuestions(draft.questions as Question[]);
+            setCurrentClauseIndex(
+                typeof draft.currentClauseIndex === "number" ? draft.currentClauseIndex : 0,
+            );
+            setStep("assessment");
+        }
     }, []);
 
-    const saveToHistory = (newAssessment: SavedAssessment) => {
+    useEffect(() => {
+        void loadSavedAssessments(true);
+    }, [loadSavedAssessments]);
+
+    useEffect(() => {
+        if (step === "list") {
+            void loadSavedAssessments(false);
+        }
+    }, [step, loadSavedAssessments]);
+
+    const saveToHistory = async (newAssessment: SavedAssessment): Promise<boolean> => {
         const userId = getStoredUserId();
         const safe = sanitizeSavedSelfAssessment({
             ...newAssessment,
             ...(userId ? { createdByUserId: userId, userId } : {}),
         }) as SavedAssessment;
-        const updated = [safe, ...savedAssessments];
+        const updated = [safe, ...savedAssessments.filter((a) => a.id !== safe.id)];
         setSavedAssessments(updated);
-        void persistSelfAssessmentsList(updated);
-        void persistSelfAssessmentDraft(null);
+
+        if (draftSaveTimerRef.current) {
+            clearTimeout(draftSaveTimerRef.current);
+            draftSaveTimerRef.current = null;
+        }
+
+        const persisted = await persistSelfAssessmentsList(updated);
+        await persistSelfAssessmentDraft(null);
+        return persisted;
     };
 
     const deleteSavedAssessment = (id: string) => {
@@ -475,6 +493,21 @@ const SelfAssessment = () => {
         void persistSelfAssessmentsList(updated);
         void deleteSelfAssessmentPersisted(id);
         toast.success("Assessment deleted from history");
+    };
+
+    const [deleteAssessmentOpen, setDeleteAssessmentOpen] = useState(false);
+    const [assessmentToDelete, setAssessmentToDelete] = useState<SavedAssessment | null>(null);
+
+    const requestDeleteSavedAssessment = (assessment: SavedAssessment) => {
+        setAssessmentToDelete(assessment);
+        setDeleteAssessmentOpen(true);
+    };
+
+    const confirmDeleteSavedAssessment = () => {
+        if (!assessmentToDelete) return;
+        deleteSavedAssessment(assessmentToDelete.id);
+        setDeleteAssessmentOpen(false);
+        setAssessmentToDelete(null);
     };
 
     const viewAssessment = (assessment: SavedAssessment) => {
@@ -490,7 +523,10 @@ const SelfAssessment = () => {
         setContactEmail(safe.contactEmail || "");
         setAuditScope(safe.auditScope || "");
         setAuditDate(safe.auditDate || format(new Date(), "yyyy-MM-dd"));
+        const frozenQuestions = safe.questions.map((q) => ({ ...q }));
         setQuestions(safe.questions);
+        setResultQuestions(frozenQuestions);
+        setResultAssessment({ ...safe, questions: frozenQuestions });
         setEmail(safe.email || "");
     };
 
@@ -539,8 +575,6 @@ const SelfAssessment = () => {
         // Reset validation state
         setShowValidationErrors(false);
         setEmail("");
-        setMarketingConsent(false);
-
         let initialQuestions: Question[] = [];
         if (standard === "ISO 14001") initialQuestions = [...ISO_14001_QUESTIONS];
         else if (standard === "ISO 9001") initialQuestions = [...ISO_9001_QUESTIONS];
@@ -665,7 +699,7 @@ const SelfAssessment = () => {
         setStep("email-collection");
     };
 
-    const handleEmailSubmit = () => {
+    const handleEmailSubmit = async () => {
         const safeEmail = sanitizeSelfAssessmentEmail(email);
         if (!safeEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(safeEmail)) {
             toast.error("Please enter a valid email address to see results.");
@@ -694,74 +728,102 @@ const SelfAssessment = () => {
         }) as SavedAssessment;
 
         setEmail(safeEmail);
-        saveToHistory(newAssessment);
-
-        // Send report email if user opted in (HTML summary + PDF attachment when generation succeeds)
-        if (marketingConsent) {
-            void (async () => {
-                let pdfBase64: string | undefined;
-                try {
-                    const blob = await generatePDF(newAssessment, true);
-                    if (blob) {
-                        pdfBase64 = await new Promise<string>((resolve, reject) => {
-                            const reader = new FileReader();
-                            reader.onloadend = () => {
-                                const result = reader.result;
-                                if (typeof result !== "string") {
-                                    reject(new Error("Failed to encode PDF"));
-                                    return;
-                                }
-                                resolve(result.split(",")[1] ?? "");
-                            };
-                            reader.onerror = () => reject(reader.error ?? new Error("Failed to read PDF"));
-                            reader.readAsDataURL(blob);
-                        });
-                    }
-                } catch (err) {
-                    console.warn("PDF generation failed; sending HTML-only report email", err);
-                }
-
-                try {
-                    const res = await apiFetch("/send-assessment-report", {
-                        method: "POST",
-                        body: JSON.stringify({
-                            to: safeEmail,
-                            companyName,
-                            auditorName,
-                            auditCompany,
-                            standard,
-                            score,
-                            date: newDate,
-                            questions,
-                            ...(pdfBase64 ? { pdfBase64 } : {}),
-                        }),
-                    });
-                    if (!res.ok) {
-                        const data = await res.json().catch(() => ({}));
-                        throw new Error(
-                            typeof data?.error === "string" ? data.error : "Failed to send report email",
-                        );
-                    }
-                    toast.success(
-                        pdfBase64
-                            ? "Report PDF sent to your email!"
-                            : "Assessment report sent to your email!",
-                    );
-                } catch (err) {
-                    console.error("Assessment report email failed", err);
-                    toast.error("Could not send email, but your results are saved.");
-                }
-            })();
+        const persisted = await saveToHistory(newAssessment);
+        if (persisted) {
+            toast.success("Assessment saved to your history.");
+        } else {
+            toast.warning("Assessment saved on this device, but could not sync to the server.");
         }
 
+        setIsSendingReport(true);
+        try {
+            const reportPayload = {
+                to: safeEmail,
+                companyName: newAssessment.companyName,
+                auditorName: newAssessment.auditorName,
+                auditCompany: newAssessment.auditCompany,
+                standard: newAssessment.standard,
+                score: newAssessment.score,
+                date: newAssessment.date,
+                questions: newAssessment.questions,
+            };
+
+            let pdfBase64: string | undefined;
+            try {
+                const blob = await generatePDF(newAssessment, true);
+                if (blob) {
+                    pdfBase64 = await new Promise<string>((resolve, reject) => {
+                        const reader = new FileReader();
+                        reader.onloadend = () => {
+                            const result = reader.result;
+                            if (typeof result !== "string") {
+                                reject(new Error("Failed to encode PDF"));
+                                return;
+                            }
+                            resolve(result.split(",")[1] ?? "");
+                        };
+                        reader.onerror = () => reject(reader.error ?? new Error("Failed to read PDF"));
+                        reader.readAsDataURL(blob);
+                    });
+                }
+            } catch (err) {
+                console.warn("PDF generation failed; sending HTML-only report email", err);
+            }
+
+            const sendReportEmail = async (includePdf: boolean) =>
+                apiFetch("/send-assessment-report", {
+                    method: "POST",
+                    body: JSON.stringify({
+                        ...reportPayload,
+                        ...(includePdf && pdfBase64 ? { pdfBase64 } : {}),
+                    }),
+                });
+
+            let res = await sendReportEmail(Boolean(pdfBase64));
+            let sentWithPdf = Boolean(pdfBase64);
+
+            if (!res.ok && res.status === 413 && pdfBase64) {
+                console.warn("Report email payload too large with PDF; retrying HTML-only");
+                res = await sendReportEmail(false);
+                sentWithPdf = false;
+            }
+
+            if (!res.ok) {
+                const data = await res.json().catch(() => ({}));
+                if (res.status === 413) {
+                    throw new Error(
+                        "The report is too large to email. Your results are saved — download the PDF from the results page.",
+                    );
+                }
+                throw new Error(
+                    typeof data?.error === "string" ? data.error : "Failed to send report email",
+                );
+            }
+            toast.success(
+                sentWithPdf
+                    ? "Report PDF sent to your email!"
+                    : "Assessment report sent to your email!",
+            );
+        } catch (err) {
+            console.error("Assessment report email failed", err);
+            const message =
+                err instanceof Error ? err.message : "Could not send email, but your results are saved.";
+            toast.error(message);
+        } finally {
+            setIsSendingReport(false);
+        }
+
+        const frozenQuestions = newAssessment.questions.map((q) => ({ ...q }));
+        setResultQuestions(frozenQuestions);
+        setResultAssessment({ ...newAssessment, questions: frozenQuestions });
         setStep("result");
     };
 
 
-    const calculateScore = () => {
-        const total = questions.length;
+    const calculateScore = (sourceQuestions: Question[] = questions) => {
+        const total = sourceQuestions.length;
         if (total === 0) return 0;
-        const yesCount = questions.filter(q => q.answer === "yes").length;
+        const yesCount = sourceQuestions.filter(q => q.answer === "yes").length;
         // Scale to 0-50
         return Math.round((yesCount / total) * 50);
     };
@@ -774,8 +836,8 @@ const SelfAssessment = () => {
         return "F";
     };
 
-    const calculateClauseScores = () => {
-        const groups = questions.reduce((acc, q) => {
+    const calculateClauseScores = (sourceQuestions: Question[] = questions) => {
+        const groups = sourceQuestions.reduce((acc, q) => {
             if (!acc[q.clause]) acc[q.clause] = [];
             acc[q.clause].push(q);
             return acc;
@@ -858,6 +920,8 @@ const SelfAssessment = () => {
         setContactEmail("");
         setAuditScope("");
         setAuditorPosition("");
+        setResultQuestions(null);
+        setResultAssessment(null);
 
     };
 
@@ -865,7 +929,7 @@ const SelfAssessment = () => {
     const barChartRef = React.useRef<HTMLDivElement>(null);
 
     const generatePDF = async (assessmentData?: SavedAssessment, returnBlob = false): Promise<Blob | void> => {
-        const doc = new jsPDF();
+        const doc = new jsPDF({ compress: true });
 
         // Data sources
         const cName = assessmentData?.companyName || companyName;
@@ -885,7 +949,7 @@ const SelfAssessment = () => {
         let headerBottom = 30; // default
 
         // Helper to add user logo to current page
-        const addUserLogo = (doc: jsPDF, logoData: string, ratio: number) => {
+        const addUserLogo = (doc: jsPDF, logoData: string, ratio: number, format: "JPEG" | "PNG") => {
             const maxWidth = 30;
             const maxHeight = 20;
             let logoWidth = maxWidth;
@@ -895,70 +959,42 @@ const SelfAssessment = () => {
                 logoHeight = maxHeight;
                 logoWidth = logoHeight / ratio;
             }
-            doc.addImage(logoData, 'PNG', 15, logoY, logoWidth, logoHeight);
-
-            // Allow updating headerBottom if not set (though ideally we calculate once)
-            // But since this is called on every page, we should calculate it outside or just ensure consistency.
-            // Let's rely on the calculation done before main render if possible.
+            doc.addImage(logoData, format, 15, logoY, logoWidth, logoHeight);
         };
 
         // Load iAudit Logo (for footer ONLY)
         let imgData: string | null = null;
-        let logoRatio = 0.3; // Default
+        let logoRatio = 0.3;
+        let footerLogoFormat: "JPEG" | "PNG" = "PNG";
 
         try {
-            const logoUrl = "/iAudit Global-01.png";
-            const result = await new Promise<{ url: string, ratio: number }>((resolve, reject) => {
-                const image = new Image();
-                image.src = logoUrl;
-                image.onload = () => {
-                    const canvas = document.createElement("canvas");
-                    canvas.width = image.width;
-                    canvas.height = image.height;
-                    const ctx = canvas.getContext("2d");
-                    ctx?.drawImage(image, 0, 0);
-                    resolve({
-                        url: canvas.toDataURL("image/png"),
-                        ratio: image.height / image.width
-                    });
-                };
-                image.onerror = reject;
-            });
-            imgData = result.url;
-            logoRatio = result.ratio;
-            // NOTE: We do NOT draw this logo in the header anymore.
+            const raster = await rasterizeForPdf(
+                "/iAudit Global-01.png",
+                PDF_LOGO_MAX_PX,
+                PDF_EXPORT_JPEG_QUALITY,
+                true,
+            );
+            imgData = raster.dataUrl;
+            logoRatio = raster.aspectRatio;
+            footerLogoFormat = raster.format;
         } catch (error) {
             console.error("Failed to load logo", error);
         }
 
-
-
-
-
-        // Load User Company Logo
         let userLogoData: string | null = null;
         let userLogoRatio = 0.3;
+        let userLogoFormat: "JPEG" | "PNG" = "JPEG";
 
         if (userCompany?.logo) {
             try {
-                const result = await new Promise<{ url: string, ratio: number }>((resolve, reject) => {
-                    const image = new Image();
-                    image.src = userCompany.logo!;
-                    image.onload = () => {
-                        const canvas = document.createElement("canvas");
-                        canvas.width = image.width;
-                        canvas.height = image.height;
-                        const ctx = canvas.getContext("2d");
-                        ctx?.drawImage(image, 0, 0);
-                        resolve({
-                            url: canvas.toDataURL("image/png"),
-                            ratio: image.height / image.width
-                        });
-                    };
-                    image.onerror = reject;
-                });
-                userLogoData = result.url;
-                userLogoRatio = result.ratio;
+                const raster = await rasterizeForPdf(
+                    userCompany.logo,
+                    PDF_LOGO_MAX_PX,
+                    PDF_EXPORT_JPEG_QUALITY,
+                );
+                userLogoData = raster.dataUrl;
+                userLogoRatio = raster.aspectRatio;
+                userLogoFormat = raster.format;
             } catch (error) {
                 console.error("Failed to load user logo", error);
             }
@@ -975,10 +1011,10 @@ const SelfAssessment = () => {
         }
 
         // Calculate Scores & Stage
-        const score = assessmentData?.score ?? calculateScore();
+        const score = assessmentData?.score ?? calculateScore(qs);
         const stage = getStage(score);
         const stageDetails = getStageDetails(score);
-        const clauseScores = calculateClauseScores();
+        const clauseScores = calculateClauseScores(qs);
 
         // Extended Data
         const audDate = assessmentData?.auditDate || auditDate;
@@ -1012,7 +1048,7 @@ const SelfAssessment = () => {
                 // Draw Logo (Bottom Right, Below Line)
                 const logoX = pageWidth - 15 - footerLogoWidth;
                 // Place top of logo at pageHeight - 30 (overlapping line area to reduce visual gap)
-                doc.addImage(imgData, 'PNG', logoX, pageHeight - 30, footerLogoWidth, footerLogoHeight);
+                doc.addImage(imgData, footerLogoFormat, logoX, pageHeight - 30, footerLogoWidth, footerLogoHeight);
 
                 // "Built with iAudit" Text
                 doc.setFontSize(10);
@@ -1032,7 +1068,7 @@ const SelfAssessment = () => {
         const drawHeaderFooter = (doc: jsPDF) => {
             const currentPage = (doc.internal as any).getCurrentPageInfo().pageNumber;
             if (lastLogoPage !== currentPage) {
-                if (userLogoData) addUserLogo(doc, userLogoData, userLogoRatio);
+                if (userLogoData) addUserLogo(doc, userLogoData, userLogoRatio, userLogoFormat);
                 addFooter(doc);
                 lastLogoPage = currentPage;
             }
@@ -1137,7 +1173,7 @@ const SelfAssessment = () => {
 
             doc.setFontSize(10);
             doc.setTextColor(100);
-            const countText = `${questions.filter(q => q.answer === "yes").length} / ${questions.length}`;
+            const countText = `${qs.filter(q => q.answer === "yes").length} / ${qs.length}`;
             doc.text(countText, centerX, centerY + 10, { align: 'center' });
         };
 
@@ -1320,10 +1356,11 @@ const SelfAssessment = () => {
             margin: { bottom: 25, top: 40 }
         });
 
+        const pdfBlob = doc.output("blob");
         if (returnBlob) {
-            return doc.output('blob');
+            return pdfBlob;
         }
-        doc.save(`Self_Assessment_${cName}_${format(new Date(), "yyyy-MM-dd")}.pdf`);
+        saveAs(pdfBlob, `Self_Assessment_${cName}_${format(new Date(), "yyyy-MM-dd")}.pdf`);
     };
 
     const generateWord = async (assessmentData?: SavedAssessment) => {
@@ -1335,13 +1372,13 @@ const SelfAssessment = () => {
             const audComp = assessmentData?.auditCompany || auditCompany;
             const std = assessmentData?.standard || standard;
             const qs = assessmentData?.questions || questions;
-            const finalScore = assessmentData?.score ?? calculateScore();
+            const finalScore = assessmentData?.score ?? calculateScore(qs);
             const dateStr = assessmentData ? format(new Date(assessmentData.date), "PPP") : format(new Date(), "PPP");
 
             // Derived Data
             const stage = getStage(finalScore);
             const stageDetails = getStageDetails(finalScore);
-            const clauseScores = calculateClauseScores();
+            const clauseScores = calculateClauseScores(qs);
 
             // Load Logo
             const logoUrl = "/iAudit Global-01.png";
@@ -1810,7 +1847,7 @@ const SelfAssessment = () => {
                                                                 </DropdownMenuContent>
                                                             </DropdownMenu>
 
-                                                            <Button variant="ghost" size="sm" className="h-8 w-8 p-0 hover:bg-red-50 hover:text-red-600" onClick={() => deleteSavedAssessment(assessment.id)}>
+                                                            <Button variant="ghost" size="sm" className="h-8 w-8 p-0 hover:bg-red-50 hover:text-red-600" onClick={() => requestDeleteSavedAssessment(assessment)}>
                                                                 <Trash2 className="w-4 h-4 text-slate-400 hover:text-red-600" />
                                                                 <span className="sr-only">Delete</span>
                                                             </Button>
@@ -2213,23 +2250,13 @@ const SelfAssessment = () => {
                                 />
                             </div>
 
-                            <div className="flex items-start space-x-2 pt-2">
-                                <Checkbox
-                                    id="marketing"
-                                    checked={marketingConsent}
-                                    onCheckedChange={(c) => setMarketingConsent(c as boolean)}
-                                />
-                                <Label htmlFor="marketing" className="text-sm font-normal text-slate-500 leading-snug">
-                                    Send my full assessment report to this email address. You may also receive tips and insights from iAudit.
-                                </Label>
-                            </div>
-
                             <div className="pt-4">
                                 <Button
-                                    onClick={handleEmailSubmit}
+                                    onClick={() => void handleEmailSubmit()}
+                                    disabled={isSendingReport}
                                     className="w-full h-12 text-base bg-emerald-600 hover:bg-emerald-700 text-white"
                                 >
-                                    See Results
+                                    {isSendingReport ? "Sending report…" : "See Results"}
                                 </Button>
                             </div>
 
@@ -2243,27 +2270,60 @@ const SelfAssessment = () => {
                 )}
 
                 {/* Step 4: Result */}
-                {step === "result" && (
+                {step === "result" && (() => {
+                    const resultQs = resultQuestions ?? questions;
+                    const exportAssessment: SavedAssessment =
+                        resultAssessment ?? {
+                            id: "result-export",
+                            companyName,
+                            auditorName,
+                            auditorPosition,
+                            auditCompany,
+                            standard: standard as Standard,
+                            score: calculateScore(resultQs),
+                            date: new Date().toISOString(),
+                            email,
+                            questions: resultQs.map((q) => ({ ...q })),
+                            auditDate,
+                            auditLocation,
+                            auditRepresentatives,
+                            contactEmail,
+                            auditScope,
+                        };
+                    const resultClauseScores = calculateClauseScores(resultQs);
+                    const resultScore = calculateScore(resultQs);
+                    const resultYesCount = resultQs.filter((q) => q.answer === "yes").length;
+                    const resultGroupedQuestions = resultQs.reduce((acc, q) => {
+                        if (!acc[q.clause]) acc[q.clause] = [];
+                        acc[q.clause].push(q);
+                        return acc;
+                    }, {} as Record<string, Question[]>);
+
+                    return (
                     <div className="flex flex-col items-center justify-center py-12 animate-in fade-in zoom-in-95 duration-500 w-full max-w-5xl mx-auto space-y-8">
 
-                        {/* Top Right Download Buttons */}
-                        <div className="w-full flex justify-end gap-3 px-2">
-                            <Button
-                                variant="outline"
-                                size="sm"
-                                className="gap-2 border-emerald-200 hover:bg-emerald-50 text-emerald-700 shadow-sm"
-                                onClick={() => generatePDF()}
-                            >
-                                <Download className="w-4 h-4" /> Download PDF
+                        <div className="w-full flex items-center justify-between gap-3 px-2">
+                            <Button variant="ghost" onClick={() => setStep("list")} className="gap-2 pl-0 hover:bg-transparent hover:text-emerald-600">
+                                <ArrowLeft className="w-4 h-4" /> Back to List
                             </Button>
-                            <Button
-                                variant="outline"
-                                size="sm"
-                                className="gap-2 border-blue-200 hover:bg-blue-50 text-blue-700 shadow-sm"
-                                onClick={() => generateWord()}
-                            >
-                                <Download className="w-4 h-4" /> Download Word
-                            </Button>
+                            <div className="flex gap-3">
+                                <Button
+                                    variant="outline"
+                                    size="sm"
+                                    className="gap-2 border-emerald-200 hover:bg-emerald-50 text-emerald-700 shadow-sm"
+                                    onClick={() => generatePDF(exportAssessment)}
+                                >
+                                    <Download className="w-4 h-4" /> Download PDF
+                                </Button>
+                                <Button
+                                    variant="outline"
+                                    size="sm"
+                                    className="gap-2 border-blue-200 hover:bg-blue-50 text-blue-700 shadow-sm"
+                                    onClick={() => generateWord(exportAssessment)}
+                                >
+                                    <Download className="w-4 h-4" /> Download Word
+                                </Button>
+                            </div>
                         </div>
 
                         {/* Header Section */}
@@ -2283,8 +2343,8 @@ const SelfAssessment = () => {
                             </div>
                             <div className="text-center md:text-right mt-6 md:mt-0">
                                 <div className="text-4xl md:text-5xl font-bold text-emerald-600">
-                                    {questions.filter(q => q.answer === "yes").length}
-                                    <span className="text-2xl text-emerald-400 font-medium"> / {questions.length}</span>
+                                    {resultYesCount}
+                                    <span className="text-2xl text-emerald-400 font-medium"> / {resultQs.length}</span>
                                 </div>
                             </div>
                         </div>
@@ -2305,8 +2365,8 @@ const SelfAssessment = () => {
                                             <PieChart>
                                                 <Pie
                                                     data={[
-                                                        { name: 'Compliant', value: questions.filter(q => q.answer === "yes").length, fill: '#f59e0b' },
-                                                        { name: 'Non-Compliant', value: questions.filter(q => q.answer !== "yes").length, fill: '#f1f5f9' },
+                                                        { name: 'Compliant', value: resultYesCount, fill: '#f59e0b' },
+                                                        { name: 'Non-Compliant', value: resultQs.length - resultYesCount, fill: '#f1f5f9' },
                                                     ]}
                                                     cx="50%"
                                                     cy="50%"
@@ -2337,12 +2397,12 @@ const SelfAssessment = () => {
                                         </ResponsiveContainer>
                                         {/* Center Text */}
                                         <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
-                                            <span className="text-4xl font-bold text-amber-500">{calculateScore()} / 50</span>
-                                            <span className="text-sm font-medium text-slate-400">{questions.filter(q => q.answer === "yes").length} questions yes</span>
+                                            <span className="text-4xl font-bold text-amber-500">{resultScore} / 50</span>
+                                            <span className="text-sm font-medium text-slate-400">{resultYesCount} questions yes</span>
                                         </div>
                                     </div>
                                     <div className="mt-4 px-4 py-1.5 bg-slate-100 rounded-full text-xs font-bold text-slate-600 uppercase tracking-wider">
-                                        {getStage(calculateScore())}
+                                        {getStage(resultScore)}
                                     </div>
                                 </CardContent>
                             </Card>
@@ -2352,18 +2412,18 @@ const SelfAssessment = () => {
                                 <CardHeader className="pb-4">
                                     <CardTitle className="flex items-center gap-2 text-slate-800">
                                         <ArrowRight className="-ml-1 w-5 h-5 text-amber-500 rotate-[-45deg]" />
-                                        Your Position: <span className="text-slate-900">{getStage(calculateScore())}</span>
+                                        Your Position: <span className="text-slate-900">{getStage(resultScore)}</span>
                                     </CardTitle>
                                 </CardHeader>
                                 <CardContent className="space-y-6">
                                     <p className="text-slate-600 leading-relaxed">
-                                        {getStageDetails(calculateScore()).description}
+                                        {getStageDetails(resultScore).description}
                                     </p>
 
                                     <div className="space-y-3">
                                         <h4 className="font-bold text-slate-900 text-sm uppercase tracking-wider">Recommended Actions:</h4>
                                         <ul className="space-y-2">
-                                            {getStageDetails(calculateScore()).actions.map((action, i) => (
+                                            {getStageDetails(resultScore).actions.map((action, i) => (
                                                 <li key={i} className="flex gap-3 text-sm text-slate-700 items-start">
                                                     <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 mt-1.5 shrink-0" />
                                                     <span className="flex-1">{action}</span>
@@ -2374,7 +2434,7 @@ const SelfAssessment = () => {
 
                                     <div className="pt-4 border-t border-slate-200">
                                         <p className="text-sm font-bold text-slate-800">
-                                            Timeline: <span className="font-normal text-slate-600">{getStageDetails(calculateScore()).timeline}</span>
+                                            Timeline: <span className="font-normal text-slate-600">{getStageDetails(resultScore).timeline}</span>
                                         </p>
                                     </div>
                                 </CardContent>
@@ -2398,7 +2458,7 @@ const SelfAssessment = () => {
                                         </TableRow>
                                     </TableHeader>
                                     <TableBody>
-                                        {calculateClauseScores().map((item) => (
+                                        {resultClauseScores.map((item) => (
                                             <TableRow key={item.clause} className="hover:bg-emerald-50/50">
                                                 <TableCell className="font-medium text-slate-700">{item.fullClause}</TableCell>
                                                 <TableCell className="text-right font-bold text-slate-900">{item.yes}</TableCell>
@@ -2407,8 +2467,8 @@ const SelfAssessment = () => {
                                         ))}
                                         <TableRow className="bg-slate-50/80 hover:bg-slate-50 font-bold border-t-2 border-slate-100">
                                             <TableCell className="text-slate-800 uppercase tracking-wider">Total Score</TableCell>
-                                            <TableCell className="text-right text-emerald-600 text-lg">{questions.filter(q => q.answer === "yes").length}</TableCell>
-                                            <TableCell className="text-right text-slate-900 text-lg">{questions.length}</TableCell>
+                                            <TableCell className="text-right text-emerald-600 text-lg">{resultYesCount}</TableCell>
+                                            <TableCell className="text-right text-slate-900 text-lg">{resultQs.length}</TableCell>
                                         </TableRow>
                                     </TableBody>
                                 </Table>
@@ -2422,7 +2482,7 @@ const SelfAssessment = () => {
                             </CardHeader>
                             <CardContent className="h-[400px]">
                                 <ResponsiveContainer width="100%" height="100%">
-                                    <BarChart data={calculateClauseScores()} margin={{ top: 20, right: 30, left: 0, bottom: 20 }}>
+                                    <BarChart data={resultClauseScores} margin={{ top: 20, right: 30, left: 0, bottom: 20 }}>
                                         <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
                                         <XAxis
                                             dataKey="clause"
@@ -2460,7 +2520,7 @@ const SelfAssessment = () => {
                                             }}
                                         />
                                         <Bar dataKey="score" radius={[4, 4, 0, 0]} barSize={50}>
-                                            {calculateClauseScores().map((entry, index) => (
+                                            {resultClauseScores.map((entry, index) => (
                                                 <Cell key={`cell-${index}`} fill={
                                                     entry.score >= 80 ? "#10b981" : // Emerald-500
                                                         entry.score >= 50 ? "#f59e0b" : // Amber-500
@@ -2479,16 +2539,16 @@ const SelfAssessment = () => {
                                 <RotateCcw className="w-4 h-4" /> Start New
                             </Button>
 
-                            <Button variant="outline" className="gap-2 h-12 flex-1 border-emerald-200 hover:bg-emerald-50 text-emerald-700" onClick={() => generatePDF()}>
+                            <Button variant="outline" className="gap-2 h-12 flex-1 border-emerald-200 hover:bg-emerald-50 text-emerald-700" onClick={() => generatePDF(exportAssessment)}>
                                 <FileText className="w-4 h-4" /> Download PDF
                             </Button>
 
-                            <Button variant="outline" className="gap-2 h-12 flex-1 border-blue-200 hover:bg-blue-50 text-blue-700" onClick={() => generateWord()}>
+                            <Button variant="outline" className="gap-2 h-12 flex-1 border-blue-200 hover:bg-blue-50 text-blue-700" onClick={() => generateWord(exportAssessment)}>
                                 <FileText className="w-4 h-4" /> Download Word
                             </Button>
                         </div>
-                        {Object.entries(groupedQuestions).length > 0 ? (
-                            Object.entries(groupedQuestions).map(([clause, clauseQuestions]) => (
+                        {Object.entries(resultGroupedQuestions).length > 0 ? (
+                            Object.entries(resultGroupedQuestions).map(([clause, clauseQuestions]) => (
                                 <Card key={clause} className="border-none shadow-sm overflow-hidden bg-white/80 backdrop-blur-sm">
                                     <CardHeader className="bg-slate-50/80 border-b border-slate-100 py-4 px-6">
                                         <CardTitle className="text-lg font-bold text-slate-800">{clause}</CardTitle>
@@ -2528,14 +2588,9 @@ const SelfAssessment = () => {
                                 No questions found.
                             </div>
                         )}
-
-                        <div className="flex justify-center pt-8">
-                            <Button variant="outline" onClick={() => setStep("list")} className="gap-2">
-                                <ArrowLeft className="w-4 h-4" /> Back to List
-                            </Button>
-                        </div>
                     </div>
-                )}
+                    );
+                })()}
 
 
                 <Dialog open={isAddModalOpen} onOpenChange={setIsAddModalOpen}>
@@ -2551,7 +2606,11 @@ const SelfAssessment = () => {
                             <Input
                                 id="question-text"
                                 value={newQuestionText}
-                                onChange={(e) => setNewQuestionText(sanitizeSelfAssessmentQuestionText(e.target.value))}
+                                onChange={(e) =>
+                                    setNewQuestionText(
+                                        sanitizeSelfAssessmentQuestionText(e.target.value, false, true),
+                                    )
+                                }
                                 placeholder="Enter your question here..."
                                 autoFocus
                             />
@@ -2569,6 +2628,21 @@ const SelfAssessment = () => {
                     onConfirm={confirmDeleteQuestion}
                     title="Delete Question"
                     description="Are you sure you want to delete this question? This action cannot be undone."
+                />
+
+                <DeleteConfirmationDialog
+                    open={deleteAssessmentOpen}
+                    onOpenChange={(open) => {
+                        setDeleteAssessmentOpen(open);
+                        if (!open) setAssessmentToDelete(null);
+                    }}
+                    onConfirm={confirmDeleteSavedAssessment}
+                    title="Delete assessment?"
+                    description={
+                        assessmentToDelete
+                            ? `This will permanently remove the self assessment for ${assessmentToDelete.companyName} (${assessmentToDelete.standard}). This action cannot be undone.`
+                            : "This will permanently remove this self assessment. This action cannot be undone."
+                    }
                 />
 
             </div>

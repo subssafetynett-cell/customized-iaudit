@@ -49,7 +49,11 @@ import { AssignAuditeeSiteModal } from "@/components/AssignAuditeeSiteModal";
 import UserModal from "@/components/UserModal";
 import { useCompanyStore } from "@/hooks/useCompanyStore";
 import { apiFetch } from "@/lib/api";
-import { sitesFromCompanies } from "@/lib/orgSites";
+import {
+    siteAvailableForAuditeeInvite,
+    siteHasAssignedAuditee,
+    sitesFromCompanies,
+} from "@/lib/orgSites";
 
 type AuditeeRow = {
     id: number;
@@ -61,7 +65,9 @@ type AuditeeRow = {
     emailVerifiedAt?: string | null;
     createdAt: string;
     siteLabel: string;
+    siteLabels: string[];
     siteId: string | null;
+    siteIds: string[];
     role: string;
 };
 
@@ -90,6 +96,11 @@ export default function InviteAuditee() {
 
     const validatedSites = useMemo(() => sitesFromCompanies(companies), [companies]);
 
+    const auditeeUserIds = useMemo(
+        () => new Set(auditees.map((a) => a.id)),
+        [auditees],
+    );
+
     const allSites = useMemo<InviteAuditeeSiteOption[]>(
         () =>
             validatedSites.map((site) => ({
@@ -100,77 +111,123 @@ export default function InviteAuditee() {
         [validatedSites],
     );
 
-    // Invite flow: only sites without an assigned auditee (one site per auditee).
+    // Invite flow: sites without an assigned auditee (legacy sites may still carry creator userId).
     const inviteSites = useMemo<InviteAuditeeSiteOption[]>(
         () =>
             validatedSites
-                .filter((site) => (site as { userId?: number | null }).userId == null)
+                .filter((site) => {
+                    if (auditeesLoading) {
+                        return (site as { userId?: number | null }).userId == null;
+                    }
+                    return siteAvailableForAuditeeInvite(site, auditeeUserIds);
+                })
                 .map((site) => ({
                     id: String(site.id),
                     name: site.name,
                     companyName: site.company.name,
                 })),
+        [validatedSites, auditeeUserIds, auditeesLoading],
+    );
+
+    const buildSiteInfoByUserId = useCallback(
+        (auditeeIds: ReadonlySet<number>) => {
+            const map = new Map<
+                number,
+                { siteIds: string[]; siteLabels: string[]; siteLabel: string }
+            >();
+            for (const site of validatedSites) {
+                if (!siteHasAssignedAuditee(site, auditeeIds)) continue;
+                const uid = Number.parseInt(String(site.userId ?? ""), 10);
+                const label = `${site.name} (${site.company.name})`;
+                const existing = map.get(uid) ?? { siteIds: [], siteLabels: [], siteLabel: "" };
+                existing.siteIds.push(String(site.id));
+                existing.siteLabels.push(label);
+                existing.siteLabel = existing.siteLabels.join(", ");
+                map.set(uid, existing);
+            }
+            return map;
+        },
         [validatedSites],
     );
 
-    const siteInfoByUserId = useMemo(() => {
-        const map = new Map<number, { siteId: string; siteLabel: string }>();
+    const siteInfoByUserId = useMemo(
+        () => buildSiteInfoByUserId(auditeeUserIds),
+        [buildSiteInfoByUserId, auditeeUserIds],
+    );
+
+    const disabledSiteIdsForAssign = useMemo(() => {
+        if (!assignSiteAuditee) return new Set<string>();
+        const blocked = new Set<string>();
         for (const site of validatedSites) {
-            const uid = Number((site as { userId?: number }).userId);
-            if (!Number.isFinite(uid) || uid < 1) continue;
-            map.set(uid, {
-                siteId: String(site.id),
-                siteLabel: `${site.name} (${site.company.name})`,
-            });
+            const uid = Number.parseInt(String(site.userId ?? ""), 10);
+            if (
+                siteHasAssignedAuditee(site, auditeeUserIds) &&
+                uid !== assignSiteAuditee.id
+            ) {
+                blocked.add(String(site.id));
+            }
         }
-        return map;
-    }, [validatedSites]);
+        return blocked;
+    }, [assignSiteAuditee, validatedSites, auditeeUserIds]);
 
     const fetchAuditees = useCallback(async () => {
         setAuditeesLoading(true);
         try {
-            const res = await apiFetch("/users");
+            const res = await apiFetch("/users/auditees");
             if (!res.ok) {
                 setAuditees([]);
                 return;
             }
             const data = await res.json();
             const list = Array.isArray(data) ? data : [];
-            const rows: AuditeeRow[] = list
-                .filter((u: { role?: string }) => String(u.role ?? "").toLowerCase() === "auditee")
-                .map((u: {
-                    id: number;
-                    firstName: string;
-                    lastName: string;
-                    email: string;
-                    mobile?: string | null;
-                    isActive: boolean;
-                    emailVerifiedAt?: string | null;
-                    createdAt: string;
-                    role?: string;
-                }) => {
-                    const siteInfo = siteInfoByUserId.get(u.id);
-                    return {
-                        id: u.id,
-                        firstName: u.firstName,
-                        lastName: u.lastName,
-                        email: u.email,
-                        mobile: u.mobile,
-                        isActive: u.isActive,
-                        emailVerifiedAt: u.emailVerifiedAt,
-                        createdAt: u.createdAt,
-                        role: u.role ?? "auditee",
-                        siteId: siteInfo?.siteId ?? null,
-                        siteLabel: siteInfo?.siteLabel ?? "—",
-                    };
-                });
+            const rows: AuditeeRow[] = list.map((u: {
+                id: number;
+                firstName: string;
+                lastName: string;
+                email: string;
+                mobile?: string | null;
+                isActive: boolean;
+                emailVerifiedAt?: string | null;
+                createdAt: string;
+                role?: string;
+                siteId?: number | string | null;
+                siteIds?: Array<number | string>;
+                siteLabel?: string | null;
+                siteLabels?: string[];
+            }) => {
+                const siteIds = Array.isArray(u.siteIds)
+                    ? u.siteIds.map((id) => String(id))
+                    : u.siteId != null
+                        ? [String(u.siteId)]
+                        : [];
+                const siteLabels = Array.isArray(u.siteLabels)
+                    ? u.siteLabels
+                    : u.siteLabel
+                        ? [u.siteLabel]
+                        : [];
+                return {
+                    id: u.id,
+                    firstName: u.firstName,
+                    lastName: u.lastName,
+                    email: u.email,
+                    mobile: u.mobile,
+                    isActive: u.isActive,
+                    emailVerifiedAt: u.emailVerifiedAt,
+                    createdAt: u.createdAt,
+                    role: u.role ?? "auditee",
+                    siteIds,
+                    siteId: siteIds[0] ?? null,
+                    siteLabels,
+                    siteLabel: siteLabels.length > 0 ? siteLabels.join(", ") : "—",
+                };
+            });
             setAuditees(rows);
         } catch {
             setAuditees([]);
         } finally {
             setAuditeesLoading(false);
         }
-    }, [siteInfoByUserId]);
+    }, []);
 
     useEffect(() => {
         let cancelled = false;
@@ -195,9 +252,10 @@ export default function InviteAuditee() {
     }, []);
 
     useEffect(() => {
-        if (!allowed || companiesLoading) return;
+        if (!allowed) return;
+        void refetchCompanies();
         void fetchAuditees();
-    }, [allowed, companiesLoading, fetchAuditees]);
+    }, [allowed, refetchCompanies, fetchAuditees]);
 
     const handleToggleActive = async (user: AuditeeRow) => {
         setActionUserId(user.id);
@@ -253,6 +311,8 @@ export default function InviteAuditee() {
                           email: updatedUser.email,
                           mobile: updatedUser.mobile,
                           siteLabel: siteInfo?.siteLabel ?? u.siteLabel,
+                          siteLabels: siteInfo?.siteLabels ?? u.siteLabels,
+                          siteIds: siteInfo?.siteIds ?? u.siteIds,
                       }
                     : u,
             ),
@@ -300,7 +360,7 @@ export default function InviteAuditee() {
                 <div>
                     <h1 className="text-2xl font-bold text-[#111827] tracking-tight">Invite Auditee</h1>
                     <p className="text-sm text-[#6B7280] mt-1 max-w-2xl">
-                        Invite someone in the auditee role so they can access their assigned site.
+                        Invite someone in the auditee role so they can access their assigned sites.
                     </p>
                 </div>
                 <Button
@@ -342,7 +402,7 @@ export default function InviteAuditee() {
                                     <TableHead className="text-white pl-6">Name</TableHead>
                                     <TableHead className="text-white">Email</TableHead>
                                     <TableHead className="text-white">Phone</TableHead>
-                                    <TableHead className="text-white">Site</TableHead>
+                                    <TableHead className="text-white">Sites</TableHead>
                                     <TableHead className="text-white">Status</TableHead>
                                     <TableHead className="text-white">Invited</TableHead>
                                     <TableHead className="text-white text-right pr-6">Actions</TableHead>
@@ -378,8 +438,22 @@ export default function InviteAuditee() {
                                                 <TableCell className="text-sm text-[#6B7280]">
                                                     {user.mobile || "—"}
                                                 </TableCell>
-                                                <TableCell className="text-sm text-[#6B7280] max-w-[200px]">
-                                                    <span className="line-clamp-2">{user.siteLabel}</span>
+                                                <TableCell className="text-sm text-[#6B7280] max-w-[240px]">
+                                                    {user.siteLabels.length > 0 ? (
+                                                        <div className="flex flex-wrap gap-1">
+                                                            {user.siteLabels.map((label) => (
+                                                                <Badge
+                                                                    key={label}
+                                                                    variant="outline"
+                                                                    className="text-[11px] font-normal whitespace-normal text-left"
+                                                                >
+                                                                    {label}
+                                                                </Badge>
+                                                            ))}
+                                                        </div>
+                                                    ) : (
+                                                        "—"
+                                                    )}
                                                 </TableCell>
                                                 <TableCell>
                                                     <Badge variant="outline" className={status.className}>
@@ -420,7 +494,7 @@ export default function InviteAuditee() {
                                                                 disabled={actionUserId === user.id || allSites.length === 0}
                                                             >
                                                                 <MapPin className="h-4 w-4 mr-2" />
-                                                                Select site
+                                                                Select sites
                                                             </DropdownMenuItem>
                                                             <DropdownMenuSeparator />
                                                             <DropdownMenuItem
@@ -488,6 +562,7 @@ export default function InviteAuditee() {
                 open={assignSiteAuditee != null}
                 auditee={assignSiteAuditee}
                 sites={allSites}
+                disabledSiteIds={disabledSiteIdsForAssign}
                 onClose={() => setAssignSiteAuditee(null)}
                 onSuccess={async () => {
                     await refetchCompanies();
@@ -507,7 +582,7 @@ export default function InviteAuditee() {
                             <span className="font-semibold text-foreground">
                                 {auditeeToDelete?.firstName} {auditeeToDelete?.lastName}
                             </span>
-                            ? This removes their account and unlinks them from the site. This cannot be undone.
+                            ? This removes their account and unlinks them from all assigned sites. This cannot be undone.
                         </AlertDialogDescription>
                     </AlertDialogHeader>
                     <AlertDialogFooter className="sm:justify-center gap-2 mt-4">

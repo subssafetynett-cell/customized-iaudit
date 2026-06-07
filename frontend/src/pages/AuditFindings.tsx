@@ -1,7 +1,6 @@
-import React, { useState, useEffect } from "react";
+import { useState, useEffect } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { apiFetch } from "@/lib/api";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
     Table,
@@ -12,17 +11,23 @@ import {
     TableRow,
 } from "@/components/ui/table";
 import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
+import { AlertTriangle, RefreshCw, SearchX, Search, Upload, Eye, Download, FileText } from "lucide-react";
 import {
-    Dialog,
-    DialogContent,
-    DialogHeader,
-    DialogTitle,
-    DialogFooter,
-} from "@/components/ui/dialog";
-import { AlertTriangle, Eye, RefreshCw, SearchX, Search, Edit2, Upload, FileText, Trash2, Download, ExternalLink } from "lucide-react";
-import { auditTemplates, ChecklistContent } from "@/data/auditTemplates";
-import { collectAuditEvidenceFromData } from "@/lib/auditEvidenceCollection";
+    DropdownMenu,
+    DropdownMenuContent,
+    DropdownMenuItem,
+    DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
+    extractFindings,
+    mergeFindingWithOverrides,
+    saveFindingOverride,
+    TYPE_CONFIG,
+    type Finding,
+    type FindingStatus,
+    type FindingType,
+} from "@/lib/auditFindings";
+import { FindingStatusBadge } from "@/components/FindingDetailView";
 import ReusablePagination from "@/components/ReusablePagination";
 import { toast } from "sonner";
 import jsPDF from "jspdf";
@@ -36,339 +41,59 @@ import {
     getAuditFindingsTourStepConfig,
 } from "@/lib/auditFindingsOnboardingTour";
 import { cn } from "@/lib/utils";
+import {
+    dataUrlToUint8Array,
+    embedPreparedImagesInJsPdf,
+    findingMediaToReportSources,
+    prepareReportEvidenceImages,
+} from "@/lib/reportEvidenceImages";
+import { isAuditeeRole } from "@/lib/userRoles";
+import {
+    Select,
+    SelectContent,
+    SelectItem,
+    SelectTrigger,
+    SelectValue,
+} from "@/components/ui/select";
 
-// ─── Types ────────────────────────────────────────────────────────────────────
-
-type FindingType = "OFI" | "Minor" | "Major";
-
-interface Finding {
-    id: string; // unique string for consistent matching
-    auditId: number;
-    auditName: string;
-    clauseRef: string;
-    type: FindingType;
-    details: string;
-    description: string;
-    actionBy: string;
-    closeDate: string;
-    assignTo: string;
-    isOverridden?: boolean;
-    media?: { name: string, data: string, type: string }[];
-}
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-const TYPE_CONFIG: Record<
-    FindingType,
-    { label: string; bg: string; text: string; ring: string }
-> = {
-    OFI: {
-        label: "OFI",
-        bg: "bg-amber-100",
-        text: "text-amber-800",
-        ring: "ring-amber-300",
-    },
-    Minor: {
-        label: "Minor N/C",
-        bg: "bg-orange-100",
-        text: "text-orange-800",
-        ring: "ring-orange-300",
-    },
-    Major: {
-        label: "Major N/C",
-        bg: "bg-red-100",
-        text: "text-red-800",
-        ring: "ring-red-300",
-    },
+type PlanFindingMeta = {
+    leadAuditorId?: number;
+    userId?: number;
 };
 
-function extractFindings(plan: any): Finding[] {
-    const results: Finding[] = [];
-    const auditName: string = plan.auditName || `Audit #${plan.id}`;
-
-    if (!plan.auditData) {
-        console.log(`Plan #${plan.id} has no auditData.`);
-        return results;
+function canEditFindingStatus(
+    finding: Finding,
+    planMeta: PlanFindingMeta | undefined,
+    viewerId: number | null,
+): boolean {
+    if (!viewerId) return false;
+    if (finding.createdByUserId && Number(finding.createdByUserId) === viewerId) {
+        return true;
     }
-
-    let data: any;
-    try {
-        data = typeof plan.auditData === "string" ? JSON.parse(plan.auditData) : plan.auditData;
-    } catch (e) {
-        console.error(`Failed to parse auditData for Plan #${plan.id}:`, e);
-        return results;
+    if (planMeta?.leadAuditorId && Number(planMeta.leadAuditorId) === viewerId) {
+        return true;
     }
-
-    if (!data || typeof data !== "object") {
-        console.log(`Plan #${plan.id} auditData is not an object. Type: ${typeof data}`);
-        return results;
+    if (!finding.createdByUserId && planMeta?.userId && Number(planMeta.userId) === viewerId) {
+        return true;
     }
+    return false;
+}
 
-    const mapType = (raw: any): FindingType | null => {
-        if (!raw || typeof raw !== 'string') return null;
-        const normalized = raw.trim().toLowerCase();
-        if (normalized === "c" || normalized === "compliant" || normalized === "compliance" || normalized === "") return null;
-        if (normalized.includes("ofi") || normalized.includes("opportunity")) return "OFI";
-        if (normalized === "min" || normalized.includes("minor")) return "Minor";
-        if (normalized === "maj" || normalized.includes("major")) return "Major";
-        if (normalized === "nc" || normalized.includes("non-conformance") || normalized.includes("nonconformance")) return "Minor";
-        return null;
-    };
+function canViewAllOrgFindings(role?: string) {
+    const normalized = String(role ?? "").trim().toLowerCase();
+    return ["superadmin", "admin", "auditor", "lead_auditor"].includes(normalized);
+}
 
-    // Helper to extract finding type from any object
-    const getFT = (obj: any): FindingType | null => {
-        if (!obj) return null;
-        return mapType(obj.findings) || mapType(obj.findingType) || mapType(obj.category) || mapType(obj.type);
-    };
-
-    // Helper to safely parse nested JSON strings
-    const safeParse = (input: any) => {
-        if (typeof input === 'string') {
-            try { return JSON.parse(input); } catch (e) { return input; }
-        }
-        return input;
-    };
-
-    const collectClauseMedia = (
-        data: any,
-        clauseKey: string,
-        options?: { checklistIndex?: number; processAuditIndex?: number },
-    ) => collectAuditEvidenceFromData(data, clauseKey, options);
-
-    // ── clause-checklist (Integrated Checklist – clauseData) ──────────────────
-    const clauseData = safeParse(data.clauseData);
-    const editableChecklist = safeParse(data.editableChecklist);
-
-    if (clauseData && typeof clauseData === "object") {
-        const entries = Object.entries(clauseData);
-        entries.forEach(([clauseId, entry]: any) => {
-            const ft = getFT(entry);
-            if (ft) {
-                // Try to find modified title/subClauses from editableChecklist
-                const modifiedClause = Array.isArray(editableChecklist) 
-                    ? editableChecklist.find((c: any) => c.clauseId === clauseId)
-                    : null;
-                
-                const requirementText = modifiedClause 
-                    ? [modifiedClause.title, ...(modifiedClause.subClauses || [])].filter(Boolean).join("\n")
-                    : entry.title || "";
-
-                results.push({
-                    id: `clause-${plan.id}-${clauseId}`,
-                    auditId: plan.id,
-                    auditName,
-                    clauseRef: `Clause ${clauseId}`,
-                    type: ft,
-                    details: [
-                        entry.evidence,
-                        entry.findingDetails,
-                        entry.correction ? `Correction: ${entry.correction}` : null,
-                        entry.rootCause ? `Root Cause: ${entry.rootCause}` : null,
-                        entry.correctiveAction ? `Action: ${entry.correctiveAction}` : null
-                    ].filter(Boolean).join("\n") || "",
-                    description: entry.description || entry.descriptionText || requirementText || "No description provided",
-                    actionBy: entry.actionBy || "",
-                    closeDate: entry.closeDate || "",
-                    assignTo: entry.assignTo || "",
-                    media: collectClauseMedia(data, clauseId),
-                });
-            }
-        });
+function findingAssigneeEmail(finding: Finding) {
+    if (finding.assignToEmail?.trim()) {
+        return finding.assignToEmail.toLowerCase().trim();
     }
-
-    // ── checklist table (Standard Checklist – checklistData) ──────────────────
-    const checklistData = safeParse(data.checklistData);
-    if (checklistData && typeof checklistData === "object") {
-        const entries = Object.entries(checklistData);
-        console.log(`Plan #${plan.id}: Checking checklistData (${entries.length} entries)`);
-        const templateContent = (() => {
-            if (Array.isArray(editableChecklist)) return editableChecklist;
-            const tmplId = plan.templateId;
-            if (!tmplId) return null;
-            const tmpl = auditTemplates.find((t) => t.id === tmplId);
-            if (!tmpl) return null;
-            return tmpl.content as ChecklistContent[];
-        })();
-
-        entries.forEach(([idx, entry]: any) => {
-            const ft = getFT(entry);
-            if (ft) {
-                const itemIndex = Number(idx);
-                const templateItem = Array.isArray(templateContent) ? templateContent[itemIndex] : null;
-                const clauseRef = entry.clause
-                    ? `Clause ${entry.clause}`
-                    : templateItem?.clause
-                        ? `Clause ${templateItem.clause}`
-                        : `Item ${itemIndex + 1}`;
-
-                const clauseKey = entry.clause || templateItem?.clause || String(itemIndex);
-                results.push({
-                    id: `checklist-${plan.id}-${idx}`,
-                    auditId: plan.id,
-                    auditName,
-                    clauseRef,
-                    type: ft,
-                    details: [
-                        entry.evidence,
-                        entry.findingDetails,
-                        entry.correction ? `Correction: ${entry.correction}` : null,
-                        entry.rootCause ? `Root Cause: ${entry.rootCause}` : null,
-                        entry.correctiveAction ? `Action: ${entry.correctiveAction}` : null
-                    ].filter(Boolean).join("\n") || "",
-                    description: entry.description || templateItem?.question || "No description provided",
-                    actionBy: entry.actionBy || "",
-                    closeDate: entry.closeDate || "",
-                    assignTo: entry.assignTo || "",
-                    media: collectClauseMedia(data, clauseKey, { checklistIndex: itemIndex }),
-                });
-            }
-        });
+    const labeled = finding.assignTo?.match(/\(([^\s@]+@[^\s@]+\.[^\s@]+)\)\s*$/);
+    if (labeled?.[1]) return labeled[1].toLowerCase().trim();
+    if (finding.assignTo?.includes("@")) {
+        return finding.assignTo.toLowerCase().trim();
     }
-
-    // ── extraChecklistItems ──────────────────────────────────────────────────
-    const extraItems = safeParse(data.extraChecklistItems);
-    if (extraItems && typeof extraItems === "object") {
-        console.log(`Plan #${plan.id}: Checking extraChecklistItems`);
-        Object.entries(extraItems).forEach(([clause, items]: any) => {
-            if (Array.isArray(items)) {
-                items.forEach((item: any, idx: number) => {
-                    const ft = getFT(item);
-                    if (ft) {
-                        results.push({
-                            id: `extra-${plan.id}-${clause}-${idx}`,
-                            auditId: plan.id,
-                            auditName,
-                            clauseRef: `Clause ${clause} (Custom)`,
-                            type: ft,
-                            details: item.evidence || item.findingDetails || "",
-                            description: item.description || item.question || "",
-                            actionBy: item.actionBy || "",
-                            closeDate: item.closeDate || "",
-                            assignTo: item.assignTo || "",
-                            media: collectClauseMedia(data, clause, { checklistIndex: idx }),
-                        });
-                    }
-                });
-            }
-        });
-    }
-
-    // ── processAudits ────────────────────────────────────────────────────────
-    const processAudits = safeParse(data.processAudits);
-    if (processAudits && Array.isArray(processAudits)) {
-        console.log(`Plan #${plan.id}: Checking processAudits (${processAudits.length} items)`);
-        processAudits.forEach((audit: any, idx: number) => {
-            const ft = getFT(audit);
-            if (ft) {
-                results.push({
-                    id: `process-${plan.id}-${idx}`,
-                    auditId: plan.id,
-                    auditName,
-                    clauseRef: audit.refNo || audit.clauseNo || `Process #${idx + 1}`,
-                    type: ft,
-                    details: [
-                        audit.evidence,
-                        audit.conclusion,
-                        audit.correction ? `Correction: ${audit.correction}` : null,
-                        audit.rootCause ? `Root Cause: ${audit.rootCause}` : null,
-                        audit.correctiveAction ? `Action: ${audit.correctiveAction}` : null
-                    ].filter(Boolean).join("\n") || "",
-                    description: audit.description || audit.processArea || "",
-                    actionBy: audit.actionBy || "",
-                    closeDate: audit.closeDate || "",
-                    assignTo: audit.assignTo || "",
-                    media: collectClauseMedia(data, audit.refNo || audit.clauseNo || String(idx), {
-                        processAuditIndex: idx,
-                    }),
-                });
-            }
-        });
-    }
-
-    // ── opportunities summary table ──────────────────────────────────────────
-    if (data.opportunities && Array.isArray(data.opportunities)) {
-        data.opportunities.forEach((opt: any, idx: number) => {
-            if (opt.opportunity && opt.opportunity.trim() !== "") {
-                results.push({
-                    id: `summary-ofi-${idx}`,
-                    auditId: plan.id,
-                    auditName,
-                    clauseRef: opt.standardClause || "Summary OFI",
-                    type: "OFI",
-                    details: opt.areaProcess || "",
-                    description: opt.opportunity,
-                    actionBy: "",
-                    closeDate: "",
-                    assignTo: "",
-                });
-            }
-        });
-    }
-
-    // ── nonConformances summary table ────────────────────────────────────────
-    if (data.nonConformances && Array.isArray(data.nonConformances)) {
-        data.nonConformances.forEach((ncr: any, idx: number) => {
-            if (ncr.statement && ncr.statement.trim() !== "") {
-                // Determine if Minor or Major if possible, default to Minor
-                const isMajor = ncr.id?.includes("Maj") || (ncr.statement && typeof ncr.statement === 'string' && ncr.statement.toLowerCase().includes("major"));
-                results.push({
-                    id: `summary-ncr-${idx}`,
-                    auditId: plan.id,
-                    auditName,
-                    clauseRef: ncr.standardClause || "Summary NCR",
-                    type: isMajor ? "Major" : "Minor",
-                    details: ncr.areaProcess || "",
-                    description: ncr.statement,
-                    actionBy: ncr.actionBy || "",
-                    closeDate: ncr.dueDate || "",
-                    assignTo: "",
-                });
-            }
-        });
-    }
-
-    // ── auditFindings tab (Custom auditFindings list) ────────────────────────
-    if (data.auditFindings && Array.isArray(data.auditFindings)) {
-        data.auditFindings.forEach((finding: any, idx: number) => {
-            const ft = getFT(finding);
-            if (ft && finding.details && finding.details.trim() !== "") {
-                results.push({
-                    id: `auditfindings-${idx}`,
-                    auditId: plan.id,
-                    auditName,
-                    clauseRef: finding.clauseNo || finding.refNo || "General Finding",
-                    type: ft,
-                    details: finding.refNo ? `Ref: ${finding.refNo}` : "",
-                    description: finding.details,
-                    actionBy: "",
-                    closeDate: "",
-                    assignTo: "",
-                });
-            }
-        });
-    }
-
-    if (results.length > 0) {
-        console.log(`Plan #${plan.id}: Successfully extracted ${results.length} findings.`);
-    } else {
-        console.log(`Plan #${plan.id}: No findings found in keys:`, Object.keys(data));
-    }
-
-    // Deduplicate and Prioritize Severity
-    const SEVERITY: Record<FindingType, number> = { OFI: 1, Minor: 2, Major: 3 };
-    const seen = new Map<string, Finding>();
-    results.forEach((f) => {
-        // We want to avoid listing the same exact finding source twice.
-        // If a finding is both in a checklist AND a summary table, they will have different IDs,
-        // so they both appear. This is actually what most auditors prefer to double check.
-        const key = `${f.auditId}::${f.id}::${f.clauseRef}`;
-        const existing = seen.get(key);
-        if (!existing || SEVERITY[f.type] > SEVERITY[existing.type]) {
-            seen.set(key, f);
-        }
-    });
-
-    return Array.from(seen.values());
+    return "";
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -447,11 +172,14 @@ export default function AuditFindings() {
 
     const [findings, setFindings] = useState<Finding[]>([]);
     const [loading, setLoading] = useState(true);
+    const [viewerEmail, setViewerEmail] = useState("");
+    const [viewerId, setViewerId] = useState<number | null>(null);
+    const [viewerSeesAll, setViewerSeesAll] = useState(true);
+    const [isAuditeeViewer, setIsAuditeeViewer] = useState(false);
+    const [planMetaByAuditId, setPlanMetaByAuditId] = useState<Record<number, PlanFindingMeta>>({});
+    const [statusSavingKey, setStatusSavingKey] = useState<string | null>(null);
     const [activeFilter, setActiveFilter] = useState<FilterType>("All");
     const [searchQuery, setSearchQuery] = useState("");
-    const [viewingFinding, setViewingFinding] = useState<Finding | null>(null);
-    const [editingFinding, setEditingFinding] = useState<Finding | null>(null);
-    const [isSaving, setIsSaving] = useState(false);
 
     // Pagination
     const [currentPage, setCurrentPage] = useState(1);
@@ -466,18 +194,63 @@ export default function AuditFindings() {
                 return;
             }
             const user = JSON.parse(userStr);
+            const userEmail = String(user.email || "").toLowerCase().trim();
+            const parsedViewerId = Number(user.id ?? user._id);
+            const isAuditee = isAuditeeRole(user.role);
+            setViewerEmail(userEmail);
+            setViewerId(Number.isInteger(parsedViewerId) && parsedViewerId > 0 ? parsedViewerId : null);
+            setViewerSeesAll(canViewAllOrgFindings(user.role));
+            setIsAuditeeViewer(isAuditee);
             console.log("Fetching findings for user:", user.email, "UID:", user.id || user._id);
 
-            // If superadmin, fetch all plans (omit userId)
             const isSuperAdmin = user.role === 'superadmin';
-            const path = isSuperAdmin
-                ? `/audit-plans?scope=all&includeData=true`
-                : `/audit-plans?scope=org&includeData=true`;
+            const seesAll = canViewAllOrgFindings(user.role);
 
-            const res = await apiFetch(path);
-            if (!res.ok) throw new Error("API call failed");
+            const planById = new Map<number, any>();
 
-            const plans: any[] = await res.json();
+            const addPlans = (rows: any[]) => {
+                if (!Array.isArray(rows)) return;
+                rows.forEach((plan) => {
+                    if (plan?.id != null) planById.set(Number(plan.id), plan);
+                });
+            };
+
+            if (isSuperAdmin) {
+                const res = await apiFetch(`/audit-plans?scope=all&includeData=true`);
+                if (!res.ok) throw new Error("API call failed");
+                addPlans(await res.json());
+            } else if (isAuditee) {
+                const [plansRes, assignedRes] = await Promise.all([
+                    apiFetch(`/audit-plans?includeData=true`),
+                    apiFetch(`/assigned-audit-findings`),
+                ]);
+                if (plansRes.ok) addPlans(await plansRes.json());
+                if (assignedRes.ok) addPlans(await assignedRes.json());
+            } else {
+                const requests: Promise<Response>[] = [
+                    apiFetch(`/assigned-audit-findings`),
+                ];
+                if (seesAll) {
+                    requests.push(apiFetch(`/audit-plans?scope=org&includeData=true`));
+                }
+
+                const responses = await Promise.all(requests);
+                for (const res of responses) {
+                    if (res.ok) {
+                        addPlans(await res.json());
+                    }
+                }
+            }
+
+            const plans = Array.from(planById.values());
+            const nextPlanMeta: Record<number, PlanFindingMeta> = {};
+            plans.forEach((plan) => {
+                nextPlanMeta[Number(plan.id)] = {
+                    leadAuditorId: Number(plan.leadAuditorId ?? plan.leadAuditor?.id) || undefined,
+                    userId: Number(plan.userId) || undefined,
+                };
+            });
+            setPlanMetaByAuditId(nextPlanMeta);
             console.log("Retrieved plans count:", plans.length);
             if (plans.length > 0) {
                 console.log("SAMPLE PLAN 0 auditData:", plans[0].auditName, plans[0].auditData);
@@ -491,22 +264,28 @@ export default function AuditFindings() {
                     if (baseFindings.length > 0) {
                         console.log(`Extracted ${baseFindings.length} findings from Plan #${plan.id} (${plan.auditName})`);
                     }
-                    const overrides = plan.findingsData ? (typeof plan.findingsData === 'string' ? JSON.parse(plan.findingsData) : plan.findingsData) : {};
+                    const overrides = plan.findingsData
+                        ? typeof plan.findingsData === "string"
+                            ? JSON.parse(plan.findingsData)
+                            : plan.findingsData
+                        : {};
 
-                    const merged = baseFindings.map(f => {
-                        if (overrides[f.id]) {
-                            return {
-                                ...f,
-                                ...overrides[f.id],
-                                isOverridden: true
-                            };
-                        }
-                        return f;
-                    });
+                    const merged = baseFindings.map((f) =>
+                        mergeFindingWithOverrides(f, overrides),
+                    );
 
                     all.push(...merged);
                 });
-                setFindings(all);
+                const visible = seesAll || isSuperAdmin
+                    ? all
+                    : isAuditee
+                      ? all.filter(
+                            (f) => userEmail && findingAssigneeEmail(f) === userEmail,
+                        )
+                      : all.filter(
+                            (f) => userEmail && findingAssigneeEmail(f) === userEmail,
+                        );
+                setFindings(visible);
             }
         } catch (error) {
             console.error("Fetch findings error:", error);
@@ -520,14 +299,49 @@ export default function AuditFindings() {
         fetchFindings();
     }, []);
 
+    const handleFindingStatusChange = async (finding: Finding, status: FindingStatus) => {
+        const rowKey = `${finding.auditId}-${finding.id}`;
+        const updated: Finding = { ...finding, status };
+        setFindings((prev) =>
+            prev.map((f) =>
+                f.auditId === finding.auditId && f.id === finding.id ? updated : f,
+            ),
+        );
+        setStatusSavingKey(rowKey);
+        try {
+            await saveFindingOverride(updated);
+            toast.success(`Finding marked as ${status}`);
+        } catch (error) {
+            console.error("Failed to update finding status:", error);
+            toast.error("Could not update finding status");
+            void fetchFindings();
+        } finally {
+            setStatusSavingKey(null);
+        }
+    };
+
     const searchedFindings = findings.filter(f => {
         const query = searchQuery.toLowerCase();
-        return (
-            f.auditName.toLowerCase().includes(query) ||
-            f.details.toLowerCase().includes(query) ||
-            f.description.toLowerCase().includes(query) ||
-            f.clauseRef.toLowerCase().includes(query)
-        );
+        const haystack = [
+            f.auditName,
+            f.details,
+            f.description,
+            f.clauseRef,
+            f.evidence,
+            f.findingDetails,
+            f.correction,
+            f.rootCause,
+            f.correctiveAction,
+            f.actionBy,
+            f.assignTo,
+            f.assignToEmail,
+            f.assignToName,
+            f.status,
+        ]
+            .filter(Boolean)
+            .join(" ")
+            .toLowerCase();
+        return haystack.includes(query);
     });
 
     const filtered = activeFilter === "All"
@@ -547,80 +361,6 @@ export default function AuditFindings() {
         setCurrentPage(1);
     }, [searchQuery, activeFilter]);
 
-    const handleSaveFinding = async (updated: Finding) => {
-        setIsSaving(true);
-        try {
-            // Fetch the specific plan to update its findingsData
-            const resPlan = await apiFetch(`/audit-plans/${updated.auditId}`);
-            if (!resPlan.ok) throw new Error("Plan not found");
-            const plan = await resPlan.json();
-            if (!plan) throw new Error("Plan not found");
-
-            const currentOverrides = plan.findingsData ? (typeof plan.findingsData === 'string' ? JSON.parse(plan.findingsData) : plan.findingsData) : {};
-            const newOverrides = {
-                ...currentOverrides,
-                [updated.id]: {
-                    description: updated.description,
-                    actionBy: updated.actionBy,
-                    details: updated.details,
-                    assignTo: updated.assignTo,
-                    closeDate: updated.closeDate,
-                    media: updated.media
-                }
-            };
-
-            const resUpdate = await apiFetch(`/audit-plans/${updated.auditId}`, {
-                method: 'PUT',
-                body: JSON.stringify({ findingsData: newOverrides })
-            });
-
-            if (resUpdate.ok) {
-                toast.success("Finding updated successfully");
-                setEditingFinding(null);
-                fetchFindings();
-            } else {
-                throw new Error("Failed to update");
-            }
-        } catch (error) {
-            console.error(error);
-            toast.error("Failed to save changes");
-        } finally {
-            setIsSaving(false);
-        }
-    };
-
-    const handleFileUpload = (files: FileList | null) => {
-        if (!files || !editingFinding) return;
-
-        const newFiles = Array.from(files);
-        newFiles.forEach(file => {
-            const reader = new FileReader();
-            reader.onloadend = () => {
-                const base64String = reader.result as string;
-                setEditingFinding(prev => {
-                    if (!prev) return prev;
-                    const media = [...(prev.media || []), {
-                        name: file.name,
-                        data: base64String,
-                        type: file.type
-                    }];
-                    return { ...prev, media };
-                });
-            };
-            reader.readAsDataURL(file);
-        });
-    };
-
-    const removeMedia = (index: number) => {
-        setEditingFinding(prev => {
-            if (!prev || !prev.media) return prev;
-            return {
-                ...prev,
-                media: prev.media.filter((_, i) => i !== index)
-            };
-        });
-    };
-
     const exportToPDF = async () => {
         const doc = new jsPDF();
         doc.setFontSize(22);
@@ -636,54 +376,33 @@ export default function AuditFindings() {
             f.clauseRef,
             f.type,
             f.details,
-            f.description,
+            f.status,
             f.actionBy
         ]);
 
         autoTable(doc, {
             startY: 35,
-            head: [["#", "Audit Name", "Clause", "Type", "Finding Details", "Description", "Action By"]],
+            head: [["#", "Audit Name", "Clause", "Type", "Finding Details", "Status", "Action By"]],
             body: tableData,
             theme: 'grid',
             headStyles: { fillColor: [33, 56, 71] },
         });
 
-        // Add media if exists
-        let currentY = (doc as any).lastAutoTable.finalY + 20;
+        const attachmentSources = filtered.flatMap((finding) =>
+            findingMediaToReportSources(
+                finding.media,
+                `${finding.clauseRef} — ${finding.auditName}`,
+            ),
+        );
+        const attachmentVisuals = await prepareReportEvidenceImages(attachmentSources);
 
-        for (const finding of filtered) {
-            if (finding.media && finding.media.length > 0) {
-                if (currentY > 250) {
-                    doc.addPage();
-                    currentY = 20;
-                }
-                doc.setFontSize(12);
-                doc.setTextColor(33, 56, 71);
-                doc.text(`Attachments for ${finding.clauseRef}:`, 14, currentY);
-                currentY += 10;
-
-                for (const m of finding.media) {
-                    if (m.type.startsWith("image/")) {
-                        try {
-                            doc.addImage(m.data, m.type.split('/')[1].toUpperCase(), 14, currentY, 50, 40);
-                            currentY += 45;
-                        } catch (e) {
-                            console.error("Failed to add image to PDF", e);
-                        }
-                    } else {
-                        doc.setFontSize(10);
-                        doc.setTextColor(100);
-                        doc.text(`- File: ${m.name} (${m.type})`, 20, currentY);
-                        currentY += 7;
-                    }
-
-                    if (currentY > 250) {
-                        doc.addPage();
-                        currentY = 20;
-                    }
-                }
-                currentY += 10;
-            }
+        if (attachmentVisuals.length > 0) {
+            const startY = ((doc as any).lastAutoTable?.finalY ?? 35) + 16;
+            embedPreparedImagesInJsPdf(doc, attachmentVisuals, startY, {
+                sectionTitle: "FINDING ATTACHMENTS",
+                introText:
+                    "Photos and PDF pages from finding evidence (compressed for download).",
+            });
         }
 
         doc.save("Audit_Findings.pdf");
@@ -695,7 +414,7 @@ export default function AuditFindings() {
             "Clause": f.clauseRef,
             "Type": f.type,
             "Finding Details": f.details,
-            "Description": f.description,
+            "Status": f.status,
             "Action By": f.actionBy,
             "Target Date": f.closeDate,
             "Assigned To": f.assignTo
@@ -712,7 +431,7 @@ export default function AuditFindings() {
                 new DocxTableCell({ children: [new Paragraph(f.clauseRef)] }),
                 new DocxTableCell({ children: [new Paragraph(f.type)] }),
                 new DocxTableCell({ children: [new Paragraph(f.details)] }),
-                new DocxTableCell({ children: [new Paragraph(f.description)] }),
+                new DocxTableCell({ children: [new Paragraph(f.status)] }),
                 new DocxTableCell({ children: [new Paragraph(f.actionBy || "—")] }),
             ]
         }));
@@ -728,7 +447,7 @@ export default function AuditFindings() {
                 width: { size: 100, type: WidthType.PERCENTAGE },
                 rows: [
                     new DocxTableRow({
-                        children: ["Audit Name", "Clause", "Type", "Details", "Description", "Action By"].map(h =>
+                        children: ["Audit Name", "Clause", "Type", "Details", "Status", "Action By"].map(h =>
                             new DocxTableCell({
                                 children: [new Paragraph({
                                     children: [new TextRun({ text: h, bold: true, color: "FFFFFF" })]
@@ -744,34 +463,44 @@ export default function AuditFindings() {
         ];
 
         for (const f of filtered) {
-            if (f.media && f.media.length > 0) {
-                mainContent.push(new Paragraph({
-                    text: `Attachments for ${f.clauseRef}:`,
-                    heading: HeadingLevel.HEADING_2,
-                    spacing: { before: 400 }
-                }));
+            const sources = findingMediaToReportSources(
+                f.media,
+                `${f.clauseRef} — ${f.auditName}`,
+            );
+            if (sources.length === 0) continue;
 
-                for (const m of f.media) {
-                    if (m.type.startsWith("image/")) {
-                        try {
-                            const base64Data = m.data.split(',')[1];
-                            const buffer = Uint8Array.from(atob(base64Data), c => c.charCodeAt(0));
-                            mainContent.push(new Paragraph({
-                                children: [
-                                    new ImageRun({
-                                        data: buffer,
-                                        transformation: { width: 300, height: 200 }
-                                    })
-                                ]
-                            }));
-                        } catch (e) {
-                            console.error("Failed to add image to Word", e);
-                        }
-                    } else {
-                        mainContent.push(new Paragraph({
-                            children: [new TextRun({ text: `- File: ${m.name} (${m.type})`, italics: true })]
-                        }));
-                    }
+            mainContent.push(new Paragraph({
+                text: `Attachments for ${f.clauseRef}:`,
+                heading: HeadingLevel.HEADING_2,
+                spacing: { before: 400 }
+            }));
+
+            const visuals = await prepareReportEvidenceImages(sources);
+            for (const img of visuals) {
+                try {
+                    const buffer = dataUrlToUint8Array(img.dataUrl);
+                    mainContent.push(new Paragraph({
+                        children: [
+                            new TextRun({ text: `${img.context} — ${img.name}`, bold: true }),
+                        ],
+                        spacing: { after: 120 },
+                    }));
+                    mainContent.push(new Paragraph({
+                        children: [
+                            new ImageRun({
+                                data: buffer,
+                                transformation: {
+                                    width: Math.min(520, img.widthPx),
+                                    height: Math.round(
+                                        (Math.min(520, img.widthPx) * img.heightPx) / img.widthPx,
+                                    ),
+                                },
+                            }),
+                        ],
+                        spacing: { after: 240 },
+                    }));
+                } catch (e) {
+                    console.error("Failed to add attachment to Word export", img.name, e);
                 }
             }
         }
@@ -797,9 +526,34 @@ export default function AuditFindings() {
                             Audit Findings
                         </h1>
                         <p className="text-sm text-slate-500 mt-1">
-                            All OFI, Minor N/C and Major N/C findings across every audit.
+                            {viewerSeesAll
+                                ? "All OFI, Minor N/C and Major N/C findings across every audit."
+                                : isAuditeeViewer
+                                  ? "Findings on your assigned site audits. Download reports or open an audit to view details."
+                                  : "Findings assigned to you. Open a finding to complete corrective action."}
                         </p>
                     </div>
+                    {filtered.length > 0 && (
+                        <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                                <Button variant="outline" className="gap-2 rounded-xl border-slate-200">
+                                    <Download className="w-4 h-4" />
+                                    Download
+                                </Button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent align="end" className="w-48">
+                                <DropdownMenuItem onClick={() => void exportToPDF()} className="gap-2 cursor-pointer">
+                                    <FileText className="w-4 h-4 text-red-500" /> Download PDF
+                                </DropdownMenuItem>
+                                <DropdownMenuItem onClick={exportToExcel} className="gap-2 cursor-pointer">
+                                    <FileText className="w-4 h-4 text-emerald-500" /> Download Excel
+                                </DropdownMenuItem>
+                                <DropdownMenuItem onClick={() => void exportToWord()} className="gap-2 cursor-pointer">
+                                    <FileText className="w-4 h-4 text-blue-500" /> Download Word
+                                </DropdownMenuItem>
+                            </DropdownMenuContent>
+                        </DropdownMenu>
+                    )}
                 </div>
 
                 <div
@@ -881,7 +635,11 @@ export default function AuditFindings() {
                         <SearchX className="w-12 h-12 opacity-40" />
                         <p className="text-base font-semibold">No findings found</p>
                         <p className="text-sm text-slate-400 max-w-md text-center">
-                            Findings from completed audits will appear here automatically.
+                            {viewerSeesAll
+                                ? "Findings from completed audits will appear here automatically."
+                                : viewerEmail
+                                  ? "When someone assigns a finding to your email, it will appear here."
+                                  : "Findings assigned to your account will appear here."}
                         </p>
                     </div>
                 ) : (
@@ -897,48 +655,96 @@ export default function AuditFindings() {
                                 <TableHeader className="bg-[#213847]">
                                     <TableRow className="hover:bg-slate-800 divide-x divide-slate-600">
                                         <TableHead className="text-white font-bold w-12 text-center">#</TableHead>
-                                        <TableHead className="text-white font-bold w-[20%]">Audit Name</TableHead>
-                                        <TableHead className="text-white font-bold w-[12%]">Clause / Item</TableHead>
+                                        <TableHead className="text-white font-bold w-[22%]">Audit Name</TableHead>
+                                        <TableHead className="text-white font-bold w-[14%]">Clause / Item</TableHead>
                                         <TableHead className="text-white font-bold w-[10%]">Type</TableHead>
-                                        <TableHead className="text-white font-bold w-[22%]">Finding Details</TableHead>
-                                        <TableHead className="text-white font-bold w-[22%]">Description</TableHead>
-                                        <TableHead className="text-white font-bold w-[12%]">Action By</TableHead>
-                                        <TableHead className="text-white font-bold w-20 text-center">View</TableHead>
+                                        <TableHead className="text-white font-bold w-[12%]">Status</TableHead>
+                                        <TableHead className="text-white font-bold w-[14%]">Action By</TableHead>
+                                        <TableHead className="text-white font-bold w-16 text-center">View</TableHead>
                                     </TableRow>
                                 </TableHeader>
                                 <TableBody>
                                     {paginatedFindings.map((finding, idx) => {
                                         const cfg = TYPE_CONFIG[finding.type];
+                                        const rowKey = `${finding.auditId}-${finding.id}`;
+                                        const canEditStatus =
+                                            !isAuditeeViewer &&
+                                            canEditFindingStatus(
+                                                finding,
+                                                planMetaByAuditId[finding.auditId],
+                                                viewerId,
+                                            );
                                         return (
-                                            <TableRow key={`${finding.auditId}-${finding.clauseRef}-${idx}`} className="bg-white hover:bg-slate-50 transition-colors divide-x divide-slate-100">
-                                                <TableCell className="text-center text-slate-500 font-medium text-sm">{(currentPage - 1) * itemsPerPage + idx + 1}</TableCell>
-                                                <TableCell className="font-semibold text-slate-800 text-sm py-3">{finding.auditName}</TableCell>
-                                                <TableCell className="text-slate-600 text-sm font-mono">
+                                            <TableRow
+                                                key={`${finding.auditId}-${finding.id}-${idx}`}
+                                                className="bg-white hover:bg-slate-50 transition-colors divide-x divide-slate-100 align-top"
+                                            >
+                                                <TableCell className="text-center text-slate-500 font-medium text-sm py-3">
+                                                    {(currentPage - 1) * itemsPerPage + idx + 1}
+                                                </TableCell>
+                                                <TableCell className="font-semibold text-slate-800 text-sm py-3">
+                                                    {finding.auditName}
+                                                </TableCell>
+                                                <TableCell className="text-slate-800 text-sm font-medium py-3">
                                                     <div className="flex items-center gap-2">
                                                         {finding.clauseRef}
                                                         {finding.media && finding.media.length > 0 && (
                                                             <span title={`${finding.media.length} attachments`}>
-                                                                <Upload className="w-3 h-3 text-amber-500" />
+                                                                <Upload className="w-3 h-3 text-amber-500 shrink-0" />
                                                             </span>
                                                         )}
                                                     </div>
                                                 </TableCell>
-                                                <TableCell>
-                                                    <span className={`inline-block px-2.5 py-1 rounded-full text-xs font-bold ring-1 ${cfg.bg} ${cfg.text} ${cfg.ring}`}>{cfg.label}</span>
+                                                <TableCell className="py-3">
+                                                    <span
+                                                        className={`inline-block px-2.5 py-1 rounded-full text-xs font-bold ring-1 ${cfg.bg} ${cfg.text} ${cfg.ring}`}
+                                                    >
+                                                        {cfg.label}
+                                                    </span>
                                                 </TableCell>
-                                                <TableCell className="text-slate-600 text-sm max-w-[220px]">
-                                                    <p className="line-clamp-3 leading-snug">{finding.details || "—"}</p>
+                                                <TableCell className="py-3">
+                                                    {canEditStatus ? (
+                                                        <Select
+                                                            value={finding.status}
+                                                            disabled={statusSavingKey === rowKey}
+                                                            onValueChange={(value) =>
+                                                                void handleFindingStatusChange(
+                                                                    finding,
+                                                                    value as FindingStatus,
+                                                                )
+                                                            }
+                                                        >
+                                                            <SelectTrigger className="h-8 w-[118px] text-xs font-semibold border-slate-200">
+                                                                <SelectValue />
+                                                            </SelectTrigger>
+                                                            <SelectContent>
+                                                                <SelectItem value="Opened">Opened</SelectItem>
+                                                                <SelectItem value="Closed">Closed</SelectItem>
+                                                            </SelectContent>
+                                                        </Select>
+                                                    ) : (
+                                                        <FindingStatusBadge status={finding.status} />
+                                                    )}
                                                 </TableCell>
-                                                <TableCell className="text-slate-600 text-sm max-w-[220px]">
-                                                    <p className="line-clamp-3 leading-snug">{finding.description || "—"}</p>
+                                                <TableCell className="text-slate-600 text-sm font-medium py-3">
+                                                    {finding.actionBy || "—"}
                                                 </TableCell>
-                                                <TableCell className="text-slate-600 text-sm font-medium">{finding.actionBy || "—"}</TableCell>
-                                                <TableCell className="text-center">
+                                                <TableCell className="text-center py-3">
                                                     <Button
                                                         variant="ghost"
                                                         size="sm"
-                                                        title="View finding details"
-                                                        onClick={() => setViewingFinding(finding)}
+                                                        title={
+                                                            isAuditeeViewer
+                                                                ? "View audit (read-only)"
+                                                                : viewerSeesAll
+                                                                  ? "Open in audit"
+                                                                  : "Complete finding"
+                                                        }
+                                                        onClick={() =>
+                                                            navigate(`/audit/execute/${finding.auditId}`, {
+                                                                state: { focusFindings: true },
+                                                            })
+                                                        }
                                                         className="h-8 w-8 p-0 text-slate-400 hover:text-[#213847]"
                                                     >
                                                         <Eye className="w-4 h-4" />
@@ -958,6 +764,7 @@ export default function AuditFindings() {
                             onPageChange={setCurrentPage}
                             className="mt-6"
                         />
+
                     </>
                 )}
             </div>
@@ -980,224 +787,6 @@ export default function AuditFindings() {
                 />
             )}
 
-            <Dialog open={!!viewingFinding} onOpenChange={(open) => !open && setViewingFinding(null)}>
-                <DialogContent className="max-w-2xl max-h-[90vh] flex flex-col">
-                    <DialogHeader>
-                        <DialogTitle className="flex items-center gap-2 pr-6">
-                            <Eye className="w-5 h-5 text-[#213847]" />
-                            Finding details
-                        </DialogTitle>
-                    </DialogHeader>
-
-                    {viewingFinding && (
-                        <div className="space-y-4 py-2 overflow-y-auto flex-1 pr-1">
-                            <div className="flex flex-wrap items-center gap-2">
-                                <span
-                                    className={`inline-block px-2.5 py-1 rounded-full text-xs font-bold ring-1 ${TYPE_CONFIG[viewingFinding.type].bg} ${TYPE_CONFIG[viewingFinding.type].text} ${TYPE_CONFIG[viewingFinding.type].ring}`}
-                                >
-                                    {TYPE_CONFIG[viewingFinding.type].label}
-                                </span>
-                                {viewingFinding.isOverridden && (
-                                    <Badge variant="outline" className="text-[10px] border-amber-300 text-amber-800">
-                                        Edited
-                                    </Badge>
-                                )}
-                            </div>
-
-                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                                <div className="space-y-1">
-                                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Audit</p>
-                                    <p className="text-sm font-semibold text-slate-900">{viewingFinding.auditName}</p>
-                                </div>
-                                <div className="space-y-1">
-                                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Clause / item</p>
-                                    <p className="text-sm font-mono text-slate-800">{viewingFinding.clauseRef}</p>
-                                </div>
-                            </div>
-
-                            <div className="space-y-1">
-                                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Finding details</p>
-                                <p className="text-sm text-slate-700 whitespace-pre-wrap rounded-lg border border-slate-100 bg-slate-50/80 p-3 min-h-[2.5rem]">
-                                    {viewingFinding.details?.trim() || "—"}
-                                </p>
-                            </div>
-
-                            <div className="space-y-1">
-                                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Description</p>
-                                <p className="text-sm text-slate-700 whitespace-pre-wrap rounded-lg border border-slate-100 bg-slate-50/80 p-3 min-h-[2.5rem]">
-                                    {viewingFinding.description?.trim() || "—"}
-                                </p>
-                            </div>
-
-                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                                <div className="space-y-1">
-                                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Action by</p>
-                                    <p className="text-sm text-slate-800">{viewingFinding.actionBy?.trim() || "—"}</p>
-                                </div>
-                                <div className="space-y-1">
-                                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Target date</p>
-                                    <p className="text-sm text-slate-800">{viewingFinding.closeDate?.trim() || "—"}</p>
-                                </div>
-                                <div className="space-y-1">
-                                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Assigned to</p>
-                                    <p className="text-sm text-slate-800">{viewingFinding.assignTo?.trim() || "—"}</p>
-                                </div>
-                            </div>
-
-                            {viewingFinding.media && viewingFinding.media.length > 0 && (
-                                <div className="space-y-2 pt-2 border-t border-slate-100">
-                                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 flex items-center gap-2">
-                                        <Upload className="w-3.5 h-3.5" />
-                                        Evidence & attachments ({viewingFinding.media.length})
-                                    </p>
-                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                                        {viewingFinding.media.map((m, idx) => (
-                                            <div key={idx} className="rounded-lg border border-slate-200 overflow-hidden bg-white">
-                                                {m.type.startsWith("image/") ? (
-                                                    <img
-                                                        src={m.data}
-                                                        alt={m.name}
-                                                        className="w-full max-h-48 object-contain bg-slate-50"
-                                                    />
-                                                ) : (
-                                                    <div className="flex items-center gap-2 p-4 text-slate-500">
-                                                        <FileText className="w-8 h-8 shrink-0" />
-                                                        <span className="text-sm truncate">{m.name}</span>
-                                                    </div>
-                                                )}
-                                                <p className="text-[10px] text-slate-500 px-2 py-1 border-t border-slate-100 truncate">
-                                                    {m.name}
-                                                </p>
-                                            </div>
-                                        ))}
-                                    </div>
-                                </div>
-                            )}
-                        </div>
-                    )}
-
-                    <DialogFooter className="flex-col-reverse sm:flex-row gap-2 sm:gap-0">
-                        <Button
-                            variant="outline"
-                            className="gap-2"
-                            onClick={() => {
-                                if (viewingFinding) {
-                                    navigate(`/audit/execute/${viewingFinding.auditId}`, {
-                                        state: { focusFindings: true },
-                                    });
-                                }
-                            }}
-                        >
-                            <ExternalLink className="w-4 h-4" />
-                            Open in audit
-                        </Button>
-                        <div className="flex gap-2 sm:ml-auto">
-                            <Button variant="outline" onClick={() => setViewingFinding(null)}>
-                                Close
-                            </Button>
-                            <Button
-                                className="bg-[#213847] hover:bg-[#213847]/90 text-white"
-                                onClick={() => {
-                                    if (viewingFinding) {
-                                        setEditingFinding(viewingFinding);
-                                        setViewingFinding(null);
-                                    }
-                                }}
-                            >
-                                <Edit2 className="w-4 h-4 mr-2" />
-                                Edit
-                            </Button>
-                        </div>
-                    </DialogFooter>
-                </DialogContent>
-            </Dialog>
-
-            <Dialog open={!!editingFinding} onOpenChange={(open) => !open && setEditingFinding(null)}>
-                <DialogContent className="max-w-2xl">
-                    <DialogHeader>
-                        <DialogTitle className="flex items-center gap-2">
-                            <Edit2 className="w-5 h-5 text-amber-500" /> Edit Finding Details
-                        </DialogTitle>
-                    </DialogHeader>
-
-                    {editingFinding && (
-                        <div className="space-y-4 py-4 max-h-[70vh] overflow-y-auto pr-2">
-                            <div className="grid grid-cols-2 gap-4">
-                                <div className="space-y-2">
-                                    <label className="text-sm font-semibold text-slate-700">Audit</label>
-                                    <Input value={editingFinding.auditName} disabled className="bg-slate-50" />
-                                </div>
-                                <div className="space-y-2">
-                                    <label className="text-sm font-semibold text-slate-700">Clause</label>
-                                    <Input value={editingFinding.clauseRef} disabled className="bg-slate-50" />
-                                </div>
-                            </div>
-
-                            <div className="space-y-2">
-                                <label className="text-sm font-semibold text-slate-700">Details (Evidence)</label>
-                                <Textarea value={editingFinding.details} onChange={(e) => setEditingFinding({ ...editingFinding, details: e.target.value })} className="min-h-[80px]" />
-                            </div>
-
-                            <div className="space-y-2">
-                                <label className="text-sm font-semibold text-slate-700">Description (Non-conformity statement)</label>
-                                <Textarea value={editingFinding.description} onChange={(e) => setEditingFinding({ ...editingFinding, description: e.target.value })} className="min-h-[80px]" />
-                            </div>
-
-                            <div className="grid grid-cols-2 gap-4">
-                                <div className="space-y-2">
-                                    <label className="text-sm font-semibold text-slate-700">Action By</label>
-                                    <Input value={editingFinding.actionBy} onChange={(e) => setEditingFinding({ ...editingFinding, actionBy: e.target.value })} />
-                                </div>
-                                <div className="space-y-2">
-                                    <label className="text-sm font-semibold text-slate-700">Target Date</label>
-                                    <Input type="date" value={editingFinding.closeDate} onChange={(e) => setEditingFinding({ ...editingFinding, closeDate: e.target.value })} />
-                                </div>
-                            </div>
-
-                            {/* Media Attachment Section */}
-                            <div className="space-y-3 pt-4 border-t border-slate-100">
-                                <label className="text-sm font-semibold text-slate-700 flex items-center gap-2">
-                                    <Upload className="w-4 h-4 text-slate-400" /> Attached Media / Files
-                                </label>
-
-                                <div className="grid grid-cols-3 gap-3">
-                                    {editingFinding.media?.map((m, idx) => (
-                                        <div key={idx} className="relative group rounded-lg border border-slate-200 p-2 bg-slate-50 overflow-hidden">
-                                            {m.type.startsWith("image/") ? (
-                                                <img src={m.data} alt={m.name} className="w-full h-20 object-cover rounded shadow-sm" />
-                                            ) : (
-                                                <div className="w-full h-20 flex flex-col items-center justify-center text-slate-400">
-                                                    <FileText className="w-8 h-8" />
-                                                    <span className="text-[10px] mt-1 truncate w-full px-1 text-center">{m.name}</span>
-                                                </div>
-                                            )}
-                                            <button
-                                                onClick={() => removeMedia(idx)}
-                                                className="absolute top-1 right-1 bg-red-500 text-white rounded-full p-1 opacity-0 group-hover:opacity-100 transition-opacity"
-                                            >
-                                                <Trash2 className="w-3 h-3" />
-                                            </button>
-                                        </div>
-                                    ))}
-
-                                    <label className="flex flex-col items-center justify-center w-full h-24 border-2 border-dashed border-slate-200 rounded-lg cursor-pointer hover:bg-slate-50 transition-colors">
-                                        <Upload className="w-6 h-6 text-slate-300" />
-                                        <span className="text-xs text-slate-400 mt-1">Upload</span>
-                                        <input type="file" multiple className="hidden" onChange={(e) => handleFileUpload(e.target.files)} accept="image/*,.pdf,.doc,.docx" />
-                                    </label>
-                                </div>
-                            </div>
-                        </div>
-                    )}
-
-                    <DialogFooter>
-                        <Button variant="outline" onClick={() => setEditingFinding(null)} disabled={isSaving}>Cancel</Button>
-                        <Button className="bg-amber-600 hover:bg-amber-700 text-white" onClick={() => editingFinding && handleSaveFinding(editingFinding)} disabled={isSaving}>
-                            {isSaving ? "Saving..." : "Save Changes"}
-                        </Button>
-                    </DialogFooter>
-                </DialogContent>
-            </Dialog>
         </div>
     );
 }

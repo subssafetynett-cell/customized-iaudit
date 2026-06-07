@@ -8,12 +8,34 @@ export const REPORT_IMAGES_BUDGET_BYTES = 2_400_000;
 /** Max PDF pages rendered per uploaded document in exported reports. */
 export const REPORT_PDF_MAX_PAGES_PER_FILE = 5;
 
-let pdfWorkerConfigured = false;
+let pdfWorkerReady: Promise<void> | null = null;
 
-function ensurePdfWorker() {
-    if (pdfWorkerConfigured) return;
-    pdfjs.GlobalWorkerOptions.workerSrc = pdfjsWorker;
-    pdfWorkerConfigured = true;
+async function ensurePdfWorker(): Promise<void> {
+    if (pdfWorkerReady) return pdfWorkerReady;
+
+    pdfWorkerReady = (async () => {
+        const workerSrc = typeof pdfjsWorker === "string" ? pdfjsWorker.trim() : "";
+        if (!workerSrc) {
+            throw new Error("[reportEvidenceImages] PDF.js worker URL is missing or invalid");
+        }
+
+        try {
+            const probe = await fetch(workerSrc, { method: "HEAD", cache: "force-cache" });
+            if (!probe.ok) {
+                throw new Error(`PDF.js worker not reachable (HTTP ${probe.status})`);
+            }
+        } catch (err) {
+            const detail = err instanceof Error ? err.message : String(err);
+            throw new Error(`[reportEvidenceImages] PDF.js worker failed to load: ${detail}`);
+        }
+
+        pdfjs.GlobalWorkerOptions.workerSrc = workerSrc;
+    })().catch((err) => {
+        pdfWorkerReady = null;
+        throw err;
+    });
+
+    return pdfWorkerReady;
 }
 
 export type ReportEvidenceSource = {
@@ -143,11 +165,12 @@ async function renderPdfPagesAsJpegs(
     maxDim: number = 1400,
     quality: number = 0.88,
 ): Promise<PreparedReportImage[]> {
-    ensurePdfWorker();
+    await ensurePdfWorker();
     const bytes = dataUrlToUint8Array(pdfDataUrl);
     const pdf = await pdfjs.getDocument({ data: bytes }).promise;
     const pageCount = Math.min(pdf.numPages, Math.max(1, maxPages));
     const out: PreparedReportImage[] = [];
+    const skippedPages: number[] = [];
 
     for (let pageNum = 1; pageNum <= pageCount; pageNum++) {
         const page = await pdf.getPage(pageNum);
@@ -158,7 +181,13 @@ async function renderPdfPagesAsJpegs(
         canvas.width = Math.max(1, Math.round(viewport.width));
         canvas.height = Math.max(1, Math.round(viewport.height));
         const ctx = canvas.getContext("2d");
-        if (!ctx) continue;
+        if (!ctx) {
+            skippedPages.push(pageNum);
+            console.error(
+                `[reportEvidenceImages] PDF page ${pageNum} skipped: canvas 2d context unavailable`,
+            );
+            continue;
+        }
 
         ctx.fillStyle = "#ffffff";
         ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -172,6 +201,12 @@ async function renderPdfPagesAsJpegs(
             widthPx: canvas.width,
             heightPx: canvas.height,
         });
+    }
+
+    if (skippedPages.length > 0) {
+        throw new Error(
+            `PDF evidence render incomplete: omitted page(s) ${skippedPages.join(", ")} (canvas context unavailable)`,
+        );
     }
 
     return out;
@@ -262,4 +297,94 @@ export function reportImageDisplayMm(
         w = h * aspect;
     }
     return { w, h };
+}
+
+export type JsPdfEvidenceEmbedOptions = {
+    margin?: number;
+    pageHeightMm?: number;
+    sectionTitle?: string;
+    introText?: string;
+};
+
+/** Embed prepared evidence visuals into an existing jsPDF document. Returns updated Y. */
+export function embedPreparedImagesInJsPdf(
+    doc: import("jspdf").jsPDF,
+    visuals: PreparedReportImage[],
+    startY: number,
+    options: JsPdfEvidenceEmbedOptions = {},
+): number {
+    if (visuals.length === 0) return startY;
+
+    const margin = options.margin ?? 14;
+    const pageW = doc.internal.pageSize.getWidth();
+    const pageH = options.pageHeightMm ?? doc.internal.pageSize.getHeight();
+    const contentWidthMm = pageW - margin * 2;
+    let y = startY;
+
+    const checkPage = (currentY: number, needMm: number) => {
+        if (currentY + needMm > pageH - 25) {
+            doc.addPage();
+            return margin;
+        }
+        return currentY;
+    };
+
+    if (options.sectionTitle) {
+        doc.setFontSize(14);
+        doc.setFont("helvetica", "bold");
+        doc.setTextColor(33, 56, 71);
+        doc.text(options.sectionTitle, margin, y);
+        y += 8;
+    }
+
+    if (options.introText) {
+        doc.setFontSize(8);
+        doc.setFont("helvetica", "normal");
+        doc.setTextColor(100, 100, 100);
+        doc.text(options.introText, margin, y);
+        y += 8;
+    }
+
+    for (const img of visuals) {
+        const isPdfPreview = img.context.includes("— PDF");
+        const { w, h } = reportImageDisplayMm(
+            img.widthPx,
+            img.heightPx,
+            contentWidthMm,
+            isPdfPreview ? 120 : 85,
+        );
+        y = checkPage(y, h + 14);
+        doc.setFontSize(9);
+        doc.setFont("helvetica", "bold");
+        doc.setTextColor(33, 56, 71);
+        doc.text(`${img.context} — ${img.name}`, margin, y);
+        y += 5;
+        try {
+            doc.addImage(img.dataUrl, img.format, margin, y, w, h, undefined, "FAST");
+            y += h + 6;
+        } catch (e) {
+            console.warn("Report PDF image embed failed", img.name, e);
+            doc.setFont("helvetica", "normal");
+            doc.setFontSize(8);
+            doc.setTextColor(150, 150, 150);
+            doc.text(`(Could not embed ${img.name})`, margin, y);
+            y += 8;
+        }
+    }
+
+    return y;
+}
+
+/** Build report evidence sources from finding attachment lists. */
+export function findingMediaToReportSources(
+    media: AuditEvidenceMedia[] | undefined,
+    context: string,
+): ReportEvidenceSource[] {
+    if (!media?.length) return [];
+    return media.map((m) => ({
+        name: m.name,
+        data: m.data,
+        type: m.type,
+        context,
+    }));
 }

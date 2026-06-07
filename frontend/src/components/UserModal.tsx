@@ -12,6 +12,7 @@ import { Switch } from "@/components/ui/switch";
 import { PhoneInputWithCountryCode } from "@/components/PhoneInputWithCountryCode";
 import { DEFAULT_PHONE_COUNTRY_CODE } from "@/lib/phoneCountries";
 import { PASSWORD_REGEX, PASSWORD_ERROR_MESSAGE, isTenDigitPhone, normalizePhone10Digits, PHONE_10_ERROR_MESSAGE } from "@/lib/validation";
+import { formatUserRoleLabel, USERS_PAGE_ROLE_OPTIONS } from "@/lib/userRoles";
 
 interface Props {
     open: boolean;
@@ -434,16 +435,17 @@ export default function UserModal({
                                         <SelectValue placeholder="Select role" />
                                     </SelectTrigger>
                                     <SelectContent>
-                                        <SelectItem value="admin">Admin</SelectItem>
-                                        <SelectItem value="auditor">Auditor</SelectItem>
-                                        <SelectItem value="auditee">Auditee</SelectItem>
-                                        <SelectItem value="other">Other</SelectItem>
+                                        {USERS_PAGE_ROLE_OPTIONS.map((option) => (
+                                            <SelectItem key={option.value} value={option.value}>
+                                                {option.label}
+                                            </SelectItem>
+                                        ))}
                                     </SelectContent>
                                 </Select>
                             ) : (
                                 <Input
                                     id="role"
-                                    value={role === "other" ? customRoleName || "Other" : role}
+                                    value={formatUserRoleLabel(role, customRoleName)}
                                     disabled
                                     className="capitalize bg-muted"
                                 />

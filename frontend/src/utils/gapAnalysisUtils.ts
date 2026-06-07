@@ -1,9 +1,16 @@
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
-import html2canvas from 'html2canvas'; // Import html2canvas
+import html2canvas from 'html2canvas';
 import { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, WidthType, ImageRun, BorderStyle, HeadingLevel, AlignmentType, Header, Footer } from 'docx';
 import { saveAs } from 'file-saver';
 import { isSafeEvidenceImageDataUrl } from '@/lib/evidenceImageUpload';
+import {
+    captureElementForPdf,
+    PDF_EVIDENCE_MAX_PX,
+    PDF_EXPORT_JPEG_QUALITY,
+    PDF_LOGO_MAX_PX,
+    rasterizeForPdf,
+} from '@/lib/pdfImageUtils';
 
 export const generatePDF = async (
     analysisData: any,
@@ -14,7 +21,7 @@ export const generatePDF = async (
     // Yield once so the UI (toast/spinner) can render before heavy work begins.
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
 
-    const doc = new jsPDF();
+    const doc = new jsPDF({ compress: true });
     const pageWidth = doc.internal.pageSize.getWidth();
     const pageHeight = doc.internal.pageSize.getHeight();
     const margin = 14;
@@ -26,56 +33,29 @@ export const generatePDF = async (
     // Logo loading to Data URL
     // Logo loading to Data URL
     let logoDataUrl: string | null = null;
-    let logoRatio = 0.3; // Default aspect ratio
+    let logoRatio = 0.3;
+    let logoFormat: 'JPEG' | 'PNG' = 'PNG';
 
     try {
         const logoUrl = '/iAudit Global-01.png';
-        const result = await new Promise<{ url: string, ratio: number }>((resolve, reject) => {
-            const img = new Image();
-            img.src = logoUrl;
-            img.onload = () => {
-                const canvas = document.createElement("canvas");
-                canvas.width = img.width;
-                canvas.height = img.height;
-                const ctx = canvas.getContext("2d");
-                ctx?.drawImage(img, 0, 0);
-                resolve({
-                    url: canvas.toDataURL("image/png"),
-                    ratio: img.height / img.width
-                });
-            };
-            img.onerror = reject;
-        });
-        logoDataUrl = result.url;
-        logoRatio = result.ratio;
+        const raster = await rasterizeForPdf(logoUrl, PDF_LOGO_MAX_PX, PDF_EXPORT_JPEG_QUALITY, true);
+        logoDataUrl = raster.dataUrl;
+        logoRatio = raster.aspectRatio;
+        logoFormat = raster.format;
     } catch (e) {
         console.warn("Logo not found", e);
     }
 
-    // Load User Logo
     let userLogoData: string | null = null;
     let userLogoRatio = 0.3;
+    let userLogoFormat: 'JPEG' | 'PNG' = 'JPEG';
 
     if (userLogo) {
         try {
-            const result = await new Promise<{ url: string, ratio: number }>((resolve, reject) => {
-                const img = new Image();
-                img.src = userLogo;
-                img.onload = () => {
-                    const canvas = document.createElement("canvas");
-                    canvas.width = img.width;
-                    canvas.height = img.height;
-                    const ctx = canvas.getContext("2d");
-                    ctx?.drawImage(img, 0, 0);
-                    resolve({
-                        url: canvas.toDataURL("image/png"),
-                        ratio: img.height / img.width
-                    });
-                };
-                img.onerror = reject;
-            });
-            userLogoData = result.url;
-            userLogoRatio = result.ratio;
+            const raster = await rasterizeForPdf(userLogo, PDF_LOGO_MAX_PX, PDF_EXPORT_JPEG_QUALITY);
+            userLogoData = raster.dataUrl;
+            userLogoRatio = raster.aspectRatio;
+            userLogoFormat = raster.format;
         } catch (e) {
             console.warn("User Logo not found", e);
         }
@@ -110,7 +90,7 @@ export const generatePDF = async (
                 height = maxHeight;
                 width = height / userLogoRatio;
             }
-            doc.addImage(userLogoData, 'PNG', margin, logoY, width, height);
+            doc.addImage(userLogoData, userLogoFormat, margin, logoY, width, height);
         }
     };
 
@@ -199,7 +179,7 @@ export const generatePDF = async (
             const logoX = pageWidth - margin - footerLogoWidth;
             // Line is at pageHeight - 20. We want logo below it.
             // Let's place top of logo at pageHeight - 30 due to significant whitespace
-            doc.addImage(logoDataUrl, 'PNG', logoX, pageHeight - 30, footerLogoWidth, footerLogoHeight);
+            doc.addImage(logoDataUrl, logoFormat, logoX, pageHeight - 30, footerLogoWidth, footerLogoHeight);
 
             // "Built with iAudit" Text (To the left of Logo, vertical align with logo middle approx)
             doc.setFontSize(10);
@@ -237,12 +217,11 @@ export const generatePDF = async (
 
     // Pie Chart
     if (pieChartRef) {
-        const pieCanvas = await html2canvas(pieChartRef, { scale: 2 });
-        const pieImgData = pieCanvas.toDataURL('image/png');
+        const pieCapture = await captureElementForPdf(pieChartRef);
         const pieImgWidth = 80;
-        const pieImgHeight = (pieCanvas.height / pieCanvas.width) * pieImgWidth;
+        const pieImgHeight = pieCapture.aspectRatio * pieImgWidth;
 
-        doc.addImage(pieImgData, 'PNG', margin, currentY, pieImgWidth, pieImgHeight);
+        doc.addImage(pieCapture.dataUrl, pieCapture.format, margin, currentY, pieImgWidth, pieImgHeight);
 
         // Add text summary next to pie chart if needed
         doc.setFontSize(12);
@@ -258,12 +237,11 @@ export const generatePDF = async (
         doc.text("Clause-wise Compliance", margin, currentY);
         currentY += 10;
 
-        const barCanvas = await html2canvas(barChartRef, { scale: 2 });
-        const barImgData = barCanvas.toDataURL('image/png');
-        const barImgWidth = 180; // Full width essentially
-        const barImgHeight = (barCanvas.height / barCanvas.width) * barImgWidth;
+        const barCapture = await captureElementForPdf(barChartRef);
+        const barImgWidth = 180;
+        const barImgHeight = barCapture.aspectRatio * barImgWidth;
 
-        doc.addImage(barImgData, 'PNG', margin, currentY, barImgWidth, barImgHeight);
+        doc.addImage(barCapture.dataUrl, barCapture.format, margin, currentY, barImgWidth, barImgHeight);
         currentY += barImgHeight + 10;
     }
 
@@ -311,16 +289,25 @@ export const generatePDF = async (
     // Pre-load evidence images for inline embedding
     const imgCellHeight = 36; // height for the image portion inside the cell
     const textRowHeight = 16;  // rough estimate for text portion above image
-    const imageMap: Record<number, { dataUrl: string; w: number; h: number }> = {};
+    const imageMap: Record<number, { dataUrl: string; format: 'JPEG' | 'PNG'; w: number; h: number }> = {};
     for (let i = 0; i < questions.length; i++) {
-        const q = questions[i] as any;
+        const q = questions[i] as { evidenceImage?: string };
         if (q.evidenceImage && isSafeEvidenceImageDataUrl(q.evidenceImage)) {
-            const img = new Image();
-            await new Promise<void>((resolve) => {
-                img.onload = () => { imageMap[i] = { dataUrl: q.evidenceImage, w: img.width, h: img.height }; resolve(); };
-                img.onerror = () => resolve();
-                img.src = q.evidenceImage;
-            });
+            try {
+                const raster = await rasterizeForPdf(
+                    q.evidenceImage,
+                    PDF_EVIDENCE_MAX_PX,
+                    PDF_EXPORT_JPEG_QUALITY,
+                );
+                imageMap[i] = {
+                    dataUrl: raster.dataUrl,
+                    format: raster.format,
+                    w: raster.width,
+                    h: raster.height,
+                };
+            } catch {
+                // Skip unreadable evidence images
+            }
         }
     }
 
@@ -384,7 +371,7 @@ export const generatePDF = async (
                     // Place image at bottom of the cell, below text
                     const x = data.cell.x + padding;
                     const y = data.cell.y + data.cell.height - drawH - padding;
-                    data.doc.addImage(imgInfo.dataUrl, 'PNG', x, y, drawW, drawH);
+                    data.doc.addImage(imgInfo.dataUrl, imgInfo.format, x, y, drawW, drawH);
                 }
             }
         },

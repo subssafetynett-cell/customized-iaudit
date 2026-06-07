@@ -25,3 +25,19 @@ export function sitesFromCompanies(
         `${a.company.name} ${a.name}`.localeCompare(`${b.company.name} ${b.name}`),
     );
 }
+
+/** Site.userId is reserved for auditee assignment; legacy rows may still reference the creator. */
+export function siteHasAssignedAuditee(
+    site: { userId?: number | string | null },
+    auditeeUserIds: ReadonlySet<number>,
+): boolean {
+    const uid = Number.parseInt(String(site.userId ?? ""), 10);
+    return Number.isFinite(uid) && uid >= 1 && auditeeUserIds.has(uid);
+}
+
+export function siteAvailableForAuditeeInvite(
+    site: { userId?: number | string | null },
+    auditeeUserIds: ReadonlySet<number>,
+): boolean {
+    return !siteHasAssignedAuditee(site, auditeeUserIds);
+}

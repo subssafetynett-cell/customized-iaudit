@@ -11,6 +11,7 @@ import { Badge } from "@/components/ui/badge";
 import { Calendar as CalendarIcon, MapPin, User, FileText, CheckCircle2, Plus, Trash2, ArrowLeft, Save, Clock, GripVertical, Eye, X } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
+import { useAuditeeReadOnly } from "@/lib/auditeeAccess";
 import { format } from "date-fns";
 import { Calendar } from "@/components/ui/calendar";
 import {
@@ -86,6 +87,7 @@ const AutoResizeTextarea = ({ value, onChange, className, placeholder }: any) =>
 const CreateAuditPlanPage = () => {
     const location = useLocation();
     const navigate = useNavigate();
+    const isAuditeeReadOnly = useAuditeeReadOnly();
     const [searchParams, setSearchParams] = useSearchParams();
     const { execution, program, site, plan } = location.state || {};
     const isEditMode = !!plan;
@@ -394,6 +396,10 @@ const CreateAuditPlanPage = () => {
     };
 
     const handleSave = async () => {
+        if (isAuditeeReadOnly) {
+            toast.error("Auditees can view and download audit plans only.");
+            return;
+        }
         if (!auditPlanRequiredFieldsValid()) {
             toast.error("Please fill in all required fields (Name, Template, Date, Location).");
             return;
@@ -491,6 +497,13 @@ const CreateAuditPlanPage = () => {
         scrollToAuditPlanTourStep(auditPlanTourStep);
     }, [auditPlanTourActive, auditPlanTourStep]);
 
+    useEffect(() => {
+        if (isAuditeeReadOnly && !plan) {
+            toast.error("You can only view existing audit plans.");
+            navigate("/audit-program", { replace: true });
+        }
+    }, [isAuditeeReadOnly, plan, navigate]);
+
     return (
         <div className="min-h-screen bg-[#F8FAFC] p-8 space-y-8 pb-32 relative">
             {auditPlanTourActive && (
@@ -503,10 +516,21 @@ const CreateAuditPlanPage = () => {
                         <ArrowLeft className="w-5 h-5 text-slate-600" />
                     </Button>
                     <div>
-                        <h1 className="text-2xl font-black text-slate-800 uppercase tracking-tight">{isEditMode ? "Edit Audit Plan" : "Create Audit Plan"}</h1>
-                        <p className="text-slate-500 font-medium text-sm">Define the scope, criteria, and schedule for your upcoming audit.</p>
+                        <h1 className="text-2xl font-black text-slate-800 uppercase tracking-tight">
+                            {isAuditeeReadOnly
+                                ? "View Audit Plan"
+                                : isEditMode
+                                  ? "Edit Audit Plan"
+                                  : "Create Audit Plan"}
+                        </h1>
+                        <p className="text-slate-500 font-medium text-sm">
+                            {isAuditeeReadOnly
+                                ? "Review the audit plan details for your assigned site."
+                                : "Define the scope, criteria, and schedule for your upcoming audit."}
+                        </p>
                     </div>
                 </div>
+                {!isAuditeeReadOnly && (
                 <Button
                     id="tour-step-save-audit-plan"
                     onClick={handleSave}
@@ -519,9 +543,16 @@ const CreateAuditPlanPage = () => {
                     <Save className="w-4 h-4" />
                     {isEditMode ? "Update Audit Plan" : "Save Audit Plan"}
                 </Button>
+                )}
             </div>
 
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+            {isAuditeeReadOnly && (
+                <div className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-600">
+                    View-only access — you can review this plan but cannot make changes.
+                </div>
+            )}
+
+            <div className={cn("grid grid-cols-1 lg:grid-cols-3 gap-8", isAuditeeReadOnly && "pointer-events-none select-none opacity-95")}>
                 {/* Left Column: Core Details */}
                 <div className="lg:col-span-2 space-y-6">
                     {/* General Information Card */}

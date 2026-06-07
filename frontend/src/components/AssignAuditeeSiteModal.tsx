@@ -12,12 +12,9 @@ import {
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import {
-    Select,
-    SelectContent,
-    SelectItem,
-    SelectTrigger,
-    SelectValue,
-} from "@/components/ui/select";
+    AuditeeSiteMultiSelect,
+    AuditeeSiteSelectionSummary,
+} from "@/components/AuditeeSiteMultiSelect";
 import { apiFetch } from "@/lib/api";
 import type { InviteAuditeeSiteOption } from "@/components/InviteAuditeeModal";
 
@@ -25,7 +22,7 @@ type AuditeeSummary = {
     id: number;
     firstName: string;
     lastName: string;
-    siteId?: string | null;
+    siteIds?: string[];
 };
 
 interface AssignAuditeeSiteModalProps {
@@ -33,6 +30,7 @@ interface AssignAuditeeSiteModalProps {
     onClose: () => void;
     auditee: AuditeeSummary | null;
     sites: InviteAuditeeSiteOption[];
+    disabledSiteIds?: ReadonlySet<string>;
     onSuccess?: () => void;
 }
 
@@ -41,29 +39,30 @@ export function AssignAuditeeSiteModal({
     onClose,
     auditee,
     sites,
+    disabledSiteIds,
     onSuccess,
 }: AssignAuditeeSiteModalProps) {
-    const [siteId, setSiteId] = useState("");
+    const [siteIds, setSiteIds] = useState<string[]>([]);
     const [error, setError] = useState("");
     const [isSubmitting, setIsSubmitting] = useState(false);
 
     useEffect(() => {
         if (open && auditee) {
-            setSiteId(auditee.siteId ?? "");
+            setSiteIds(auditee.siteIds ?? []);
             setError("");
         }
     }, [open, auditee]);
 
     const handleClose = () => {
-        setSiteId("");
+        setSiteIds([]);
         setError("");
         onClose();
     };
 
     const handleSubmit = async () => {
         if (!auditee) return;
-        if (!siteId) {
-            setError("Please select a site.");
+        if (siteIds.length === 0) {
+            setError("Please select at least one site.");
             return;
         }
         setError("");
@@ -71,22 +70,22 @@ export function AssignAuditeeSiteModal({
             setIsSubmitting(true);
             const res = await apiFetch(`/users/${auditee.id}/auditee-site`, {
                 method: "PATCH",
-                body: JSON.stringify({ siteId: Number(siteId) }),
+                body: JSON.stringify({ siteIds: siteIds.map((id) => Number(id)) }),
             });
             const data = await res.json().catch(() => ({}));
             if (!res.ok) {
                 throw new Error(
                     (typeof data.error === "string" && data.error) ||
                         (typeof data.message === "string" && data.message) ||
-                        "Failed to update site",
+                        "Failed to update sites",
                 );
             }
-            toast.success("Site assignment updated");
+            toast.success("Site assignments updated");
             onSuccess?.();
             handleClose();
         } catch (err) {
             const message =
-                err instanceof Error ? err.message : "Failed to update site. Please try again.";
+                err instanceof Error ? err.message : "Failed to update sites. Please try again.";
             setError(message);
             toast.error(message);
         } finally {
@@ -104,40 +103,23 @@ export function AssignAuditeeSiteModal({
                 <DialogHeader>
                     <DialogTitle className="flex items-center gap-2 text-xl">
                         <MapPin className="h-6 w-6 text-primary" />
-                        Select site
+                        Select sites
                     </DialogTitle>
                     <DialogDescription>
-                        Choose which site {displayName || "this auditee"} is associated with.
+                        Choose which sites {displayName || "this auditee"} can access.
                     </DialogDescription>
                 </DialogHeader>
 
                 <div className="space-y-4 py-2">
                     <div className="space-y-2">
-                        <Label>Site *</Label>
-                        <Select value={siteId} onValueChange={setSiteId}>
-                            <SelectTrigger>
-                                <SelectValue placeholder="Select a site" />
-                            </SelectTrigger>
-                            <SelectContent>
-                                {sites.length === 0 ? (
-                                    <SelectItem value="__none" disabled>
-                                        No sites available
-                                    </SelectItem>
-                                ) : (
-                                    sites.map((site) => (
-                                        <SelectItem key={site.id} value={site.id}>
-                                            <span className="flex items-center gap-2">
-                                                <MapPin className="h-3.5 w-3.5 text-slate-400 shrink-0" />
-                                                {site.name}
-                                                <span className="text-slate-400 text-xs">
-                                                    ({site.companyName})
-                                                </span>
-                                            </span>
-                                        </SelectItem>
-                                    ))
-                                )}
-                            </SelectContent>
-                        </Select>
+                        <Label>Sites *</Label>
+                        <AuditeeSiteMultiSelect
+                            sites={sites}
+                            selectedSiteIds={siteIds}
+                            onChange={setSiteIds}
+                            disabledSiteIds={disabledSiteIds}
+                        />
+                        <AuditeeSiteSelectionSummary count={siteIds.length} />
                     </div>
                     {error ? (
                         <p className="text-sm text-red-600 font-medium">{error}</p>

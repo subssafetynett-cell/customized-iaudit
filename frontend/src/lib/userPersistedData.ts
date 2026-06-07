@@ -130,6 +130,34 @@ function stampSelfAssessmentsForUser<T>(list: T[], userId: number): T[] {
 
 
 
+function mergeSelfAssessmentsById<T extends { id: string }>(...lists: T[][]): T[] {
+
+    const byId = new Map<string, T>();
+
+    for (const list of lists) {
+
+        for (const item of list) {
+
+            if (item?.id) byId.set(String(item.id), item);
+
+        }
+
+    }
+
+    return Array.from(byId.values()).sort((a, b) => {
+
+        const da = Date.parse(String((a as { date?: string }).date ?? "")) || 0;
+
+        const db = Date.parse(String((b as { date?: string }).date ?? "")) || 0;
+
+        return db - da;
+
+    });
+
+}
+
+
+
 function parseLocalStorageJsonArray(key: string): unknown[] {
 
     const saved = localStorage.getItem(key);
@@ -610,17 +638,37 @@ export async function fetchSelfAssessmentsPersisted<T>(): Promise<{
 
             const data = await res.json();
 
-            if (Array.isArray(data.assessments)) {
+            const serverList = Array.isArray(data.assessments)
 
-                assessments = filterSelfAssessmentsForUser(
+                ? filterSelfAssessmentsForUser(data.assessments as T[], userId)
 
-                    data.assessments as T[],
+                : [];
 
-                    userId,
+            let localBackup: T[] = [];
 
-                );
+            const saved = localStorage.getItem(selfLocalKey(userId));
+
+            if (saved) {
+
+                try {
+
+                    localBackup = filterSelfAssessmentsForUser(
+
+                        JSON.parse(saved) as T[],
+
+                        userId,
+
+                    );
+
+                } catch {
+
+                    localBackup = [];
+
+                }
 
             }
+
+            assessments = mergeSelfAssessmentsById(serverList, localBackup);
 
             if (data.draft && typeof data.draft === "object") {
 
@@ -710,11 +758,11 @@ export async function fetchSelfAssessmentsPersisted<T>(): Promise<{
 
 
 
-export async function persistSelfAssessmentsList<T>(assessments: T[]): Promise<void> {
+export async function persistSelfAssessmentsList<T>(assessments: T[]): Promise<boolean> {
 
     const userId = getStoredUserId();
 
-    if (!userId) return;
+    if (!userId) return false;
 
 
 
@@ -746,11 +794,17 @@ export async function persistSelfAssessmentsList<T>(assessments: T[]): Promise<v
 
             );
 
+            return false;
+
         }
+
+        return true;
 
     } catch (e) {
 
         console.warn("Self assessments API save failed", e);
+
+        return false;
 
     }
 

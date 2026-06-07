@@ -24,7 +24,7 @@ import {
 import { TourStepPopover } from "@/components/TourStepPopover";
 import { ONBOARDING_TOTAL_STEPS } from "@/lib/onboardingTour";
 import UserModal from "@/components/UserModal";
-import { canManageOrgUsers } from "@/lib/userRoles";
+import { canManageOrgUsers, formatUserRoleLabel, isAuditeeRole, USERS_PAGE_ROLE_OPTIONS } from "@/lib/userRoles";
 import { useStoredUser } from "@/hooks/useStoredUser";
 import ReusablePagination from "@/components/ReusablePagination";
 import { Badge } from "@/components/ui/badge";
@@ -66,6 +66,14 @@ import {
 import { apiFetch } from "@/lib/api";
 
 export default function Users() {
+    const [searchParams] = useSearchParams();
+    if (searchParams.get("inviteAuditee") === "true") {
+        return <Navigate to="/invite-auditee" replace />;
+    }
+    return <UsersPage />;
+}
+
+function UsersPage() {
     const navigate = useNavigate();
     const [searchParams, setSearchParams] = useSearchParams();
     const [showCreate, setShowCreate] = useState(false);
@@ -154,10 +162,6 @@ export default function Users() {
             setSelectedUser(null);
         }
     }, [searchParams]);
-
-    if (searchParams.get("inviteAuditee") === "true") {
-        return <Navigate to="/invite-auditee" replace />;
-    }
 
     const fetchUsers = async () => {
         try {
@@ -330,6 +334,8 @@ export default function Users() {
     };
 
     const filteredUsers = users.filter(user => {
+        if (isAuditeeRole(user.role)) return false;
+
         const matchesSearch = (user.firstName + " " + user.lastName + " " + user.email)
             .toLowerCase()
             .includes(searchQuery.toLowerCase());
@@ -388,9 +394,15 @@ export default function Users() {
                             </SelectTrigger>
                             <SelectContent className="rounded-xl border-slate-200 shadow-lg">
                                 <SelectItem value="all" className="rounded-lg cursor-pointer">All Roles</SelectItem>
-                                <SelectItem value="auditor" className="rounded-lg cursor-pointer">Auditor</SelectItem>
-                                <SelectItem value="auditee" className="rounded-lg cursor-pointer">Auditee</SelectItem>
-                                <SelectItem value="other" className="rounded-lg cursor-pointer">Other</SelectItem>
+                                {USERS_PAGE_ROLE_OPTIONS.map((option) => (
+                                    <SelectItem
+                                        key={option.value}
+                                        value={option.value}
+                                        className="rounded-lg cursor-pointer"
+                                    >
+                                        {option.label}
+                                    </SelectItem>
+                                ))}
                             </SelectContent>
                         </Select>
 
@@ -457,7 +469,7 @@ export default function Users() {
                                             <TableCell>
                                                 <Badge variant="secondary" className="font-medium capitalize py-0 px-2 h-6 flex w-fit items-center gap-1">
                                                     <Shield className="h-3 w-3" />
-                                                    {user.role === "other" ? user.customRoleName : user.role}
+                                                    {formatUserRoleLabel(user.role, user.customRoleName)}
                                                 </Badge>
                                             </TableCell>
                                             <TableCell>

@@ -43,6 +43,36 @@ export function getCompaniesSnapshot(): Company[] {
   return globalCompanies;
 }
 
+async function fetchCompaniesFromApi() {
+  try {
+    const storedUser = localStorage.getItem("user");
+    if (!storedUser) {
+      globalLoading = false;
+      notify();
+      return;
+    }
+
+    const user = JSON.parse(storedUser);
+    if (!user.id) {
+      globalLoading = false;
+      notify();
+      return;
+    }
+
+    const response = await apiFetch(`/companies?_t=${Date.now()}`);
+    if (response.ok) {
+      const data = await response.json();
+      globalCompanies = data.map(normalizeCompany);
+    }
+    globalLoading = false;
+    notify();
+  } catch (error) {
+    console.error("Failed to fetch companies:", error);
+    globalLoading = false;
+    notify();
+  }
+}
+
 export function useCompanyStore() {
   const [, setTick] = useState(0);
 
@@ -64,38 +94,13 @@ export function useCompanyStore() {
     if (!isInitialized && currentUserId) {
       isInitialized = true;
       initializedUserId = String(currentUserId);
-      fetchCompanies();
+      void fetchCompaniesFromApi();
     }
 
     return () => {
       listeners = listeners.filter((l) => l !== rerender);
     };
   }, [rerender]);
-
-  const fetchCompanies = async () => {
-    try {
-      const storedUser = localStorage.getItem('user');
-      if (!storedUser) return;
-
-      const user = JSON.parse(storedUser);
-      if (!user.id) return;
-
-      const response = await apiFetch(`/companies?_t=${Date.now()}`);
-      if (response.ok) {
-        const data = await response.json();
-        globalCompanies = data.map(normalizeCompany);
-        globalLoading = false;
-        notify();
-      } else {
-        globalLoading = false;
-        notify();
-      }
-    } catch (error) {
-      console.error("Failed to fetch companies:", error);
-      globalLoading = false;
-      notify();
-    }
-  };
 
   const addCompany = async (data: {
     name: string;
@@ -368,7 +373,7 @@ export function useCompanyStore() {
     updateDepartment,
     deleteDepartment,
     updateCompany,
-    refetchCompanies: fetchCompanies,
+    refetchCompanies: fetchCompaniesFromApi,
     isLoading: globalLoading,
     getCompany: (id: string) => globalCompanies.find((c) => c.id === id),
   };

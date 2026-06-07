@@ -41,6 +41,7 @@ import {
   SectionContent,
   ClauseChecklistContent,
   ProcessAuditContent,
+  getAuditExecuteSectionLabels,
 } from "@/data/auditTemplates";
 import { toast } from "sonner";
 import { format } from "date-fns";
@@ -67,7 +68,11 @@ import {
   getAuditExecuteTourStepConfig,
 } from "@/lib/auditExecuteOnboardingTour";
 import { cn } from "@/lib/utils";
+import { useAuditeeReadOnly } from "@/lib/auditeeAccess";
 import { useAuditExecutionAutosave } from "@/hooks/useAuditExecutionAutosave";
+import { useAssigneeEmailLookup } from "@/hooks/useAssigneeEmailLookup";
+import { AssigneeEmailFields } from "@/components/AssigneeEmailFields";
+import { AuditEvidenceAttachmentList } from "@/components/AuditEvidenceAttachmentList";
 import {
   AUDIT_EVIDENCE_ACCEPT,
   AUDIT_EVIDENCE_UNSUPPORTED_MESSAGE,
@@ -112,10 +117,42 @@ const calculatePeriods = (frequency: string, duration: number, startDate?: strin
   return result;
 };
 
+function getLoggedInUserId(): number | undefined {
+  try {
+    const userStr = localStorage.getItem("user");
+    if (!userStr) return undefined;
+    const user = JSON.parse(userStr);
+    const id = Number(user.id ?? user._id);
+    return Number.isInteger(id) && id > 0 ? id : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function isActiveFindingFieldValue(field: string, value: unknown): boolean {
+  const normalized = String(value ?? "").trim();
+  if (!normalized || normalized === "C") return false;
+  return field === "findingType" || field === "findings";
+}
+
+function stampFindingCreator(
+  field: string,
+  value: unknown,
+  existing?: { createdByUserId?: number },
+): { createdByUserId?: number; status?: "Opened" } {
+  if (!isActiveFindingFieldValue(field, value) || existing?.createdByUserId) {
+    return {};
+  }
+  const userId = getLoggedInUserId();
+  if (!userId) return {};
+  return { createdByUserId: userId, status: "Opened" };
+}
+
 const AuditExecute = () => {
   const { id } = useParams();
   const location = useLocation();
   const navigate = useNavigate();
+  const isAuditeeReadOnly = useAuditeeReadOnly();
   const [searchParams, setSearchParams] = useSearchParams();
   const auditExecuteTourActive = searchParams.get("auditExecuteTour") === "true";
   const auditExecuteTourStep = Math.min(
@@ -166,6 +203,9 @@ const AuditExecute = () => {
   // Use the template attached to the plan, or fallback
   const templateId = plan?.templateId;
   const template = (auditTemplates || []).find((t) => t.id === templateId);
+  const templateSectionLabels = template
+    ? getAuditExecuteSectionLabels(template)
+    : { divider: "Audit Execution", detailsTitle: null as string | null };
 
   // --- Pre-calculate Schedule Data ---
   let colIndex = -1;
@@ -235,10 +275,6 @@ const AuditExecute = () => {
       }
     >
   >({});
-  const [assignableUsers, setAssignableUsers] = useState<
-    { id: string; name: string; email: string }[]
-  >([]);
-
   // Extra questions added per clause during the audit (not in original template)
   const [extraChecklistItems, setExtraChecklistItems] = useState<
     Record<string, { question: string; findings: string; evidence: string; description?: string; correction?: string; rootCause?: string; correctiveAction?: string }[]>
@@ -420,35 +456,20 @@ const AuditExecute = () => {
     fetchPlanDetails();
   }, [id]);
 
-  // Load org users for Assign To dropdowns
-  useEffect(() => {
-    const fetchAssignableUsers = async () => {
-      try {
-        const res = await apiFetch("/users");
-        if (!res.ok) return;
-        const data = await res.json();
-        const rows = Array.isArray(data) ? data : [];
-        const mapped = rows
-          .map((u: any) => {
-            const fullName = `${u?.firstName || ""} ${u?.lastName || ""}`.trim();
-            const name = fullName || u?.name || u?.email || "";
-            const email = String(u?.email || "").trim();
-            const id = String(u?.id ?? email ?? "");
-            return { id, name, email, isActive: u?.isActive };
-          })
-          .filter((u: any) => u.id && u.name && u.email && u.isActive !== false)
-          .filter(
-            (u: any, idx: number, arr: any[]) =>
-              arr.findIndex((x: any) => x.email.toLowerCase() === u.email.toLowerCase()) === idx,
-          )
-          .map(({ id, name, email }: any) => ({ id, name, email }));
-        setAssignableUsers(mapped);
-      } catch (error) {
-        console.error("Failed to fetch users for assignee dropdown:", error);
-      }
-    };
-    fetchAssignableUsers();
-  }, []);
+  const {
+    handleAssigneeEmailChange,
+    getFieldError,
+  } = useAssigneeEmailLookup(id);
+
+  const applyAssigneeEmail = (
+    fieldKey: string,
+    email: string,
+    onEmailChange: (email: string) => void,
+    onNameChange: (name: string) => void,
+    notifyMeta?: { findingRef: string; findingType?: string },
+  ) => {
+    handleAssigneeEmailChange(fieldKey, email, onEmailChange, onNameChange, notifyMeta);
+  };
   const [sectionData, setSectionData] = useState<Record<number, string>>({});
   const [signatureData, setSignatureData] = useState<string | null>(null);
   const [clauseFiles, setClauseFiles] = useState<Record<string, AuditEvidenceMedia[]>>({});
@@ -559,7 +580,9 @@ const AuditExecute = () => {
     value: any,
   ) => {
     const newAudits = [...processAudits];
-    newAudits[index] = { ...newAudits[index], [field]: value };
+    const current = newAudits[index] || {};
+    const creatorStamp = stampFindingCreator(field, value, current);
+    newAudits[index] = { ...current, [field]: value, ...creatorStamp };
     setProcessAudits(newAudits);
   };
   const removeProcessAudit = (index: number) =>
@@ -688,8 +711,8 @@ const AuditExecute = () => {
   const { saveNow } = useAuditExecutionAutosave({
     planId: id,
     buildAuditData: buildAuditDataPayload,
-    enabled: !!plan && !!template,
-    deps: [buildAuditDataPayload],
+    enabled: !!plan && !!template && !isAuditeeReadOnly,
+    deps: [buildAuditDataPayload, isAuditeeReadOnly],
   });
 
   const collectFindings = () => {
@@ -846,10 +869,14 @@ const AuditExecute = () => {
     field: string,
     value: string,
   ) => {
-    setChecklistData((prev) => ({
-      ...prev,
-      [index]: { ...prev[index], [field]: value },
-    }));
+    setChecklistData((prev) => {
+      const current = prev[index] || {};
+      const creatorStamp = stampFindingCreator(field, value, current);
+      return {
+        ...prev,
+        [index]: { ...current, [field]: value, ...creatorStamp },
+      };
+    });
   };
 
   const reportRejectedEvidence = (
@@ -953,24 +980,21 @@ const AuditExecute = () => {
     field: keyof ClauseChecklistContent,
     value: any,
   ) => {
-    setClauseData((prev) => ({
-      ...prev,
-      [clauseId]: { ...prev[clauseId], [field]: value },
-    }));
-  };
-
-  const getSelectedAssigneeId = (name?: string, email?: string) => {
-    const byEmail = (email || "").trim().toLowerCase();
-    if (byEmail) {
-      const hit = assignableUsers.find((u) => u.email.toLowerCase() === byEmail);
-      if (hit) return hit.id;
-    }
-    const byName = (name || "").trim().toLowerCase();
-    if (!byName) return "";
-    return assignableUsers.find((u) => u.name.trim().toLowerCase() === byName)?.id || "";
+    setClauseData((prev) => {
+      const current = prev[clauseId] || {};
+      const creatorStamp = stampFindingCreator(field, value, current);
+      return {
+        ...prev,
+        [clauseId]: { ...current, [field]: value, ...creatorStamp },
+      };
+    });
   };
 
   const handleSubmit = async () => {
+    if (isAuditeeReadOnly) {
+      toast.error("Auditees can view and download audits only.");
+      return;
+    }
     const toastId = toast.loading("Saving audit…");
     try {
       const auditData = buildAuditDataPayload();
@@ -1953,6 +1977,12 @@ const AuditExecute = () => {
           </div>
         </div>
 
+        {isAuditeeReadOnly && (
+          <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
+            View-only access — you can review this audit and download reports, but cannot make changes.
+          </div>
+        )}
+
         {/* --- TOP OVERVIEW CARDS --- */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
           {/* Left Column: Plan Overview & Audit Details */}
@@ -2212,6 +2242,7 @@ const AuditExecute = () => {
         </div>
 
         {/* --- EXTENDED SECTIONS --- */}
+        <div className={cn(isAuditeeReadOnly && "pointer-events-none select-none opacity-95")}>
         {(template.type === "clause-checklist" ||
           template.type === "checklist") && !focusFindings && (
             <div className="space-y-8 bg-white rounded-xl p-6 shadow-sm border border-slate-200">
@@ -2776,8 +2807,8 @@ const AuditExecute = () => {
                       <div className="grid grid-cols-4 gap-4">
                         <span>Action By</span>
                         <span>Close Date</span>
-                        <span>Assign (Name)</span>
                         <span>Assign (Email)</span>
+                        <span>Assign (Name)</span>
                       </div>
                     </TableHead>
                     <TableHead className="w-12 text-center font-bold text-slate-700">Go</TableHead>
@@ -2816,41 +2847,26 @@ const AuditExecute = () => {
                               else if (f.source === 'process') updateProcessAudit(Number(f.id), 'closeDate', e.target.value);
                             }}
                           />
-                          <select
-                            className="border-0 focus:outline-none rounded-none bg-transparent h-12 px-4 shadow-none text-sm w-full"
-                            value={getSelectedAssigneeId(f.assignToName, f.assignToEmail)}
-                            onChange={(e) => {
-                              const selected = assignableUsers.find((u) => u.id === e.target.value);
-                              const selectedName = selected?.name || "";
-                              const selectedEmail = selected?.email || "";
-                              if (f.source === "clause") {
-                                handleClauseChange(f.id, "assignToName", selectedName);
-                                handleClauseChange(f.id, "assignToEmail", selectedEmail);
-                              } else if (f.source === "checklist") {
-                                handleChecklistChange(Number(f.id), "assignToName", selectedName);
-                                handleChecklistChange(Number(f.id), "assignToEmail", selectedEmail);
-                              } else if (f.source === "process") {
-                                updateProcessAudit(Number(f.id), "assignToName", selectedName);
-                                updateProcessAudit(Number(f.id), "assignToEmail", selectedEmail);
-                              }
+                          <AssigneeEmailFields
+                            layout="table-cell"
+                            fieldKey={`summary-${f.source}-${f.id}`}
+                            email={f.assignToEmail}
+                            name={f.assignToName}
+                            findingRef={f.ref}
+                            findingType={f.type}
+                            assignmentSource={f.source}
+                            assignmentKey={String(f.id)}
+                            error={getFieldError(`summary-${f.source}-${f.id}`)}
+                            onEmailInput={applyAssigneeEmail}
+                            onEmailChange={(value) => {
+                              if (f.source === "clause") handleClauseChange(f.id, "assignToEmail", value);
+                              else if (f.source === "checklist") handleChecklistChange(Number(f.id), "assignToEmail", value);
+                              else if (f.source === "process") updateProcessAudit(Number(f.id), "assignToEmail", value);
                             }}
-                          >
-                            <option value="">Select user...</option>
-                            {assignableUsers.map((u) => (
-                              <option key={u.id} value={u.id}>
-                                {u.name}
-                              </option>
-                            ))}
-                          </select>
-                          <Input
-                            type="email"
-                            className={`border-0 focus-visible:ring-0 rounded-none bg-transparent h-12 px-4 shadow-none text-sm ${f.assignToEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(f.assignToEmail) ? 'text-red-500 bg-red-50/50' : ''}`}
-                            placeholder="Email..."
-                            value={f.assignToEmail}
-                            onChange={(e) => {
-                              if (f.source === 'clause') handleClauseChange(f.id, 'assignToEmail', e.target.value);
-                              else if (f.source === 'checklist') handleChecklistChange(Number(f.id), 'assignToEmail', e.target.value);
-                              else if (f.source === 'process') updateProcessAudit(Number(f.id), 'assignToEmail', e.target.value);
+                            onNameChange={(value) => {
+                              if (f.source === "clause") handleClauseChange(f.id, "assignToName", value);
+                              else if (f.source === "checklist") handleChecklistChange(Number(f.id), "assignToName", value);
+                              else if (f.source === "process") updateProcessAudit(Number(f.id), "assignToName", value);
                             }}
                           />
                         </div>
@@ -2879,18 +2895,18 @@ const AuditExecute = () => {
         <div className="flex items-center gap-3">
           <div className="h-0.5 flex-1 bg-slate-200"></div>
           <span className="text-sm font-bold text-slate-400 uppercase tracking-widest px-2">
-            Audit Checklist
+            {templateSectionLabels.divider}
           </span>
           <div className="h-0.5 flex-1 bg-slate-200"></div>
         </div>
 
-        {/* --- TEMPLATE DYNAMIC CHECKLIST --- */}
+        {/* --- TEMPLATE DYNAMIC CONTENT --- */}
         {template.type === "clause-checklist" ? (
           <div className="space-y-6">
             <div className="flex justify-between items-center bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
               <h3 className="text-lg font-bold text-slate-800 uppercase tracking-wider flex items-center gap-2">
                 <FileText className="w-5 h-5 text-slate-400" />
-                Audit Checklist Details
+                {templateSectionLabels.detailsTitle ?? "Clause Audit Details"}
               </h3>
               <Button 
                 variant={isEditMode ? "default" : "outline"}
@@ -3230,38 +3246,24 @@ const AuditExecute = () => {
                               }
                             />
                           </div>
-                          <div className="space-y-2">
-                            <Label className="text-sm font-bold text-slate-700">Assign To (Name)</Label>
-                            <select
-                              className="h-10 w-full rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-900"
-                              value={getSelectedAssigneeId(currentData.assignToName, currentData.assignToEmail)}
-                              onChange={(e) => {
-                                const selected = assignableUsers.find((u) => u.id === e.target.value);
-                                handleClauseChange(clause.id, "assignToName", selected?.name || "");
-                                handleClauseChange(clause.id, "assignToEmail", selected?.email || "");
-                              }}
-                            >
-                              <option value="">Select user...</option>
-                              {assignableUsers.map((u) => (
-                                <option key={u.id} value={u.id}>
-                                  {u.name}
-                                </option>
-                              ))}
-                            </select>
-                          </div>
-                          <div className="space-y-2">
-                            <Label className="text-sm font-bold text-slate-700">Assign To (Email)</Label>
-                            <Input
-                              type="email"
-                              className={`bg-white border-slate-200 text-slate-900 ${currentData.assignToEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(currentData.assignToEmail) ? 'border-red-500 focus-visible:ring-red-500' : ''}`}
-                              placeholder="Email..."
-                              value={currentData.assignToEmail || ""}
-                              onChange={(e) => handleClauseChange(clause.id, "assignToEmail", e.target.value)}
-                            />
-                            {currentData.assignToEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(currentData.assignToEmail) && (
-                              <p className="text-[10px] text-red-500 font-bold mt-1">Please enter a valid email address</p>
-                            )}
-                          </div>
+                          <AssigneeEmailFields
+                            layout="inline"
+                            fieldKey={`clause-${clause.id}`}
+                            email={currentData.assignToEmail || ""}
+                            name={currentData.assignToName || ""}
+                            findingRef={`Clause ${clause.id}`}
+                            findingType={currentData.findingType}
+                            assignmentSource="clause"
+                            assignmentKey={String(clause.id)}
+                            error={getFieldError(`clause-${clause.id}`)}
+                            onEmailInput={applyAssigneeEmail}
+                            onEmailChange={(value) =>
+                              handleClauseChange(clause.id, "assignToEmail", value)
+                            }
+                            onNameChange={(value) =>
+                              handleClauseChange(clause.id, "assignToName", value)
+                            }
+                          />
                         </div>
                       </div>
                     )}
@@ -3285,23 +3287,13 @@ const AuditExecute = () => {
                         </div>
                       </label>
 
-                      {genericFiles[`clause_checklist_${clause.id}`] && genericFiles[`clause_checklist_${clause.id}`].length > 0 && (
-                        <div className="w-full flex flex-col gap-2 p-2">
-                          <span className="text-xs font-bold text-slate-500 uppercase">Attached Files</span>
-                          <div className="flex flex-wrap gap-2">
-                            {genericFiles[`clause_checklist_${clause.id}`].map((file, fileIdx) => (
-                              <div key={fileIdx} className="flex items-center gap-2 bg-slate-50 border border-slate-200 text-slate-700 px-3 py-1.5 rounded-md text-xs shadow-sm">
-                                <FileText className="w-4 h-4 text-emerald-600" />
-                                <span className="max-w-[150px] truncate" title={file.name}>{file.name}</span>
-                                <Trash2
-                                  className="w-3.5 h-3.5 text-slate-400 hover:text-red-500 cursor-pointer ml-1 transition-colors"
-                                  onClick={() => removeGenericFile(`clause_checklist_${clause.id}`, fileIdx)}
-                                />
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      )}
+                      <AuditEvidenceAttachmentList
+                        files={genericFiles[`clause_checklist_${clause.id}`] ?? []}
+                        onRemove={(fileIdx) =>
+                          removeGenericFile(`clause_checklist_${clause.id}`, fileIdx)
+                        }
+                        readOnly={isAuditeeReadOnly}
+                      />
                     </div>
                   </CardContent>
                 </Card>
@@ -3344,23 +3336,12 @@ const AuditExecute = () => {
                       <span>Add / Upload / Insert record or picture</span>
                     </label>
 
-                    {genericFiles[`section_${index}`] && genericFiles[`section_${index}`].length > 0 && (
-                      <div className="w-full p-3 border-t border-slate-200 bg-white flex flex-col gap-2">
-                        <span className="text-xs font-bold text-slate-500 uppercase px-1">Attached Files</span>
-                        <div className="flex flex-wrap gap-2">
-                          {genericFiles[`section_${index}`].map((file, fileIdx) => (
-                            <div key={fileIdx} className="flex items-center gap-2 bg-slate-50 border border-slate-200 text-slate-700 px-3 py-1.5 rounded-md text-xs shadow-sm">
-                              <FileText className="w-4 h-4 text-emerald-600" />
-                              <span className="max-w-[150px] truncate" title={file.name}>{file.name}</span>
-                              <Trash2
-                                className="w-3.5 h-3.5 text-slate-400 hover:text-red-500 cursor-pointer ml-1 transition-colors"
-                                onClick={() => removeGenericFile(`section_${index}`, fileIdx)}
-                              />
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
+                    <AuditEvidenceAttachmentList
+                      files={genericFiles[`section_${index}`] ?? []}
+                      onRemove={(fileIdx) => removeGenericFile(`section_${index}`, fileIdx)}
+                      readOnly={isAuditeeReadOnly}
+                      className="w-full p-3 border-t border-slate-200 bg-white"
+                    />
                   </div>
                 </CardContent>
               </Card>
@@ -4030,38 +4011,24 @@ const AuditExecute = () => {
                                 }
                               />
                             </div>
-                            <div className="space-y-2">
-                              <Label className="text-sm font-bold text-slate-700">Assign To (Name)</Label>
-                              <select
-                                className="h-10 w-full rounded-md border border-slate-200 bg-slate-50 px-3 text-sm text-slate-900 focus:bg-white"
-                                value={getSelectedAssigneeId(audit.assignToName, audit.assignToEmail)}
-                                onChange={(e) => {
-                                  const selected = assignableUsers.find((u) => u.id === e.target.value);
-                                  updateProcessAudit(index, "assignToName", selected?.name || "");
-                                  updateProcessAudit(index, "assignToEmail", selected?.email || "");
-                                }}
-                              >
-                                <option value="">Select user...</option>
-                                {assignableUsers.map((u) => (
-                                  <option key={u.id} value={u.id}>
-                                    {u.name}
-                                  </option>
-                                ))}
-                              </select>
-                            </div>
-                            <div className="space-y-2">
-                              <Label className="text-sm font-bold text-slate-700">Assign To (Email)</Label>
-                              <Input
-                                type="email"
-                                className={`bg-slate-50 border-slate-200 text-slate-900 focus:bg-white ${audit.assignToEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(audit.assignToEmail) ? 'border-red-500 focus-visible:ring-red-500' : ''}`}
-                                placeholder="Email..."
-                                value={audit.assignToEmail || ""}
-                                onChange={(e) => updateProcessAudit(index, "assignToEmail", e.target.value)}
-                              />
-                              {audit.assignToEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(audit.assignToEmail) && (
-                                <p className="text-[10px] text-red-500 font-bold mt-1">Please enter a valid email address</p>
-                              )}
-                            </div>
+                            <AssigneeEmailFields
+                              layout="inline"
+                              fieldKey={`process-${index}`}
+                              email={audit.assignToEmail || ""}
+                              name={audit.assignToName || ""}
+                              findingRef={audit.refNo || audit.clauseNo || `Process #${index + 1}`}
+                              findingType={audit.findingType}
+                              assignmentSource="process"
+                              assignmentKey={String(index)}
+                              error={getFieldError(`process-${index}`)}
+                              onEmailInput={applyAssigneeEmail}
+                              onEmailChange={(value) =>
+                                updateProcessAudit(index, "assignToEmail", value)
+                              }
+                              onNameChange={(value) =>
+                                updateProcessAudit(index, "assignToName", value)
+                              }
+                            />
                           </div>
                         </div>
                       )}
@@ -4085,23 +4052,13 @@ const AuditExecute = () => {
                             <span>Add / Upload / Insert record or picture</span>
                           </div>
                         </label>
-                        {genericFiles[`process_audit_${index}`] && genericFiles[`process_audit_${index}`].length > 0 && (
-                          <div className="w-full mt-4 flex flex-col gap-2">
-                            <span className="text-sm font-bold text-slate-500 uppercase px-1">Attached Files</span>
-                            <div className="flex flex-wrap gap-2">
-                              {genericFiles[`process_audit_${index}`].map((file, fileIdx) => (
-                                <div key={fileIdx} className="flex items-center gap-2 bg-white border border-slate-200 text-slate-700 px-3 py-1.5 rounded-md text-sm shadow-sm">
-                                  <FileText className="w-4 h-4 text-emerald-600" />
-                                  <span className="max-w-[150px] truncate" title={file.name}>{file.name}</span>
-                                  <Trash2
-                                    className="w-4 h-4 text-slate-400 hover:text-red-500 cursor-pointer ml-1 transition-colors"
-                                    onClick={() => removeGenericFile(`process_audit_${index}`, fileIdx)}
-                                  />
-                                </div>
-                              ))}
-                            </div>
-                          </div>
-                        )}
+                        <AuditEvidenceAttachmentList
+                          files={genericFiles[`process_audit_${index}`] ?? []}
+                          onRemove={(fileIdx) => removeGenericFile(`process_audit_${index}`, fileIdx)}
+                          readOnly={isAuditeeReadOnly}
+                          className="w-full mt-4"
+                          chipClassName="text-sm"
+                        />
                       </div>
                     </div>
                   </CardContent>
@@ -4725,38 +4682,28 @@ const AuditExecute = () => {
                                         }
                                       />
                                     </div>
-                                    <div className="space-y-2">
-                                      <Label className="text-sm font-bold text-slate-700">Assign To (Name)</Label>
-                                      <select
-                                        className="h-10 w-full rounded-md border border-slate-200 bg-slate-50 px-3 text-sm text-slate-900 focus:bg-white"
-                                        value={getSelectedAssigneeId(checklistData[index]?.assignToName, checklistData[index]?.assignToEmail)}
-                                        onChange={(e) => {
-                                          const selected = assignableUsers.find((u) => u.id === e.target.value);
-                                          handleChecklistChange(index, "assignToName", selected?.name || "");
-                                          handleChecklistChange(index, "assignToEmail", selected?.email || "");
-                                        }}
-                                      >
-                                        <option value="">Select user...</option>
-                                        {assignableUsers.map((u) => (
-                                          <option key={u.id} value={u.id}>
-                                            {u.name}
-                                          </option>
-                                        ))}
-                                      </select>
-                                    </div>
-                                    <div className="space-y-2">
-                                      <Label className="text-sm font-bold text-slate-700">Assign To (Email)</Label>
-                                      <Input
-                                        type="email"
-                                        className={`bg-slate-50 border-slate-200 text-slate-900 focus:bg-white ${checklistData[index]?.assignToEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(checklistData[index]?.assignToEmail) ? 'border-red-500 focus-visible:ring-red-500' : ''}`}
-                                        placeholder="Email..."
-                                        value={checklistData[index]?.assignToEmail || ""}
-                                        onChange={(e) => handleChecklistChange(index, "assignToEmail", e.target.value)}
-                                      />
-                                      {checklistData[index]?.assignToEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(checklistData[index]?.assignToEmail) && (
-                                        <p className="text-[10px] text-red-500 font-bold mt-1">Please enter a valid email address</p>
-                                      )}
-                                    </div>
+                                    <AssigneeEmailFields
+                                      layout="inline"
+                                      fieldKey={`checklist-${index}`}
+                                      email={checklistData[index]?.assignToEmail || ""}
+                                      name={checklistData[index]?.assignToName || ""}
+                                      findingRef={
+                                        checklistData[index]?.clause
+                                          ? `Clause ${checklistData[index]?.clause}`
+                                          : `Item ${index + 1}`
+                                      }
+                                      findingType={checklistData[index]?.findings}
+                                      assignmentSource="checklist"
+                                      assignmentKey={String(index)}
+                                      error={getFieldError(`checklist-${index}`)}
+                                      onEmailInput={applyAssigneeEmail}
+                                      onEmailChange={(value) =>
+                                        handleChecklistChange(index, "assignToEmail", value)
+                                      }
+                                      onNameChange={(value) =>
+                                        handleChecklistChange(index, "assignToName", value)
+                                      }
+                                    />
                                   </div>
                                 </div>
                               </TableCell>
@@ -4790,24 +4737,14 @@ const AuditExecute = () => {
                                   </label>
                                 </TableCell>
                               </TableRow>
-                              {clauseFiles[item.clause] && clauseFiles[item.clause].length > 0 && (
+                              {(clauseFiles[item.clause]?.length ?? 0) > 0 && (
                                 <TableRow className="bg-white border-b-2 border-slate-100">
                                   <TableCell colSpan={4} className="py-3 px-6">
-                                    <div className="flex flex-col gap-2">
-                                      <span className="text-xs font-bold text-slate-500 uppercase">Attached Files</span>
-                                      <div className="flex flex-wrap gap-2">
-                                        {clauseFiles[item.clause].map((file, fileIdx) => (
-                                          <div key={fileIdx} className="flex items-center gap-2 bg-slate-50 border border-slate-200 text-slate-700 px-3 py-1.5 rounded-md text-xs shadow-sm">
-                                            <FileText className="w-4 h-4 text-emerald-600" />
-                                            <span className="max-w-[150px] truncate" title={file.name}>{file.name}</span>
-                                            <Trash2
-                                              className="w-3.5 h-3.5 text-slate-400 hover:text-red-500 cursor-pointer ml-1 transition-colors"
-                                              onClick={() => removeClauseFile(item.clause, fileIdx)}
-                                            />
-                                          </div>
-                                        ))}
-                                      </div>
-                                    </div>
+                                    <AuditEvidenceAttachmentList
+                                      files={clauseFiles[item.clause] ?? []}
+                                      onRemove={(fileIdx) => removeClauseFile(item.clause, fileIdx)}
+                                      readOnly={isAuditeeReadOnly}
+                                    />
                                   </TableCell>
                                 </TableRow>
                               )}
@@ -4901,6 +4838,7 @@ const AuditExecute = () => {
         )}
 
         {/* Submit Actions */}
+        </div>
         <div className="fixed bottom-0 left-0 right-0 p-4 bg-white border-t border-slate-200 shadow-lg flex justify-end gap-4 z-50">
           <Button
             variant="outline"
@@ -4908,8 +4846,9 @@ const AuditExecute = () => {
             className="bg-white"
             onClick={() => navigate("/audit")}
           >
-            Cancel
+            {isAuditeeReadOnly ? "Back" : "Cancel"}
           </Button>
+          {!isAuditeeReadOnly && (
           <div className="flex items-center gap-3">
             {(template.type === 'checklist' || template.isTripleMapping || template.type === 'clause-checklist') && (
               <Button
@@ -4933,6 +4872,7 @@ const AuditExecute = () => {
               <Save className="w-5 h-5" /> Save Audit Progress
             </Button>
           </div>
+          )}
         </div>
       </div>
 

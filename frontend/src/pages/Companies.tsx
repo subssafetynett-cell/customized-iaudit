@@ -58,6 +58,23 @@ import { TourStepPopover } from "@/components/TourStepPopover";
 import { ONBOARDING_TOTAL_STEPS } from "@/lib/onboardingTour";
 import { toast } from "sonner";
 
+function siteContactDisplay(site: Site): { primary: string; secondary?: string } | null {
+  const name = site.contactName?.trim();
+  const position = site.contactPosition?.trim();
+  const phone = site.contactNumber?.trim();
+  const email = site.email?.trim();
+
+  if (name) {
+    return {
+      primary: position ? `${name}, ${position}` : name,
+      secondary: phone || email || undefined,
+    };
+  }
+  if (phone) return { primary: phone, secondary: email || undefined };
+  if (email) return { primary: email };
+  return null;
+}
+
 const CompaniesPage = () => {
   const {
     companies, addCompany, addSite, addDepartment, deleteSite,
@@ -416,7 +433,9 @@ const CompaniesPage = () => {
                         </TableCell>
                       </TableRow>
                     ) : (
-                      selectedCompany.sites.map((site) => (
+                      selectedCompany.sites.map((site) => {
+                        const contact = siteContactDisplay(site);
+                        return (
                         <TableRow key={site.id} className="hover:bg-slate-50/30 transition-colors border-slate-50">
                           <TableCell className="py-5 px-6 max-w-0 w-[22%]">
                             <div className="font-bold text-slate-900 break-all line-clamp-2" title={site.name}>
@@ -434,7 +453,22 @@ const CompaniesPage = () => {
                               <span className="text-sm font-medium text-slate-500">{site.city || "—"}</span>
                             </div>
                           </TableCell>
-                          <TableCell className="py-5 text-slate-400 font-medium">—</TableCell>
+                          <TableCell className="py-5">
+                            {contact ? (
+                              <div className="min-w-0">
+                                <div className="text-sm font-medium text-slate-700 truncate" title={contact.primary}>
+                                  {contact.primary}
+                                </div>
+                                {contact.secondary ? (
+                                  <div className="text-xs text-slate-400 truncate" title={contact.secondary}>
+                                    {contact.secondary}
+                                  </div>
+                                ) : null}
+                              </div>
+                            ) : (
+                              <span className="text-slate-400 font-medium">—</span>
+                            )}
+                          </TableCell>
                           <TableCell className="py-5">
                             <Badge className="bg-emerald-50 text-emerald-600 border border-emerald-100 font-bold px-3 py-0.5 text-[10px]">
                               {site.status || "Active"}
@@ -451,7 +485,8 @@ const CompaniesPage = () => {
                             </div>
                           </TableCell>
                         </TableRow>
-                      ))
+                        );
+                      })
                     )}
                   </TableBody>
                 </Table>

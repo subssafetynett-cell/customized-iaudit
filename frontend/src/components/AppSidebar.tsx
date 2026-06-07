@@ -5,6 +5,7 @@ import { apiFetch } from "@/lib/api";
 import { NavLink } from "@/components/NavLink";
 import { cn } from "@/lib/utils";
 import { TrialSidebarBadge } from "@/components/TrialSidebarBadge";
+import { isAuditeeUser, AUDITEE_SIDEBAR_TITLES } from "@/lib/auditeeAccess";
 
 
 import {
@@ -47,12 +48,24 @@ export function AppSidebar() {
   const location = useLocation();
   const currentPath = location.pathname;
   const [canInviteAuditee, setCanInviteAuditee] = useState(false);
+  const [isAuditee, setIsAuditee] = useState(false);
+
+  useEffect(() => {
+    try {
+      const userStr = localStorage.getItem("user");
+      const user = userStr ? JSON.parse(userStr) : null;
+      setIsAuditee(isAuditeeUser(user));
+    } catch {
+      setIsAuditee(false);
+    }
+  }, [location.pathname]);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
         const res = await apiFetch("/users/invite-auditee/access");
+        if (cancelled) return;
         if (!res.ok) return;
         const data = await res.json();
         if (!cancelled) setCanInviteAuditee(data.allowed === true);
@@ -65,13 +78,34 @@ export function AppSidebar() {
     };
   }, []);
 
-  const visibleManagementNav = managementNav.filter(
-    (item) => item.title !== "Invite Auditee" || canInviteAuditee,
-  );
+  const visibleManagementNav = managementNav.filter((item) => {
+    if (isAuditee && !AUDITEE_SIDEBAR_TITLES.has(item.title)) {
+      return false;
+    }
+    if (item.title === "Invite Auditee" && !canInviteAuditee) {
+      return false;
+    }
+    return true;
+  });
+
+  const visibleDashboardNav = dashboardNav.filter((item) => {
+    if (isAuditee && item.title === "Start Onboarding") {
+      return false;
+    }
+    return true;
+  });
+
+  const visibleBillingNav = billingNav.filter((item) => {
+    if (isAuditee && item.title === "Subscription") {
+      return false;
+    }
+    return true;
+  });
 
   const isActive = (path: string) => {
     if (path === "/companies") return currentPath === "/companies" || currentPath.startsWith("/company/");
     if (path === "/getting-started") return currentPath === "/getting-started";
+    if (path === "/audit-findings") return currentPath === "/audit-findings";
     const pathOnly = path.split("?")[0];
     return currentPath === pathOnly;
   };
@@ -96,7 +130,7 @@ export function AppSidebar() {
               </SidebarGroupLabel>
               <SidebarGroupContent>
                 <SidebarMenu className="gap-0.5">
-                  {dashboardNav.map((item) => {
+                  {visibleDashboardNav.map((item) => {
                     const active = isActive(item.url);
                     return (
                       <SidebarMenuItem key={item.title}>
@@ -212,7 +246,7 @@ export function AppSidebar() {
               </SidebarGroupLabel>
               <SidebarGroupContent>
                 <SidebarMenu className="gap-0.5">
-                  {billingNav.map((item) => {
+                  {visibleBillingNav.map((item) => {
                     const active = isActive(item.url);
                     return (
                       <SidebarMenuItem key={item.title}>

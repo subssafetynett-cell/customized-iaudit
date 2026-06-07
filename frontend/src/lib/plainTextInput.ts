@@ -168,8 +168,9 @@ export function sanitizeSelfAssessmentNameField(
     let s = sanitizePlainTextInput(value, { maxLen, normalizeWhitespace: forSave });
     s = s.replace(/[`\\<>]/g, "");
     s = s.replace(/[^\p{L}\p{M}\p{N}\s\-'.,&()]/gu, "");
-    // Name fields always trim edges and collapse runs (legacy UX; single spaces between words still work).
-    s = s.trim().replace(/\s+/g, " ");
+    if (forSave) {
+        s = s.trim().replace(/\s+/g, " ");
+    }
     return s;
 }
 
@@ -188,9 +189,13 @@ export function sanitizeSelfAssessmentScope(value: string, forSave = false): str
     return s;
 }
 
-export function sanitizeSelfAssessmentQuestionText(value: string, forSave = false): string {
+export function sanitizeSelfAssessmentQuestionText(
+    value: string,
+    forSave = false,
+    singleLine = false,
+): string {
     let s = sanitizePlainTextInput(value, {
-        preserveNewlines: true,
+        preserveNewlines: !singleLine,
         maxLen: SELF_ASSESSMENT_QUESTION_MAX,
         normalizeWhitespace: forSave,
     });
