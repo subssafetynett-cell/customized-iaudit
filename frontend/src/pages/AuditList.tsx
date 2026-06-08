@@ -37,6 +37,7 @@ import {
   getAuditPlanStatusLabel,
   isAuditPlanCompleted,
 } from "@/lib/auditCompletion";
+import { useAuditeeReadOnly } from "@/lib/auditeeAccess";
 
 const AuditList = () => {
     const [auditPlans, setAuditPlans] = useState<any[]>([]);

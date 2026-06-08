@@ -252,8 +252,8 @@ export default function ProfileSettings() {
                                     {isEditing ? (
                                         <PhoneInputWithCountryCode
                                             id="mobile"
-                                            dialCode={mobileDial}
-                                            onDialCodeChange={setMobileDial}
+                                            countryCode={mobileCountry}
+                                            onCountryCodeChange={setMobileCountry}
                                             value={formData.mobile}
                                             onChange={(digits) =>
                                                 setFormData((prev) => ({ ...prev, mobile: digits }))
