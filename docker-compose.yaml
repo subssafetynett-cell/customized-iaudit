@@ -11,8 +11,6 @@ services:
       DATABASE_URL: ${DATABASE_URL}
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    ports:
-      - "${SERVER_HOST_PORT:-3001}:3001"
     healthcheck:
       test:
         - "CMD"
