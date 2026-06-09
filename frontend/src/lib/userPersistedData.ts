@@ -490,11 +490,11 @@ export async function fetchGapAnalysesPersisted<T>(): Promise<{
 
 
 
-export async function persistGapAnalysesList<T>(analyses: T[]): Promise<void> {
+export async function persistGapAnalysesList<T>(analyses: T[]): Promise<boolean> {
 
     const userId = getStoredUserId();
 
-    if (!userId) return;
+    if (!userId) return false;
 
 
 
@@ -518,13 +518,23 @@ export async function persistGapAnalysesList<T>(analyses: T[]): Promise<void> {
 
         if (!res.ok) {
 
+            const { parseTrialLimitApiError } = await import("@/lib/trialLimits");
+
+            if (await parseTrialLimitApiError(res)) return false;
+
             console.warn("Failed to persist gap analyses to server", await res.text());
 
+            return false;
+
         }
+
+        return true;
 
     } catch (e) {
 
         console.warn("Gap analyses API save failed", e);
+
+        return false;
 
     }
 
@@ -785,6 +795,10 @@ export async function persistSelfAssessmentsList<T>(assessments: T[]): Promise<b
         });
 
         if (!res.ok) {
+
+            const { parseTrialLimitApiError } = await import("@/lib/trialLimits");
+
+            if (await parseTrialLimitApiError(res)) return false;
 
             console.warn(
 

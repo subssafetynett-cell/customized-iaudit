@@ -48,6 +48,7 @@ import {
     persistGapAnalysisDraft,
     deleteGapAnalysisPersisted,
 } from "@/lib/userPersistedData";
+import { guardTrialCreate } from "@/lib/trialLimits";
 import {
     sanitizeGapAnalysisField,
     sanitizeGapAnalysisLongField,
@@ -254,15 +255,24 @@ const GapAnalysis = () => {
         };
     }, []);
 
-    const saveCurrentAnalysis = (status: "In Progress" | "Completed" = "In Progress") => {
+    const openNewGapAnalysisSetup = () => {
+        if (!guardTrialCreate("gapAnalysis", savedAnalyses.length)) return;
+        setStep("setup");
+    };
+
+    const saveCurrentAnalysis = async (status: "In Progress" | "Completed" = "In Progress") => {
         if (!companyName || !standard) {
             toast.error("Company Name and Standard are required to save.");
             return;
         }
 
+        const analysisId = currentId || crypto.randomUUID();
+        const isNew = !savedAnalyses.some((a) => a.id === analysisId);
+        if (isNew && !guardTrialCreate("gapAnalysis", savedAnalyses.length)) return;
+
         const userId = getStoredUserId();
         const newAnalysis = sanitizeSavedGapAnalysis({
-            id: currentId || crypto.randomUUID(),
+            id: analysisId,
             ...(userId ? { createdByUserId: userId, userId } : {}),
             companyName,
             auditDate,
@@ -283,7 +293,11 @@ const GapAnalysis = () => {
             : [newAnalysis, ...savedAnalyses];
 
         setSavedAnalyses(updated);
-        void persistGapAnalysesList(updated);
+        const persisted = await persistGapAnalysesList(updated);
+        if (!persisted) {
+            setSavedAnalyses(savedAnalyses);
+            return;
+        }
         if (status === "Completed") {
             void persistGapAnalysisDraft(null);
         }
@@ -557,7 +571,7 @@ const GapAnalysis = () => {
                             )}
                             <Button 
                                 id="tour-step-new-analysis"
-                                onClick={() => setStep("setup")} 
+                                onClick={openNewGapAnalysisSetup}
                                 className={`w-full sm:w-auto bg-[#213847] hover:bg-[#213847]/90 text-white rounded-xl h-10 px-4 font-medium shadow-sm transition-all duration-300 ${showOnboardingGuide && onboardingStep === 17 ? "relative z-[60] scale-105 shadow-2xl" : ""}`}
                             >
                                 <Plus className="h-4 w-4 mr-2" /> New Analysis

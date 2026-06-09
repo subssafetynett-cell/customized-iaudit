@@ -51,6 +51,7 @@ import {
     PDF_LOGO_MAX_PX,
     rasterizeForPdf,
 } from "@/lib/pdfImageUtils";
+import { guardTrialCreate } from "@/lib/trialLimits";
 import {
     fetchSelfAssessmentsPersisted,
     getStoredUserId,
@@ -468,12 +469,21 @@ const SelfAssessment = () => {
         }
     }, [step, loadSavedAssessments]);
 
+    const openNewSelfAssessmentSetup = () => {
+        if (!guardTrialCreate("selfAssessment", savedAssessments.length)) return;
+        setStep("setup");
+    };
+
     const saveToHistory = async (newAssessment: SavedAssessment): Promise<boolean> => {
         const userId = getStoredUserId();
         const safe = sanitizeSavedSelfAssessment({
             ...newAssessment,
             ...(userId ? { createdByUserId: userId, userId } : {}),
         }) as SavedAssessment;
+        const isNew = !savedAssessments.some((a) => a.id === safe.id);
+        if (isNew && !guardTrialCreate("selfAssessment", savedAssessments.length)) return false;
+
+        const previous = savedAssessments;
         const updated = [safe, ...savedAssessments.filter((a) => a.id !== safe.id)];
         setSavedAssessments(updated);
 
@@ -483,6 +493,10 @@ const SelfAssessment = () => {
         }
 
         const persisted = await persistSelfAssessmentsList(updated);
+        if (!persisted) {
+            setSavedAssessments(previous);
+            return false;
+        }
         await persistSelfAssessmentDraft(null);
         return persisted;
     };
@@ -1702,7 +1716,7 @@ const SelfAssessment = () => {
                             )}
                             <Button 
                                 id="tour-step-new-assessment"
-                                onClick={() => setStep("setup")} 
+                                onClick={openNewSelfAssessmentSetup}
                                 size="sm" 
                                 className={`gap-1.5 shadow-sm bg-[#213847] hover:bg-[#213847]/90 text-white rounded-xl px-5 h-11 transition-all ${showOnboardingGuide ? 'relative z-[60] scale-105 shadow-2xl' : ''}`}
                             >
@@ -1748,7 +1762,7 @@ const SelfAssessment = () => {
                                 </div>
                                 <h3 className="text-lg font-medium text-slate-900">No assessments yet</h3>
                                 <p className="text-slate-500 max-w-sm mx-auto mt-2 mb-6">Start your first self-assessment to evaluate your organization's compliance.</p>
-                                <Button onClick={() => setStep("setup")} className="bg-[#213847] hover:bg-[#213847]/90 text-white gap-2 shadow-sm rounded-xl px-5 h-11">
+                                <Button onClick={openNewSelfAssessmentSetup} className="bg-[#213847] hover:bg-[#213847]/90 text-white gap-2 shadow-sm rounded-xl px-5 h-11">
                                     <Plus className="w-4 h-4" /> Start Assessment
                                 </Button>
                             </div>

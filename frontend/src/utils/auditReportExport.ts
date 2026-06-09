@@ -11,11 +11,12 @@ import {
     TableCell as DocxTableCell,
     WidthType,
     BorderStyle,
+    UnderlineType,
 } from "docx";
 import { saveAs } from "file-saver";
 import * as XLSX from "xlsx";
 import { format } from "date-fns";
-import { auditTemplates, ChecklistContent } from "@/data/auditTemplates";
+import { auditTemplates, ChecklistContent, ClauseChecklistContent, ProcessAuditContent } from "@/data/auditTemplates";
 import { sanitizeAuditEvidenceMediaMap, type AuditEvidenceMedia } from "@/lib/evidenceImageUpload";
 import { collectAuditEvidenceMedia } from "@/lib/auditEvidenceCollection";
 import {
@@ -25,9 +26,14 @@ import {
     prepareReportEvidenceImages,
     reportImageDisplayMm,
 } from "@/lib/reportEvidenceImages";
+import type { FindingsReportForm } from "@/lib/findingsReportForm";
 
-const PRIMARY_COLOR = "213847";
-const DARK_RGB: [number, number, number] = [33, 56, 71];
+const DOC_NUMBER = "SH-CP-FM-11";
+const REPORT_TITLE = "Audit Findings Report";
+const REVISION_NO = "03";
+const SZL_LOGO_PATH = "/szl-logo.png";
+const MARGIN = 14;
+const FONT = "times";
 
 export function getAuditData(plan: { auditData?: unknown }) {
     if (!plan.auditData) return {};
@@ -35,34 +41,138 @@ export function getAuditData(plan: { auditData?: unknown }) {
 }
 
 export function auditReportBaseName(plan: { auditName?: string; id?: number }) {
-    return `Audit_Report_${(plan.auditName || "Audit").replace(/[^a-z0-9]/gi, "_") || plan.id}`;
+    return `Audit_Findings_Report_${(plan.auditName || "Audit").replace(/[^a-z0-9]/gi, "_") || plan.id}`;
 }
 
-async function loadLogoBase64(): Promise<string | null> {
+interface ReportContext {
+    managementSystem: string;
+    department: string;
+    auditDate: string;
+    auditors: string;
+    auditees: string;
+    scope: string;
+    criteriaAndMethod: string;
+    executiveSummary: string;
+    nonConformances: { id: string; statement: string }[];
+    participants: { name: string; position: string; department: string }[];
+    issueDate: string;
+    acknowledgement: {
+        auditeeSignature: string;
+        auditeeDate: string;
+        auditorSignature: string;
+        auditorDate: string;
+    };
+}
+
+function getReportContext(plan: Record<string, any>): ReportContext {
+    const auditData = getAuditData(plan);
+    const form = auditData.findingsReportForm as Partial<FindingsReportForm> | undefined;
+    const globalInfo = (auditData.auditGlobalInfo as Record<string, string>) || {};
+    const template = auditTemplates.find((t) => t.id === plan.templateId);
+
+    const leadAuditor = plan.leadAuditor
+        ? `${plan.leadAuditor.firstName || ""} ${plan.leadAuditor.lastName || ""}`.trim()
+        : plan.leadAuditorName || "";
+
+    const auditees = Array.isArray(plan.auditees)
+        ? plan.auditees
+              .map((a: unknown) =>
+                  typeof a === "string" ? a : `${(a as { firstName?: string }).firstName || ""} ${(a as { lastName?: string }).lastName || ""}`.trim(),
+              )
+              .filter(Boolean)
+              .join(", ")
+        : plan.auditees || "";
+
+    const planAuditDate = plan.date ? format(new Date(plan.date), "dd/MM/yy") : "—";
+    const planIssueDate = plan.date ? format(new Date(plan.date), "dd/MM/yy") : format(new Date(), "dd/MM/yy");
+
+    const keyPersonnel = (form?.keyPersonnel || [])
+        .filter((p) => p.name?.trim() || p.position?.trim() || p.department?.trim())
+        .map((p) => ({
+            name: p.name || "",
+            position: p.position || "",
+            department: p.department || "",
+        }));
+
+    const legacyParticipants = ((auditData.participants as { name?: string; position?: string; interviewed?: string }[]) || [])
+        .filter((p) => p.name?.trim())
+        .map((p) => ({
+            name: p.name || "",
+            position: p.position || "",
+            department: p.interviewed || "",
+        }));
+
+    const participants = keyPersonnel.length > 0 ? keyPersonnel : legacyParticipants;
+
+    const nonConformances = ((auditData.nonConformances as { id?: string; statement?: string }[]) || [])
+        .filter((nc) => nc.statement?.trim())
+        .map((nc, i) => ({
+            id: nc.id || String(i + 1),
+            statement: nc.statement || "",
+        }));
+
+    const criteriaParts = [plan.criteria, plan.objective].filter(Boolean);
+    const defaultCriteriaAndMethod =
+        criteriaParts.length > 0
+            ? criteriaParts.join(" — ")
+            : "Internal audit against documented procedures and applicable standard requirements.";
+
+    const executiveSummary = form?.generalComment?.trim()
+        ? form.generalComment
+        : String(auditData.executiveSummary || "");
+
+    return {
+        managementSystem:
+            form?.managementSystem ||
+            globalInfo.clauseNo ||
+            plan.criteria ||
+            template?.standard ||
+            plan.standard ||
+            "—",
+        department:
+            form?.department ||
+            globalInfo.department ||
+            plan.auditProgram?.site?.name ||
+            plan.location ||
+            "—",
+        auditDate: form?.auditDate || planAuditDate,
+        auditors: form?.auditors || leadAuditor || "—",
+        auditees: form?.auditees || auditees || "—",
+        scope: form?.auditScope || plan.scope || "—",
+        criteriaAndMethod: form?.auditCriteriaAndMethod || defaultCriteriaAndMethod,
+        executiveSummary,
+        nonConformances,
+        participants,
+        issueDate: form?.issueDate || planIssueDate,
+        acknowledgement: {
+            auditeeSignature: form?.acknowledgement?.auditeeSignature || "",
+            auditeeDate: form?.acknowledgement?.auditeeDate || "",
+            auditorSignature: form?.acknowledgement?.auditorSignature || "",
+            auditorDate: form?.acknowledgement?.auditorDate || "",
+        },
+    };
+}
+
+async function loadSzlLogoBase64(): Promise<{ dataUrl: string; ratio: number } | null> {
     try {
-        const response = await fetch("/iAudit Global-01.png");
+        const response = await fetch(SZL_LOGO_PATH);
         const blob = await response.blob();
-        return await new Promise<string>((resolve, reject) => {
+        return await new Promise((resolve, reject) => {
             const img = new Image();
             img.onload = () => {
-                const MAX = 120;
+                const MAX_W = 200;
                 const canvas = document.createElement("canvas");
                 let { width, height } = img;
-                if (width > MAX || height > MAX) {
-                    if (width > height) {
-                        height = Math.round((height * MAX) / width);
-                        width = MAX;
-                    } else {
-                        width = Math.round((width * MAX) / height);
-                        height = MAX;
-                    }
+                if (width > MAX_W) {
+                    height = Math.round((height * MAX_W) / width);
+                    width = MAX_W;
                 }
                 canvas.width = width;
                 canvas.height = height;
                 const ctx = canvas.getContext("2d")!;
                 ctx.clearRect(0, 0, width, height);
                 ctx.drawImage(img, 0, 0, width, height);
-                resolve(canvas.toDataURL("image/png"));
+                resolve({ dataUrl: canvas.toDataURL("image/png"), ratio: height / width });
             };
             img.onerror = reject;
             img.src = URL.createObjectURL(blob);
@@ -72,41 +182,232 @@ async function loadLogoBase64(): Promise<string | null> {
     }
 }
 
-async function loadLogoBuffer(): Promise<ArrayBuffer | null> {
+async function loadSzlLogoBuffer(): Promise<ArrayBuffer | null> {
     try {
-        const response = await fetch("/iAudit Global-01.png");
+        const response = await fetch(SZL_LOGO_PATH);
         const blob = await response.blob();
-        return await new Promise<ArrayBuffer>((resolve, reject) => {
-            const img = new Image();
-            img.onload = () => {
-                const MAX = 120;
-                const canvas = document.createElement("canvas");
-                let { width, height } = img;
-                if (width > MAX || height > MAX) {
-                    if (width > height) {
-                        height = Math.round((height * MAX) / width);
-                        width = MAX;
-                    } else {
-                        width = Math.round((width * MAX) / height);
-                        height = MAX;
-                    }
-                }
-                canvas.width = width;
-                canvas.height = height;
-                const ctx = canvas.getContext("2d")!;
-                ctx.clearRect(0, 0, width, height);
-                ctx.drawImage(img, 0, 0, width, height);
-                canvas.toBlob((compressedBlob) => {
-                    if (compressedBlob) compressedBlob.arrayBuffer().then(resolve).catch(reject);
-                    else reject(new Error("Canvas toBlob returned null"));
-                }, "image/png");
-            };
-            img.onerror = reject;
-            img.src = URL.createObjectURL(blob);
-        });
+        return await blob.arrayBuffer();
     } catch {
         return null;
     }
+}
+
+function checkPage(doc: jsPDF, y: number, need: number, pageH: number): number {
+    if (y + need > pageH - 20) {
+        doc.addPage();
+        return MARGIN;
+    }
+    return y;
+}
+
+function drawSzlPdfHeader(doc: jsPDF, logo: { dataUrl: string; ratio: number } | null, issueDate: string): number {
+    const pageW = doc.internal.pageSize.getWidth();
+    const colW = (pageW - MARGIN * 2) / 3;
+    const topRowH = 10;
+    const logoRowH = 32;
+    let y = MARGIN;
+
+    doc.setDrawColor(0);
+    doc.setLineWidth(0.4);
+    doc.setFont(FONT, "normal");
+    doc.setFontSize(9);
+    doc.setTextColor(0, 0, 0);
+
+    doc.rect(MARGIN, y, colW, topRowH);
+    doc.rect(MARGIN + colW, y, colW, topRowH);
+    doc.rect(MARGIN + colW * 2, y, colW, topRowH);
+    doc.text(`Doc. Number: ${DOC_NUMBER}`, MARGIN + 3, y + 6.5);
+    doc.text(`Title: ${REPORT_TITLE}`, MARGIN + colW + 3, y + 6.5);
+    doc.text(`Revision No: ${REVISION_NO}`, MARGIN + colW * 2 + 3, y + 6.5);
+    y += topRowH;
+
+    doc.rect(MARGIN, y, colW, logoRowH);
+    doc.rect(MARGIN + colW, y, colW, logoRowH);
+    doc.rect(MARGIN + colW * 2, y, colW, logoRowH);
+
+    if (logo) {
+        const imgW = colW - 10;
+        const imgH = Math.min(logoRowH - 6, imgW * logo.ratio);
+        doc.addImage(logo.dataUrl, "PNG", MARGIN + 5, y + (logoRowH - imgH) / 2, imgW, imgH, undefined, "FAST");
+    }
+
+    doc.text(`Issue Date: ${issueDate}`, MARGIN + colW * 2 + 3, y + logoRowH / 2 + 2);
+    return y + logoRowH + 8;
+}
+
+function pdfSectionHeading(doc: jsPDF, title: string, y: number): number {
+    doc.setFont(FONT, "bold");
+    doc.setFontSize(11);
+    doc.setTextColor(0, 0, 0);
+    doc.text(title, MARGIN, y);
+    const tw = doc.getTextWidth(title);
+    doc.setLineWidth(0.3);
+    doc.line(MARGIN, y + 1.2, MARGIN + tw, y + 1.2);
+    return y + 8;
+}
+
+function pdfSubHeading(doc: jsPDF, title: string, y: number): number {
+    doc.setFont(FONT, "bold");
+    doc.setFontSize(10);
+    doc.text(title, MARGIN, y);
+    return y + 6;
+}
+
+function pdfBodyText(doc: jsPDF, text: string, y: number, pageW: number): number {
+    doc.setFont(FONT, "normal");
+    doc.setFontSize(10);
+    const lines = doc.splitTextToSize(text || "—", pageW - MARGIN * 2);
+    doc.text(lines, MARGIN, y);
+    return y + lines.length * 5 + 4;
+}
+
+function pdfDottedLine(doc: jsPDF, label: string, y: number, pageW: number): number {
+    doc.setFont(FONT, "bold");
+    doc.setFontSize(10);
+    doc.text(label, MARGIN, y);
+    const labelW = doc.getTextWidth(label);
+    const dots = ".".repeat(Math.floor((pageW - MARGIN * 2 - labelW - 4) / 2.2));
+    doc.setFont(FONT, "normal");
+    doc.text(dots, MARGIN + labelW + 4, y);
+    return y + 10;
+}
+
+async function renderSzlReportHeaderAndMetadataAsync(doc: jsPDF, ctx: ReportContext): Promise<number> {
+    const pageW = doc.internal.pageSize.getWidth();
+    const pageH = doc.internal.pageSize.getHeight();
+    let y = MARGIN;
+
+    const logo = await loadSzlLogoBase64();
+    y = drawSzlPdfHeader(doc, logo, ctx.issueDate);
+
+    y = pdfSectionHeading(doc, "1. MANAGEMENT SYSTEM :", y);
+    y = checkPage(doc, y, 40, pageH);
+    autoTable(doc, {
+        startY: y,
+        body: [
+            [`MANAGEMENT SYSTEM : ${ctx.managementSystem}`],
+            [`DEPARTMENT : ${ctx.department}`],
+            [`DATE OF AUDIT : ${ctx.auditDate}`],
+            [`AUDITORS : ${ctx.auditors}`],
+            [`AUDITEES : ${ctx.auditees}`],
+        ],
+        theme: "grid",
+        styles: { font: FONT, fontSize: 10, cellPadding: 5, minCellHeight: 12 },
+        margin: { left: MARGIN, right: MARGIN },
+    });
+    y = (doc as unknown as { lastAutoTable: { finalY: number } }).lastAutoTable.finalY + 8;
+
+    y = checkPage(doc, y, 30, pageH);
+    y = pdfSectionHeading(doc, "2. AUDIT SCOPE:", y);
+    y = pdfBodyText(doc, ctx.scope, y, pageW);
+
+    y = checkPage(doc, y, 30, pageH);
+    y = pdfSectionHeading(doc, "3. AUDIT CRITERIA AND METHOD:", y);
+    y = pdfBodyText(doc, ctx.criteriaAndMethod, y, pageW);
+
+    return y;
+}
+
+function renderSzlReportSummaryAndSignatures(doc: jsPDF, ctx: ReportContext, y: number): number {
+    const pageW = doc.internal.pageSize.getWidth();
+    const pageH = doc.internal.pageSize.getHeight();
+
+    y = checkPage(doc, y, 40, pageH);
+    y = pdfSectionHeading(doc, "5. AUDIT SUMMARY", y);
+
+    y = pdfSubHeading(doc, "5.1 Summary of Non-conformities:", y);
+    if (ctx.nonConformances.length > 0) {
+        doc.setFont(FONT, "normal");
+        doc.setFontSize(10);
+        doc.text("Number    Statement of nonconformity", MARGIN, y);
+        y += 6;
+        ctx.nonConformances.forEach((nc, idx) => {
+            y = checkPage(doc, y, 12, pageH);
+            const line = `${idx + 1}.    ${nc.statement}`;
+            const wrapped = doc.splitTextToSize(line, pageW - MARGIN * 2);
+            doc.text(wrapped, MARGIN, y);
+            y += wrapped.length * 5 + 3;
+        });
+    } else {
+        y = pdfBodyText(doc, "No non-conformities recorded.", y, pageW);
+    }
+
+    y = checkPage(doc, y, 20, pageH);
+    y = pdfSubHeading(doc, "5.2 General comment on system implementation:", y);
+    y = pdfBodyText(doc, ctx.executiveSummary || "—", y, pageW);
+
+    y = checkPage(doc, y, 50, pageH);
+    y = pdfSubHeading(doc, "5.3 Key personnel interviewed:", y);
+    const participantRows =
+        ctx.participants.length > 0
+            ? ctx.participants.map((p) => [p.name, p.position, p.department])
+            : Array.from({ length: 4 }, () => ["", "", ""]);
+    autoTable(doc, {
+        startY: y,
+        head: [["Name", "Position", "Department"]],
+        body: participantRows,
+        theme: "grid",
+        styles: { font: FONT, fontSize: 10, cellPadding: 4, minCellHeight: 10 },
+        headStyles: { fontStyle: "bold", fillColor: [255, 255, 255], textColor: [0, 0, 0] },
+        margin: { left: MARGIN, right: MARGIN },
+    });
+    y = (doc as unknown as { lastAutoTable: { finalY: number } }).lastAutoTable.finalY + 10;
+
+    y = checkPage(doc, y, 50, pageH);
+    y = pdfSectionHeading(doc, "6. ACKNOWLEDGEMENT OF FINDINGS:", y);
+
+    if (ctx.acknowledgement.auditeeSignature || ctx.acknowledgement.auditeeDate) {
+        doc.setFont(FONT, "normal");
+        doc.setFontSize(10);
+        if (ctx.acknowledgement.auditeeSignature.startsWith("data:image/")) {
+            doc.text("Auditee Signature: ", MARGIN, y);
+            const labelW = doc.getTextWidth("Auditee Signature: ");
+            try {
+                const format = ctx.acknowledgement.auditeeSignature.includes("image/jpeg") ? "JPEG" : "PNG";
+                doc.addImage(ctx.acknowledgement.auditeeSignature, format, MARGIN + labelW, y - 8, 40, 12, undefined, "FAST");
+            } catch (e) {
+                console.error("Failed to add auditee signature image to PDF", e);
+                doc.text("[Invalid Image]", MARGIN + labelW, y);
+            }
+            y += 12;
+        } else {
+            doc.text(`Auditee Signature: ${ctx.acknowledgement.auditeeSignature || "—"}`, MARGIN, y);
+            y += 6;
+        }
+        doc.text(`Date: ${ctx.acknowledgement.auditeeDate || "—"}`, MARGIN, y);
+        y += 10;
+    } else {
+        y = pdfDottedLine(doc, "Auditee Signature", y, pageW);
+        y = pdfDottedLine(doc, "Date", y, pageW);
+        y += 4;
+    }
+
+    if (ctx.acknowledgement.auditorSignature || ctx.acknowledgement.auditorDate) {
+        doc.setFont(FONT, "normal");
+        doc.setFontSize(10);
+        if (ctx.acknowledgement.auditorSignature.startsWith("data:image/")) {
+            doc.text("Auditor Signature: ", MARGIN, y);
+            const labelW = doc.getTextWidth("Auditor Signature: ");
+            try {
+                const format = ctx.acknowledgement.auditorSignature.includes("image/jpeg") ? "JPEG" : "PNG";
+                doc.addImage(ctx.acknowledgement.auditorSignature, format, MARGIN + labelW, y - 8, 40, 12, undefined, "FAST");
+            } catch (e) {
+                console.error("Failed to add auditor signature image to PDF", e);
+                doc.text("[Invalid Image]", MARGIN + labelW, y);
+            }
+            y += 12;
+        } else {
+            doc.text(`Auditor Signature: ${ctx.acknowledgement.auditorSignature || "—"}`, MARGIN, y);
+            y += 6;
+        }
+        doc.text(`Date: ${ctx.acknowledgement.auditorDate || "—"}`, MARGIN, y);
+        y += 6;
+    } else {
+        y = pdfDottedLine(doc, "Auditor Signature", y, pageW);
+        y = pdfDottedLine(doc, "Date", y, pageW);
+    }
+
+    return y;
 }
 
 /** Full audit execution report as PDF */
@@ -114,201 +415,58 @@ export async function generateAuditReportPdf(plan: Record<string, any>) {
     const doc = new jsPDF();
     const pageW = doc.internal.pageSize.getWidth();
     const pageH = doc.internal.pageSize.getHeight();
-    const margin = 14;
-    const MARGIN = 20;
-    const CONTENT_WIDTH = pageW - MARGIN * 2;
     const template = auditTemplates.find((t) => t.id === plan.templateId);
     const auditData = getAuditData(plan);
     const fileName = auditReportBaseName(plan);
+    const ctx = getReportContext(plan);
 
-    const logo = await loadLogoBase64();
-    let y = margin;
-    if (logo) {
-        doc.addImage(logo, "PNG", pageW / 2 - 12, y, 24, 24, undefined, "FAST");
-        y += 30;
-    }
+    let y = await renderSzlReportHeaderAndMetadataAsync(doc, ctx);
 
-    doc.setFillColor(...DARK_RGB);
-    doc.rect(0, y, pageW, 14, "F");
-    doc.setTextColor(255, 255, 255);
-    doc.setFontSize(14);
-    doc.setFont("helvetica", "bold");
-    doc.text("AUDIT REPORT", MARGIN, y + 9);
-    doc.setFont("helvetica", "normal");
-    y += 22;
-
-    doc.setTextColor(0, 0, 0);
-    doc.setFontSize(11);
-    doc.setFont("helvetica", "bold");
-    doc.text(plan.auditName || plan.auditType || "Audit", MARGIN, y);
-    y += 6;
-    doc.setFontSize(9);
-    doc.setFont("helvetica", "normal");
-    doc.setTextColor(100, 100, 100);
-    doc.text(`Generated: ${new Date().toLocaleString()}`, MARGIN, y);
-    y += 10;
-
-    const section = (title: string, startY: number) => {
+    const sectionHeading = (title: string, startY: number) => {
         if (startY > pageH - 40) {
             doc.addPage();
-            startY = margin;
+            startY = MARGIN;
         }
-        doc.setFillColor(...DARK_RGB);
-        doc.rect(margin, startY, pageW - margin * 2, 8, "F");
-        doc.setFontSize(10);
-        doc.setFont("helvetica", "bold");
-        doc.setTextColor(255, 255, 255);
-        doc.text(title, margin + 3, startY + 5.5);
+        doc.setFont(FONT, "bold");
+        doc.setFontSize(11);
         doc.setTextColor(0, 0, 0);
-        doc.setFont("helvetica", "normal");
-        return startY + 12;
+        doc.text(title, MARGIN, startY);
+        doc.setLineWidth(0.3);
+        doc.line(MARGIN, startY + 1.2, MARGIN + doc.getTextWidth(title), startY + 1.2);
+        doc.setFont(FONT, "normal");
+        return startY + 10;
     };
 
-    y = section("AUDIT INFORMATION", y);
-    autoTable(doc, {
-        startY: y,
-        body: [
-            ["Audit Name", plan.auditName || plan.auditType || "—"],
-            ["Template", template?.title || plan.templateId || "—"],
-            ["Status", plan.status || "—"],
-            ["Date", plan.date ? format(new Date(plan.date), "yyyy-MM-dd") : "TBD"],
-            ["Location", plan.auditProgram?.site?.name || plan.location || "—"],
-            [
-                "Lead Auditor",
-                plan.leadAuditor
-                    ? `${plan.leadAuditor.firstName} ${plan.leadAuditor.lastName}`
-                    : "—",
-            ],
-            ["Criteria", plan.criteria || "—"],
-            ["Scope", plan.scope || "—"],
-            ["Objective", plan.objective || "—"],
-            ["Progress", `${plan.progress ?? auditData.progress ?? 0}%`],
-        ],
-        theme: "grid",
-        styles: { fontSize: 9, cellPadding: 3 },
-        columnStyles: { 0: { fontStyle: "bold", fillColor: [240, 243, 246], cellWidth: 45 } },
-        margin: { left: margin, right: margin },
-    });
-    y = (doc as any).lastAutoTable.finalY + 8;
+    const hasDetailedRecord =
+        auditData.checklistData ||
+        auditData.clauseData ||
+        auditData.nonConformances ||
+        auditData.opportunities ||
+        auditData.processAudits ||
+        collectReportEvidenceSources(auditData).length > 0;
 
-    const itinerary = plan.itinerary
-        ? typeof plan.itinerary === "string"
-            ? JSON.parse(plan.itinerary)
-            : plan.itinerary
-        : [];
-    if (Array.isArray(itinerary) && itinerary.length > 0) {
-        y = section("AUDIT ITINERARY", y);
-        autoTable(doc, {
-            startY: y,
-            head: [["Time", "Activity", "Auditee / Dept"]],
-            body: itinerary.map((item: any) => [
-                `${item.startTime || ""} - ${item.endTime || ""}`,
-                item.activity || "",
-                item.auditee || item.notes || "",
-            ]),
-            headStyles: { fillColor: DARK_RGB, fontSize: 9 },
-            bodyStyles: { fontSize: 8 },
-            margin: { left: margin, right: margin },
-            theme: "grid",
-        });
-        y = (doc as any).lastAutoTable.finalY + 8;
-    }
-
-    if (auditData.executiveSummary) {
-        y = section("EXECUTIVE SUMMARY", y);
-        doc.setFontSize(9);
-        const lines = doc.splitTextToSize(String(auditData.executiveSummary), CONTENT_WIDTH);
-        doc.text(lines, margin, y);
-        y += lines.length * 5 + 8;
+    if (hasDetailedRecord) {
+        y = sectionHeading("4. DETAILED AUDIT RECORD", y);
     }
 
     if (auditData.summaryCounts) {
         const sc = auditData.summaryCounts as Record<string, string | number>;
-        y = section("FINDINGS SUMMARY", y);
         autoTable(doc, {
             startY: y,
             head: [["Compliant", "OFI", "Minor NCR", "Major NCR", "Positive"]],
-            body: [
-                [
-                    sc.compliant ?? "0",
-                    sc.ofi ?? "0",
-                    sc.minor ?? "0",
-                    sc.major ?? "0",
-                    sc.positive ?? "0",
-                ],
-            ],
-            headStyles: { fillColor: [16, 185, 129], fontSize: 9 },
-            margin: { left: margin, right: margin },
+            body: [[sc.compliant ?? "0", sc.ofi ?? "0", sc.minor ?? "0", sc.major ?? "0", sc.positive ?? "0"]],
             theme: "grid",
+            styles: { font: FONT, fontSize: 9 },
+            margin: { left: MARGIN, right: MARGIN },
         });
-        y = (doc as any).lastAutoTable.finalY + 8;
-    }
-
-    const participants = (auditData.participants as any[]) || [];
-    if (participants.length > 0) {
-        y = section("AUDIT PARTICIPANTS", y);
-        autoTable(doc, {
-            startY: y,
-            head: [["Name", "Position", "Opening", "Closing", "Interviewed"]],
-            body: participants.map((p) => [
-                p.name || "—",
-                p.position || "—",
-                p.opening ? "Yes" : "No",
-                p.closing ? "Yes" : "No",
-                p.interviewed || "—",
-            ]),
-            headStyles: { fillColor: DARK_RGB, fontSize: 9 },
-            margin: { left: margin, right: margin },
-            theme: "grid",
-        });
-        y = (doc as any).lastAutoTable.finalY + 8;
-    }
-
-    const nonConformances = ((auditData.nonConformances as any[]) || []).filter((nc) => nc.statement);
-    if (nonConformances.length > 0) {
-        y = section("NON-CONFORMANCES", y);
-        autoTable(doc, {
-            startY: y,
-            head: [["ID", "Clause", "Area", "Statement", "Due Date"]],
-            body: nonConformances.map((nc) => [
-                nc.id,
-                nc.standardClause || "—",
-                nc.areaProcess || "—",
-                nc.statement || "—",
-                nc.dueDate || "—",
-            ]),
-            headStyles: { fillColor: [239, 68, 68], fontSize: 8 },
-            bodyStyles: { fontSize: 8, overflow: "linebreak" },
-            margin: { left: margin, right: margin },
-            theme: "grid",
-        });
-        y = (doc as any).lastAutoTable.finalY + 8;
-    }
-
-    const opportunities = ((auditData.opportunities as any[]) || []).filter((o) => o.opportunity);
-    if (opportunities.length > 0) {
-        y = section("OPPORTUNITIES FOR IMPROVEMENT", y);
-        autoTable(doc, {
-            startY: y,
-            head: [["ID", "Clause", "Area", "Opportunity"]],
-            body: opportunities.map((o) => [
-                o.id,
-                o.standardClause || "—",
-                o.areaProcess || "—",
-                o.opportunity || "—",
-            ]),
-            headStyles: { fillColor: [245, 158, 11], fontSize: 8 },
-            margin: { left: margin, right: margin },
-            theme: "grid",
-        });
-        y = (doc as any).lastAutoTable.finalY + 8;
+        y = (doc as unknown as { lastAutoTable: { finalY: number } }).lastAutoTable.finalY + 8;
     }
 
     const clauseFilesForReport = sanitizeAuditEvidenceMediaMap(
-        auditData.clauseFiles as Record<string, AuditEvidenceMedia[]> | undefined
+        auditData.clauseFiles as Record<string, AuditEvidenceMedia[]> | undefined,
     );
     const genericFilesForReport = sanitizeAuditEvidenceMediaMap(
-        auditData.genericFiles as Record<string, AuditEvidenceMedia[]> | undefined
+        auditData.genericFiles as Record<string, AuditEvidenceMedia[]> | undefined,
     );
 
     if (auditData.checklistData && template?.content) {
@@ -319,12 +477,9 @@ export async function generateAuditReportPdf(plan: Record<string, any>) {
                 const itemIndex = Number(idx);
                 const item = (template.content as ChecklistContent[])[itemIndex];
                 const clauseKey = item?.clause || String(idx);
-                const attached = collectAuditEvidenceMedia(
-                    clauseFilesForReport,
-                    genericFilesForReport,
-                    clauseKey,
-                    { checklistIndex: itemIndex },
-                );
+                const attached = collectAuditEvidenceMedia(clauseFilesForReport, genericFilesForReport, clauseKey, {
+                    checklistIndex: itemIndex,
+                });
                 const photoCount = attached.filter((m) => m.type.startsWith("image/")).length;
                 const pdfCount = attached.filter((m) => m.type === "application/pdf").length;
                 const attachmentNote = [
@@ -333,353 +488,570 @@ export async function generateAuditReportPdf(plan: Record<string, any>) {
                 ]
                     .filter(Boolean)
                     .join(", ");
-                const evidenceText = [
-                    v.evidence || "",
-                    attachmentNote ? `[${attachmentNote} in Evidence section]` : "",
-                ]
-                    .filter(Boolean)
-                    .join(" ");
-                checklistRows.push([
-                    clauseKey,
-                    item?.question || "—",
-                    v.findings,
-                    evidenceText,
-                    v.description || "",
-                ]);
+                const evidenceText = [v.evidence || "", attachmentNote ? `[${attachmentNote}]` : ""].filter(Boolean).join(" ");
+                const detailsParts = [
+                    v.description ? `Details: ${v.description}` : "",
+                    v.correction ? `Correction: ${v.correction}` : "",
+                    v.rootCause ? `Root Cause: ${v.rootCause}` : "",
+                    v.correctiveAction ? `Corrective Action: ${v.correctiveAction}` : "",
+                ].filter(Boolean).join("\n");
+                const detailsText = detailsParts || "—";
+                checklistRows.push([clauseKey, item?.question || "—", v.findings, evidenceText, detailsText]);
             });
         if (checklistRows.length > 0) {
-            y = section("CHECKLIST FINDINGS", y);
+            y = checkPage(doc, y, 20, pageH);
+            y = sectionHeading("Checklist Findings", y);
             autoTable(doc, {
                 startY: y,
                 head: [["Clause", "Question", "Finding", "Evidence", "Details"]],
                 body: checklistRows,
-                headStyles: { fillColor: DARK_RGB, fontSize: 8 },
-                bodyStyles: { fontSize: 7, overflow: "linebreak" },
-                margin: { left: margin, right: margin },
+                styles: { font: FONT, fontSize: 8, overflow: "linebreak" },
+                margin: { left: MARGIN, right: MARGIN },
                 theme: "grid",
             });
-            y = (doc as any).lastAutoTable.finalY + 8;
+            y = (doc as unknown as { lastAutoTable: { finalY: number } }).lastAutoTable.finalY + 8;
         }
     }
 
-    const processAudits = ((auditData.processAudits as any[]) || []).filter((pa) => pa.processArea);
-    if (processAudits.length > 0) {
-        y = section("PROCESS AUDITS", y);
+    if (template?.type === "clause-checklist" && auditData.clauseData) {
+        const checklistRows: string[][] = [];
+        (template.content as ClauseChecklistContent[]).forEach((item) => {
+            const v = auditData.clauseData[item.clauseId];
+            if (!v || !v.findingType) return;
+            const clauseKey = item.clauseId;
+            const attached = collectAuditEvidenceMedia(clauseFilesForReport, genericFilesForReport, clauseKey);
+            const photoCount = attached.filter((m) => m.type.startsWith("image/")).length;
+            const pdfCount = attached.filter((m) => m.type === "application/pdf").length;
+            const attachmentNote = [
+                photoCount > 0 ? `${photoCount} photo(s)` : "",
+                pdfCount > 0 ? `${pdfCount} PDF(s)` : "",
+            ]
+                .filter(Boolean)
+                .join(", ");
+            const evidenceText = [v.evidence || "", attachmentNote ? `[${attachmentNote}]` : ""].filter(Boolean).join(" ");
+            const detailsParts = [
+                v.description ? `Details: ${v.description}` : "",
+                v.correction ? `Correction: ${v.correction}` : "",
+                v.rootCause ? `Root Cause: ${v.rootCause}` : "",
+                v.correctiveAction ? `Corrective Action: ${v.correctiveAction}` : "",
+            ].filter(Boolean).join("\n");
+            const detailsText = detailsParts || "—";
+            const requirement = [item.title, ...(item.subClauses || [])].filter(Boolean).join('\n');
+            checklistRows.push([clauseKey, requirement, v.findingType, evidenceText, detailsText]);
+        });
+        if (checklistRows.length > 0) {
+            y = checkPage(doc, y, 20, pageH);
+            y = sectionHeading("Checklist Findings", y);
+            autoTable(doc, {
+                startY: y,
+                head: [["Clause", "Requirement", "Finding", "Evidence", "Details"]],
+                body: checklistRows,
+                styles: { font: FONT, fontSize: 8, overflow: "linebreak" },
+                margin: { left: MARGIN, right: MARGIN },
+                theme: "grid",
+            });
+            y = (doc as unknown as { lastAutoTable: { finalY: number } }).lastAutoTable.finalY + 8;
+        }
+    }
+
+    if (template?.type === "process-audit" && auditData.processAudits) {
+        const processRows: string[][] = [];
+        (auditData.processAudits as ProcessAuditContent[]).forEach((audit, index) => {
+            if (!audit.findingType) return;
+            const detailsParts = [
+                audit.description ? `Details: ${audit.description}` : "",
+                audit.correction ? `Correction: ${audit.correction}` : "",
+                audit.rootCause ? `Root Cause: ${audit.rootCause}` : "",
+                audit.correctiveAction ? `Corrective Action: ${audit.correctiveAction}` : "",
+            ].filter(Boolean).join("\n");
+            const detailsText = detailsParts || "—";
+            processRows.push([
+                String(index + 1),
+                audit.processArea || "—",
+                audit.auditees || "—",
+                audit.evidence || "—",
+                audit.conclusion || "—",
+                audit.findingType,
+                detailsText,
+            ]);
+        });
+        if (processRows.length > 0) {
+            y = checkPage(doc, y, 20, pageH);
+            y = sectionHeading("Process Audit Record", y);
+            autoTable(doc, {
+                startY: y,
+                head: [["No.", "Process Area", "Auditee(s)", "Evidence", "Conclusion", "Finding", "Details"]],
+                body: processRows,
+                styles: { font: FONT, fontSize: 8, overflow: "linebreak" },
+                margin: { left: MARGIN, right: MARGIN },
+                theme: "grid",
+            });
+            y = (doc as unknown as { lastAutoTable: { finalY: number } }).lastAutoTable.finalY + 8;
+        }
+    }
+
+    const opportunities = ((auditData.opportunities as any[]) || []).filter((o) => o.opportunity);
+    if (opportunities.length > 0) {
+        y = checkPage(doc, y, 20, pageH);
+        y = sectionHeading("Opportunities for Improvement", y);
         autoTable(doc, {
             startY: y,
-            head: [["Process Area", "Auditees", "Evidence", "Conclusion"]],
-            body: processAudits.map((pa) => [
-                pa.processArea || "—",
-                pa.auditees || "—",
-                pa.evidence || "—",
-                pa.conclusion || "—",
-            ]),
-            headStyles: { fillColor: DARK_RGB, fontSize: 8 },
-            margin: { left: margin, right: margin },
+            head: [["ID", "Clause", "Area", "Opportunity"]],
+            body: opportunities.map((o) => [o.id, o.standardClause || "—", o.areaProcess || "—", o.opportunity || "—"]),
+            styles: { font: FONT, fontSize: 8 },
+            margin: { left: MARGIN, right: MARGIN },
             theme: "grid",
         });
-        y = (doc as any).lastAutoTable.finalY + 8;
+        y = (doc as unknown as { lastAutoTable: { finalY: number } }).lastAutoTable.finalY + 8;
     }
 
     const evidenceSources = collectReportEvidenceSources(auditData);
     const pdfImages = await prepareReportEvidenceImages(evidenceSources);
-    const contentWidthMm = pageW - margin * 2;
-
-    const checkPage = (currentY: number, needMm: number) => {
-        if (currentY + needMm > pageH - 25) {
-            doc.addPage();
-            return margin;
-        }
-        return currentY;
-    };
-
-    const pdfSourceNames = new Set(
-        evidenceSources.filter((e) => e.type === "application/pdf").map((e) => e.name),
-    );
-    const renderedPdfNames = new Set(
-        pdfImages
-            .filter((img) => img.context.includes("— PDF"))
-            .map((img) => img.name.replace(/ \(page \d+\)$/i, "")),
-    );
+    const contentWidthMm = pageW - MARGIN * 2;
 
     if (pdfImages.length > 0) {
-        y = section("EVIDENCE & UPLOADED FILES", y);
-        doc.setFontSize(8);
-        doc.setTextColor(100, 100, 100);
-        doc.text(
-            `${pdfImages.length} evidence file preview(s) from the audit (photos and PDF pages, compressed for download).`,
-            margin,
-            y
-        );
-        y += 8;
-
+        y = checkPage(doc, y, 20, pageH);
+        y = sectionHeading("Evidence & Uploaded Files", y);
         for (const img of pdfImages) {
             const isPdfPreview = img.context.includes("— PDF");
-            const { w, h } = reportImageDisplayMm(
-                img.widthPx,
-                img.heightPx,
-                contentWidthMm,
-                isPdfPreview ? 120 : 85
-            );
-            y = checkPage(y, h + 14);
+            const { w, h } = reportImageDisplayMm(img.widthPx, img.heightPx, contentWidthMm, isPdfPreview ? 120 : 85);
+            y = checkPage(doc, y, h + 14, pageH);
+            doc.setFont(FONT, "bold");
             doc.setFontSize(9);
-            doc.setFont("helvetica", "bold");
-            doc.setTextColor(33, 56, 71);
-            doc.text(`${img.context} — ${img.name}`, margin, y);
+            doc.text(`${img.context} — ${img.name}`, MARGIN, y);
             y += 5;
             try {
-                doc.addImage(img.dataUrl, img.format, margin, y, w, h, undefined, "FAST");
+                doc.addImage(img.dataUrl, img.format, MARGIN, y, w, h, undefined, "FAST");
                 y += h + 6;
-            } catch (e) {
-                console.warn("Report PDF image embed failed", img.name, e);
-                doc.setFont("helvetica", "normal");
-                doc.setFontSize(8);
-                doc.setTextColor(150, 150, 150);
-                doc.text(`(Could not embed ${img.name})`, margin, y);
+            } catch {
                 y += 8;
             }
         }
     }
 
-    const failedPdfAttachments: { context: string; name: string }[] = [];
-    for (const [key, list] of Object.entries({ ...clauseFilesForReport, ...genericFilesForReport })) {
-        for (const m of list) {
-            if (m.type === "application/pdf" && pdfSourceNames.has(m.name) && !renderedPdfNames.has(m.name)) {
-                failedPdfAttachments.push({ context: key, name: m.name });
-            }
-        }
-    }
-    if (failedPdfAttachments.length > 0) {
-        y = checkPage(y, 20);
-        y = section("PDF FILES (COULD NOT PREVIEW)", y);
-        autoTable(doc, {
-            startY: y,
-            head: [["Location", "File name"]],
-            body: failedPdfAttachments.map((d) => [d.context, d.name]),
-            headStyles: { fillColor: DARK_RGB, fontSize: 8 },
-            margin: { left: margin, right: margin },
-            theme: "grid",
-        });
-    }
+    // Now render 5. AUDIT SUMMARY and 6. ACKNOWLEDGEMENT OF FINDINGS (Signatures)
+    y = renderSzlReportSummaryAndSignatures(doc, ctx, y);
 
     const totalPages = doc.getNumberOfPages();
     for (let i = 1; i <= totalPages; i++) {
         doc.setPage(i);
+        doc.setFont(FONT, "normal");
         doc.setFontSize(8);
-        doc.setTextColor(150, 150, 150);
-        doc.line(margin, pageH - 12, pageW - margin, pageH - 12);
-        doc.text(`${plan.auditName || "Audit"} Report`, margin, pageH - 7);
-        doc.text(`Page ${i} of ${totalPages}`, pageW - margin, pageH - 7, { align: "right" });
+        doc.setTextColor(120, 120, 120);
+        doc.line(MARGIN, pageH - 12, pageW - MARGIN, pageH - 12);
+        doc.text(`${DOC_NUMBER} — ${REPORT_TITLE}`, MARGIN, pageH - 7);
+        doc.text(`Page ${i} of ${totalPages}`, pageW - MARGIN, pageH - 7, { align: "right" });
     }
 
     doc.save(`${fileName}.pdf`);
 }
 
+function docxBorderedCell(children: Paragraph[], widthPct = 33) {
+    return new DocxTableCell({
+        children,
+        width: { size: widthPct, type: WidthType.PERCENTAGE },
+        borders: {
+            top: { style: BorderStyle.SINGLE, size: 1 },
+            bottom: { style: BorderStyle.SINGLE, size: 1 },
+            left: { style: BorderStyle.SINGLE, size: 1 },
+            right: { style: BorderStyle.SINGLE, size: 1 },
+        },
+    });
+}
+
+function docxSectionHeading(text: string) {
+    return new Paragraph({
+        children: [new TextRun({ text, bold: true, underline: { type: UnderlineType.SINGLE } })],
+        spacing: { before: 280, after: 160 },
+    });
+}
+
+function docxSubHeading(text: string) {
+    return new Paragraph({
+        children: [new TextRun({ text, bold: true })],
+        spacing: { before: 160, after: 120 },
+    });
+}
+
 /** Full audit execution report as Word */
 export async function generateAuditReportDocx(plan: Record<string, any>) {
-    const template = auditTemplates.find((t) => t.id === plan.templateId);
     const auditData = getAuditData(plan);
     const fileName = auditReportBaseName(plan);
-    const logoBuffer = await loadLogoBuffer();
+    const ctx = getReportContext(plan);
+    const template = auditTemplates.find((t) => t.id === plan.templateId);
+    const logoBuffer = await loadSzlLogoBuffer();
+    const children: (Paragraph | DocxTable)[] = [];
 
-    const children: any[] = [];
-    const MARGIN_TWIPS = 1440;
+    const headerRow1 = new DocxTableRow({
+        children: [
+            docxBorderedCell([new Paragraph(`Doc. Number: ${DOC_NUMBER}`)]),
+            docxBorderedCell([new Paragraph(`Title: ${REPORT_TITLE}`)]),
+            docxBorderedCell([new Paragraph(`Revision No: ${REVISION_NO}`)]),
+        ],
+    });
 
-    if (logoBuffer) {
-        children.push(
-            new Paragraph({
-                children: [new ImageRun({ data: logoBuffer, transformation: { width: 80, height: 60 } })],
-                spacing: { after: 200 },
-            })
-        );
-    }
+    const logoParagraphs: Paragraph[] = logoBuffer
+        ? [new Paragraph({ children: [new ImageRun({ data: logoBuffer, transformation: { width: 180, height: 103 } })] })]
+        : [new Paragraph("")];
 
-    const heading = (text: string, color = PRIMARY_COLOR) =>
-        new Paragraph({
-            children: [new TextRun({ text, bold: true, size: 28, color })],
-            spacing: { before: 400, after: 200 },
-        });
-
-    const kv = (label: string, value: string) =>
-        new Paragraph({
-            children: [new TextRun({ text: `${label}: `, bold: true }), new TextRun(value || "N/A")],
-            spacing: { after: 120 },
-        });
-
-    const kvTwoLine = (label: string, value: string) => [
-        new Paragraph({
-            children: [new TextRun({ text: `${label}:`, bold: true })],
-            spacing: { before: 200 },
-        }),
-        new Paragraph({
-            children: [new TextRun(value || "N/A")],
-            spacing: { after: 200 },
-        }),
-    ];
+    const headerRow2 = new DocxTableRow({
+        children: [
+            docxBorderedCell(logoParagraphs),
+            docxBorderedCell([new Paragraph("")]),
+            docxBorderedCell([new Paragraph(`Issue Date: ${ctx.issueDate}`)]),
+        ],
+    });
 
     children.push(
-        new Paragraph({
-            children: [new TextRun({ text: "AUDIT REPORT", bold: true, size: 40, color: PRIMARY_COLOR })],
-            spacing: { after: 400 },
+        new DocxTable({
+            width: { size: 100, type: WidthType.PERCENTAGE },
+            rows: [headerRow1, headerRow2],
         }),
-        kv("Audit Name", plan.auditName || plan.auditType),
-        kv("Status", plan.status || "—"),
-        kv("Date", plan.date ? new Date(plan.date).toLocaleDateString() : "TBD"),
-        kv("Location", plan.auditProgram?.site?.name || plan.location),
-        kv(
-            "Lead Auditor",
-            plan.leadAuditor ? `${plan.leadAuditor.firstName} ${plan.leadAuditor.lastName}` : "-"
-        ),
-        kv("Criteria", plan.criteria),
-        ...kvTwoLine("Scope", plan.scope),
-        ...kvTwoLine("Objective", plan.objective)
     );
 
-    const itinerary = plan.itinerary
-        ? typeof plan.itinerary === "string"
-            ? JSON.parse(plan.itinerary)
-            : plan.itinerary
-        : [];
-    if (Array.isArray(itinerary) && itinerary.length > 0) {
-        children.push(heading("Audit Itinerary"));
-        const tableRows = [
-            new DocxTableRow({
-                children: [
-                    new DocxTableCell({
-                        children: [
-                            new Paragraph({
-                                children: [new TextRun({ text: "Time", bold: true, color: "ffffff" })],
-                            }),
-                        ],
-                        shading: { fill: PRIMARY_COLOR },
-                    }),
-                    new DocxTableCell({
-                        children: [
-                            new Paragraph({
-                                children: [new TextRun({ text: "Activity", bold: true, color: "ffffff" })],
-                            }),
-                        ],
-                        shading: { fill: PRIMARY_COLOR },
-                    }),
-                    new DocxTableCell({
-                        children: [
-                            new Paragraph({
-                                children: [
-                                    new TextRun({ text: "Auditee / Dept", bold: true, color: "ffffff" }),
-                                ],
-                            }),
-                        ],
-                        shading: { fill: PRIMARY_COLOR },
-                    }),
-                ],
-            }),
-            ...itinerary.map(
-                (item: any) =>
-                    new DocxTableRow({
-                        children: [
-                            new DocxTableCell({
-                                children: [
-                                    new Paragraph(`${item.startTime || ""} - ${item.endTime || ""}`),
-                                ],
-                            }),
-                            new DocxTableCell({ children: [new Paragraph(item.activity || "")] }),
-                            new DocxTableCell({
-                                children: [new Paragraph(item.auditee || item.notes || "")],
-                            }),
-                        ],
-                    })
-            ),
-        ];
-        children.push(
-            new DocxTable({
-                width: { size: 100, type: WidthType.PERCENTAGE },
-                rows: tableRows,
-                borders: {
-                    top: { style: BorderStyle.SINGLE, size: 2 },
-                    bottom: { style: BorderStyle.SINGLE, size: 2 },
-                    left: { style: BorderStyle.SINGLE, size: 2 },
-                    right: { style: BorderStyle.SINGLE, size: 2 },
-                    insideHorizontal: { style: BorderStyle.SINGLE, size: 1 },
-                    insideVertical: { style: BorderStyle.SINGLE, size: 1 },
-                },
-            })
-        );
-    }
+    children.push(docxSectionHeading("1. MANAGEMENT SYSTEM :"));
+    children.push(
+        new DocxTable({
+            width: { size: 100, type: WidthType.PERCENTAGE },
+            rows: [
+                new DocxTableRow({ children: [docxBorderedCell([new Paragraph(`MANAGEMENT SYSTEM : ${ctx.managementSystem}`)], 100)] }),
+                new DocxTableRow({ children: [docxBorderedCell([new Paragraph(`DEPARTMENT : ${ctx.department}`)], 100)] }),
+                new DocxTableRow({ children: [docxBorderedCell([new Paragraph(`DATE OF AUDIT : ${ctx.auditDate}`)], 100)] }),
+                new DocxTableRow({ children: [docxBorderedCell([new Paragraph(`AUDITORS : ${ctx.auditors}`)], 100)] }),
+                new DocxTableRow({ children: [docxBorderedCell([new Paragraph(`AUDITEES : ${ctx.auditees}`)], 100)] }),
+            ],
+        }),
+    );
 
-    if (auditData.executiveSummary) {
-        children.push(heading("Executive Summary"));
-        children.push(new Paragraph({ text: String(auditData.executiveSummary), spacing: { after: 200 } }));
-    }
+    children.push(docxSectionHeading("2. AUDIT SCOPE:"));
+    children.push(new Paragraph({ text: ctx.scope, spacing: { after: 200 } }));
 
-    if (auditData.nonConformances) {
-        const ncs = (auditData.nonConformances as any[]).filter((nc) => nc.statement);
-        if (ncs.length > 0) {
-            children.push(heading("Non-Conformances", "DC2626"));
-            ncs.forEach((nc) => {
-                children.push(
-                    new Paragraph({
-                        children: [
-                            new TextRun({ text: `${nc.id} (${nc.standardClause || ""}): `, bold: true }),
-                            new TextRun(nc.statement),
-                        ],
-                        bullet: { level: 0 },
-                        spacing: { after: 100 },
-                    })
-                );
-            });
-        }
-    }
+    children.push(docxSectionHeading("3. AUDIT CRITERIA AND METHOD:"));
+    children.push(new Paragraph({ text: ctx.criteriaAndMethod, spacing: { after: 200 } }));
 
+    // --- 4. DETAILED AUDIT RECORD & EVIDENCE ---
     const evidenceSources = collectReportEvidenceSources(auditData);
     const wordImages = await prepareReportEvidenceImages(evidenceSources);
-    if (wordImages.length > 0) {
-        children.push(heading("Evidence & Uploaded Files"));
-        children.push(
-            new Paragraph({
-                children: [
-                    new TextRun({
-                        text: `${wordImages.length} evidence preview(s) from the audit (photos and PDF pages).`,
-                        size: 20,
-                        color: "666666",
-                    }),
-                ],
-                spacing: { after: 200 },
-            })
-        );
-        for (const img of wordImages) {
-            children.push(
-                new Paragraph({
+    const hasDetailedRecord =
+        auditData.checklistData ||
+        auditData.clauseData ||
+        auditData.processAudits ||
+        wordImages.length > 0;
+
+    if (hasDetailedRecord) {
+        children.push(docxSectionHeading("4. DETAILED AUDIT RECORD"));
+
+        // Checklist / Clause Checklist Table / Process Audit Record Table
+        if (template?.type === "checklist" && auditData.checklistData) {
+            const rows: DocxTableRow[] = [
+                new DocxTableRow({
                     children: [
-                        new TextRun({ text: `${img.context} — ${img.name}`, bold: true, size: 22 }),
+                        docxBorderedCell([new Paragraph({ children: [new TextRun({ text: "Clause", bold: true })] })], 10),
+                        docxBorderedCell([new Paragraph({ children: [new TextRun({ text: "Question", bold: true })] })], 35),
+                        docxBorderedCell([new Paragraph({ children: [new TextRun({ text: "Finding", bold: true })] })], 10),
+                        docxBorderedCell([new Paragraph({ children: [new TextRun({ text: "Evidence", bold: true })] })], 20),
+                        docxBorderedCell([new Paragraph({ children: [new TextRun({ text: "Details", bold: true })] })], 25),
                     ],
-                    spacing: { before: 200, after: 100 },
-                })
-            );
-            try {
-                const buffer = dataUrlToUint8Array(img.dataUrl);
-                const maxW = 520;
-                const aspect = img.widthPx / img.heightPx;
-                let w = maxW;
-                let h = Math.round(w / aspect);
-                if (h > 360) {
-                    h = 360;
-                    w = Math.round(h * aspect);
+                }),
+            ];
+
+            Object.entries(auditData.checklistData as Record<string, any>)
+                .filter(([, v]) => v?.findings)
+                .forEach(([idx, v]) => {
+                    const itemIndex = Number(idx);
+                    const item = (template.content as ChecklistContent[])[itemIndex];
+                    const clauseKey = item?.clause || String(idx);
+                    
+                    const detailsParts = [
+                        v.description ? `Details: ${v.description}` : "",
+                        v.correction ? `Correction: ${v.correction}` : "",
+                        v.rootCause ? `Root Cause: ${v.rootCause}` : "",
+                        v.correctiveAction ? `Corrective Action: ${v.correctiveAction}` : "",
+                    ].filter(Boolean);
+                    const detailsParagraphs = detailsParts.length > 0
+                        ? detailsParts.map(line => new Paragraph({ children: [new TextRun({ text: line })] }))
+                        : [new Paragraph("—")];
+
+                    rows.push(
+                        new DocxTableRow({
+                            children: [
+                                docxBorderedCell([new Paragraph(clauseKey)], 10),
+                                docxBorderedCell([new Paragraph(item?.question || "—")], 35),
+                                docxBorderedCell([new Paragraph(v.findings || "—")], 10),
+                                docxBorderedCell([new Paragraph(v.evidence || "—")], 20),
+                                docxBorderedCell(detailsParagraphs, 25),
+                            ],
+                        }),
+                    );
+                });
+
+            if (rows.length > 1) {
+                children.push(docxSubHeading("Checklist Findings"));
+                children.push(
+                    new DocxTable({
+                        width: { size: 100, type: WidthType.PERCENTAGE },
+                        rows,
+                    }),
+                );
+            }
+        } else if (template?.type === "clause-checklist" && auditData.clauseData) {
+            const rows: DocxTableRow[] = [
+                new DocxTableRow({
+                    children: [
+                        docxBorderedCell([new Paragraph({ children: [new TextRun({ text: "Clause", bold: true })] })], 10),
+                        docxBorderedCell([new Paragraph({ children: [new TextRun({ text: "Requirement", bold: true })] })], 35),
+                        docxBorderedCell([new Paragraph({ children: [new TextRun({ text: "Finding", bold: true })] })], 10),
+                        docxBorderedCell([new Paragraph({ children: [new TextRun({ text: "Evidence", bold: true })] })], 20),
+                        docxBorderedCell([new Paragraph({ children: [new TextRun({ text: "Details", bold: true })] })], 25),
+                    ],
+                }),
+            ];
+
+            (template.content as ClauseChecklistContent[]).forEach((item) => {
+                const v = auditData.clauseData[item.clauseId];
+                if (!v || !v.findingType) return;
+                const clauseKey = item.clauseId;
+                const requirement = [item.title, ...(item.subClauses || [])].filter(Boolean).join('\n');
+                
+                const detailsParts = [
+                    v.description ? `Details: ${v.description}` : "",
+                    v.correction ? `Correction: ${v.correction}` : "",
+                    v.rootCause ? `Root Cause: ${v.rootCause}` : "",
+                    v.correctiveAction ? `Corrective Action: ${v.correctiveAction}` : "",
+                ].filter(Boolean);
+                const detailsParagraphs = detailsParts.length > 0
+                    ? detailsParts.map(line => new Paragraph({ children: [new TextRun({ text: line })] }))
+                    : [new Paragraph("—")];
+
+                rows.push(
+                    new DocxTableRow({
+                        children: [
+                            docxBorderedCell([new Paragraph(clauseKey)], 10),
+                            docxBorderedCell([new Paragraph(requirement)], 35),
+                            docxBorderedCell([new Paragraph(v.findingType || "—")], 10),
+                            docxBorderedCell([new Paragraph(v.evidence || "—")], 20),
+                            docxBorderedCell(detailsParagraphs, 25),
+                        ],
+                    }),
+                );
+            });
+
+            if (rows.length > 1) {
+                children.push(docxSubHeading("Checklist Findings"));
+                children.push(
+                    new DocxTable({
+                        width: { size: 100, type: WidthType.PERCENTAGE },
+                        rows,
+                    }),
+                );
+            }
+        } else if (template?.type === "process-audit" && auditData.processAudits) {
+            const rows: DocxTableRow[] = [
+                new DocxTableRow({
+                    children: [
+                        docxBorderedCell([new Paragraph({ children: [new TextRun({ text: "No.", bold: true })] })], 5),
+                        docxBorderedCell([new Paragraph({ children: [new TextRun({ text: "Process Area", bold: true })] })], 15),
+                        docxBorderedCell([new Paragraph({ children: [new TextRun({ text: "Auditee(s)", bold: true })] })], 15),
+                        docxBorderedCell([new Paragraph({ children: [new TextRun({ text: "Evidence", bold: true })] })], 20),
+                        docxBorderedCell([new Paragraph({ children: [new TextRun({ text: "Conclusion", bold: true })] })], 15),
+                        docxBorderedCell([new Paragraph({ children: [new TextRun({ text: "Finding", bold: true })] })], 10),
+                        docxBorderedCell([new Paragraph({ children: [new TextRun({ text: "Details", bold: true })] })], 20),
+                    ],
+                }),
+            ];
+
+            (auditData.processAudits as ProcessAuditContent[]).forEach((audit, index) => {
+                if (!audit.findingType) return;
+                
+                const detailsParts = [
+                    audit.description ? `Details: ${audit.description}` : "",
+                    audit.correction ? `Correction: ${audit.correction}` : "",
+                    audit.rootCause ? `Root Cause: ${audit.rootCause}` : "",
+                    audit.correctiveAction ? `Corrective Action: ${audit.correctiveAction}` : "",
+                ].filter(Boolean);
+                const detailsParagraphs = detailsParts.length > 0
+                    ? detailsParts.map(line => new Paragraph({ children: [new TextRun({ text: line })] }))
+                    : [new Paragraph("—")];
+
+                rows.push(
+                    new DocxTableRow({
+                        children: [
+                            docxBorderedCell([new Paragraph(String(index + 1))], 5),
+                            docxBorderedCell([new Paragraph(audit.processArea || "—")], 15),
+                            docxBorderedCell([new Paragraph(audit.auditees || "—")], 15),
+                            docxBorderedCell([new Paragraph(audit.evidence || "—")], 20),
+                            docxBorderedCell([new Paragraph(audit.conclusion || "—")], 15),
+                            docxBorderedCell([new Paragraph(audit.findingType || "—")], 10),
+                            docxBorderedCell(detailsParagraphs, 20),
+                        ],
+                    }),
+                );
+            });
+
+            if (rows.length > 1) {
+                children.push(docxSubHeading("Process Audit Record"));
+                children.push(
+                    new DocxTable({
+                        width: { size: 100, type: WidthType.PERCENTAGE },
+                        rows,
+                    }),
+                );
+            }
+        }
+        if (wordImages.length > 0) {
+            children.push(docxSubHeading("Evidence & Uploaded Files"));
+            for (const img of wordImages) {
+                children.push(
+                    new Paragraph({
+                        children: [new TextRun({ text: `${img.context} — ${img.name}`, bold: true })],
+                        spacing: { before: 160, after: 80 },
+                    }),
+                );
+                try {
+                    const buffer = dataUrlToUint8Array(img.dataUrl);
+                    const maxW = 520;
+                    const aspect = img.widthPx / img.heightPx;
+                    let w = maxW;
+                    let h = Math.round(w / aspect);
+                    if (h > 360) {
+                        h = 360;
+                        w = Math.round(h * aspect);
+                    }
+                    children.push(
+                        new Paragraph({
+                            children: [new ImageRun({ data: buffer, transformation: { width: w, height: h } })],
+                            spacing: { after: 240 },
+                        }),
+                    );
+                } catch {
+                    /* skip broken image */
                 }
+            }
+        }
+    }
+
+    // --- 5. AUDIT SUMMARY ---
+    children.push(docxSectionHeading("5. AUDIT SUMMARY"));
+    children.push(docxSubHeading("5.1 Summary of Non-conformities:"));
+    if (ctx.nonConformances.length > 0) {
+        children.push(new Paragraph({ text: "Number    Statement of nonconformity", spacing: { after: 100 } }));
+        ctx.nonConformances.forEach((nc, idx) => {
+            children.push(new Paragraph({ text: `${idx + 1}.    ${nc.statement}`, spacing: { after: 80 } }));
+        });
+    } else {
+        children.push(new Paragraph({ text: "No non-conformities recorded.", spacing: { after: 120 } }));
+    }
+
+    children.push(docxSubHeading("5.2 General comment on system implementation:"));
+    children.push(new Paragraph({ text: ctx.executiveSummary || "—", spacing: { after: 200 } }));
+
+    children.push(docxSubHeading("5.3 Key personnel interviewed:"));
+    const participantRows =
+        ctx.participants.length > 0
+            ? ctx.participants
+            : Array.from({ length: 4 }, () => ({ name: "", position: "", department: "" }));
+    children.push(
+        new DocxTable({
+            width: { size: 100, type: WidthType.PERCENTAGE },
+            rows: [
+                new DocxTableRow({
+                    children: ["Name", "Position", "Department"].map((h) =>
+                        docxBorderedCell([new Paragraph({ children: [new TextRun({ text: h, bold: true })] })]),
+                    ),
+                }),
+                ...participantRows.map(
+                    (p) =>
+                        new DocxTableRow({
+                            children: [p.name, p.position, p.department].map((v) => docxBorderedCell([new Paragraph(v || "")])),
+                        }),
+                ),
+            ],
+        }),
+    );
+
+    // --- 6. ACKNOWLEDGEMENT OF FINDINGS ---
+    children.push(docxSectionHeading("6. ACKNOWLEDGEMENT OF FINDINGS:"));
+
+    if (ctx.acknowledgement.auditeeSignature || ctx.acknowledgement.auditeeDate) {
+        if (ctx.acknowledgement.auditeeSignature.startsWith("data:image/")) {
+            try {
+                const buffer = dataUrlToUint8Array(ctx.acknowledgement.auditeeSignature);
                 children.push(
                     new Paragraph({
                         children: [
-                            new ImageRun({
-                                data: buffer,
-                                transformation: { width: w, height: h },
-                            }),
+                            new TextRun({ text: "Auditee Signature: " }),
+                            new ImageRun({ data: buffer, transformation: { width: 120, height: 45 } })
                         ],
-                        spacing: { after: 300 },
-                    })
+                        spacing: { after: 120 },
+                    }),
                 );
             } catch (e) {
-                console.warn("Report Word image embed failed", img.name, e);
+                console.error("Failed to add auditee signature image to DOCX", e);
+                children.push(
+                    new Paragraph({
+                        text: "Auditee Signature: [Invalid Image]",
+                        spacing: { after: 120 },
+                    }),
+                );
             }
+        } else {
+            children.push(
+                new Paragraph({
+                    text: `Auditee Signature: ${ctx.acknowledgement.auditeeSignature || "—"}`,
+                    spacing: { after: 120 },
+                }),
+            );
         }
+        children.push(
+            new Paragraph({
+                text: `Date: ${ctx.acknowledgement.auditeeDate || "—"}`,
+                spacing: { after: 200 },
+            }),
+        );
+    } else {
+        children.push(new Paragraph({ text: "Auditee Signature .................................................................", spacing: { after: 120 } }));
+        children.push(new Paragraph({ text: "Date .................................................", spacing: { after: 200 } }));
+    }
+
+    if (ctx.acknowledgement.auditorSignature || ctx.acknowledgement.auditorDate) {
+        if (ctx.acknowledgement.auditorSignature.startsWith("data:image/")) {
+            try {
+                const buffer = dataUrlToUint8Array(ctx.acknowledgement.auditorSignature);
+                children.push(
+                    new Paragraph({
+                        children: [
+                            new TextRun({ text: "Auditor Signature: " }),
+                            new ImageRun({ data: buffer, transformation: { width: 120, height: 45 } })
+                        ],
+                        spacing: { after: 120 },
+                    }),
+                );
+            } catch (e) {
+                console.error("Failed to add auditor signature image to DOCX", e);
+                children.push(
+                    new Paragraph({
+                        text: "Auditor Signature: [Invalid Image]",
+                        spacing: { after: 120 },
+                    }),
+                );
+            }
+        } else {
+            children.push(
+                new Paragraph({
+                    text: `Auditor Signature: ${ctx.acknowledgement.auditorSignature || "—"}`,
+                    spacing: { after: 120 },
+                }),
+            );
+        }
+        children.push(
+            new Paragraph({
+                text: `Date: ${ctx.acknowledgement.auditorDate || "—"}`,
+                spacing: { after: 300 },
+            }),
+        );
+    } else {
+        children.push(new Paragraph({ text: "Auditor Signature .................................................................", spacing: { after: 120 } }));
+        children.push(new Paragraph({ text: "Date .................................................", spacing: { after: 300 } }));
     }
 
     const doc = new Document({
@@ -687,12 +1059,7 @@ export async function generateAuditReportDocx(plan: Record<string, any>) {
             {
                 properties: {
                     page: {
-                        margin: {
-                            top: MARGIN_TWIPS,
-                            right: MARGIN_TWIPS,
-                            bottom: MARGIN_TWIPS,
-                            left: MARGIN_TWIPS,
-                        },
+                        margin: { top: 1440, right: 1440, bottom: 1440, left: 1440 },
                     },
                 },
                 children,
@@ -708,126 +1075,109 @@ export function generateAuditReportExcel(plan: Record<string, any>) {
     const template = auditTemplates.find((t) => t.id === plan.templateId);
     const auditData = getAuditData(plan);
     const fileName = auditReportBaseName(plan);
+    const ctx = getReportContext(plan);
     const wb = XLSX.utils.book_new();
 
     const summaryData = [
         ["Field", "Value"],
+        ["Document No.", DOC_NUMBER],
+        ["Report Title", REPORT_TITLE],
+        ["Revision", REVISION_NO],
+        ["Issue Date", ctx.issueDate],
         ["Audit Name", plan.auditName || plan.auditType || "N/A"],
+        ["Management System", ctx.managementSystem],
+        ["Department", ctx.department],
+        ["Audit Date", ctx.auditDate],
+        ["Auditors", ctx.auditors],
+        ["Auditees", ctx.auditees],
+        ["Scope", ctx.scope],
+        ["Criteria & Method", ctx.criteriaAndMethod],
         ["Template", template?.title || plan.templateId || "N/A"],
         ["Status", plan.status || "N/A"],
-        ["Date", plan.date ? new Date(plan.date).toLocaleDateString() : "TBD"],
-        ["Location", plan.auditProgram?.site?.name || plan.location || "N/A"],
-        [
-            "Lead Auditor",
-            plan.leadAuditor ? `${plan.leadAuditor.firstName} ${plan.leadAuditor.lastName}` : "-",
-        ],
-        ["Scope", plan.scope || "N/A"],
-        ["Objective", plan.objective || "N/A"],
         ["Saved Progress", `${auditData.progress ?? plan.progress ?? 0}%`],
-        ["Last Saved", auditData.lastSaved ? new Date(String(auditData.lastSaved)).toLocaleString() : "Never"],
     ];
-    if (auditData.executiveSummary) summaryData.push(["Executive Summary", String(auditData.executiveSummary)]);
-    if (auditData.summaryCounts) {
-        const sc = auditData.summaryCounts as Record<string, string | number>;
-        summaryData.push(["Major NCs", sc.major || "0"]);
-        summaryData.push(["Minor NCs", sc.minor || "0"]);
-        summaryData.push(["OFIs", sc.ofi || "0"]);
-        summaryData.push(["Positive Aspects", sc.positive || "0"]);
-    }
+    if (ctx.executiveSummary) summaryData.push(["General Comment", ctx.executiveSummary]);
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(summaryData), "Summary");
 
-    if ((auditData.participants as any[])?.length) {
-        const pData = [["Name", "Position", "Opening Meeting", "Closing Meeting", "Interviewed"]];
-        (auditData.participants as any[]).forEach((p) => {
-            pData.push([
-                p.name,
-                p.position,
-                p.opening ? "Yes" : "No",
-                p.closing ? "Yes" : "No",
-                p.interviewed || "",
-            ]);
-        });
-        XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(pData), "Participants");
+    if (ctx.participants.length > 0) {
+        const pData = [["Name", "Position", "Department"]];
+        ctx.participants.forEach((p) => pData.push([p.name, p.position, p.department]));
+        XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(pData), "Personnel");
+    }
+
+    if (ctx.nonConformances.length > 0) {
+        const ncData = [["No.", "Statement"]];
+        ctx.nonConformances.forEach((nc, i) => ncData.push([String(i + 1), nc.statement]));
+        XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(ncData), "Non-Conformities");
     }
 
     const clauseFilesForExcel = sanitizeAuditEvidenceMediaMap(
-        auditData.clauseFiles as Record<string, AuditEvidenceMedia[]> | undefined
+        auditData.clauseFiles as Record<string, AuditEvidenceMedia[]> | undefined,
     );
     const genericFilesForExcel = sanitizeAuditEvidenceMediaMap(
-        auditData.genericFiles as Record<string, AuditEvidenceMedia[]> | undefined
+        auditData.genericFiles as Record<string, AuditEvidenceMedia[]> | undefined,
     );
 
     if (auditData.checklistData && Object.keys(auditData.checklistData as object).length > 0 && template?.content) {
-        const cData = [
-            ["Clause", "Question", "Finding", "Evidence", "Description", "Correction", "Root Cause", "Corrective Action"],
-        ];
+        const cData = [["Clause", "Question", "Finding", "Evidence", "Details", "Correction", "Root Cause", "Corrective Action"]];
         Object.entries(auditData.checklistData as Record<string, any>)
             .filter(([, v]) => v.findings)
             .forEach(([idx, v]) => {
                 const itemIndex = Number(idx);
                 const item = (template.content as ChecklistContent[])[itemIndex];
                 const clauseKey = item?.clause || String(idx);
-                const attached = collectAuditEvidenceMedia(
-                    clauseFilesForExcel,
-                    genericFilesForExcel,
-                    clauseKey,
-                    { checklistIndex: itemIndex },
-                );
-                const photoCount = attached.filter((m) => m.type.startsWith("image/")).length;
-                const pdfCount = attached.filter((m) => m.type === "application/pdf").length;
-                const attachmentNote = [
-                    photoCount > 0 ? `${photoCount} photo(s)` : "",
-                    pdfCount > 0 ? `${pdfCount} PDF(s)` : "",
-                ]
-                    .filter(Boolean)
-                    .join(", ");
-                const evidenceText = [v.evidence || "", attachmentNote ? `[${attachmentNote} — see Evidence Files sheet]` : ""]
-                    .filter(Boolean)
-                    .join(" ");
                 cData.push([
                     clauseKey,
                     item?.question || "-",
                     v.findings,
-                    evidenceText,
+                    v.evidence || "",
                     v.description || "",
                     v.correction || "",
                     v.rootCause || "",
-                    v.correctiveAction || "",
+                    v.correctiveAction || ""
                 ]);
             });
         if (cData.length > 1) XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(cData), "Checklist");
     }
 
-    if ((auditData.nonConformances as any[])?.some((nc) => nc.statement)) {
-        const ncData = [["ID", "Standard Clause", "Area/Process", "Statement", "Due Date"]];
-        (auditData.nonConformances as any[]).forEach((nc) =>
-            ncData.push([nc.id, nc.standardClause, nc.areaProcess, nc.statement, nc.dueDate || ""])
-        );
-        XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(ncData), "Non-Conformances");
+    if (template?.type === "clause-checklist" && auditData.clauseData) {
+        const cData = [["Clause", "Requirement", "Finding", "Evidence", "Details", "Correction", "Root Cause", "Corrective Action"]];
+        (template.content as ClauseChecklistContent[]).forEach((item) => {
+            const v = auditData.clauseData[item.clauseId];
+            if (!v || !v.findingType) return;
+            const requirement = [item.title, ...(item.subClauses || [])].filter(Boolean).join('\n');
+            cData.push([
+                item.clauseId,
+                requirement,
+                v.findingType,
+                v.evidence || "",
+                v.description || "",
+                v.correction || "",
+                v.rootCause || "",
+                v.correctiveAction || ""
+            ]);
+        });
+        if (cData.length > 1) XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(cData), "Checklist");
     }
 
-    if ((auditData.opportunities as any[])?.some((o) => o.opportunity)) {
-        const oData = [["ID", "Standard Clause", "Area/Process", "Opportunity"]];
-        (auditData.opportunities as any[]).forEach((o) =>
-            oData.push([o.id, o.standardClause, o.areaProcess, o.opportunity])
-        );
-        XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(oData), "OFIs");
-    }
-
-    if ((auditData.positiveAspects as any[])?.some((pa) => pa.aspect)) {
-        const paData = [["ID", "Standard Clause", "Area/Process", "Aspect"]];
-        (auditData.positiveAspects as any[]).forEach((pa) =>
-            paData.push([pa.id, pa.standardClause, pa.areaProcess, pa.aspect])
-        );
-        XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(paData), "Positive Aspects");
-    }
-
-    if ((auditData.processAudits as any[])?.some((pa) => pa.processArea)) {
-        const prData = [["Process Area", "Auditees", "Evidence", "Conclusion"]];
-        (auditData.processAudits as any[]).forEach((pa) =>
-            prData.push([pa.processArea, pa.auditees, pa.evidence, pa.conclusion])
-        );
-        XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(prData), "Process Audits");
+    if (template?.type === "process-audit" && auditData.processAudits) {
+        const cData = [["No.", "Process Area", "Auditee(s)", "Evidence", "Conclusion", "Finding", "Details", "Correction", "Root Cause", "Corrective Action"]];
+        (auditData.processAudits as ProcessAuditContent[]).forEach((audit, index) => {
+            if (!audit.findingType) return;
+            cData.push([
+                String(index + 1),
+                audit.processArea || "",
+                audit.auditees || "",
+                audit.evidence || "",
+                audit.conclusion || "",
+                audit.findingType,
+                audit.description || "",
+                audit.correction || "",
+                audit.rootCause || "",
+                audit.correctiveAction || ""
+            ]);
+        });
+        if (cData.length > 1) XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(cData), "Process Audit");
     }
 
     const evidenceList = collectReportEvidenceFileList(auditData);

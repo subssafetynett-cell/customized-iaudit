@@ -1171,6 +1171,84 @@ const checkTrialExpiration = async (req, res, next) => {
     }
 };
 
+const TRIAL_GAP_ANALYSIS_LIMIT = 3;
+const TRIAL_SELF_ASSESSMENT_LIMIT = 3;
+const TRIAL_AUDIT_PROGRAM_LIMIT = 1;
+
+async function loadUserSubscriptionFlags(userId) {
+    return prisma.user.findUnique({
+        where: { id: userId },
+        select: { subscriptionStatus: true, role: true },
+    });
+}
+
+function userRequiresTrialLimits(user) {
+    if (!user) return false;
+    if (user.role === 'superadmin') return false;
+    return user.subscriptionStatus !== 'active';
+}
+
+function trialLimitResponse(resource, limit) {
+    const labels = {
+        gapAnalysis: 'gap analyses',
+        selfAssessment: 'self assessments',
+        auditProgram: 'audit programs',
+    };
+    const label = labels[resource] || 'items';
+    return {
+        error: 'TrialLimitExceeded',
+        resource,
+        limit,
+        message: `You have reached the free trial limit of ${limit} ${label}. Please upgrade your plan to create more.`,
+    };
+}
+
+async function countOrgAuditPrograms(actorId) {
+    const orgRootId = await resolveActorOrgRootId(actorId);
+    const subtreeIds = await collectOrgSubtreeUserIds(orgRootId);
+    return prisma.auditProgram.count({
+        where: { OR: buildOrgSubtreeProgramVisibilityOr(subtreeIds) },
+    });
+}
+
+async function countOrgGapAnalyses(actorId) {
+    const orgRootId = await resolveActorOrgRootId(actorId);
+    const subtreeIds = await collectOrgSubtreeUserIds(orgRootId);
+    let total = 0;
+    for (const uid of subtreeIds) {
+        const { analyses } = await ensureUserGapAnalysisStore(uid);
+        total += analyses.length;
+    }
+    return total;
+}
+
+async function countOrgSelfAssessments(actorId) {
+    const orgRootId = await resolveActorOrgRootId(actorId);
+    const subtreeIds = await collectOrgSubtreeUserIds(orgRootId);
+    let total = 0;
+    for (const uid of subtreeIds) {
+        const { assessments } = await ensureUserSelfAssessmentStore(uid);
+        total += assessments.length;
+    }
+    return total;
+}
+
+async function rejectIfTrialLimitExceeded(actorId, resource, projectedCount) {
+    const user = await loadUserSubscriptionFlags(actorId);
+    if (!userRequiresTrialLimits(user)) return null;
+    const limits = {
+        gapAnalysis: TRIAL_GAP_ANALYSIS_LIMIT,
+        selfAssessment: TRIAL_SELF_ASSESSMENT_LIMIT,
+        auditProgram: TRIAL_AUDIT_PROGRAM_LIMIT,
+    };
+    const limit = limits[resource];
+    if (limit == null) return null;
+    if (projectedCount > limit) {
+        return trialLimitResponse(resource, limit);
+    }
+    return null;
+}
+
 // Middleware: validate server-side session (DB row); each request must present a valid session token.
 const authenticateToken = async (req, res, next) => {
     const authHeader = req.headers['authorization'];
@@ -4697,6 +4775,16 @@ app.post('/audit-programs', authenticateToken, checkTrialExpiration, async (req,
             return res.status(403).json({ error: 'Forbidden' });
         }
 
+        const programCount = await countOrgAuditPrograms(actorId);
+        const trialRejected = await rejectIfTrialLimitExceeded(
+            actorId,
+            'auditProgram',
+            programCount + 1,
+        );
+        if (trialRejected) {
+            return res.status(403).json(trialRejected);
+        }
+
         const program = await prisma.auditProgram.create({
             data: {
                 name,
@@ -5277,6 +5365,18 @@ app.put('/gap-analyses', authenticateToken, async (req, res) => {
                         : gapAnalysisDraftForUser({ ...draft, ownerUserId: actorId }, actorId)
                     : (existing?.draft ?? null),
         };
+        if (analyses !== undefined) {
+            const orgTotalBefore = await countOrgGapAnalyses(actorId);
+            const actorDelta = data.analyses.length - ownedExisting.length;
+            const trialRejected = await rejectIfTrialLimitExceeded(
+                actorId,
+                'gapAnalysis',
+                orgTotalBefore + actorDelta,
+            );
+            if (trialRejected) {
+                return res.status(403).json(trialRejected);
+            }
+        }
         const row = await prisma.userGapAnalysisStore.upsert({
             where: { userId: actorId },
             create: { userId: actorId, ...data },
@@ -5367,6 +5467,18 @@ app.put('/self-assessments', authenticateToken, async (req, res) => {
                         : selfAssessmentDraftForUser({ ...draft, ownerUserId: actorId }, actorId)
                     : (existing?.draft ?? null),
         };
+        if (assessments !== undefined) {
+            const orgTotalBefore = await countOrgSelfAssessments(actorId);
+            const actorDelta = data.assessments.length - ownedExisting.length;
+            const trialRejected = await rejectIfTrialLimitExceeded(
+                actorId,
+                'selfAssessment',
+                orgTotalBefore + actorDelta,
+            );
+            if (trialRejected) {
+                return res.status(403).json(trialRejected);
+            }
+        }
         const row = await prisma.userSelfAssessmentStore.upsert({
             where: { userId: actorId },
             create: { userId: actorId, ...data },

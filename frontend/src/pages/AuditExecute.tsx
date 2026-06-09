@@ -45,23 +45,7 @@ import {
 } from "@/data/auditTemplates";
 import { toast } from "sonner";
 import { format } from "date-fns";
-import jsPDF from "jspdf";
-import autoTable from "jspdf-autotable";
 import * as XLSX from "xlsx";
-import {
-  Document,
-  Packer,
-  Paragraph,
-  TextRun,
-  Table as DocxTable,
-  TableRow as DocxTableRow,
-  TableCell as DocxTableCell,
-  WidthType,
-  HeadingLevel,
-  AlignmentType,
-  ImageRun
-} from "docx";
-import { saveAs } from "file-saver";
 import { TourStepPopover } from "@/components/TourStepPopover";
 import {
   AUDIT_EXECUTE_TOUR_TOTAL_STEPS,
@@ -82,11 +66,13 @@ import {
   sanitizeAuditEvidenceMediaMap,
   type AuditEvidenceMedia,
 } from "@/lib/evidenceImageUpload";
+import { generateAuditReportPdf, generateAuditReportDocx, downloadAuditReport } from "@/utils/auditReportExport";
+import { AuditFindingsReportForm } from "@/components/AuditFindingsReportForm";
 import {
-  prepareReportEvidenceImages,
-  reportImageDisplayMm,
-  collectReportEvidenceSources,
-} from "@/lib/reportEvidenceImages";
+  buildFindingsReportDefaults,
+  defaultFindingsReportForm,
+  type FindingsReportForm,
+} from "@/lib/findingsReportForm";
 
 import { CLAUSE_MATRIX, ClauseMatrixRow } from "@/data/clauseMapping";
 
@@ -140,7 +126,7 @@ function isActiveFindingFieldValue(field: string, value: unknown): boolean {
 function stampFindingCreator(
   field: string,
   value: unknown,
-  existing?: { createdByUserId?: number },
+  existing?: Record<string, any>,
 ): { createdByUserId?: number; status?: "Opened" } {
   if (!isActiveFindingFieldValue(field, value) || existing?.createdByUserId) {
     return {};
@@ -405,6 +391,9 @@ const AuditExecute = () => {
 
 
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [findingsReportForm, setFindingsReportForm] = useState<FindingsReportForm>(
+    defaultFindingsReportForm(),
+  );
 
   // Load saved progress
   useEffect(() => {
@@ -439,6 +428,7 @@ const AuditExecute = () => {
             if (data.showAuditFindings !== undefined) setShowAuditFindings(data.showAuditFindings);
             if (data.clauseFiles) setClauseFiles(sanitizeAuditEvidenceMediaMap(data.clauseFiles));
             if (data.genericFiles) setGenericFiles(sanitizeAuditEvidenceMediaMap(data.genericFiles));
+            setFindingsReportForm(buildFindingsReportDefaults(found, data));
             const currentTemplate = found.templateId ? auditTemplates.find(t => t.id === found.templateId) : null;
 
             if (data.editableChecklist && data.editableChecklist.length > 0) {
@@ -447,6 +437,7 @@ const AuditExecute = () => {
               setEditableChecklist(currentTemplate.content);
             }
           } else {
+            setFindingsReportForm(buildFindingsReportDefaults(found));
             const currentTemplate = found.templateId ? auditTemplates.find(t => t.id === found.templateId) : null;
             if (currentTemplate?.content) {
               setEditableChecklist(currentTemplate.content);
@@ -596,7 +587,8 @@ const AuditExecute = () => {
     value: any,
   ) => {
     const newAudits = [...processAudits];
-    const current = newAudits[index] || {};
+    const current = newAudits[index];
+    if (!current) return;
     const creatorStamp = stampFindingCreator(field, value, current);
     newAudits[index] = { ...current, [field]: value, ...creatorStamp };
     setProcessAudits(newAudits);
@@ -672,8 +664,15 @@ const AuditExecute = () => {
     pendingItems,
   } = calculateProgress();
 
+  const handleFindingsReportFormChange = useCallback((next: FindingsReportForm) => {
+    setFindingsReportForm(next);
+    setExecutiveSummary(next.generalComment);
+  }, []);
+
   const buildAuditDataPayload = useCallback(
     () => {
+      const syncedGeneralComment =
+        findingsReportForm.generalComment || executiveSummary;
       const payload = {
         checklistData,
         sectionData,
@@ -684,7 +683,7 @@ const AuditExecute = () => {
         positiveAspects,
         opportunities,
         nonConformances,
-        executiveSummary,
+        executiveSummary: syncedGeneralComment,
         summaryCounts,
         auditFindings,
         auditGlobalInfo,
@@ -693,6 +692,10 @@ const AuditExecute = () => {
         showExecutiveSummary,
         showAuditParticipants,
         showAuditFindings,
+        findingsReportForm: {
+          ...findingsReportForm,
+          generalComment: syncedGeneralComment,
+        },
         lastSaved: new Date().toISOString(),
         progress: progressValue,
         editableChecklist,
@@ -729,6 +732,7 @@ const AuditExecute = () => {
       opportunities,
       nonConformances,
       executiveSummary,
+      findingsReportForm,
       summaryCounts,
       auditFindings,
       auditGlobalInfo,
@@ -932,7 +936,7 @@ const AuditExecute = () => {
       const creatorStamp = stampFindingCreator(field, value, current);
       return {
         ...prev,
-        [index]: { ...current, [field]: value, ...creatorStamp },
+        [index]: { ...current, [field]: value, ...creatorStamp } as any,
       };
     });
   };
@@ -1043,7 +1047,7 @@ const AuditExecute = () => {
       const creatorStamp = stampFindingCreator(field, value, current);
       return {
         ...prev,
-        [clauseId]: { ...current, [field]: value, ...creatorStamp },
+        [clauseId]: { ...current, [field]: value, ...creatorStamp } as any,
       };
     });
   };
@@ -1125,901 +1129,18 @@ const AuditExecute = () => {
   };
 
   const exportToPDF = async () => {
-    const doc = new jsPDF();
-    const pageW = doc.internal.pageSize.getWidth();
-    const pageH = doc.internal.pageSize.getHeight();
-    const margin = 14;
-    const darkColor: [number, number, number] = [33, 56, 71];
-    const greenColor: [number, number, number] = [16, 185, 129];
-    const amberColor: [number, number, number] = [245, 158, 11];
-    const redColor: [number, number, number] = [239, 68, 68];
-
-    // ---------- helpers ----------
-    const section = (title: string, y: number): number => {
-      if (y > pageH - 40) { doc.addPage(); y = margin; }
-      doc.setFillColor(...darkColor);
-      doc.rect(margin, y, pageW - margin * 2, 8, 'F');
-      doc.setFontSize(11); doc.setFont('helvetica', 'bold'); doc.setTextColor(255, 255, 255);
-      doc.text(title, margin + 3, y + 5.5);
-      doc.setTextColor(0, 0, 0); doc.setFont('helvetica', 'normal');
-      return y + 12;
-    };
-
-    const checkPage = (y: number, need = 20): number => {
-      if (y + need > pageH - 25) { doc.addPage(); return margin; }
-      return y;
-    };
-
-    // ---- Try to load logo - compressed via canvas to prevent huge file sizes ----
-    let logoDataUrl: string | null = null;
-    let logoRatio = 0.3;
-    try {
-      await new Promise<void>((resolve) => {
-        const img = new Image();
-        img.src = '/iAudit Global-01.png';
-        img.onload = () => {
-          const MAX = 120;
-          const canvas = document.createElement('canvas');
-          let { width, height } = img;
-          if (width > MAX || height > MAX) {
-            if (width > height) { height = Math.round(height * MAX / width); width = MAX; }
-            else { width = Math.round(width * MAX / height); height = MAX; }
-          }
-          canvas.width = width;
-          canvas.height = height;
-          const ctx = canvas.getContext('2d')!;
-          ctx.fillStyle = "#ffffff";
-          ctx.fillRect(0, 0, width, height);
-          ctx.drawImage(img, 0, 0, width, height);
-          logoDataUrl = canvas.toDataURL('image/jpeg', 0.6);
-          logoRatio = height / width;
-          resolve();
-        };
-        img.onerror = () => resolve();
-      });
-    } catch { }
-
-    // ---- PAGE 1: COVER ----
-    let y = margin;
-    if (logoDataUrl) {
-      const lw = 50; const lh = lw * logoRatio;
-      doc.addImage(logoDataUrl, 'PNG', pageW / 2 - lw / 2, y, lw, lh);
-      y += lh + 8;
-    } else {
-      y += 10;
-    }
-    doc.setFontSize(22); doc.setFont('helvetica', 'bold'); doc.setTextColor(...darkColor);
-    doc.text('Audit Report', pageW / 2, y, { align: 'center' });
-    y += 8;
-    doc.setFontSize(13); doc.setFont('helvetica', 'normal'); doc.setTextColor(80, 80, 80);
-    doc.text(plan.auditName || '', pageW / 2, y, { align: 'center' });
-    y += 10;
-    doc.setFontSize(9); doc.setTextColor(130, 130, 130);
-    doc.text(`Generated: ${new Date().toLocaleDateString()}`, pageW / 2, y, { align: 'center' });
-    y += 14;
-
-    // ---- 1. Audit Information ----
-    y = section('1. AUDIT INFORMATION', y);
-    const leadName = plan.leadAuditor ? `${plan.leadAuditor.firstName} ${plan.leadAuditor.lastName}` : (plan.leadAuditorName || '—');
-    const auditeeStr = Array.isArray(plan.auditees)
-      ? plan.auditees.map((a: any) => typeof a === 'string' ? a : `${a.firstName || ''} ${a.lastName || ''}`.trim()).join(', ')
-      : (plan.auditees || '—');
-    autoTable(doc, {
-      startY: y,
-      body: [
-        ['Audit Name', plan.auditName || '—'],
-        ['Template', template.title || '—'],
-        ['Site / Location', plan.site?.name || plan.location || '—'],
-        ['Date', plan.date ? format(new Date(plan.date), 'PPP') : '—'],
-        ['Lead Auditor', leadName],
-        ['Auditees', auditeeStr],
-        ['Standard / Criteria', plan.criteria || plan.standard || '—'],
-        ['Objective', plan.objective || '—'],
-        ['Scope', plan.scope || '—'],
-      ],
-      theme: 'grid',
-      styles: { fontSize: 9, cellPadding: 4 },
-      columnStyles: { 0: { fontStyle: 'bold', fillColor: [240, 243, 246], cellWidth: 52 } }
-    });
-    y = (doc as any).lastAutoTable.finalY + 10;
-
-    // ---- 2. Previous Findings ----
-    y = section('2. PREVIOUS FINDINGS', y);
-    if (previousFindings?.trim()) {
-      doc.setFontSize(9); doc.setTextColor(40, 40, 40);
-      const pfLines = doc.splitTextToSize(previousFindings, pageW - margin * 2);
-      pfLines.forEach((line: string) => { y = checkPage(y, 6); doc.text(line, margin, y); y += 5; });
-    } else {
-      doc.setFontSize(9); doc.setTextColor(150, 150, 150);
-      doc.text('No previous findings recorded.', margin, y); y += 6;
-    }
-    y += 6;
-
-    // ---- 3. Details of Changes ----
-    y = section('3. DETAILS OF CHANGES', y);
-    autoTable(doc, {
-      startY: y,
-      head: [['Item', 'Action Required', 'Notes']],
-      body: detailsOfChanges.map(d => [d.item, d.actionRequired ? 'Yes' : 'No', d.notes || '—']),
-      theme: 'grid', styles: { fontSize: 9 }, headStyles: { fillColor: darkColor },
-      didParseCell: (data) => {
-        if (data.section === 'body' && data.column.index === 1 && data.cell.raw === 'Yes')
-          data.cell.styles.textColor = [239, 68, 68];
-      }
-    });
-    y = (doc as any).lastAutoTable.finalY + 10;
-
-    // ---- 4. Audit Participants ----
-    y = section('4. AUDIT PARTICIPANTS', y);
-    const filledParticipants = participants.filter(p => p.name?.trim());
-    if (filledParticipants.length > 0) {
-      autoTable(doc, {
-        startY: y,
-        head: [['Name', 'Position', 'Opening', 'Closing', 'Interviewed']],
-        body: filledParticipants.map(p => [p.name || '—', p.position || '—', p.opening ? '✓' : '', p.closing ? '✓' : '', p.interviewed || '—']),
-        theme: 'grid', styles: { fontSize: 9 }, headStyles: { fillColor: darkColor }
-      });
-      y = (doc as any).lastAutoTable.finalY + 10;
-    } else {
-      doc.setFontSize(9); doc.setTextColor(150, 150, 150);
-      doc.text('No participants recorded.', margin, y); y += 12;
-    }
-
-    // ---- 5. Global Findings / Summary ----
-    y = section('5. GLOBAL FINDINGS SUMMARY', y);
-    autoTable(doc, {
-      startY: y,
-      head: [['Compliant', 'OFI', 'Minor NCR', 'Major NCR', 'Positive Aspects']],
-      body: [[summaryCounts.compliant || '0', summaryCounts.ofi || '0', summaryCounts.minor || '0', summaryCounts.major || '0', summaryCounts.positive || '0']],
-      theme: 'grid', styles: { fontSize: 10, halign: 'center' },
-      headStyles: { fillColor: greenColor }
-    });
-    y = (doc as any).lastAutoTable.finalY + 8;
-    // Findings log
-    const filledAF = auditFindings.filter(f => f.details?.trim());
-    if (filledAF.length > 0) {
-      doc.setFontSize(10); doc.setFont('helvetica', 'bold'); doc.setTextColor(...darkColor);
-      doc.text('Audit Findings Log', margin, y); y += 5; doc.setFont('helvetica', 'normal'); doc.setTextColor(0, 0, 0);
-      autoTable(doc, {
-        startY: y,
-        head: [['Ref No', 'Clause No', 'Category', 'Details']],
-        body: filledAF.map(f => [f.refNo || '—', f.clauseNo || '—', f.category || '—', f.details || '—']),
-        theme: 'grid', styles: { fontSize: 9 }, headStyles: { fillColor: darkColor }
-      });
-      y = (doc as any).lastAutoTable.finalY + 10;
-    } else { y += 6; }
-
-    // ---- 6. Opportunities for Improvement (OFI) ----
-    y = section('6. OPPORTUNITIES FOR IMPROVEMENT (OFI)', y);
-    const ofiItems = opportunities.filter(o => o.opportunity?.trim());
-    if (ofiItems.length > 0) {
-      autoTable(doc, {
-        startY: y,
-        head: [['Ref', 'Standard Clause', 'Area / Process', 'Opportunity']],
-        body: ofiItems.map(o => [o.id, o.standardClause || '—', o.areaProcess || '—', o.opportunity || '—']),
-        theme: 'grid', styles: { fontSize: 9 }, headStyles: { fillColor: amberColor }
-      });
-      y = (doc as any).lastAutoTable.finalY + 10;
-    } else {
-      doc.setFontSize(9); doc.setTextColor(150, 150, 150);
-      doc.text('No OFIs recorded.', margin, y); y += 12;
-    }
-
-    // ---- 7. Non-Conformances (NCR) ----
-    y = section('7. NON-CONFORMANCES (NCR)', y);
-    const ncrItems = nonConformances.filter(n => n.statement?.trim());
-    if (ncrItems.length > 0) {
-      autoTable(doc, {
-        startY: y,
-        head: [['Ref', 'Standard Clause', 'Area / Process', 'NC Statement', 'Due Date', 'Action By']],
-        body: ncrItems.map(n => [n.id, n.standardClause || '—', n.areaProcess || '—', n.statement || '—', n.dueDate || '—', n.actionBy || '—']),
-        theme: 'grid', styles: { fontSize: 8, overflow: 'linebreak' }, headStyles: { fillColor: redColor }
-      });
-      y = (doc as any).lastAutoTable.finalY + 10;
-    } else {
-      doc.setFontSize(9); doc.setTextColor(150, 150, 150);
-      doc.text('No non-conformances recorded.', margin, y); y += 12;
-    }
-
-    // ---- 8. Template Fields (filled rows only, NC details inline) ----
-    if (template.type === 'checklist') {
-      y = section('8. AUDIT CHECKLIST FINDINGS', y);
-      // lblStyle: blue label cell style
-      const lblStyle = { fillColor: darkColor as [number, number, number], textColor: [255, 255, 255] as [number, number, number], fontStyle: 'bold' as const, fontSize: 8, cellPadding: 3 };
-      const bodyRows: any[] = [];
-      const imgRowMap = new Map<number, string>(); // rowIndex -> image data URL
-
-      (editableChecklist as ChecklistContent[]).forEach((item, idx) => {
-        const d = (checklistData[idx] || {}) as any;
-        if (!d.findings) return; // skip unfilled
-        // Main finding row
-        bodyRows.push([item.clause, item.question, d.findings]);
-        // Evidence sub-row
-        if (d.evidence?.trim()) {
-          bodyRows.push([{ content: 'Evidence', styles: lblStyle }, { content: d.evidence, colSpan: 2, styles: { fontSize: 8, cellPadding: 3 } }]);
-        }
-        // NC detail sub-rows (only when non-compliant)
-        if (d.findings !== 'C') {
-          if (d.description?.trim()) bodyRows.push([{ content: 'Details', styles: lblStyle }, { content: d.description, colSpan: 2, styles: { fontSize: 8, cellPadding: 3 } }]);
-          if (d.correction?.trim()) bodyRows.push([{ content: 'Correction', styles: lblStyle }, { content: d.correction, colSpan: 2, styles: { fontSize: 8, cellPadding: 3 } }]);
-          if (d.rootCause?.trim()) bodyRows.push([{ content: 'Root Cause', styles: lblStyle }, { content: d.rootCause, colSpan: 2, styles: { fontSize: 8, cellPadding: 3 } }]);
-          if (d.correctiveAction?.trim()) bodyRows.push([{ content: 'Corrective Action', styles: lblStyle }, { content: d.correctiveAction, colSpan: 2, styles: { fontSize: 8, cellPadding: 3 } }]);
-        }
-        // Image sub-row
-        const clauseImgs = (clauseFiles[item.clause] || []).filter((m) => m.type.startsWith('image/'));
-        if (clauseImgs.length > 0) {
-          imgRowMap.set(bodyRows.length, clauseImgs[0].data);
-          bodyRows.push([{ content: '', colSpan: 3, styles: { minCellHeight: 55, cellPadding: 2 } }]);
-        }
-      });
-
-      // Also append extra questions added during the audit
-      Object.entries(extraChecklistItems).forEach(([clause, extras]) => {
-        extras.forEach((eq) => {
-          if (!eq.question?.trim() && !eq.findings) return;
-          bodyRows.push([clause, eq.question || '(no question text)', eq.findings || '—']);
-          if (eq.evidence?.trim()) bodyRows.push([{ content: 'Evidence', styles: lblStyle }, { content: eq.evidence, colSpan: 2, styles: { fontSize: 8, cellPadding: 3 } }]);
-          if (eq.findings !== 'C') {
-            if (eq.correction?.trim()) bodyRows.push([{ content: 'Correction', styles: lblStyle }, { content: eq.correction, colSpan: 2, styles: { fontSize: 8, cellPadding: 3 } }]);
-            if (eq.rootCause?.trim()) bodyRows.push([{ content: 'Root Cause', styles: lblStyle }, { content: eq.rootCause, colSpan: 2, styles: { fontSize: 8, cellPadding: 3 } }]);
-            if (eq.correctiveAction?.trim()) bodyRows.push([{ content: 'Corrective Action', styles: lblStyle }, { content: eq.correctiveAction, colSpan: 2, styles: { fontSize: 8, cellPadding: 3 } }]);
-          }
-        });
-      });
-
-      if (bodyRows.length === 0) {
-        doc.setFontSize(9); doc.setTextColor(150, 150, 150);
-        doc.text('No findings recorded yet.', margin, y); y += 12;
-      } else {
-        autoTable(doc, {
-          startY: y,
-          head: [['Clause', 'Question', 'Finding']],
-          body: bodyRows, theme: 'grid',
-          styles: { fontSize: 8, cellPadding: 3, overflow: 'linebreak' },
-          columnStyles: { 0: { cellWidth: 20 }, 1: { cellWidth: 'auto' }, 2: { cellWidth: 22 } },
-          headStyles: { fillColor: darkColor },
-          didParseCell: (data) => {
-            if (data.section === 'body' && data.column.index === 2 && !imgRowMap.has(data.row.index)) {
-              const f = String(data.cell.raw || '');
-              if (f === 'C') data.cell.styles.textColor = [16, 185, 129];
-              else if (f === 'OFI') data.cell.styles.textColor = [245, 158, 11];
-              else if (f === 'Min' || f === 'Maj') data.cell.styles.textColor = [239, 68, 68];
-            }
-          },
-          didDrawCell: (data) => {
-            if (data.section === 'body' && data.column.index === 0 && imgRowMap.has(data.row.index)) {
-              const imgData = imgRowMap.get(data.row.index)!;
-              try {
-                const fmt = imgData.startsWith('data:image/jpeg') ? 'JPEG' : 'PNG';
-                // full-width image across all 3 cols, positioned at the row's cell
-                const tblW = pageW - margin * 2;
-                doc.addImage(imgData, fmt, data.cell.x + 2, data.cell.y + 2, tblW - 4, 50);
-              } catch (e) { console.error('clause img row failed', e); }
-            }
-          }
-        });
-        y = (doc as any).lastAutoTable.finalY + 10;
-      }
-    } else if (template.type === 'clause-checklist') {
-      y = section('8. CLAUSE CHECKLIST', y);
-      const checklistToUse = (editableChecklist as ClauseChecklistContent[]).length > 0
-        ? (editableChecklist as ClauseChecklistContent[])
-        : (template.content as ClauseChecklistContent[]);
-
-      const filledClauses = checklistToUse.filter(c => (clauseData[c.clauseId] || {} as any).findingType);
-      if (filledClauses.length === 0) {
-        doc.setFontSize(9); doc.setTextColor(150, 150, 150);
-        doc.text('No findings recorded yet.', margin, y); y += 12;
-      } else {
-        const bodyRows: any[] = [];
-        const lblStyle = { fillColor: darkColor as [number, number, number], textColor: [255, 255, 255] as [number, number, number], fontStyle: 'bold' as const, fontSize: 8, cellPadding: 3 };
-        
-        filledClauses.forEach(c => {
-          const d = (clauseData[c.clauseId] || {}) as any;
-          const requirement = [c.title, ...(c.subClauses || [])].filter(Boolean).join('\n');
-          bodyRows.push([c.clauseId, requirement, d.findingType || '—', d.evidence || '—']);
-          
-          if (d.findingType && d.findingType !== 'C') {
-            if (d.description?.trim()) bodyRows.push([{ content: 'Description of Finding', styles: lblStyle }, { content: d.description, colSpan: 3, styles: { fontSize: 8, cellPadding: 3 } }]);
-            if (d.correction?.trim()) bodyRows.push([{ content: 'Correction Done', styles: lblStyle }, { content: d.correction, colSpan: 3, styles: { fontSize: 8, cellPadding: 3 } }]);
-            if (d.rootCause?.trim()) bodyRows.push([{ content: 'Root Cause', styles: lblStyle }, { content: d.rootCause, colSpan: 3, styles: { fontSize: 8, cellPadding: 3 } }]);
-            if (d.correctiveAction?.trim()) bodyRows.push([{ content: 'Corrective Action', styles: lblStyle }, { content: d.correctiveAction, colSpan: 3, styles: { fontSize: 8, cellPadding: 3 } }]);
-          }
-        });
-
-        autoTable(doc, {
-          startY: y, head: [['Clause', 'Requirement', 'Status', 'Evidence']],
-          body: bodyRows,
-          theme: 'grid', styles: { fontSize: 8, overflow: 'linebreak' },
-          columnStyles: { 0: { cellWidth: 18 }, 2: { cellWidth: 18 } }, headStyles: { fillColor: darkColor },
-          didParseCell: (data) => {
-            if (data.section === 'body' && data.column.index === 2) {
-              const f = String(data.cell.raw || '');
-              if (f === 'C') data.cell.styles.textColor = [16, 185, 129];
-              else if (f === 'OFI') data.cell.styles.textColor = [245, 158, 11];
-              else if (f !== '—' && f !== '') data.cell.styles.textColor = [239, 68, 68];
-            }
-          }
-        });
-        y = (doc as any).lastAutoTable.finalY + 10;
-      }
-    } else if (template.type === 'section') {
-      y = section('8. SECTION RESPONSES', y);
-      const filledSections = (template.content as SectionContent[]).filter((_, idx) => sectionData[idx]?.trim());
-      if (filledSections.length === 0) {
-        doc.setFontSize(9); doc.setTextColor(150, 150, 150);
-        doc.text('No responses recorded yet.', margin, y); y += 12;
-      } else {
-        const rows = (template.content as SectionContent[]).reduce<string[][]>((acc, sec, idx) => {
-          if (sectionData[idx]?.trim()) acc.push([sec.title || `Section ${idx + 1}`, sectionData[idx]]);
-          return acc;
-        }, []);
-        autoTable(doc, { startY: y, head: [['Section', 'Response']], body: rows, theme: 'grid', styles: { fontSize: 9 }, headStyles: { fillColor: darkColor } });
-        y = (doc as any).lastAutoTable.finalY + 10;
-      }
-    } else if (template.type === 'process-audit') {
-      y = section('8. PROCESS AUDIT', y);
-      const filledPA = processAudits.filter(pa => pa.processArea?.trim() || pa.evidence?.trim());
-      if (filledPA.length === 0) {
-        doc.setFontSize(9); doc.setTextColor(150, 150, 150);
-        doc.text('No process audits recorded yet.', margin, y); y += 12;
-      } else {
-        autoTable(doc, {
-          startY: y, head: [['Process Area', 'Auditees', 'Evidence', 'Conclusion', 'Finding']],
-          body: filledPA.map(pa => [pa.processArea || '—', pa.auditees || '—', pa.evidence || '—', pa.conclusion || '—', (pa as any).findingType || '—']),
-          theme: 'grid', styles: { fontSize: 8, overflow: 'linebreak' }, headStyles: { fillColor: darkColor }
-        });
-        y = (doc as any).lastAutoTable.finalY + 10;
-      }
-    } else if (template.isTripleMapping) {
-      y = section(`8. INTEGRATED AUDIT MAPPING (${[showISO9001 && 'ISO 9001', showISO14001 && 'ISO 14001', showISO45001 && 'ISO 45001'].filter(Boolean).join(', ')})`, y);
-      const rows: any[] = [];
-      const lblStyle = { fillColor: darkColor as [number, number, number], textColor: [255, 255, 255] as [number, number, number], fontStyle: 'bold' as const, fontSize: 8, cellPadding: 3 };
-
-      CLAUSE_MATRIX.forEach((row, idx) => {
-        if (!isClauseSelected(row.id)) return;
-        
-        // Use editableChecklist if available to match UI
-        const questions = (editableChecklist as ChecklistContent[]).filter(q => q.clause === row.id);
-        
-        if (row.isHeading) {
-          const headingParts = [
-            showISO45001 && row.iso45001, 
-            showISO14001 && row.iso14001, 
-            showISO9001 && row.iso9001
-          ].filter(Boolean);
-          rows.push([{ content: headingParts.join(' / '), colSpan: activeCount + 2, styles: { fillColor: [240, 240, 240], fontStyle: 'bold' } }]);
-          return;
-        }
-
-        questions.forEach(q => {
-          const dIdx = editableChecklist.indexOf(q);
-          const d = (checklistData[dIdx] || {}) as any;
-          if (!d.findings) return;
-
-          const rowData = [
-            showISO45001 && row.iso45001,
-            showISO14001 && row.iso14001,
-            showISO9001 && row.iso9001,
-            d.findings,
-            d.evidence || '—'
-          ].filter(val => val !== false);
-
-          rows.push(rowData);
-
-          if (d.findings !== 'C') {
-            if (d.description?.trim()) rows.push([{ content: 'Details', styles: lblStyle }, { content: d.description, colSpan: activeCount + 1, styles: { fontSize: 8, cellPadding: 3 } }]);
-            if (d.correction?.trim()) rows.push([{ content: 'Correction', styles: lblStyle }, { content: d.correction, colSpan: activeCount + 1, styles: { fontSize: 8, cellPadding: 3 } }]);
-            if (d.rootCause?.trim()) rows.push([{ content: 'Root Cause', styles: lblStyle }, { content: d.rootCause, colSpan: activeCount + 1, styles: { fontSize: 8, cellPadding: 3 } }]);
-            if (d.correctiveAction?.trim()) rows.push([{ content: 'Corrective Action', styles: lblStyle }, { content: d.correctiveAction, colSpan: activeCount + 1, styles: { fontSize: 8, cellPadding: 3 } }]);
-          }
-        });
-      });
-
-      if (rows.length === 0) {
-        doc.setFontSize(9); doc.setTextColor(150, 150, 150);
-        doc.text('No findings recorded yet.', margin, y); y += 12;
-      } else {
-        const head = [
-          showISO45001 && 'ISO 45001',
-          showISO14001 && 'ISO 14001',
-          showISO9001 && 'ISO 9001',
-          'Finding',
-          'Evidence'
-        ].filter(Boolean) as string[];
-
-        autoTable(doc, {
-          startY: y,
-          head: [head],
-          body: rows,
-          theme: 'grid',
-          styles: { fontSize: 7, cellPadding: 2, overflow: 'linebreak' },
-          columnStyles: { 
-            0: { cellWidth: activeCount === 1 ? 105 : activeCount === 2 ? 52 : 35 },
-            1: { cellWidth: activeCount === 2 ? 52 : 35 },
-            2: { cellWidth: 35 },
-            [activeCount]: { cellWidth: 15 },
-            [activeCount + 1]: { cellWidth: 'auto' } 
-          },
-          headStyles: { fillColor: darkColor },
-          didParseCell: (data) => {
-            if (data.section === 'body' && data.column.index === activeCount) {
-              const f = String(data.cell.raw || '');
-              if (f === 'C') data.cell.styles.textColor = [16, 185, 129];
-              else if (f === 'OFI') data.cell.styles.textColor = [245, 158, 11];
-              else if (f === 'Min' || f === 'Maj') data.cell.styles.textColor = [239, 68, 68];
-            }
-          }
-        });
-        y = (doc as any).lastAutoTable.finalY + 10;
-      }
-    }
-
-    // ---- 9. Evidence & uploaded files (images + PDF page previews) ----
-    // Use the same humanized evidence labels logic as other code paths.
-    const evidenceSources = collectReportEvidenceSources({ clauseFiles, genericFiles });
-    const evidenceVisuals = await prepareReportEvidenceImages(evidenceSources);
-    if (evidenceVisuals.length > 0) {
-      y = section("9. EVIDENCE & UPLOADED FILES", y);
-      const contentWidthMm = pageW - margin * 2;
-      for (const img of evidenceVisuals) {
-        const isPdfPreview = img.context.includes("— PDF");
-        const { w, h } = reportImageDisplayMm(
-          img.widthPx,
-          img.heightPx,
-          contentWidthMm,
-          isPdfPreview ? 120 : 85,
-        );
-        y = checkPage(y, h + 14);
-        doc.setFontSize(9);
-        doc.setFont("helvetica", "bold");
-        doc.setTextColor(33, 56, 71);
-        doc.text(`${img.context} — ${img.name}`, margin, y);
-        y += 5;
-        try {
-          doc.addImage(img.dataUrl, img.format, margin, y, w, h, undefined, "FAST");
-          y += h + 6;
-        } catch (e) {
-          console.error("PDF evidence embed failed", img.name, e);
-          doc.setFont("helvetica", "normal");
-          doc.setFontSize(8);
-          doc.setTextColor(150, 150, 150);
-          doc.text(`(Could not embed ${img.name})`, margin, y);
-          y += 8;
-        }
-      }
-    }
-
-    // ---- Footer on every page ----
-    const totalPages = (doc.internal as any).getNumberOfPages();
-    for (let i = 1; i <= totalPages; i++) {
-      doc.setPage(i);
-      doc.setFontSize(8); doc.setTextColor(150, 150, 150);
-      doc.line(margin, pageH - 12, pageW - margin, pageH - 12);
-      doc.text(`${plan.auditName || 'Audit'} Report`, margin, pageH - 7);
-      doc.text(`Page ${i} of ${totalPages}`, pageW - margin, pageH - 7, { align: 'right' });
-    }
-
-    doc.save(`${(plan.auditName || 'Audit').replace(/\s+/g, '_')}_Report.pdf`);
+    await generateAuditReportPdf({ ...plan, auditData: buildAuditDataPayload() });
   };
 
+
   const exportToExcel = () => {
-    const rows: any[] = [];
-
-    if (template.type === "checklist") {
-      (editableChecklist as ChecklistContent[]).forEach((item, idx) => {
-        const data = (checklistData[idx] || {}) as any;
-        rows.push({
-          "Clause": item.clause,
-          "Question": item.question,
-          "Finding": data.findings,
-          "Evidence": data.evidence
-        });
-      });
-    } else if (template.isTripleMapping) {
-      CLAUSE_MATRIX.forEach((row, idx) => {
-        if (!isClauseSelected(row.id)) return;
-        if (row.isHeading) return;
-        
-        const questionsForClause = (editableChecklist as ChecklistContent[]).filter(q => q.clause === row.id);
-        
-        questionsForClause.forEach(q => {
-          const dIdx = editableChecklist.indexOf(q);
-          const data = (checklistData[dIdx] || {}) as any;
-          if (!data.findings) return;
-          
-          const rowData: any = {};
-          if (showISO45001) rowData["ISO 45001"] = row.iso45001;
-          if (showISO14001) rowData["ISO 14001"] = row.iso14001;
-          if (showISO9001) rowData["ISO 9001"] = row.iso9001;
-          rowData["Question"] = q.question;
-          rowData["Finding"] = data.findings;
-          rowData["Evidence"] = data.evidence;
-          rows.push(rowData);
-        });
-      });
-    } else if (template.type === 'clause-checklist') {
-      (editableChecklist as ClauseChecklistContent[]).forEach(c => {
-        const data = (clauseData[c.clauseId] || {}) as any;
-        const requirement = [c.title, ...(c.subClauses || [])].filter(Boolean).join('\n');
-        rows.push({
-          "Clause": c.clauseId,
-          "Requirement": requirement,
-          "Status": data.findingType,
-          "Evidence": data.evidence
-        });
-      });
-    } else {
-      clausesToRender.forEach(c => {
-        const data = (clauseData[c.id] || {}) as any;
-        rows.push({
-          "Clause": c.id,
-          "Requirement": c.iso9001 || c.iso14001 || c.iso45001,
-          "Status": data.findingType,
-          "Evidence": data.evidence
-        });
-      });
-    }
-
-    const worksheet = XLSX.utils.json_to_sheet(rows);
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, "Audit Report");
-    XLSX.writeFile(workbook, `${plan.auditName || 'Audit'}_Report.xlsx`);
+    downloadAuditReport({ ...plan, auditData: buildAuditDataPayload() }, "excel");
   };
 
   const exportToWord = async () => {
-    const darkFill = '213847';
-    const greenFill = '10B981';
-    const amberFill = 'F59E0B';
-    const redFill = 'EF4444';
-
-    const makeHeader = (text: string) =>
-      new Paragraph({
-        children: [new TextRun({ text, bold: true, color: 'FFFFFF', size: 24 })],
-        shading: { fill: darkFill },
-        spacing: { before: 300, after: 100 },
-      });
-
-    const makeRow = (cells: string[], headerFill?: string) =>
-      new DocxTableRow({
-        children: cells.map((c, i) =>
-          new DocxTableCell({
-            shading: headerFill ? { fill: headerFill } : undefined,
-            children: [new Paragraph({
-              children: [new TextRun({ text: c || '—', bold: !!headerFill, color: headerFill ? 'FFFFFF' : '000000', size: 18 })]
-            })]
-          })
-        )
-      });
-
-    const tbl = (head: string[], body: string[][], fill = darkFill) =>
-      new DocxTable({
-        width: { size: 100, type: WidthType.PERCENTAGE },
-        rows: [makeRow(head, fill), ...body.map(r => makeRow(r))]
-      });
-
-    const spacer = () => new Paragraph({ text: '' });
-
-    const leadName = plan.leadAuditor
-      ? `${plan.leadAuditor.firstName} ${plan.leadAuditor.lastName}`
-      : (plan.leadAuditorName || '—');
-
-    const auditees = Array.isArray(plan.auditees)
-      ? plan.auditees.map((a: any) => typeof a === 'string' ? a : `${a.firstName || ''} ${a.lastName || ''}`.trim()).join(', ')
-      : (plan.auditees || '—');
-
-    // --- Logo - compressed via canvas to prevent huge file sizes ---
-    let logoBuffer: ArrayBuffer | null = null;
-    try {
-      const response = await fetch('/iAudit Global-01.png');
-      const blob = await response.blob();
-      logoBuffer = await new Promise<ArrayBuffer>((resolve, reject) => {
-        const img = new Image();
-        img.onload = () => {
-          const MAX = 120;
-          const canvas = document.createElement("canvas");
-          let { width, height } = img;
-          if (width > MAX || height > MAX) {
-            if (width > height) { height = Math.round(height * MAX / width); width = MAX; }
-            else { width = Math.round(width * MAX / height); height = MAX; }
-          }
-          canvas.width = width;
-          canvas.height = height;
-          const ctx = canvas.getContext("2d")!;
-          ctx.fillStyle = "#ffffff";
-          ctx.fillRect(0, 0, width, height);
-          ctx.drawImage(img, 0, 0, width, height);
-          canvas.toBlob((compressedBlob) => {
-            if (compressedBlob) compressedBlob.arrayBuffer().then(resolve).catch(reject);
-            else reject(new Error("Canvas toBlob returned null"));
-          }, "image/jpeg", 0.6);
-        };
-        img.onerror = reject;
-        img.src = URL.createObjectURL(blob);
-      });
-    } catch (e) {
-      console.warn("Logo could not be loaded for DOCX", e);
-    }
-
-    const sectionGreen = '0EA572';
-    const content: any[] = [
-      // Cover
-      ...(logoBuffer ? [
-        new Paragraph({
-          children: [new ImageRun({ data: logoBuffer, transformation: { width: 80, height: 60 } })],
-          alignment: AlignmentType.CENTER,
-          spacing: { after: 200 }
-        })
-      ] : []),
-      new Paragraph({ text: 'Audit Report', heading: HeadingLevel.HEADING_1, alignment: AlignmentType.CENTER }),
-      new Paragraph({ text: plan.auditName || '', alignment: AlignmentType.CENTER }),
-      new Paragraph({ text: `Generated: ${new Date().toLocaleDateString()}`, alignment: AlignmentType.CENTER, spacing: { after: 400 } }),
-
-      // 1. Audit Information
-      makeHeader('1. AUDIT INFORMATION'),
-      tbl(['Field', 'Value'], [
-        ['Audit Name', plan.auditName || '—'],
-        ['Template', template.title || '—'],
-        ['Site / Location', plan.site?.name || plan.location || '—'],
-        ['Date', plan.date ? format(new Date(plan.date), 'PPP') : '—'],
-        ['Lead Auditor', leadName],
-        ['Auditees', auditees],
-        ['Standard / Criteria', plan.criteria || plan.standard || '—'],
-        ['Objective', plan.objective || '—'],
-        ['Scope', plan.scope || '—'],
-      ]),
-      spacer(),
-    ];
-
-    // 2. Previous Findings
-    content.push(makeHeader('2. PREVIOUS FINDINGS'));
-    content.push(new Paragraph({ children: [new TextRun({ text: previousFindings?.trim() ? previousFindings : 'No previous findings recorded.', size: 20, color: previousFindings?.trim() ? '000000' : '888888' })] }));
-    content.push(spacer());
-
-    // 3. Details of Changes
-    content.push(makeHeader('3. DETAILS OF CHANGES'));
-    content.push(tbl(
-      ['Item', 'Action Required', 'Notes'],
-      detailsOfChanges.map(d => [d.item, d.actionRequired ? 'Yes' : 'No', d.notes || '—'])
-    ));
-    content.push(spacer());
-
-    // 4. Audit Participants
-    content.push(makeHeader('4. AUDIT PARTICIPANTS'));
-    const filledPW = participants.filter(p => p.name?.trim());
-    if (filledPW.length > 0) {
-      content.push(tbl(
-        ['Name', 'Position', 'Opening', 'Closing', 'Interviewed'],
-        filledPW.map(p => [p.name || '—', p.position || '—', p.opening ? '✓' : '', p.closing ? '✓' : '', p.interviewed || '—'])
-      ));
-    } else {
-      content.push(new Paragraph({ children: [new TextRun({ text: 'No participants recorded.', size: 20, color: '888888' })] }));
-    }
-    content.push(spacer());
-
-    // 5. Global Findings Summary
-    content.push(makeHeader('5. GLOBAL FINDINGS SUMMARY'));
-    content.push(tbl(
-      ['Compliant', 'OFI', 'Minor NCR', 'Major NCR', 'Positive Aspects'],
-      [[summaryCounts.compliant || '0', summaryCounts.ofi || '0', summaryCounts.minor || '0', summaryCounts.major || '0', summaryCounts.positive || '0']],
-      greenFill
-    ));
-    const flAFW = auditFindings.filter(f => f.details?.trim());
-    if (flAFW.length > 0) {
-      content.push(new Paragraph({ text: 'Audit Findings Log', heading: HeadingLevel.HEADING_3 }));
-      content.push(tbl(['Ref No', 'Clause No', 'Category', 'Details'], flAFW.map(f => [f.refNo || '—', f.clauseNo || '—', f.category || '—', f.details || '—'])));
-    }
-    content.push(spacer());
-
-    // 6. OFI
-    content.push(makeHeader('6. OPPORTUNITIES FOR IMPROVEMENT (OFI)'));
-    const ofiRowsW = opportunities.filter(o => o.opportunity?.trim());
-    if (ofiRowsW.length > 0) {
-      content.push(tbl(['Ref', 'Standard Clause', 'Area / Process', 'Opportunity'], ofiRowsW.map(o => [o.id, o.standardClause || '—', o.areaProcess || '—', o.opportunity || '—']), amberFill));
-    } else {
-      content.push(new Paragraph({ children: [new TextRun({ text: 'No OFIs recorded.', size: 20, color: '888888' })] }));
-    }
-    content.push(spacer());
-
-    // 7. NCR
-    content.push(makeHeader('7. NON-CONFORMANCES (NCR)'));
-    const ncrRowsW = nonConformances.filter(n => n.statement?.trim());
-    if (ncrRowsW.length > 0) {
-      content.push(tbl(['Ref', 'Standard Clause', 'Area / Process', 'NC Statement', 'Due Date', 'Action By'], ncrRowsW.map(n => [n.id, n.standardClause || '—', n.areaProcess || '—', n.statement || '—', n.dueDate || '—', n.actionBy || '—']), redFill));
-    } else {
-      content.push(new Paragraph({ children: [new TextRun({ text: 'No non-conformances recorded.', size: 20, color: '888888' })] }));
-    }
-    content.push(spacer());
-
-    // 8. Template Fields (filled only, NC details inline)
-    if (template.type === 'checklist' || template.isTripleMapping) {
-      content.push(makeHeader('8. AUDIT CHECKLIST FINDINGS'));
-      const filledChecklist = (editableChecklist as ChecklistContent[])
-        .map((item, idx) => ({ item, d: (checklistData[idx] || {}) as any }))
-        .filter(({ d }) => d.findings);
-      if (filledChecklist.length === 0) {
-        content.push(new Paragraph({ children: [new TextRun({ text: 'No findings recorded yet.', size: 20, color: '888888' })] }));
-      } else {
-        const makeBlueLabel = (label: string, value: string) =>
-          new DocxTableRow({
-            children: [
-              new DocxTableCell({ shading: { fill: darkFill }, children: [new Paragraph({ children: [new TextRun({ text: label, bold: true, color: 'FFFFFF', size: 18 })] })] }),
-              new DocxTableCell({ columnSpan: 2, children: [new Paragraph({ children: [new TextRun({ text: value, size: 18 })] })] }),
-            ]
-          });
-        const tableRows: DocxTableRow[] = [makeRow(['Clause', 'Question', 'Finding'], darkFill)];
-        for (const { item, d } of filledChecklist) {
-          tableRows.push(makeRow([item.clause, item.question, d.findings || '—']));
-          if (d.evidence?.trim()) tableRows.push(makeBlueLabel('Evidence', d.evidence));
-          if (d.findings !== 'C') {
-            if (d.description?.trim()) tableRows.push(makeBlueLabel('Details', d.description));
-            if (d.correction?.trim()) tableRows.push(makeBlueLabel('Correction', d.correction));
-            if (d.rootCause?.trim()) tableRows.push(makeBlueLabel('Root Cause', d.rootCause));
-            if (d.correctiveAction?.trim()) tableRows.push(makeBlueLabel('Corrective Action', d.correctiveAction));
-          }
-          // Inline image
-          const clauseImgsW = (clauseFiles[item.clause] || []).filter((m) => m.type.startsWith('image/'));
-          if (clauseImgsW.length > 0) {
-            try {
-              const base64Data = clauseImgsW[0].data.split(',')[1];
-              const buffer = Uint8Array.from(atob(base64Data), c => c.charCodeAt(0));
-              tableRows.push(new DocxTableRow({
-                children: [new DocxTableCell({
-                  columnSpan: 3,
-                  children: [new Paragraph({ children: [new ImageRun({ data: buffer, transformation: { width: 400, height: 280 } })] })]
-                })]
-              }));
-            } catch (e) { console.error('Word clause img failed', e); }
-          }
-        }
-        // Extra questions added during the audit
-        Object.entries(extraChecklistItems).forEach(([clause, extras]) => {
-          extras.forEach((eq) => {
-            if (!eq.question?.trim() && !eq.findings) return;
-            tableRows.push(makeRow([clause, eq.question || '(no question text)', eq.findings || '—']));
-            if (eq.evidence?.trim()) tableRows.push(makeBlueLabel('Evidence', eq.evidence));
-            if (eq.findings !== 'C') {
-              if (eq.correction?.trim()) tableRows.push(makeBlueLabel('Correction', eq.correction));
-              if (eq.rootCause?.trim()) tableRows.push(makeBlueLabel('Root Cause', eq.rootCause!));
-              if (eq.correctiveAction?.trim()) tableRows.push(makeBlueLabel('Corrective Action', eq.correctiveAction!));
-            }
-          });
-        });
-        content.push(new DocxTable({ width: { size: 100, type: WidthType.PERCENTAGE }, rows: tableRows }));
-      }
-    } else if (template.type === 'clause-checklist') {
-      content.push(makeHeader('8. CLAUSE CHECKLIST'));
-      const checklistToUse = (editableChecklist as ClauseChecklistContent[]).length > 0
-        ? (editableChecklist as ClauseChecklistContent[])
-        : (template.content as ClauseChecklistContent[]);
-
-      const filledClauses = checklistToUse.filter(c => (clauseData[c.clauseId] || {} as any).findingType);
-      if (filledClauses.length === 0) {
-        content.push(new Paragraph({ children: [new TextRun({ text: 'No findings recorded yet.', size: 20, color: '888888' })] }));
-      } else {
-        const makeBlueLabel = (label: string, value: string) =>
-          new DocxTableRow({
-            children: [
-              new DocxTableCell({ shading: { fill: darkFill }, children: [new Paragraph({ children: [new TextRun({ text: label, bold: true, color: 'FFFFFF', size: 18 })] })] }),
-              new DocxTableCell({ columnSpan: 3, children: [new Paragraph({ children: [new TextRun({ text: value, size: 18 })] })] }),
-            ]
-          });
-          
-        const tableRows: DocxTableRow[] = [makeRow(['Clause', 'Requirement', 'Status', 'Evidence'], darkFill)];
-        for (const c of filledClauses) {
-          const d = (clauseData[c.clauseId] || {}) as any; 
-          const requirement = [c.title, ...(c.subClauses || [])].filter(Boolean).join('\n');
-          tableRows.push(makeRow([c.clauseId, requirement, d.findingType || '—', d.evidence || '—']));
-          
-          if (d.findingType && d.findingType !== 'C') {
-             if (d.description?.trim()) tableRows.push(makeBlueLabel('Description of Finding', d.description));
-             if (d.correction?.trim()) tableRows.push(makeBlueLabel('Correction Done', d.correction));
-             if (d.rootCause?.trim()) tableRows.push(makeBlueLabel('Root Cause', d.rootCause));
-             if (d.correctiveAction?.trim()) tableRows.push(makeBlueLabel('Corrective Action', d.correctiveAction));
-          }
-        }
-        content.push(new DocxTable({ width: { size: 100, type: WidthType.PERCENTAGE }, rows: tableRows }));
-      }
-    } else if (template.type === 'section') {
-      content.push(makeHeader('8. SECTION RESPONSES'));
-      const filledSecs = (template.content as SectionContent[])
-        .map((sec, idx) => [sec.title || `Section ${idx + 1}`, sectionData[idx] || '']).filter(r => r[1].trim());
-      if (filledSecs.length === 0) {
-        content.push(new Paragraph({ children: [new TextRun({ text: 'No responses recorded yet.', size: 20, color: '888888' })] }));
-      } else {
-        content.push(tbl(['Section', 'Response'], filledSecs));
-      }
-    } else if (template.type === 'process-audit') {
-      content.push(makeHeader('8. PROCESS AUDIT'));
-      const filledPA = processAudits.filter(pa => pa.processArea?.trim() || pa.evidence?.trim());
-      if (filledPA.length === 0) {
-        content.push(new Paragraph({ children: [new TextRun({ text: 'No process audits recorded yet.', size: 20, color: '888888' })] }));
-      } else {
-        content.push(tbl(['Process Area', 'Auditees', 'Evidence', 'Conclusion', 'Finding'], filledPA.map(pa => [pa.processArea || '—', pa.auditees || '—', pa.evidence || '—', pa.conclusion || '—', (pa as any).findingType || '—'])));
-      }
-    } else if (template.isTripleMapping) {
-      content.push(makeHeader('8. INTEGRATED AUDIT MAPPING (ISO 9001, 14001, 45001)'));
-      const filledRows = CLAUSE_MATRIX
-        .map((row, idx) => ({ row, idx, d: (checklistData[idx] || {}) as any }))
-        .filter(({ row, d }) => isClauseSelected(row.id) && (d.findings || row.isHeading));
-
-      if (filledRows.length === 0) {
-        content.push(new Paragraph({ children: [new TextRun({ text: 'No findings recorded yet.', size: 20, color: '888888' })] }));
-      } else {
-        const makeBlueLabel = (label: string, value: string) =>
-          new DocxTableRow({
-            children: [
-              new DocxTableCell({ shading: { fill: darkFill }, children: [new Paragraph({ children: [new TextRun({ text: label, bold: true, color: 'FFFFFF', size: 18 })] })] }),
-              new DocxTableCell({ columnSpan: 4, children: [new Paragraph({ children: [new TextRun({ text: value, size: 18 })] })] }),
-            ]
-          });
-
-        const tableRows: DocxTableRow[] = [makeRow(['ISO 45001', 'ISO 14001', 'ISO 9001', 'Finding', 'Evidence'], darkFill)];
-        for (const { row, d } of filledRows) {
-          if (row.isHeading) {
-            tableRows.push(new DocxTableRow({
-              children: [new DocxTableCell({
-                columnSpan: 5,
-                shading: { fill: 'F3F4F6' },
-                children: [new Paragraph({ children: [new TextRun({ text: `${row.iso45001} / ${row.iso14001} / ${row.iso9001}`, bold: true, size: 18 })] })]
-              })]
-            }));
-            continue;
-          }
-          if (!d.findings) continue;
-
-          tableRows.push(makeRow([row.iso45001, row.iso14001, row.iso9001, d.findings || '—', d.evidence || '—']));
-          if (d.findings !== 'C') {
-            if (d.description?.trim()) tableRows.push(makeBlueLabel('Details', d.description));
-            if (d.correction?.trim()) tableRows.push(makeBlueLabel('Correction', d.correction));
-            if (d.rootCause?.trim()) tableRows.push(makeBlueLabel('Root Cause', d.rootCause));
-            if (d.correctiveAction?.trim()) tableRows.push(makeBlueLabel('Corrective Action', d.correctiveAction));
-          }
-        }
-        content.push(new DocxTable({ width: { size: 100, type: WidthType.PERCENTAGE }, rows: tableRows }));
-      }
-    }
-    content.push(spacer());
-
-    // 9. Evidence & uploaded files (images + PDF page previews)
-    const evidenceSourcesWord = collectReportEvidenceSources({ clauseFiles, genericFiles });
-    const evidenceVisualsWord = await prepareReportEvidenceImages(evidenceSourcesWord);
-    if (evidenceVisualsWord.length > 0) {
-      content.push(makeHeader("9. EVIDENCE & UPLOADED FILES"));
-      for (const img of evidenceVisualsWord) {
-        content.push(
-          new Paragraph({
-            children: [new TextRun({ text: `${img.context} — ${img.name}`, bold: true, size: 20 })],
-            spacing: { before: 200, after: 100 },
-          }),
-        );
-        try {
-          const base64Data = img.dataUrl.split(",")[1];
-          const buffer = Uint8Array.from(atob(base64Data), (c) => c.charCodeAt(0));
-          const maxW = 520;
-          const aspect = img.widthPx / img.heightPx;
-          let w = maxW;
-          let h = Math.round(w / aspect);
-          if (h > 360) {
-            h = 360;
-            w = Math.round(h * aspect);
-          }
-          content.push(
-            new Paragraph({
-              children: [new ImageRun({ data: buffer, transformation: { width: w, height: h } })],
-              spacing: { after: 200 },
-            }),
-          );
-        } catch (e) {
-          console.error("Word evidence embed failed", img.name, e);
-        }
-      }
-    }
-
-    const docx = new Document({ sections: [{ children: content }] });
-    const blob = await Packer.toBlob(docx);
-    saveAs(blob, `${(plan.auditName || 'Audit').replace(/\s+/g, '_')}_Report.docx`);
+    await generateAuditReportDocx({ ...plan, auditData: buildAuditDataPayload() });
   };
+
 
   return (
     <div className="flex-1 p-8 pt-6 bg-transparent min-h-screen relative">
@@ -2328,11 +1449,21 @@ const AuditExecute = () => {
                 Download Word
               </Button>
             </Card>
-          </div>
         </div>
+      </div>
 
-        {/* --- EXTENDED SECTIONS --- */}
+      {!focusFindings && (
         <div className={cn(isAuditeeReadOnly && "pointer-events-none select-none opacity-95")}>
+          <AuditFindingsReportForm
+            value={findingsReportForm}
+            onChange={handleFindingsReportFormChange}
+            section="header"
+          />
+        </div>
+      )}
+
+      {/* --- EXTENDED SECTIONS --- */}
+      <div className={cn(isAuditeeReadOnly && "pointer-events-none select-none opacity-95")}>
         {(template.type === "clause-checklist" ||
           template.type === "checklist") && !focusFindings && (
             <div className="space-y-8 bg-white rounded-xl p-6 shadow-sm border border-slate-200">
@@ -4930,6 +4061,16 @@ const AuditExecute = () => {
               </Table>
             </div>
           </Card>
+        )}
+
+        {!focusFindings && (
+          <div className={cn(isAuditeeReadOnly && "pointer-events-none select-none opacity-95")}>
+            <AuditFindingsReportForm
+              value={findingsReportForm}
+              onChange={handleFindingsReportFormChange}
+              section="footer"
+            />
+          </div>
         )}
 
         {/* Submit Actions */}

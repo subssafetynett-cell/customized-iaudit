@@ -150,6 +150,7 @@ const AuditTemplates = () => {
                                 <SelectItem value="ISO 9001" className="rounded-lg cursor-pointer">ISO 9001</SelectItem>
                                 <SelectItem value="ISO 14001" className="rounded-lg cursor-pointer">ISO 14001</SelectItem>
                                 <SelectItem value="ISO 45001" className="rounded-lg cursor-pointer">ISO 45001</SelectItem>
+                                <SelectItem value="ISO 22000" className="rounded-lg cursor-pointer">ISO 22000</SelectItem>
                             </SelectContent>
                         </Select>
                     </div>

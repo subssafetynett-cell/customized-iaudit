@@ -20,6 +20,7 @@ import { saveAs } from 'file-saver';
 import logoImg from "@/assets/logo.png";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
+import { guardTrialCreate, parseTrialLimitApiError } from "@/lib/trialLimits";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, DropdownMenuCheckboxItem } from "@/components/ui/dropdown-menu";
 import { TourStepPopover } from "@/components/TourStepPopover";
@@ -49,7 +50,32 @@ const ISO_STANDARDS = [
     "ISO 9001:2015 - Quality Management System",
     "ISO 14001:2015 - Environmental Management System",
     "ISO 45001:2018 - Occupational Health and Safety",
+    "ISO 22000:2018 - Food Safety Management System",
 ];
+
+function standardDisplayLabel(std: string): string {
+    if (std.includes("22000")) return "ISO 22000:2018";
+    if (std.includes("9001")) return "ISO 9001:2015";
+    if (std.includes("14001")) return "ISO 14001:2015";
+    if (std.includes("45001")) return "ISO 45001:2018";
+    return "Clause";
+}
+
+function standardBadgeLabel(std: string): string {
+    if (std.includes("22000")) return "22000";
+    if (std.includes("9001")) return "9001";
+    if (std.includes("14001")) return "14001";
+    if (std.includes("45001")) return "45001";
+    return "";
+}
+
+function clauseTextForStandard(clause: ClauseMatrixRow, std: string): string {
+    if (std.includes("22000")) return clause.iso9001;
+    if (std.includes("9001")) return clause.iso9001;
+    if (std.includes("14001")) return clause.iso14001;
+    if (std.includes("45001")) return clause.iso45001;
+    return clause.iso9001 || clause.iso14001 || clause.iso45001;
+}
 
 const FREQUENCIES = ["Monthly", "Quarterly", "Bi-annually", "Annually"];
 
@@ -339,7 +365,17 @@ const AuditPrograms = () => {
         }));
     };
 
+    const openNewAuditProgram = () => {
+        if (!guardTrialCreate("auditProgram", auditPrograms.length)) return;
+        resetForm();
+        setView("create");
+    };
+
     const handleSaveProgram = async () => {
+        if (view !== "edit" && !guardTrialCreate("auditProgram", auditPrograms.length)) {
+            return;
+        }
+
         setLoading(true);
         const path = view === "edit" ? `/audit-programs/${currentId}` : `/audit-programs`;
         const method = view === "edit" ? "PUT" : "POST";
@@ -370,7 +406,7 @@ const AuditPrograms = () => {
                 }
                 setView("list");
                 resetForm();
-            } else {
+            } else if (!(await parseTrialLimitApiError(response))) {
                 toast.error("Failed to save Audit Program");
             }
         } catch (error) {
@@ -501,6 +537,7 @@ const AuditPrograms = () => {
 
     const handleAuditTourNext = () => {
         if (auditTourStep === 2) {
+            if (!guardTrialCreate("auditProgram", auditPrograms.length)) return;
             resetForm();
             setView("create");
             setAuditTourStep(3);
@@ -699,12 +736,7 @@ const AuditPrograms = () => {
 
         // Prepare table data - handles comma-separated standards string
         const standards: string[] = program.isoStandard ? program.isoStandard.split(', ').map((s: string) => s.trim()).filter(Boolean) : [];
-        const stdLabels = (standards.length > 0 ? standards : ["Clause"]).map((std: string) => {
-            if (std.includes("9001")) return "ISO 9001:2015";
-            if (std.includes("14001")) return "ISO 14001:2015";
-            if (std.includes("45001")) return "ISO 45001:2018";
-            return "Clause";
-        });
+        const stdLabels = (standards.length > 0 ? standards : ["Clause"]).map(standardDisplayLabel);
         const tableHead = [[...stdLabels, ...programPeriods.map((p: any) => p.label)]];
         const tableBody: any[] = [];
 
@@ -712,11 +744,7 @@ const AuditPrograms = () => {
             const isHeading = isClauseMatrixHeading(clause);
             const isMainHeading = isMainClauseHeading(clause);
             if (standards.length === 1 && !isMainClauseHeading(clause)) {
-                const std = standards[0];
-                let text = "";
-                if (std.includes("9001")) text = clause.iso9001;
-                else if (std.includes("14001")) text = clause.iso14001;
-                else if (std.includes("45001")) text = clause.iso45001;
+                const text = clauseTextForStandard(clause, standards[0]);
                 if (text === "Corresponding Clause does not exist") return;
             }
 
@@ -724,11 +752,7 @@ const AuditPrograms = () => {
             const stds = standards.length > 0 ? standards : ["anything"];
 
             stds.forEach((std: string, index: number) => {
-                let cellText = "";
-                if (std.includes("9001")) cellText = clause.iso9001;
-                else if (std.includes("14001")) cellText = clause.iso14001;
-                else if (std.includes("45001")) cellText = clause.iso45001;
-                else cellText = clause.iso9001 || clause.iso14001 || clause.iso45001;
+                const cellText = clauseTextForStandard(clause, std);
 
                 if (isHeading) {
                     if (index === 0) {
@@ -846,12 +870,7 @@ const AuditPrograms = () => {
         }
 
         const standards: string[] = program.isoStandard ? program.isoStandard.split(', ').map((s: string) => s.trim()).filter(Boolean) : [];
-        const stdLabels = (standards.length > 0 ? standards : ["Clause"]).map((std: string) => {
-            if (std.includes("9001")) return "ISO 9001:2015";
-            if (std.includes("14001")) return "ISO 14001:2015";
-            if (std.includes("45001")) return "ISO 45001:2018";
-            return "Clause";
-        });
+        const stdLabels = (standards.length > 0 ? standards : ["Clause"]).map(standardDisplayLabel);
 
         // Create table header row
         const headerCells = [
@@ -872,11 +891,7 @@ const AuditPrograms = () => {
             const isHeading = isClauseMatrixHeading(clause);
             const isMainHeading = isMainClauseHeading(clause);
             if (standards.length === 1 && !isMainClauseHeading(clause)) {
-                const std = standards[0];
-                let text = "";
-                if (std.includes("9001")) text = clause.iso9001;
-                else if (std.includes("14001")) text = clause.iso14001;
-                else if (std.includes("45001")) text = clause.iso45001;
+                const text = clauseTextForStandard(clause, standards[0]);
                 if (text === "Corresponding Clause does not exist") return;
             }
 
@@ -884,11 +899,7 @@ const AuditPrograms = () => {
             const stds = standards.length > 0 ? standards : ["anything"];
 
             stds.forEach((std: string, index: number) => {
-                let cellText = "";
-                if (std.includes("9001")) cellText = clause.iso9001;
-                else if (std.includes("14001")) cellText = clause.iso14001;
-                else if (std.includes("45001")) cellText = clause.iso45001;
-                else cellText = clause.iso9001 || clause.iso14001 || clause.iso45001;
+                const cellText = clauseTextForStandard(clause, std);
 
                 if (isHeading) {
                     if (index === 0) {
@@ -1077,6 +1088,7 @@ const AuditPrograms = () => {
                             )}
                             <Button
                                 onClick={() => {
+                                    if (!guardTrialCreate("auditProgram", auditPrograms.length)) return;
                                     resetForm();
                                     setView("create");
                                     setShowOnboardingGuide(false);
@@ -1206,7 +1218,7 @@ const AuditPrograms = () => {
                                                     <p className="text-lg font-bold text-slate-900">No audit programs yet</p>
                                                     <p className="text-sm text-slate-500 max-w-sm mx-auto">Create your first audit program to begin scheduling audits.</p>
                                                     <Button
-                                                        onClick={() => { resetForm(); setView("create"); }}
+                                                        onClick={openNewAuditProgram}
                                                         className="bg-[#213847] hover:bg-[#213847]/90 text-white font-bold rounded-xl h-11 px-6 shadow-sm mt-4 gap-2"
                                                     >
                                                         <Plus className="w-4 h-4" /> Create Program
@@ -1676,7 +1688,7 @@ const AuditPrograms = () => {
                                                     const colWidth = isMobile ? `${Math.min(baseWidth, 140)}px` : `${baseWidth}px`;
                                                     const leftOffset = colIdx * parseInt(colWidth);
 
-                                                    const label = std.includes("9001") ? "ISO 9001:2015" : std.includes("14001") ? "ISO 14001:2015" : std.includes("45001") ? "ISO 45001:2018" : "CLAUSE NAME";
+                                                    const label = standardDisplayLabel(std);
                                                     return (
                                                         <th key={std}
                                                             className={cn(
@@ -1702,12 +1714,7 @@ const AuditPrograms = () => {
                                             {/* Matrix Body */}
                                             {CLAUSE_MATRIX.map((clause, rowIndex) => {
                                                 if (selectedStandards.length === 1 && !isMainClauseHeading(clause)) {
-                                                    const std = selectedStandards[0];
-                                                    let text = "";
-                                                    if (std.includes("9001")) text = clause.iso9001;
-                                                    else if (std.includes("14001")) text = clause.iso14001;
-                                                    else if (std.includes("45001")) text = clause.iso45001;
-
+                                                    const text = clauseTextForStandard(clause, selectedStandards[0]);
                                                     if (text === "Corresponding Clause does not exist") {
                                                         return null;
                                                     }
@@ -1721,15 +1728,7 @@ const AuditPrograms = () => {
                                                             const colWidth = isMobile ? `${Math.min(baseWidth, 140)}px` : `${baseWidth}px`;
                                                             const leftOffset = colIdx * parseInt(colWidth);
 
-                                                            const isIso9001 = std.includes("9001");
-                                                            const isIso14001 = std.includes("14001");
-                                                            const isIso45001 = std.includes("45001");
-
-                                                            let cellText = "";
-                                                            if (isIso9001) cellText = clause.iso9001;
-                                                            else if (isIso14001) cellText = clause.iso14001;
-                                                            else if (isIso45001) cellText = clause.iso45001;
-
+                                                            const cellText = clauseTextForStandard(clause, std);
                                                             const isMissing = cellText === "Corresponding Clause does not exist";
 
                                                             return (
@@ -1842,17 +1841,10 @@ const AuditPrograms = () => {
                                                 <CardContent className="p-4">
                                                     <div className="text-[12px] font-bold text-slate-800 leading-tight mb-3">
                                                         {selectedStandards.map(std => {
-                                                            const isIso9001 = std.includes("9001");
-                                                            const isIso14001 = std.includes("14001");
-                                                            const isIso45001 = std.includes("45001");
-                                                            let cellText = "";
-                                                            if (isIso9001) cellText = item.clause.iso9001;
-                                                            else if (isIso14001) cellText = item.clause.iso14001;
-                                                            else if (isIso45001) cellText = item.clause.iso45001;
-
+                                                            const cellText = clauseTextForStandard(item.clause, std);
                                                             if (cellText === "Corresponding Clause does not exist") return null;
 
-                                                            const label = std.includes("9001") ? "9001" : std.includes("14001") ? "14001" : std.includes("45001") ? "45001" : "";
+                                                            const label = standardBadgeLabel(std);
 
                                                             return (
                                                                 <div key={std} className="mb-1 pb-1 border-b border-slate-50 last:border-0">

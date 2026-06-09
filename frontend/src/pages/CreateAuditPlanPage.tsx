@@ -604,7 +604,7 @@ const CreateAuditPlanPage = () => {
                                         <SelectContent>
                                             {(() => {
                                                 const determineStandards = () => {
-                                                    const knownStandards = ["ISO 9001", "ISO 14001", "ISO 45001"];
+                                                    const knownStandards = ["ISO 9001", "ISO 14001", "ISO 45001", "ISO 22000"];
                                                     // Derive primarily from what's physically in the auditCriteria field
                                                     const criteriaUpper = auditCriteria.toUpperCase();
                                                     const criteriaStandards = knownStandards.filter(std => criteriaUpper.includes(std));
