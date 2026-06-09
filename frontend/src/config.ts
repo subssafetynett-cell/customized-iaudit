@@ -41,6 +41,6 @@ function resolveApiBaseUrl(): string {
 
 export const API_BASE_URL = resolveApiBaseUrl();
 
-export const FRONTEND_URL = getIsLocalhost()
-    ? "http://localhost:5173"
+export const FRONTEND_URL = typeof window !== "undefined" && window.location
+    ? window.location.origin
     : "https://apps.iaudit.global";

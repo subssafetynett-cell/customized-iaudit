@@ -305,6 +305,10 @@ app.use(cors({
         // Non-browser clients (curl, server-to-server) send no Origin header
         if (!origin) return callback(null, true);
         if (CORS_ALLOWED_ORIGINS.has(origin)) return callback(null, true);
+        // Allow any subdomain of iaudit.global
+        if (/^https?:\/\/([a-z0-9-]+\.)*iaudit\.global$/.test(origin)) {
+            return callback(null, true);
+        }
         // Any localhost port during local development (Vite may use 8080, 8081, 8082, …)
         if (/^http:\/\/localhost:\d+$/.test(origin) || /^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
             return callback(null, true);
@@ -1056,12 +1060,12 @@ app.use(express.json({ limit: '50mb' }));
 app.use((req, res, next) => {
     res.setHeader(
         'Content-Security-Policy',
-        "default-src 'self' https://iaudit.global https://api.iaudit.global https://apps.iaudit.global; " +
+        "default-src 'self' https://iaudit.global https://*.iaudit.global; " +
         "font-src 'self' data: https://fonts.gstatic.com; " +
         "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
         "script-src 'self' 'unsafe-inline'; " +
         "img-src 'self' data:; " +
-        "connect-src 'self' https://iaudit.global https://api.iaudit.global https://apps.iaudit.global https://fonts.googleapis.com;"
+        "connect-src 'self' https://iaudit.global https://*.iaudit.global https://fonts.googleapis.com;"
     );
 
     next();
