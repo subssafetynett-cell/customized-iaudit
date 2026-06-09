@@ -12,7 +12,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
-      - "3001:3001"
+      - "${SERVER_HOST_PORT:-3001}:3001"
     healthcheck:
       test:
         - "CMD"
@@ -38,4 +38,4 @@ services:
       server:
         condition: service_healthy
     ports:
-      - "8081:80"
+      - "${FRONTEND_HOST_PORT:-8081}:80"
