@@ -1,11 +1,19 @@
 #!/bin/sh
 
+echo "============================================"
+echo "[start] DATABASE_URL host: $(echo $DATABASE_URL | sed 's|.*@||' | cut -d/ -f1)"
+echo "============================================"
+
 echo "[start] Applying database schema…"
-if npx prisma migrate deploy 2>/dev/null; then
-  echo "[start] Migrations applied"
+if npx prisma migrate deploy; then
+  echo "[start] Migrations applied successfully"
 else
-  echo "[start] migrate deploy skipped; trying prisma db push…"
-  npx prisma db push --accept-data-loss || echo "[start] db push also failed — continuing anyway, server will retry on boot"
+  echo "[start] migrate deploy failed — trying prisma db push (full schema sync)…"
+  if npx prisma db push --accept-data-loss; then
+    echo "[start] db push applied successfully"
+  else
+    echo "[start] WARNING: db push also failed — schema may be out of sync!"
+  fi
 fi
 
 echo "[start] Ensuring super admin account…"
