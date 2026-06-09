@@ -13,10 +13,10 @@ services:
       - "host.docker.internal:host-gateway"
     healthcheck:
       test:
-        - "CMD"
-        - "node"
-        - "-e"
-        - "fetch('http://localhost:3001/health').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+        - CMD
+        - node
+        - -e
+        - fetch('http://localhost:3001/health').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))
       interval: 5s
       timeout: 5s
       retries: 12
@@ -35,5 +35,3 @@ services:
     depends_on:
       server:
         condition: service_healthy
-    ports:
-      - "${FRONTEND_HOST_PORT:-8081}:80"
