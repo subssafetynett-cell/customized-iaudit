@@ -4,11 +4,15 @@
  */
 import { spawnSync } from "node:child_process";
 import { createConnection } from "node:net";
-import { dirname, join, resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { baselineExistingDatabase } from "./baseline-migrations.js";
 import { loadServerEnv } from "../src/loadEnv.js";
-import { resolveDatabaseUrl } from "../src/resolveDatabaseUrl.js";
+import {
+    isLocalDatabaseHost,
+    parseDatabaseEndpoint,
+    resolveDatabaseUrl,
+} from "../src/resolveDatabaseUrl.js";
 
 function probeTcp(host, port, timeoutMs = 2000) {
     return new Promise((resolveProbe) => {
@@ -41,21 +45,23 @@ console.log(
     `[db:migrate] Target: ${databaseUrl.replace(/:([^:@/]+)@/, ":***@")}`,
 );
 
-const hostMatch = databaseUrl.match(/@([^:/]+):(\d+)/);
-const dbHost = hostMatch?.[1] ?? "localhost";
-const dbPort = Number(hostMatch?.[2] ?? 5432);
+const { host: dbHost, port: dbPort } = parseDatabaseEndpoint(databaseUrl);
 
-if (!(await probeTcp(dbHost, dbPort))) {
-    console.error(
-        `\n[db:migrate] Cannot reach PostgreSQL at ${dbHost}:${dbPort}.`,
-    );
-    console.error(
-        "  Start Postgres (e.g. docker compose up -d postgres or audit-postgres), then run again.",
-    );
-    console.error(
-        "  From your Mac, use localhost in DATABASE_URL — host.docker.internal only works inside Docker.\n",
-    );
-    process.exit(1);
+if (isLocalDatabaseHost(dbHost)) {
+    if (!(await probeTcp(dbHost, dbPort))) {
+        console.error(
+            `\n[db:migrate] Cannot reach PostgreSQL at ${dbHost}:${dbPort}.`,
+        );
+        console.error(
+            "  Start Postgres (e.g. docker compose up -d postgres or audit-postgres), then run again.",
+        );
+        console.error(
+            "  From your Mac, use localhost in DATABASE_URL — host.docker.internal only works inside Docker.\n",
+        );
+        process.exit(1);
+    }
+} else {
+    console.log(`[db:migrate] Remote database host ${dbHost}:${dbPort} — skipping local TCP probe`);
 }
 
 const result = spawnSync("npx", ["prisma", "migrate", "deploy"], {

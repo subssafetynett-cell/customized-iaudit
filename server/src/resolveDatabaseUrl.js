@@ -22,3 +22,30 @@ export function resolveDatabaseUrl(rawUrl = process.env.DATABASE_URL) {
 
     return url.replace(/host\.docker\.internal/gi, "localhost");
 }
+
+/** Parse host/port from a Postgres connection URL (supports URLs without an explicit port). */
+export function parseDatabaseEndpoint(databaseUrl) {
+    try {
+        const parsed = new URL(databaseUrl);
+        return {
+            host: parsed.hostname,
+            port: parsed.port ? Number(parsed.port) : 5432,
+        };
+    } catch {
+        const match = databaseUrl.match(/@([^:/@]+)(?::(\d+))?/);
+        return {
+            host: match?.[1] ?? "localhost",
+            port: match?.[2] ? Number(match[2]) : 5432,
+        };
+    }
+}
+
+export function isLocalDatabaseHost(host) {
+    const normalized = host.toLowerCase();
+    return (
+        normalized === "localhost" ||
+        normalized === "127.0.0.1" ||
+        normalized === "host.docker.internal" ||
+        normalized === "postgres"
+    );
+}
