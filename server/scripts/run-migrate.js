@@ -11,7 +11,7 @@ import { loadServerEnv } from "../src/loadEnv.js";
 import {
     isLocalDatabaseHost,
     parseDatabaseEndpoint,
-    resolveDatabaseUrl,
+    prepareDatabaseUrl,
 } from "../src/resolveDatabaseUrl.js";
 
 function probeTcp(host, port, timeoutMs = 2000) {
@@ -33,7 +33,7 @@ const serverRoot = resolve(__dirname, "..");
 
 loadServerEnv();
 
-const databaseUrl = resolveDatabaseUrl(process.env.DATABASE_URL?.trim());
+const databaseUrl = prepareDatabaseUrl(process.env.DATABASE_URL?.trim());
 if (!databaseUrl) {
     console.error(
         "[db:migrate] DATABASE_URL is not set (use server/.env locally or env_file in Docker)",

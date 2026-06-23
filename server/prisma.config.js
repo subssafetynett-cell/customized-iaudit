@@ -26,7 +26,22 @@ function resolveDatabaseUrl(rawUrl) {
     return url.replace(/host\.docker\.internal/gi, "localhost");
 }
 
-const databaseUrl = resolveDatabaseUrl(process.env.DATABASE_URL);
+function normalizeDatabaseUrl(rawUrl) {
+    const url = rawUrl?.trim();
+    if (!url) return url;
+
+    try {
+        const parsed = new URL(url);
+        parsed.searchParams.delete("channel_binding");
+        return parsed.toString();
+    } catch {
+        return url
+            .replace(/([?&])channel_binding=[^&]*&?/gi, "$1")
+            .replace(/[?&]$/, "");
+    }
+}
+
+const databaseUrl = normalizeDatabaseUrl(resolveDatabaseUrl(process.env.DATABASE_URL));
 if (!databaseUrl) {
     throw new Error(
         "DATABASE_URL is not set. Add it to server/.env (your local safetynet_db URL).",

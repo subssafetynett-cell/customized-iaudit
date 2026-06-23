@@ -4,13 +4,12 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import pkgPrisma from '../generated/prisma/index.js';
 import { loadServerEnv } from './loadEnv.js';
 import { buildPgPoolConfig } from './pgPoolConfig.js';
-import { resolveDatabaseUrl } from './resolveDatabaseUrl.js';
+import { prepareDatabaseUrl } from './resolveDatabaseUrl.js';
 loadServerEnv();
 
-// Ensure pg pool uses the URL appropriate for this runtime (host vs container).
-if (!process.env.DATABASE_URL_HOST) {
-    const resolved = resolveDatabaseUrl(process.env.DATABASE_URL);
-    if (resolved) process.env.DATABASE_URL = resolved;
+const databaseUrl = prepareDatabaseUrl(process.env.DATABASE_URL);
+if (databaseUrl) {
+    process.env.DATABASE_URL = databaseUrl;
 }
 
 const { PrismaClient } = pkgPrisma;

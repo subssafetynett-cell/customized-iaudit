@@ -53,7 +53,7 @@ services:
       interval: 10s
       timeout: 10s
       retries: 18
-      start_period: 120s
+      start_period: 300s
     networks:
       - app
 
@@ -65,9 +65,19 @@ services:
       args:
         VITE_API_BASE_URL: ""
     restart: unless-stopped
+    expose:
+      - "80"
     depends_on:
       server:
-        condition: service_healthy
+        condition: service_started
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -qO- http://127.0.0.1/nginx-health >/dev/null 2>&1 || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
     networks:
       - app
 

@@ -28,7 +28,7 @@ export function buildPgPoolConfig() {
     const config = {
         connectionString,
         connectionTimeoutMillis: Number.parseInt(
-            process.env.PG_CONNECTION_TIMEOUT_MS || "15000",
+            process.env.PG_CONNECTION_TIMEOUT_MS || "30000",
             10,
         ),
         max: Number.parseInt(process.env.PG_POOL_MAX || "10", 10),

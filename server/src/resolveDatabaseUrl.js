@@ -49,3 +49,24 @@ export function isLocalDatabaseHost(host) {
         normalized === "postgres"
     );
 }
+
+/** node-pg does not support Neon's channel_binding query param — strip it. */
+export function normalizeDatabaseUrl(rawUrl) {
+    const url = rawUrl?.trim();
+    if (!url) return url;
+
+    try {
+        const parsed = new URL(url);
+        parsed.searchParams.delete("channel_binding");
+        return parsed.toString();
+    } catch {
+        return url
+            .replace(/([?&])channel_binding=[^&]*&?/gi, "$1")
+            .replace(/[?&]$/, "");
+    }
+}
+
+/** Full URL prep for Prisma / node-pg at runtime. */
+export function prepareDatabaseUrl(rawUrl = process.env.DATABASE_URL) {
+    return normalizeDatabaseUrl(resolveDatabaseUrl(rawUrl));
+}
