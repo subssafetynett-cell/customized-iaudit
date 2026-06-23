@@ -13,8 +13,13 @@ if (existsSync(envPath)) {
 
 /** Host CLI cannot use host.docker.internal; keep self-contained for prisma.config (Docker build runs before src/ is copied). */
 function resolveDatabaseUrl(rawUrl) {
-    const explicitHost = process.env.DATABASE_URL_HOST?.trim();
-    if (explicitHost) return explicitHost;
+    const explicitOverride = process.env.DATABASE_URL_HOST?.trim();
+    if (
+        explicitOverride?.startsWith("postgresql://") ||
+        explicitOverride?.startsWith("postgres://")
+    ) {
+        return explicitOverride;
+    }
 
     const url = rawUrl?.trim();
     if (!url) return url;

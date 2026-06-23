@@ -1,29 +1,6 @@
 name: iaudit
 
 services:
-  postgres:
-    profiles: [local]
-    image: public.ecr.aws/docker/library/postgres:16-alpine
-    restart: unless-stopped
-    environment:
-      POSTGRES_DB: ${POSTGRES_DB:-appdb}
-      POSTGRES_USER: ${POSTGRES_USER:-appuser}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-apppassword}
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "pg_isready -U ${POSTGRES_USER:-appuser} -d ${POSTGRES_DB:-appdb}",
-        ]
-      interval: 10s
-      timeout: 5s
-      retries: 8
-      start_period: 20s
-    networks:
-      - app
-
   server:
     build:
       context: ./server
@@ -32,12 +9,12 @@ services:
     restart: unless-stopped
     env_file:
       - .env
-    depends_on:
-      postgres:
-        condition: service_healthy
-        required: false
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    expose:
+      - "3001"
     healthcheck:
       test:
         - CMD
@@ -69,7 +46,7 @@ services:
       - "80"
     depends_on:
       server:
-        condition: service_started
+        condition: service_healthy
     healthcheck:
       test:
         - CMD-SHELL
@@ -84,6 +61,3 @@ services:
 networks:
   app:
     driver: bridge
-
-volumes:
-  postgres_data:

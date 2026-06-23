@@ -7,7 +7,10 @@ import { buildPgPoolConfig } from './pgPoolConfig.js';
 import { prepareDatabaseUrl } from './resolveDatabaseUrl.js';
 loadServerEnv();
 
-const databaseUrl = prepareDatabaseUrl(process.env.DATABASE_URL);
+// DATABASE_URL_HOST full-URL override is for host-side CLI only — keep runtime pool on DATABASE_URL.
+const databaseUrl = prepareDatabaseUrl(process.env.DATABASE_URL, {
+    allowHostOverride: false,
+});
 if (databaseUrl) {
     process.env.DATABASE_URL = databaseUrl;
 }

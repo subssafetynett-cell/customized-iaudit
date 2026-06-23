@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
-import { apiFetch, SESSION_EXPIRES_AT_KEY } from "@/lib/api";
+import { apiFetch, parseApiJson, SESSION_EXPIRES_AT_KEY } from "@/lib/api";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -507,7 +507,7 @@ export default function Auth() {
                 body: JSON.stringify({ email: signupEmail })
             });
 
-            const data = await response.json();
+            const data = await parseApiJson<{ error?: string; retryAfterSeconds?: number }>(response);
 
             if (!response.ok) {
                 if (response.status === 429 && typeof data.retryAfterSeconds === "number") {
@@ -543,7 +543,7 @@ export default function Auth() {
                 body: JSON.stringify({ email: signupEmail })
             });
 
-            const data = await response.json();
+            const data = await parseApiJson<{ error?: string; retryAfterSeconds?: number }>(response);
 
             if (!response.ok) {
                 if (response.status === 429 && typeof data.retryAfterSeconds === "number") {

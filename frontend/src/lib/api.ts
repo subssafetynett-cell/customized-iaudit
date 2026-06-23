@@ -36,6 +36,18 @@ export function clearSessionAndRedirectToLogin() {
     redirectToLoginIfNeeded();
 }
 
+export async function parseApiJson<T = unknown>(response: Response): Promise<T> {
+    const contentType = response.headers.get("content-type") || "";
+    if (!contentType.includes("application/json")) {
+        const text = await response.text();
+        if (response.status === 502 || response.status === 503 || response.status === 504) {
+            throw new Error("The API is temporarily unavailable. Please wait a moment and try again.");
+        }
+        throw new Error(text?.slice(0, 200) || `Unexpected response (${response.status})`);
+    }
+    return response.json() as Promise<T>;
+}
+
 export async function apiFetch(endpoint: string, options: RequestInit = {}) {
     const token = localStorage.getItem("token");
 

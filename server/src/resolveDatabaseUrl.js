@@ -9,11 +9,21 @@ export function isRunningInDocker() {
  * Resolve DATABASE_URL for the current runtime.
  * - In Docker: keep host.docker.internal (reaches Postgres on the host / published port).
  * - On the host: rewrite host.docker.internal → localhost (host CLI cannot use that hostname).
- * - DATABASE_URL_HOST overrides for explicit host-side tooling.
+ * - DATABASE_URL_HOST: only used when it is a full postgres:// connection string (host-side tooling).
+ *   Pass `{ allowHostOverride: false }` for server runtime so the pool keeps DATABASE_URL.
  */
-export function resolveDatabaseUrl(rawUrl = process.env.DATABASE_URL) {
-    const explicitHost = process.env.DATABASE_URL_HOST?.trim();
-    if (explicitHost) return explicitHost;
+export function resolveDatabaseUrl(
+    rawUrl = process.env.DATABASE_URL,
+    { allowHostOverride = true } = {},
+) {
+    const explicitOverride = process.env.DATABASE_URL_HOST?.trim();
+    if (
+        allowHostOverride &&
+        (explicitOverride?.startsWith("postgresql://") ||
+            explicitOverride?.startsWith("postgres://"))
+    ) {
+        return explicitOverride;
+    }
 
     const url = rawUrl?.trim();
     if (!url) return url;
@@ -67,6 +77,9 @@ export function normalizeDatabaseUrl(rawUrl) {
 }
 
 /** Full URL prep for Prisma / node-pg at runtime. */
-export function prepareDatabaseUrl(rawUrl = process.env.DATABASE_URL) {
-    return normalizeDatabaseUrl(resolveDatabaseUrl(rawUrl));
+export function prepareDatabaseUrl(
+    rawUrl = process.env.DATABASE_URL,
+    options = {},
+) {
+    return normalizeDatabaseUrl(resolveDatabaseUrl(rawUrl, options));
 }
