@@ -33,6 +33,7 @@ COPY docker-entrypoint.sh ./docker-entrypoint.sh
 RUN chmod +x docker-entrypoint.sh
 
 ENV NODE_ENV=production
+ENV RUNNING_IN_DOCKER=1
 EXPOSE 3001
 
 CMD ["./docker-entrypoint.sh"]

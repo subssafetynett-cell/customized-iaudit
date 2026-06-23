@@ -9,7 +9,9 @@
   "scripts": {
     "dev": "nodemon src/index.js",
     "start": "node src/index.js",
-    "db:migrate": "node scripts/run-migrate.js"
+    "db:migrate": "node scripts/run-migrate.js",
+    "db:baseline": "node scripts/baseline-migrations.js",
+    "migrate:deploy": "node scripts/run-migrate.js"
   },
   "keywords": [],
   "author": "",

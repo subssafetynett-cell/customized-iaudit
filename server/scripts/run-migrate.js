@@ -1,19 +1,21 @@
 /**
- * Run `prisma migrate deploy` using DATABASE_URL from server/.env (local safetynet_db).
+ * Run `prisma migrate deploy` using DATABASE_URL from server/.env.
+ * Auto-baselines existing databases that hit P3005 (created via db push).
  */
 import { spawnSync } from "node:child_process";
 import { createConnection } from "node:net";
-import { config as loadEnv } from "dotenv";
-import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { baselineExistingDatabase } from "./baseline-migrations.js";
+import { loadServerEnv } from "../src/loadEnv.js";
+import { resolveDatabaseUrl } from "../src/resolveDatabaseUrl.js";
 
 function probeTcp(host, port, timeoutMs = 2000) {
-    return new Promise((resolve) => {
+    return new Promise((resolveProbe) => {
         const socket = createConnection({ host, port });
         const done = (ok) => {
             socket.destroy();
-            resolve(ok);
+            resolveProbe(ok);
         };
         socket.setTimeout(timeoutMs);
         socket.on("connect", () => done(true));
@@ -24,17 +26,14 @@ function probeTcp(host, port, timeoutMs = 2000) {
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const serverRoot = resolve(__dirname, "..");
-const envPath = join(serverRoot, ".env");
 
-if (!existsSync(envPath)) {
-    console.error("[db:migrate] Missing server/.env");
-    process.exit(1);
-}
-loadEnv({ path: envPath });
+loadServerEnv();
 
-const databaseUrl = process.env.DATABASE_URL?.trim();
+const databaseUrl = resolveDatabaseUrl(process.env.DATABASE_URL?.trim());
 if (!databaseUrl) {
-    console.error("[db:migrate] DATABASE_URL is not set in server/.env");
+    console.error(
+        "[db:migrate] DATABASE_URL is not set (use server/.env locally or env_file in Docker)",
+    );
     process.exit(1);
 }
 
@@ -50,15 +49,42 @@ if (!(await probeTcp(dbHost, dbPort))) {
     console.error(
         `\n[db:migrate] Cannot reach PostgreSQL at ${dbHost}:${dbPort}.`,
     );
-    console.error("  Start your local Postgres (safetynet_db on port 5433), then run again.\n");
+    console.error(
+        "  Start Postgres (e.g. docker compose up -d postgres or audit-postgres), then run again.",
+    );
+    console.error(
+        "  From your Mac, use localhost in DATABASE_URL — host.docker.internal only works inside Docker.\n",
+    );
     process.exit(1);
 }
 
 const result = spawnSync("npx", ["prisma", "migrate", "deploy"], {
     cwd: serverRoot,
-    stdio: "inherit",
+    stdio: "pipe",
+    encoding: "utf-8",
     env: { ...process.env, DATABASE_URL: databaseUrl },
     shell: true,
 });
+
+if (result.stdout) process.stdout.write(result.stdout);
+if (result.stderr) process.stderr.write(result.stderr);
+
+if (result.status === 0) {
+    process.exit(0);
+}
+
+const output = `${result.stdout || ""}\n${result.stderr || ""}`;
+if (/P3005/.test(output)) {
+    console.warn(
+        "[db:migrate] Database has no migration history (P3005) — baselining…",
+    );
+    try {
+        baselineExistingDatabase(databaseUrl);
+        process.exit(0);
+    } catch (error) {
+        console.error("[db:migrate] Baseline failed:", error.message);
+        process.exit(1);
+    }
+}
 
 process.exit(result.status ?? 1);

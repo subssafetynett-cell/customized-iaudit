@@ -5,16 +5,15 @@ echo "[start] DATABASE_URL host: $(echo $DATABASE_URL | sed 's|.*@||' | cut -d/ 
 echo "============================================"
 
 echo "[start] Applying database schema…"
-if npx prisma migrate deploy; then
+if node scripts/run-migrate.js; then
   echo "[start] Migrations applied successfully"
 else
-  echo "[start] migrate deploy failed — trying prisma db push (full schema sync)…"
-  if npx prisma db push --accept-data-loss; then
-    echo "[start] db push applied successfully"
-  else
-    echo "[start] WARNING: db push also failed — schema may be out of sync!"
-  fi
+  echo "[start] FATAL: database schema could not be applied — refusing to start API"
+  exit 1
 fi
+
+echo "[start] Verifying database connectivity…"
+node scripts/verify-database.js || exit 1
 
 echo "[start] Ensuring super admin account…"
 node scripts/ensure-superadmin.js || echo "[start] super-admin seed failed — continuing"

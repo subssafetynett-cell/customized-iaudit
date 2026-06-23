@@ -11,7 +11,22 @@ if (existsSync(envPath)) {
     loadEnv({ path: envPath });
 }
 
-const databaseUrl = process.env.DATABASE_URL?.trim();
+/** Host CLI cannot use host.docker.internal; keep self-contained for prisma.config (Docker build runs before src/ is copied). */
+function resolveDatabaseUrl(rawUrl) {
+    const explicitHost = process.env.DATABASE_URL_HOST?.trim();
+    if (explicitHost) return explicitHost;
+
+    const url = rawUrl?.trim();
+    if (!url) return url;
+
+    const inDocker =
+        process.env.RUNNING_IN_DOCKER === "1" || existsSync("/.dockerenv");
+    if (inDocker) return url;
+
+    return url.replace(/host\.docker\.internal/gi, "localhost");
+}
+
+const databaseUrl = resolveDatabaseUrl(process.env.DATABASE_URL);
 if (!databaseUrl) {
     throw new Error(
         "DATABASE_URL is not set. Add it to server/.env (your local safetynet_db URL).",

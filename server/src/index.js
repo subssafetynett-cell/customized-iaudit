@@ -2132,9 +2132,15 @@ function buildOrgSubtreePlanVisibilityOr(subtreeIds) {
     ];
 }
 
-// Basic health check endpoint
-app.get('/health', (req, res) => {
-    res.status(200).json({ status: 'ok' });
+// Basic health check endpoint (includes DB — avoids marking server healthy when Prisma is broken)
+app.get('/health', async (req, res) => {
+    try {
+        await prisma.$queryRaw`SELECT 1`;
+        res.status(200).json({ status: 'ok', database: 'connected' });
+    } catch (error) {
+        console.error('[health] Database check failed:', error.message);
+        res.status(503).json({ status: 'degraded', database: 'unavailable', error: error.message });
+    }
 });
 
 // Root route to prevent 404
@@ -3106,8 +3112,14 @@ const sendOtpLogic = async (req, res) => {
             });
         }
         handlePrismaError(error, `sendOtpLogic at step: ${step}`);
-        res.status(500).json({
-            error: `Failed during: ${step}`,
+        const isSchemaDrift =
+            error.code === 'P2022' ||
+            /column .* does not exist/i.test(error.message || '') ||
+            /relation .* does not exist/i.test(error.message || '');
+        res.status(isSchemaDrift ? 503 : 500).json({
+            error: isSchemaDrift
+                ? 'Database schema is out of date. Redeploy the API or run database migrations.'
+                : `Failed during: ${step}`,
             message: error.message,
             code: error.code,
             step: step

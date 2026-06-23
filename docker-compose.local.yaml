@@ -1,0 +1,25 @@
+# Local dev (browser + bundled Postgres):
+#   docker compose -f docker-compose.yaml -f docker-compose.local.yaml --profile local up -d --build
+#
+# If port 8081 is taken, set FRONTEND_HOST_PORT=8082 in .env
+
+services:
+  postgres:
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+
+  server:
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-appuser}:${POSTGRES_PASSWORD:-apppassword}@postgres:5432/${POSTGRES_DB:-appdb}?sslmode=disable
+
+  frontend:
+    ports:
+      - "${FRONTEND_HOST_PORT:-8082}:80"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -qO- http://127.0.0.1/health >/dev/null 2>&1 || exit 1
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
