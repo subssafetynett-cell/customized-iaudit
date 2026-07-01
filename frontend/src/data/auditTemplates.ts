@@ -70,6 +70,120 @@ export interface AuditTemplate {
     content: SectionContent[] | ChecklistContent[] | ClauseChecklistContent[] | ProcessAuditContent[];
 }
 
+/** Short label for audit plan template picker (type-based, not full ISO title). */
+export function getAuditPlanTemplateLabel(
+    template: Pick<AuditTemplate, "type" | "isIntegrated">,
+    isMultiStandard = false,
+): string {
+    if (isMultiStandard) {
+        if (template.isIntegrated || template.type === "checklist") {
+            return "IMS Checklist";
+        }
+        switch (template.type) {
+            case "clause-checklist":
+                return "IMS Clause Audit";
+            case "process-audit":
+                return "IMS Process";
+            case "section":
+                return "IMS Section";
+            default:
+                return "IMS Audit";
+        }
+    }
+    switch (template.type) {
+        case "clause-checklist":
+            return "Clause Template";
+        case "checklist":
+            return "Checklist Template";
+        case "process-audit":
+            return "Process Template";
+        case "section":
+            return "Section Template";
+        default:
+            return "Audit Template";
+    }
+}
+
+export function isAuditPlanMultiStandard(
+    auditCriteria: string,
+    programIsoStandard?: string,
+): boolean {
+    return resolveAuditPlanStandards(auditCriteria, programIsoStandard).length > 1;
+}
+
+export function getAuditPlanTemplateSubtitle(
+    template: Pick<AuditTemplate, "standard" | "type" | "content" | "isIntegrated">,
+    isMultiStandard: boolean,
+): string {
+    const countLabel = template.type === "checklist" ? "questions" : "clauses";
+    if (isMultiStandard) {
+        return `${getAuditPlanTemplateLabel(template, true)} · ${template.content.length} ${countLabel}`;
+    }
+    return `${template.standard} · ${template.content.length} ${countLabel}`;
+}
+
+const AUDIT_PLAN_KNOWN_STANDARDS = ["ISO 9001", "ISO 14001", "ISO 45001", "ISO 22000"] as const;
+
+/** Resolve ISO standards from audit criteria / program for template filtering. */
+export function resolveAuditPlanStandards(
+    auditCriteria: string,
+    programIsoStandard?: string,
+): string[] {
+    const criteriaUpper = auditCriteria.toUpperCase();
+    const fromCriteria = AUDIT_PLAN_KNOWN_STANDARDS.filter((std) => criteriaUpper.includes(std));
+    if (fromCriteria.length > 0) return [...fromCriteria];
+
+    if (programIsoStandard) {
+        const progUpper = programIsoStandard.toUpperCase();
+        const fromProgram = AUDIT_PLAN_KNOWN_STANDARDS.filter((std) => progUpper.includes(std));
+        if (fromProgram.length > 0) return [...fromProgram];
+        if (progUpper.includes("22000")) return ["ISO 22000"];
+        return programIsoStandard.split(",").map((s) => s.trim()).filter(Boolean);
+    }
+
+    return [];
+}
+
+/** Templates offered in the audit plan picker for the active ISO standard(s). */
+export function getAuditPlanTemplateOptions(
+    auditCriteria: string,
+    programIsoStandard?: string,
+): AuditTemplate[] {
+    const standards = resolveAuditPlanStandards(auditCriteria, programIsoStandard);
+    const isMultiStandard = standards.length > 1;
+
+    const filtered = auditTemplates.filter((template) => {
+        if (standards.length === 0) return true;
+        return standards.some((s) => {
+            const tStd = template.standard.toUpperCase();
+            const searchStd = s.toUpperCase();
+            return (
+                tStd.includes(searchStd) ||
+                searchStd.includes(tStd) ||
+                (template.isIntegrated && isMultiStandard)
+            );
+        });
+    });
+
+    if (isMultiStandard) {
+        const integratedChecklist = filtered.find((t) => t.isIntegrated);
+        const uniqueTypes = new Set<TemplateType>();
+        return filtered.filter((t) => {
+            if (t.type === "checklist") {
+                if (integratedChecklist) return t.id === integratedChecklist.id;
+                if (uniqueTypes.has("checklist")) return false;
+                uniqueTypes.add("checklist");
+                return true;
+            }
+            if (uniqueTypes.has(t.type)) return false;
+            uniqueTypes.add(t.type);
+            return true;
+        });
+    }
+
+    return filtered;
+}
+
 /** Section divider / heading copy on the audit execution page — varies by template type. */
 export function getAuditExecuteSectionLabels(
     template: Pick<AuditTemplate, "type" | "isTripleMapping">,

@@ -1,17 +1,18 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { apiFetch } from "@/lib/api";
-import { usersEligibleAsAuditors } from "@/lib/userRoles";
+import { usersEligibleAsAuditors, formatUserDisplayName, mergeAuditorUserOptions } from "@/lib/userRoles";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Calendar as CalendarIcon, MapPin, User, FileText, CheckCircle2, Plus, Trash2, ArrowLeft, Save, Clock, GripVertical, Eye, X } from "lucide-react";
+import { Calendar as CalendarIcon, MapPin, User, FileText, CheckCircle2, Plus, Trash2, ArrowLeft, Save, Clock, GripVertical, Eye, X, Building2 } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { useAuditeeReadOnly } from "@/lib/auditeeAccess";
+import { resolveDepartmentsFromProgram } from "@/lib/auditProgramDepartments";
 import { format } from "date-fns";
 import { Calendar } from "@/components/ui/calendar";
 import {
@@ -41,7 +42,13 @@ import {
     TableHeader,
     TableRow,
 } from "@/components/ui/table";
-import { auditTemplates } from "@/data/auditTemplates";
+import {
+    auditTemplates,
+    getAuditPlanTemplateLabel,
+    getAuditPlanTemplateOptions,
+    getAuditPlanTemplateSubtitle,
+    isAuditPlanMultiStandard,
+} from "@/data/auditTemplates";
 import { TourStepPopover } from "@/components/TourStepPopover";
 import {
     AUDIT_PLAN_TOUR_TOTAL_STEPS,
@@ -144,6 +151,8 @@ const CreateAuditPlanPage = () => {
 
     // Auditor Selection State
     const [users, setUsers] = useState<any[]>([]);
+    const [companies, setCompanies] = useState<any[]>([]);
+    const [seedAuditors, setSeedAuditors] = useState<any[]>([]);
     const [leadAuditorId, setLeadAuditorId] = useState<string>("");
     const [selectedAuditorId, setSelectedAuditorId] = useState<string>(""); // For single select in this UI version
     const [isSaving, setIsSaving] = useState(false);
@@ -161,17 +170,40 @@ const CreateAuditPlanPage = () => {
         { id: "9", startTime: "16:45", endTime: "17:00", activity: "Closing Meeting", notes: "Presentation of audit findings, conclusions, and next steps." },
     ]);
 
-    // Fetch Users (Scope by creatorId)
+    const auditorOptions = useMemo(
+        () => mergeAuditorUserOptions(usersEligibleAsAuditors(users), seedAuditors),
+        [users, seedAuditors],
+    );
+
+    const activeProgram = program ?? plan?.auditProgram;
+    const programDepartments = useMemo(
+        () => resolveDepartmentsFromProgram(activeProgram, companies),
+        [activeProgram, companies],
+    );
+
+    const collectSeedAuditors = (...sources: any[]) => {
+        const collected: any[] = [];
+        const add = (user: any) => {
+            if (user?.id != null) collected.push(user);
+        };
+        sources.forEach((source) => {
+            if (!source) return;
+            if (Array.isArray(source)) source.forEach(add);
+            else add(source);
+        });
+        return collected;
+    };
+
+    // Fetch Users (org-wide — same scope as Users page)
     useEffect(() => {
         const fetchUsers = async () => {
             try {
                 const user = JSON.parse(localStorage.getItem('user') || '{}');
-                const response = await apiFetch(`/users?creatorId=${user.id}`);
+                const response = await apiFetch(`/users`);
                 if (response.ok) {
                     const data = await response.json();
                     const usersList = Array.isArray(data) ? data : [];
 
-                    // Add current user if not in list
                     if (user && user.id) {
                         const exists = usersList.some((u: any) => u.id === user.id);
                         if (!exists) {
@@ -187,6 +219,21 @@ const CreateAuditPlanPage = () => {
             }
         };
         fetchUsers();
+    }, []);
+
+    useEffect(() => {
+        const fetchCompanies = async () => {
+            try {
+                const response = await apiFetch("/companies");
+                if (response.ok) {
+                    const data = await response.json();
+                    setCompanies(Array.isArray(data) ? data : []);
+                }
+            } catch (error) {
+                console.error("Failed to fetch companies", error);
+            }
+        };
+        fetchCompanies();
     }, []);
 
     // Safety check for missing state — only redirect when there is no usable state at all
@@ -215,9 +262,17 @@ const CreateAuditPlanPage = () => {
                     setAuditCriteria(fullPlan.criteria || "");
 
                     if (fullPlan.leadAuditorId) setLeadAuditorId(fullPlan.leadAuditorId.toString());
+                    else if (fullPlan.leadAuditor?.id) setLeadAuditorId(fullPlan.leadAuditor.id.toString());
                     if (fullPlan.auditors && fullPlan.auditors.length > 0) {
-                        setSelectedAuditorId(fullPlan.auditors[0].id.toString());
+                        const firstAuditor = fullPlan.auditors[0];
+                        setSelectedAuditorId(typeof firstAuditor === 'object' ? firstAuditor.id?.toString() : firstAuditor.toString());
                     }
+                    setSeedAuditors(collectSeedAuditors(
+                        fullPlan.leadAuditor,
+                        fullPlan.auditors,
+                        fullPlan.auditProgram?.leadAuditor,
+                        fullPlan.auditProgram?.auditors,
+                    ));
                     if (fullPlan.itinerary) {
                         setItinerary(typeof fullPlan.itinerary === 'string' ? JSON.parse(fullPlan.itinerary) : fullPlan.itinerary);
                     }
@@ -232,6 +287,12 @@ const CreateAuditPlanPage = () => {
         if (existingPlan) {
             // Edit Mode - If scope/objective are missing, fetch fresh from backend
             if (!existingPlan.scope || !existingPlan.objective || !existingPlan.itinerary) {
+                setSeedAuditors(collectSeedAuditors(
+                    existingPlan.leadAuditor,
+                    existingPlan.auditors,
+                    program?.leadAuditor,
+                    program?.auditors,
+                ));
                 loadFullPlan(existingPlan.id);
             } else {
                 setAuditName(existingPlan.auditName || "");
@@ -255,6 +316,13 @@ const CreateAuditPlanPage = () => {
                 if (existingPlan.itinerary) {
                     setItinerary(typeof existingPlan.itinerary === 'string' ? JSON.parse(existingPlan.itinerary) : existingPlan.itinerary);
                 }
+
+                setSeedAuditors(collectSeedAuditors(
+                    existingPlan.leadAuditor,
+                    existingPlan.auditors,
+                    program?.leadAuditor,
+                    program?.auditors,
+                ));
             }
         } else if (execution) {
             // Create Mode Defaults
@@ -319,14 +387,28 @@ const CreateAuditPlanPage = () => {
 
                 // Auto-select template based on ISO Standard
                 if (program.isoStandard) {
-                    const matchingTemplate = auditTemplates.find(t => program.isoStandard.includes(t.standard));
+                    const options = getAuditPlanTemplateOptions(
+                        `${currentStandard}, Internal Manual, Local Regulations`,
+                        program.isoStandard,
+                    );
+                    const matchingTemplate = options[0];
                     if (matchingTemplate) {
                         setSelectedTemplateId(matchingTemplate.id);
                     }
                 }
+
+                setSeedAuditors(collectSeedAuditors(program?.leadAuditor, program?.auditors));
             }
         }
     }, [execution, program, site, location.state, isEditMode, plan]);
+
+    useEffect(() => {
+        const options = getAuditPlanTemplateOptions(auditCriteria, program?.isoStandard);
+        if (!selectedTemplateId) return;
+        if (!options.some((t) => t.id === selectedTemplateId)) {
+            setSelectedTemplateId(options[0]?.id ?? "");
+        }
+    }, [auditCriteria, program?.isoStandard, selectedTemplateId]);
 
     const handleItineraryChange = (id: string, field: keyof ItineraryItem, value: string) => {
         setItinerary(prev => prev.map(item => item.id === id ? { ...item, [field]: value } : item));
@@ -603,56 +685,10 @@ const CreateAuditPlanPage = () => {
                                         </SelectTrigger>
                                         <SelectContent>
                                             {(() => {
-                                                const determineStandards = () => {
-                                                    const knownStandards = ["ISO 9001", "ISO 14001", "ISO 45001", "ISO 22000"];
-                                                    // Derive primarily from what's physically in the auditCriteria field
-                                                    const criteriaUpper = auditCriteria.toUpperCase();
-                                                    const criteriaStandards = knownStandards.filter(std => criteriaUpper.includes(std));
-                                                    
-                                                    if (criteriaStandards.length > 0) return criteriaStandards;
-
-                                                    // Fallback to program property if needed
-                                                    if (program?.isoStandard) {
-                                                        const progStandards = knownStandards.filter(std => program.isoStandard.toUpperCase().includes(std));
-                                                        if (progStandards.length > 0) return progStandards;
-                                                        return program.isoStandard.split(',').map((s: string) => s.trim());
-                                                    }
-                                                    
-                                                    return [];
-                                                };
-
-                                                const standards = determineStandards();
-                                                const isMultiStandard = standards.length > 1;
-
-                                                const filtered = auditTemplates.filter(template => {
-                                                    if (standards.length === 0) return true; // Show all if no constraints
-                                                    return standards.some(s => {
-                                                        const tStd = template.standard.toUpperCase();
-                                                        const searchStd = s.toUpperCase();
-                                                        return tStd.includes(searchStd) || searchStd.includes(tStd) || (template.isIntegrated && isMultiStandard);
-                                                    });
-                                                });
-
-                                                if (isMultiStandard && filtered.some(t => t.isIntegrated)) {
-                                                    // For multi-standard, we prioritize the integrated ones
-                                                    const uniqueTypes = new Set();
-                                                    return filtered
-                                                        .filter(t => {
-                                                            if (t.isIntegrated) return true;
-                                                            if (uniqueTypes.has(t.type)) return false;
-                                                            uniqueTypes.add(t.type);
-                                                            return true;
-                                                        })
-                                                        .map(template => (
-                                                            <SelectItem key={template.id} value={template.id}>
-                                                                {template.title} <span className="text-slate-400 text-xs ml-2">({template.standard})</span>
-                                                            </SelectItem>
-                                                        ));
-                                                }
-
-                                                return filtered.map(template => (
+                                                const isMultiStandard = isAuditPlanMultiStandard(auditCriteria, program?.isoStandard);
+                                                return getAuditPlanTemplateOptions(auditCriteria, program?.isoStandard).map((template) => (
                                                     <SelectItem key={template.id} value={template.id}>
-                                                        {template.title} <span className="text-slate-400 text-xs ml-2">({template.standard})</span>
+                                                        {getAuditPlanTemplateLabel(template, isMultiStandard)}
                                                     </SelectItem>
                                                 ));
                                             })()}
@@ -672,14 +708,15 @@ const CreateAuditPlanPage = () => {
                                 </div>
                                 {selectedTemplateId && (() => {
                                     const t = auditTemplates.find(t => t.id === selectedTemplateId);
+                                    const isMultiStandard = isAuditPlanMultiStandard(auditCriteria, program?.isoStandard);
                                     return t ? (
                                         <div className="flex items-center gap-3 p-3 bg-white border border-indigo-100 rounded-xl shadow-sm">
                                             <div className="w-8 h-8 rounded-lg bg-indigo-100 flex items-center justify-center shrink-0">
                                                 <FileText className="w-4 h-4 text-indigo-600" />
                                             </div>
                                             <div>
-                                                <p className="text-sm font-bold text-slate-800">{t.title}</p>
-                                                <p className="text-xs text-slate-500">{t.standard} · {t.content.length} {t.type === 'checklist' ? 'questions' : 'clauses'}</p>
+                                                <p className="text-sm font-bold text-slate-800">{getAuditPlanTemplateLabel(t, isMultiStandard)}</p>
+                                                <p className="text-xs text-slate-500">{getAuditPlanTemplateSubtitle(t, isMultiStandard)}</p>
                                             </div>
                                             <span className="ml-auto bg-emerald-100 text-emerald-700 text-[10px] font-bold uppercase px-2 py-0.5 rounded-full">Selected ✓</span>
                                         </div>
@@ -735,6 +772,26 @@ const CreateAuditPlanPage = () => {
                                     <Input value={auditLocation} onChange={e => setAuditLocation(e.target.value)} className="pl-9 font-semibold bg-slate-50 border-slate-200" />
                                 </div>
                             </div>
+                            {programDepartments.length > 0 && (
+                                <div className="space-y-2 md:col-span-2">
+                                    <Label className="text-xs font-bold text-slate-500 uppercase flex items-center gap-1.5">
+                                        <Building2 className="w-3.5 h-3.5" />
+                                        Departments in Scope
+                                    </Label>
+                                    <div className="flex flex-wrap gap-2 rounded-xl border border-slate-200 bg-slate-50/80 p-3">
+                                        {programDepartments.map((dept) => (
+                                            <Badge
+                                                key={dept.id}
+                                                variant="outline"
+                                                className="text-xs font-medium bg-white border-emerald-200 text-slate-800"
+                                            >
+                                                {dept.name}
+                                                <span className="text-slate-400 font-normal ml-1">· {dept.siteName}</span>
+                                            </Badge>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
                         </CardContent>
                     </Card>
 
@@ -875,12 +932,18 @@ const CreateAuditPlanPage = () => {
                                 <Label className="text-xs font-bold text-slate-500 uppercase">Lead Auditor</Label>
                                 <Select value={leadAuditorId} onValueChange={setLeadAuditorId}>
                                     <SelectTrigger className="font-semibold bg-slate-50 border-slate-200 h-10">
-                                        <SelectValue placeholder="Select Lead Auditor" />
+                                        <SelectValue placeholder="Select Lead Auditor">
+                                            {leadAuditorId
+                                                ? formatUserDisplayName(
+                                                    auditorOptions.find((u) => u.id.toString() === leadAuditorId),
+                                                )
+                                                : null}
+                                        </SelectValue>
                                     </SelectTrigger>
                                     <SelectContent>
-                                        {users.map(u => (
+                                        {auditorOptions.map((u) => (
                                             <SelectItem key={u.id} value={u.id.toString()}>
-                                                {u.firstName} {u.lastName}
+                                                {formatUserDisplayName(u)}
                                             </SelectItem>
                                         ))}
                                     </SelectContent>
@@ -890,12 +953,18 @@ const CreateAuditPlanPage = () => {
                                 <Label className="text-xs font-bold text-slate-500 uppercase">Auditor(s)</Label>
                                 <Select value={selectedAuditorId} onValueChange={setSelectedAuditorId}>
                                     <SelectTrigger className="font-semibold bg-slate-50 border-slate-200 h-10">
-                                        <SelectValue placeholder="Select Auditor" />
+                                        <SelectValue placeholder="Select Auditor">
+                                            {selectedAuditorId
+                                                ? formatUserDisplayName(
+                                                    auditorOptions.find((u) => u.id.toString() === selectedAuditorId),
+                                                )
+                                                : null}
+                                        </SelectValue>
                                     </SelectTrigger>
                                     <SelectContent>
-                                        {users.map(u => (
+                                        {auditorOptions.map((u) => (
                                             <SelectItem key={u.id} value={u.id.toString()}>
-                                                {u.firstName} {u.lastName}
+                                                {formatUserDisplayName(u)}
                                             </SelectItem>
                                         ))}
                                     </SelectContent>
@@ -903,6 +972,32 @@ const CreateAuditPlanPage = () => {
                             </div>
                         </CardContent>
                     </Card>
+
+                    {programDepartments.length > 0 && (
+                        <Card className="border-slate-200 shadow-sm rounded-2xl overflow-hidden">
+                            <CardHeader className="bg-slate-50/50 border-b border-slate-100 pb-4">
+                                <CardTitle className="flex items-center gap-2 text-base font-bold text-slate-700">
+                                    <Building2 className="w-4 h-4 text-emerald-500" />
+                                    Departments
+                                </CardTitle>
+                            </CardHeader>
+                            <CardContent className="p-4">
+                                <div className="flex flex-wrap gap-2">
+                                    {programDepartments.map((dept) => (
+                                        <Badge
+                                            key={dept.id}
+                                            className="bg-emerald-50 border border-emerald-200 text-slate-800 font-medium"
+                                        >
+                                            {dept.name}
+                                        </Badge>
+                                    ))}
+                                </div>
+                                <p className="text-xs text-slate-500 mt-3">
+                                    From audit program: {activeProgram?.name || "—"}
+                                </p>
+                            </CardContent>
+                        </Card>
+                    )}
 
                     {/* Selected Clauses Summary (Moved under Audit Team) */}
                     {

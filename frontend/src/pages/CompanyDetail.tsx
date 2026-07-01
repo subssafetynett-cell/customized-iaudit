@@ -272,10 +272,12 @@ export default function CompanyDetail() {
           open={!!addDeptSiteId}
           onClose={() => setAddDeptSiteId(null)}
           onSubmit={async (data) => {
-            await addDepartment(company.id, activeSite.id, data.name, data);
+            const targetSiteId = data.siteId ?? activeSite.id;
+            await addDepartment(company.id, targetSiteId, data.name, data);
             setAddDeptSiteId(null);
           }}
-          siteName={activeSite.name}
+          sites={company.sites.map((s) => ({ id: s.id, name: s.name }))}
+          initialSiteId={activeSite.id}
           mode="create"
         />
       )}
@@ -298,12 +300,15 @@ export default function CompanyDetail() {
 
       {editDept && (
         <DepartmentModal
+          key={`edit-dept-${editDept.dept.id}`}
           open={!!editDept}
           onClose={() => setEditDept(null)}
           onSubmit={(data) => {
             updateDepartment(company.id, editDept.siteId, editDept.dept.id, data);
             setEditDept(null);
           }}
+          initialData={editDept.dept}
+          siteName={company.sites.find((s) => s.id === editDept.siteId)?.name}
           mode="edit"
         />
       )}

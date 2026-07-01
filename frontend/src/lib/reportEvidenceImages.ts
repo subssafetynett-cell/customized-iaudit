@@ -49,6 +49,7 @@ export type ReportEvidenceSource = {
     data: string;
     type: string;
     context: string;
+    description?: string;
 };
 
 export type PreparedReportImage = {
@@ -58,6 +59,7 @@ export type PreparedReportImage = {
     format: "JPEG" | "PNG";
     widthPx: number;
     heightPx: number;
+    description?: string;
 };
 
 function loadImage(src: string): Promise<HTMLImageElement> {
@@ -152,6 +154,7 @@ export function collectReportEvidenceFileList(
                 data: m.data,
                 type: m.type,
                 context: humanizeEvidenceKey(key),
+                description: m.description?.trim() || undefined,
             });
         }
     }
@@ -232,6 +235,7 @@ async function buildVisualsFromSources(
                 ...item,
                 name: src.name,
                 context: src.context,
+                description: src.description,
             });
             continue;
         }
@@ -246,6 +250,7 @@ async function buildVisualsFromSources(
                         ...page,
                         name: pageLabel,
                         context: `${src.context} — PDF`,
+                        description: src.description,
                     });
                 });
             } catch (error) {
@@ -305,6 +310,41 @@ export function reportImageDisplayMm(
     return { w, h };
 }
 
+export const EVIDENCE_TITLE_HEIGHT_MM = 5;
+export const EVIDENCE_DESC_LINE_HEIGHT_MM = 4;
+export const EVIDENCE_DESC_BOTTOM_GAP_MM = 2;
+export const EVIDENCE_IMAGE_BOTTOM_GAP_MM = 6;
+
+/** Measure wrapped description lines using the same font settings as PDF export. */
+export function measureEvidenceDescriptionBlock(
+    doc: import("jspdf").jsPDF,
+    description: string | undefined,
+    contentWidthMm: number,
+    fontName = "helvetica",
+): { lines: string[]; heightMm: number } {
+    const trimmed = description?.trim();
+    if (!trimmed) return { lines: [], heightMm: 0 };
+
+    doc.setFont(fontName, "italic");
+    doc.setFontSize(8);
+    const lines = doc.splitTextToSize(trimmed, contentWidthMm);
+    const heightMm =
+        lines.length * EVIDENCE_DESC_LINE_HEIGHT_MM + EVIDENCE_DESC_BOTTOM_GAP_MM;
+    return { lines, heightMm };
+}
+
+export function evidenceVisualBlockHeightMm(
+    imageHeightMm: number,
+    descriptionHeightMm: number,
+): number {
+    return (
+        EVIDENCE_TITLE_HEIGHT_MM +
+        descriptionHeightMm +
+        imageHeightMm +
+        EVIDENCE_IMAGE_BOTTOM_GAP_MM
+    );
+}
+
 export type JsPdfEvidenceEmbedOptions = {
     margin?: number;
     pageHeightMm?: number;
@@ -359,15 +399,31 @@ export function embedPreparedImagesInJsPdf(
             contentWidthMm,
             isPdfPreview ? 120 : 85,
         );
-        y = checkPage(y, h + 14);
+        const { lines: descLines, heightMm: descHeightMm } = measureEvidenceDescriptionBlock(
+            doc,
+            img.description,
+            contentWidthMm,
+        );
+        y = checkPage(y, evidenceVisualBlockHeightMm(h, descHeightMm));
         doc.setFontSize(9);
         doc.setFont("helvetica", "bold");
         doc.setTextColor(33, 56, 71);
         doc.text(`${img.context} — ${img.name}`, margin, y);
-        y += 5;
+        y += EVIDENCE_TITLE_HEIGHT_MM;
+        if (descLines.length > 0) {
+            doc.setFont("helvetica", "italic");
+            doc.setFontSize(8);
+            doc.setTextColor(80, 80, 80);
+            doc.text(descLines, margin, y);
+            y += descHeightMm;
+        }
+        doc.setFont("helvetica", "bold");
+        doc.setFontSize(9);
+        doc.setTextColor(33, 56, 71);
+        y = checkPage(y, h + EVIDENCE_IMAGE_BOTTOM_GAP_MM);
         try {
             doc.addImage(img.dataUrl, img.format, margin, y, w, h, undefined, "FAST");
-            y += h + 6;
+            y += h + EVIDENCE_IMAGE_BOTTOM_GAP_MM;
         } catch (e) {
             console.warn("Report PDF image embed failed", img.name, e);
             doc.setFont("helvetica", "normal");
@@ -392,5 +448,6 @@ export function findingMediaToReportSources(
         data: m.data,
         type: m.type,
         context,
+        description: m.description?.trim() || undefined,
     }));
 }

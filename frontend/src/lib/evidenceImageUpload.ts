@@ -132,7 +132,23 @@ export async function readValidatedEvidenceImageFile(
     return { ok: true, dataUrl };
 }
 
-export type AuditEvidenceMedia = { name: string; data: string; type: string };
+export type AuditEvidenceMedia = {
+    name: string;
+    data: string;
+    type: string;
+    description?: string;
+};
+
+const EVIDENCE_DESCRIPTION_MAX = 500;
+
+export function normalizeEvidenceDescription(
+    description: string | undefined | null,
+): string | undefined {
+    if (!description || typeof description !== "string") return undefined;
+    const trimmed = description.trim();
+    if (!trimmed) return undefined;
+    return trimmed.slice(0, EVIDENCE_DESCRIPTION_MAX);
+}
 
 export const AUDIT_EVIDENCE_DOC_MAX_BYTES = 10 * 1024 * 1024; // 10 MB raw PDF
 
@@ -291,14 +307,18 @@ export function sanitizeAuditEvidenceMedia(
         const safe = sanitizeEvidenceImageDataUrl(data);
         if (!safe) return null;
         const mime = safe.startsWith("data:image/png") ? "image/png" : "image/jpeg";
-        return { name, data: safe, type: mime };
+        const description = normalizeEvidenceDescription(media.description);
+        return description ? { name, data: safe, type: mime, description } : { name, data: safe, type: mime };
     }
     if (
         type === "application/pdf" &&
         SAFE_PDF_DATA_RE.test(data) &&
         data.length <= AUDIT_EVIDENCE_PDF_DATA_URL_MAX
     ) {
-        return { name, data, type: "application/pdf" };
+        const description = normalizeEvidenceDescription(media.description);
+        return description
+            ? { name, data, type: "application/pdf", description }
+            : { name, data, type: "application/pdf" };
     }
     return null;
 }

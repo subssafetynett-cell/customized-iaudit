@@ -57,3 +57,44 @@ export function formatUserRoleLabel(
 export function usersEligibleAsAuditors<T extends { role?: string }>(users: T[]): T[] {
     return users.filter((u) => !isAuditeeRole(u.role));
 }
+
+export function formatUserDisplayName(
+    user:
+        | {
+              firstName?: string | null;
+              lastName?: string | null;
+              email?: string | null;
+              id?: number | string | null;
+          }
+        | null
+        | undefined,
+): string {
+    if (!user) return "";
+    const name = `${user.firstName ?? ""} ${user.lastName ?? ""}`.trim();
+    if (name) return name;
+    if (user.email?.trim()) return user.email.trim();
+    if (user.id != null) return `User #${user.id}`;
+    return "Unknown user";
+}
+
+/** Ensure assigned auditors appear in picker options even if missing from the users API list. */
+export function mergeAuditorUserOptions<T extends { id?: number | string | null }>(
+    baseUsers: T[],
+    ...extraSources: (T | T[] | null | undefined)[]
+): T[] {
+    const byId = new Map<string, T>();
+    const add = (user: T | null | undefined) => {
+        if (user?.id == null) return;
+        const key = String(user.id);
+        if (!byId.has(key)) byId.set(key, user);
+    };
+
+    baseUsers.forEach(add);
+    extraSources.forEach((source) => {
+        if (!source) return;
+        if (Array.isArray(source)) source.forEach(add);
+        else add(source);
+    });
+
+    return Array.from(byId.values());
+}

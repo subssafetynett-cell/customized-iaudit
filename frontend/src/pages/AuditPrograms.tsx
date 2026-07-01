@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { useSearchParams, useNavigate } from "react-router-dom";
 import { TopNav } from "@/components/TopNav";
 import { apiFetch } from "@/lib/api";
@@ -45,6 +45,19 @@ import {
     isClauseMatrixHeading,
     isMainClauseHeading,
 } from "@/data/clauseMapping";
+import {
+    departmentsFromCompanies,
+    formatDepartmentNames,
+    getDepartmentIdsFromScheduleData,
+    resolveDepartmentsByIds,
+} from "@/lib/auditProgramDepartments";
+import {
+    applyBuiltWithIauditPdfFooter,
+    buildIauditDocxFooter,
+    IAUDIT_FOOTER_LOGO_SRC,
+    IAUDIT_FOOTER_RESERVE_MM,
+    imageAssetToBuffer,
+} from "@/utils/pdfBranding";
 
 const ISO_STANDARDS = [
     "ISO 9001:2015 - Quality Management System",
@@ -140,6 +153,19 @@ const MONTHS = [
 
 const YEARS = Array.from({ length: 10 }, (_, i) => (new Date().getFullYear() + i));
 
+function splitScheduleData(loadData: Record<string, unknown> | null | undefined) {
+    const data = loadData ?? {};
+    const { customRows, startDate, departmentIds, departmentNames, ...rest } = data;
+    return {
+        customRows: (Array.isArray(customRows) ? customRows : []) as { id: string; text: string }[],
+        startDate: typeof startDate === "string" ? startDate : undefined,
+        departmentIds: Array.isArray(departmentIds)
+            ? departmentIds.map((id) => String(id))
+            : [],
+        selectedCells: rest as Record<string, boolean>,
+    };
+}
+
 const AuditPrograms = () => {
     const navigate = useNavigate();
     const isAuditeeReadOnly = useAuditeeReadOnly();
@@ -187,8 +213,11 @@ const AuditPrograms = () => {
     const [deleteId, setDeleteId] = useState<number | null>(null);
     const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
     const [showSchedule, setShowSchedule] = useState(false);
+    const [scrollToScheduleOnShow, setScrollToScheduleOnShow] = useState(false);
+    const scheduleMatrixRef = useRef<HTMLDivElement>(null);
     const [loading, setLoading] = useState(false);
     const [sites, setSites] = useState<any[]>([]);
+    const [companies, setCompanies] = useState<any[]>([]);
     const [auditors, setAuditors] = useState<any[]>([]);
 
     // Search and Filter states
@@ -225,6 +254,7 @@ const AuditPrograms = () => {
     const [frequency, setFrequency] = useState("Bi-annually");
     const [duration, setDuration] = useState(3);
     const [selectedSite, setSelectedSite] = useState("");
+    const [selectedDepartmentIds, setSelectedDepartmentIds] = useState<string[]>([]);
     const [selectedAuditors, setSelectedAuditors] = useState<string[]>([]);
     const [leadAuditorId, setLeadAuditorId] = useState<string | null>(null);
     const [selectedCells, setSelectedCells] = useState<Record<string, boolean>>({});
@@ -243,7 +273,7 @@ const AuditPrograms = () => {
                     apiFetch("/sites"),
                     apiFetch("/companies"),
                     apiFetch(`/users?creatorId=${user.id}`),
-                    apiFetch(`/audit-programs?scope=org`),
+                    apiFetch(`/audit-programs?scope=org&full=true`),
                 ]);
                 const sitesData = sitesRes.ok ? await sitesRes.json() : [];
                 const companiesData = companiesRes.ok ? await companiesRes.json() : [];
@@ -265,6 +295,7 @@ const AuditPrograms = () => {
                     sitesList = sitesFromCompanies(companiesData);
                 }
                 setSites(sitesList);
+                setCompanies(Array.isArray(companiesData) ? companiesData : []);
                 setAuditors(usersEligibleAsAuditors(Array.isArray(usersData) ? usersData : []));
                 setAuditPrograms(Array.isArray(programsData) ? programsData : []);
 
@@ -282,7 +313,7 @@ const AuditPrograms = () => {
     const fetchPrograms = async () => {
         try {
             const user = JSON.parse(localStorage.getItem('user') || '{}');
-            const res = await apiFetch(`/audit-programs?scope=org`);
+            const res = await apiFetch(`/audit-programs?scope=org&full=true`);
             if (res.ok) {
                 const data = await res.json();
                 setAuditPrograms(Array.isArray(data) ? data : []);
@@ -339,6 +370,14 @@ const AuditPrograms = () => {
     };
 
     const periods = calculatePeriods();
+    const allDepartments = departmentsFromCompanies(companies);
+    const allDepartmentsSelected =
+        allDepartments.length > 0 &&
+        allDepartments.every((dept) => selectedDepartmentIds.includes(dept.id));
+    const someDepartmentsSelected = allDepartments.some((dept) =>
+        selectedDepartmentIds.includes(dept.id),
+    );
+    const selectedDepartments = resolveDepartmentsByIds(selectedDepartmentIds, companies);
 
     const isPeriodActive = (colIndex: number) => {
         return Object.keys(selectedCells).some(key => {
@@ -347,12 +386,35 @@ const AuditPrograms = () => {
         });
     };
 
+    const scrollToScheduleMatrix = () => {
+        requestAnimationFrame(() => {
+            setTimeout(() => {
+                scheduleMatrixRef.current?.scrollIntoView({
+                    behavior: "smooth",
+                    block: "start",
+                    inline: "nearest",
+                });
+            }, 150);
+        });
+    };
+
+    useEffect(() => {
+        if (!showSchedule || !scrollToScheduleOnShow) return;
+        setScrollToScheduleOnShow(false);
+        scrollToScheduleMatrix();
+    }, [showSchedule, scrollToScheduleOnShow]);
+
     const handleGenerateSchedule = () => {
         if (!auditName || selectedStandards.length === 0 || !selectedSite) {
             toast.error("Please fill in Audit Name, Standard(s) and Site");
             return;
         }
-        setShowSchedule(true);
+        if (showSchedule) {
+            scrollToScheduleMatrix();
+        } else {
+            setScrollToScheduleOnShow(true);
+            setShowSchedule(true);
+        }
         toast.success("Schedule updated!");
     };
 
@@ -392,7 +454,13 @@ const AuditPrograms = () => {
                     siteId: selectedSite,
                     auditorIds: selectedAuditors,
                     leadAuditorId: leadAuditorId,
-                    scheduleData: { ...selectedCells, customRows, startDate: programStartDate.toISOString() },
+                    scheduleData: {
+                        ...selectedCells,
+                        customRows,
+                        startDate: programStartDate.toISOString(),
+                        departmentIds: selectedDepartmentIds,
+                        departmentNames: selectedDepartments.map((dept) => dept.name),
+                    },
                     userId: user.id
                 })
             });
@@ -476,10 +544,15 @@ const AuditPrograms = () => {
             setDuration(fullProgram.duration);
             setSelectedSite(fullProgram.siteId.toString());
             applyProgramAuditorsFromLoaded(fullProgram);
-            const loadData = fullProgram.scheduleData || {};
-            const { customRows: loadedCustomRows, startDate: loadedStartDate, ...restCells } = loadData;
-            setSelectedCells(restCells);
-            setCustomRows(loadedCustomRows || []);
+            const {
+                customRows: loadedCustomRows,
+                startDate: loadedStartDate,
+                departmentIds: loadedDepartmentIds,
+                selectedCells: loadedCells,
+            } = splitScheduleData(fullProgram.scheduleData);
+            setSelectedCells(loadedCells);
+            setCustomRows(loadedCustomRows);
+            setSelectedDepartmentIds(loadedDepartmentIds);
             setProgramStartDate(loadedStartDate ? new Date(loadedStartDate) : (fullProgram.createdAt ? new Date(fullProgram.createdAt) : new Date()));
             setShowSchedule(true);
             setView("edit");
@@ -505,10 +578,15 @@ const AuditPrograms = () => {
             setDuration(fullProgram.duration);
             setSelectedSite(fullProgram.siteId.toString());
             applyProgramAuditorsFromLoaded(fullProgram);
-            const loadData = fullProgram.scheduleData || {};
-            const { customRows: loadedCustomRows, startDate: loadedStartDate, ...restCells } = loadData;
-            setSelectedCells(restCells);
-            setCustomRows(loadedCustomRows || []);
+            const {
+                customRows: loadedCustomRows,
+                startDate: loadedStartDate,
+                departmentIds: loadedDepartmentIds,
+                selectedCells: loadedCells,
+            } = splitScheduleData(fullProgram.scheduleData);
+            setSelectedCells(loadedCells);
+            setCustomRows(loadedCustomRows);
+            setSelectedDepartmentIds(loadedDepartmentIds);
             setProgramStartDate(loadedStartDate ? new Date(loadedStartDate) : (fullProgram.createdAt ? new Date(fullProgram.createdAt) : new Date()));
             setShowSchedule(true);
             setView("view");
@@ -527,6 +605,7 @@ const AuditPrograms = () => {
         setFrequency("Bi-annually");
         setDuration(3);
         setSelectedSite("");
+        setSelectedDepartmentIds([]);
         setSelectedAuditors([]);
         setLeadAuditorId(null);
         setSelectedCells({});
@@ -548,6 +627,7 @@ const AuditPrograms = () => {
                 toast.error("Please fill in Audit Name, Standard(s) and Site");
                 return;
             }
+            setScrollToScheduleOnShow(true);
             setShowSchedule(true);
             toast.success("Schedule generated!");
             setAuditTourStep(5);
@@ -640,31 +720,32 @@ const AuditPrograms = () => {
         const company = resolveProgramCompany(program, sites);
         const pageWidth = doc.internal.pageSize.getWidth();
         const leftX = 14;
-        let headerBottomY = 12;
+        let headerBottomY = 10;
 
-        // Company logo (render later inside the metadata section, under "Site")
         const companyLogoAsset = company.logo ? await loadImageAsset(company.logo, 140) : null;
+        const iauditFooterAsset = await loadImageAsset(IAUDIT_FOOTER_LOGO_SRC, 100);
 
-        // iAudit logo (top-right)
-        try {
-            const iauditAsset = await loadImageAsset("/iAudit Global-01.png", 120);
-            if (iauditAsset) {
-                const logoW = 22;
-                const logoH = logoW * iauditAsset.ratio;
-                doc.addImage(
-                    iauditAsset.dataUrl,
-                    iauditAsset.format,
-                    pageWidth - logoW - 14,
-                    10,
-                    logoW,
-                    logoH,
-                );
+        if (companyLogoAsset) {
+            const maxLogoW = 36;
+            const maxLogoH = 24;
+            let logoW = maxLogoW;
+            let logoH = logoW * companyLogoAsset.ratio;
+            if (logoH > maxLogoH) {
+                logoH = maxLogoH;
+                logoW = logoH / companyLogoAsset.ratio;
             }
-        } catch (error) {
-            console.error("Failed to load iAudit logo for PDF", error);
+            doc.addImage(
+                companyLogoAsset.dataUrl,
+                companyLogoAsset.format,
+                leftX,
+                10,
+                logoW,
+                logoH,
+            );
+            headerBottomY = 10 + logoH + 4;
         }
 
-        let metaY = Math.max(headerBottomY + 8, 42);
+        let metaY = Math.max(headerBottomY + 4, 36);
         doc.setFontSize(20);
         doc.setFont("helvetica", "bold");
         doc.setTextColor(40, 40, 40);
@@ -686,6 +767,11 @@ const AuditPrograms = () => {
         addMetaLine("Standard", program.isoStandard || "N/A");
         addMetaLine("Frequency", program.frequency || "N/A");
         addMetaLine("Site", program.site?.name || "N/A");
+        const programDepartments = resolveDepartmentsByIds(
+            getDepartmentIdsFromScheduleData(program.scheduleData),
+            companies,
+        );
+        addMetaLine("Departments", formatDepartmentNames(programDepartments));
 
         // Company block: name first, then logo below
         metaY += 3;
@@ -705,27 +791,7 @@ const AuditPrograms = () => {
         doc.setTextColor(30, 41, 59);
         const nameLines = doc.splitTextToSize(safeCompanyName, pageWidth - valueX - 14);
         doc.text(nameLines, valueX, contentY);
-        contentY += nameLines.length * 5.5 + 5;
-
-        if (companyLogoAsset) {
-            const maxLogoW = 44;
-            const maxLogoH = 20;
-            let logoW = maxLogoW;
-            let logoH = logoW * companyLogoAsset.ratio;
-            if (logoH > maxLogoH) {
-                logoH = maxLogoH;
-                logoW = logoH / companyLogoAsset.ratio;
-            }
-            doc.addImage(
-                companyLogoAsset.dataUrl,
-                companyLogoAsset.format,
-                valueX,
-                contentY,
-                logoW,
-                logoH,
-            );
-            contentY += logoH + 4;
-        }
+        contentY += nameLines.length * 5.5 + 2;
 
         doc.setFontSize(10);
         doc.setFont("helvetica", "normal");
@@ -796,11 +862,17 @@ const AuditPrograms = () => {
         const customProgramRows = program.scheduleData?.customRows || [];
         const numStandardCols = standards.length || 1;
         customProgramRows.forEach((cRow: any) => {
-            tableBody.push([{
+            const row: any[] = [{
                 content: cRow.text || "Custom Requirement",
-                colSpan: numStandardCols + programPeriods.length,
-                styles: { fontStyle: 'italic', textColor: [100, 116, 139], halign: 'left' }
-            }]);
+                colSpan: numStandardCols,
+                styles: { fontStyle: "italic", textColor: [100, 116, 139], halign: "left" },
+            }];
+            programPeriods.forEach((_, colIndex) => {
+                const key = `custom_${cRow.id}-${colIndex}`;
+                const isSelected = program.scheduleData && program.scheduleData[key];
+                row.push(isSelected ? "X" : "");
+            });
+            tableBody.push(row);
         });
 
         // Generate Table
@@ -816,8 +888,11 @@ const AuditPrograms = () => {
                 halign: 'center',
                 valign: 'middle'
             },
-            styles: { fontSize: 6, cellPadding: 0.8, halign: 'center', valign: 'middle' }
+            styles: { fontSize: 6, cellPadding: 0.8, halign: 'center', valign: 'middle' },
+            margin: { left: leftX, right: 14, bottom: IAUDIT_FOOTER_RESERVE_MM },
         });
+
+        applyBuiltWithIauditPdfFooter(doc, iauditFooterAsset, leftX);
 
         const safeName = (program.name || "Audit_Program").replace(/\s+/g, "_");
         doc.save(`${safeName}_Schedule.pdf`);
@@ -862,11 +937,14 @@ const AuditPrograms = () => {
             }
         }
 
-        let logoBuffer: ArrayBuffer | null = null;
+        let iauditLogoBuffer: ArrayBuffer | null = null;
+        let iauditLogoRatio = 1;
         try {
-            logoBuffer = await dataUrlToBuffer("/iAudit Global-01.png");
+            const iauditAsset = await loadImageAsset(IAUDIT_FOOTER_LOGO_SRC, 100);
+            iauditLogoRatio = iauditAsset?.ratio ?? 1;
+            iauditLogoBuffer = await imageAssetToBuffer(iauditAsset);
         } catch (error) {
-            console.error("Failed to fetch logo for Word doc:", error);
+            console.error("Failed to fetch iAudit logo for Word doc:", error);
         }
 
         const standards: string[] = program.isoStandard ? program.isoStandard.split(', ').map((s: string) => s.trim()).filter(Boolean) : [];
@@ -961,15 +1039,25 @@ const AuditPrograms = () => {
         const customProgramRowsDocx = program.scheduleData?.customRows || [];
         const numStandardCols = standards.length || 1;
         customProgramRowsDocx.forEach((cRow: any) => {
-            bodyRows.push(new DocxTableRow({
-                children: [
-                    new DocxTableCell({
-                        children: [new Paragraph({ text: cRow.text || "Custom Requirement", alignment: AlignmentType.LEFT })],
-                        columnSpan: numStandardCols + programPeriods.length,
-                        shading: { fill: "FCFCFC" }
-                    })
-                ]
-            }));
+            const cells: any[] = [
+                new DocxTableCell({
+                    children: [new Paragraph({ text: cRow.text || "Custom Requirement", alignment: AlignmentType.LEFT })],
+                    columnSpan: numStandardCols,
+                    shading: { fill: "FCFCFC" },
+                }),
+            ];
+            programPeriods.forEach((_, colIndex) => {
+                const key = `custom_${cRow.id}-${colIndex}`;
+                const isSelected = program.scheduleData && program.scheduleData[key];
+                cells.push(new DocxTableCell({
+                    children: [new Paragraph({
+                        text: isSelected ? "X" : "",
+                        alignment: AlignmentType.CENTER,
+                    })],
+                    shading: { fill: "FCFCFC" },
+                }));
+            });
+            bodyRows.push(new DocxTableRow({ children: cells }));
         });
 
         const table = new DocxTable({
@@ -991,11 +1079,11 @@ const AuditPrograms = () => {
         const getChildren = () => {
             const children: any[] = [];
 
-            if (logoBuffer) {
+            if (companyLogoBuffer) {
                 children.push(
                     new Paragraph({
                         children: [
-                            new ImageRun({ data: logoBuffer, transformation: { width: 70, height: 70 } }),
+                            new ImageRun({ data: companyLogoBuffer, transformation: { width: 110, height: 50 } }),
                         ],
                         spacing: { after: 200 },
                     }),
@@ -1011,7 +1099,16 @@ const AuditPrograms = () => {
                 new Paragraph({ text: `Program Name: ${program.name}` }),
                 new Paragraph({ text: `Standard: ${program.isoStandard}` }),
                 new Paragraph({ text: `Frequency: ${program.frequency}` }),
-                new Paragraph({ text: `Site: ${program.site?.name || "N/A"}`, spacing: { after: 160 } }),
+                new Paragraph({ text: `Site: ${program.site?.name || "N/A"}` }),
+                new Paragraph({
+                    text: `Departments: ${formatDepartmentNames(
+                        resolveDepartmentsByIds(
+                            getDepartmentIdsFromScheduleData(program.scheduleData),
+                            companies,
+                        ),
+                    )}`,
+                    spacing: { after: 160 },
+                }),
                 new Paragraph({
                     children: [new TextRun({ text: "Company:", bold: true })],
                     spacing: { after: 80 },
@@ -1022,23 +1119,9 @@ const AuditPrograms = () => {
                 new Paragraph({
                     children: [new TextRun({ text: company.name, bold: true, size: 28 })],
                     indent: { left: 720 },
-                    spacing: { after: 120 },
+                    spacing: { after: 240 },
                 }),
             );
-            if (companyLogoBuffer) {
-                children.push(
-                    new Paragraph({
-                        children: [
-                            new ImageRun({
-                                data: companyLogoBuffer,
-                                transformation: { width: 180, height: 80 },
-                            }),
-                        ],
-                        indent: { left: 720 },
-                        spacing: { after: 240 },
-                    }),
-                );
-            }
 
             children.push(table);
             return children;
@@ -1047,6 +1130,9 @@ const AuditPrograms = () => {
         const doc = new Document({
             sections: [{
                 properties: {},
+                footers: {
+                    default: buildIauditDocxFooter(iauditLogoBuffer, iauditLogoRatio),
+                },
                 children: getChildren(),
             }],
         });
@@ -1203,6 +1289,7 @@ const AuditPrograms = () => {
                                         <TableHead className="font-bold text-xs uppercase tracking-wider text-white">Program Name</TableHead>
                                         <TableHead className="font-bold text-xs uppercase tracking-wider text-white">ISO Standard</TableHead>
                                         <TableHead className="font-bold text-xs uppercase tracking-wider text-white">Site</TableHead>
+                                        <TableHead className="font-bold text-xs uppercase tracking-wider text-white">Departments</TableHead>
                                         <TableHead className="font-bold text-xs uppercase tracking-wider text-white text-center">Periods</TableHead>
                                         <TableHead className="w-[100px] font-bold text-xs uppercase tracking-wider text-white text-right pr-6">Actions</TableHead>
                                     </TableRow>
@@ -1210,7 +1297,7 @@ const AuditPrograms = () => {
                                 <TableBody>
                                     {filteredAuditPrograms.length === 0 ? (
                                         <TableRow>
-                                            <TableCell colSpan={6} className="h-64 text-center">
+                                            <TableCell colSpan={7} className="h-64 text-center">
                                                 <div className="flex flex-col items-center justify-center space-y-3">
                                                     <div className="w-16 h-16 bg-slate-100 rounded-[2rem] flex items-center justify-center text-slate-400 mb-2">
                                                         <FileText className="w-8 h-8" />
@@ -1241,6 +1328,30 @@ const AuditPrograms = () => {
                                                     </div>
                                                 </TableCell>
                                                 <TableCell className="text-sm text-foreground font-medium">{program.site?.name || "N/A"}</TableCell>
+                                                <TableCell className="text-sm text-muted-foreground max-w-[220px]">
+                                                    {(() => {
+                                                        const programDepts = resolveDepartmentsByIds(
+                                                            getDepartmentIdsFromScheduleData(program.scheduleData),
+                                                            companies,
+                                                        );
+                                                        if (!programDepts.length) {
+                                                            return <span className="text-slate-400">—</span>;
+                                                        }
+                                                        return (
+                                                            <div className="flex flex-wrap gap-1">
+                                                                {programDepts.map((dept) => (
+                                                                    <Badge
+                                                                        key={dept.id}
+                                                                        variant="outline"
+                                                                        className="text-[10px] font-medium bg-slate-50 border-slate-200 text-slate-700"
+                                                                    >
+                                                                        {dept.name}
+                                                                    </Badge>
+                                                                ))}
+                                                            </div>
+                                                        );
+                                                    })()}
+                                                </TableCell>
                                                 <TableCell className="text-center font-bold text-emerald-600">
                                                     <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-muted text-muted-foreground">
                                                         {program.isConfigured ? "Configured" : "Not Set"}
@@ -1475,6 +1586,96 @@ const AuditPrograms = () => {
                             </div>
 
                             <div className="space-y-2 md:col-span-2">
+                                <div className="flex items-center justify-between gap-3">
+                                    <Label>Departments</Label>
+                                    {allDepartments.length > 0 && view !== "view" && (
+                                        <label className="flex items-center gap-2 text-sm text-slate-600 cursor-pointer">
+                                            <Checkbox
+                                                checked={allDepartmentsSelected}
+                                                onCheckedChange={(checked) => {
+                                                    if (checked === true) {
+                                                        setSelectedDepartmentIds(allDepartments.map((dept) => dept.id));
+                                                    } else {
+                                                        setSelectedDepartmentIds([]);
+                                                    }
+                                                }}
+                                                className="data-[state=checked]:bg-emerald-600 data-[state=checked]:border-emerald-600"
+                                            />
+                                            <span>Select all</span>
+                                        </label>
+                                    )}
+                                </div>
+                                <div className="rounded-lg border border-slate-200 bg-white p-3 max-h-48 overflow-y-auto space-y-2">
+                                    {allDepartments.length === 0 ? (
+                                        <p className="text-sm text-slate-500">
+                                            No departments yet — add departments under Companies first
+                                        </p>
+                                    ) : (
+                                        allDepartments.map((dept) => {
+                                            const isChecked = selectedDepartmentIds.includes(dept.id);
+                                            return (
+                                                <label
+                                                    key={dept.id}
+                                                    className={cn(
+                                                        "flex items-center gap-3 rounded-md px-2 py-2 cursor-pointer hover:bg-slate-50",
+                                                        view === "view" && "cursor-default opacity-80",
+                                                        isChecked && "bg-emerald-50/60",
+                                                    )}
+                                                >
+                                                    <Checkbox
+                                                        checked={isChecked}
+                                                        disabled={view === "view"}
+                                                        onCheckedChange={(checked) => {
+                                                            if (view === "view") return;
+                                                            const nextChecked = checked === true;
+                                                            setSelectedDepartmentIds((prev) =>
+                                                                nextChecked
+                                                                    ? prev.includes(dept.id)
+                                                                        ? prev
+                                                                        : [...prev, dept.id]
+                                                                    : prev.filter((id) => id !== dept.id),
+                                                            );
+                                                        }}
+                                                        className="data-[state=checked]:bg-emerald-600 data-[state=checked]:border-emerald-600"
+                                                    />
+                                                    <div className="flex-1 min-w-0">
+                                                        <p className="text-sm font-medium text-slate-800 truncate">
+                                                            {dept.name}
+                                                        </p>
+                                                        <p className="text-xs text-slate-500 truncate">
+                                                            {dept.companyName} · {dept.siteName}
+                                                        </p>
+                                                    </div>
+                                                </label>
+                                            );
+                                        })
+                                    )}
+                                </div>
+                                {selectedDepartmentIds.length > 0 && (
+                                    <p className="text-xs text-slate-500">
+                                        {selectedDepartmentIds.length} department
+                                        {selectedDepartmentIds.length === 1 ? "" : "s"} selected
+                                        {someDepartmentsSelected && !allDepartmentsSelected && allDepartments.length > 0
+                                            ? " (partial selection)"
+                                            : ""}
+                                    </p>
+                                )}
+                                {selectedDepartments.length > 0 && (
+                                    <div className="flex flex-wrap gap-2 pt-1">
+                                        {selectedDepartments.map((dept) => (
+                                            <Badge
+                                                key={dept.id}
+                                                variant="outline"
+                                                className="text-xs font-medium bg-emerald-50 border-emerald-200 text-emerald-800"
+                                            >
+                                                {dept.name}
+                                            </Badge>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+
+                            <div className="space-y-2 md:col-span-2">
                                 <Label>Auditors</Label>
                                 <div className="rounded-lg border border-slate-200 bg-white p-3 max-h-48 overflow-y-auto space-y-2">
                                     {auditors.length === 0 ? (
@@ -1614,6 +1815,26 @@ const AuditPrograms = () => {
 
                     {showSchedule && (
                         <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
+                            {selectedDepartments.length > 0 && (
+                                <Card className="border border-emerald-100 bg-emerald-50/30 shadow-sm">
+                                    <CardContent className="p-4">
+                                        <p className="text-xs font-bold uppercase tracking-wide text-emerald-700 mb-2">
+                                            Departments in this program
+                                        </p>
+                                        <div className="flex flex-wrap gap-2">
+                                            {selectedDepartments.map((dept) => (
+                                                <Badge
+                                                    key={dept.id}
+                                                    className="bg-white border-emerald-200 text-slate-800 font-medium"
+                                                >
+                                                    {dept.name}
+                                                    <span className="text-slate-400 font-normal ml-1">· {dept.siteName}</span>
+                                                </Badge>
+                                            ))}
+                                        </div>
+                                    </CardContent>
+                                </Card>
+                            )}
                             {/* Program Timeline */}
                             <Card
                                 id="tour-step-program-timeline"
@@ -1673,9 +1894,10 @@ const AuditPrograms = () => {
                                 </Badge>
 
                                 <div
+                                    ref={scheduleMatrixRef}
                                     id="tour-step-schedule-matrix"
                                     className={cn(
-                                        "overflow-x-auto scrollbar-thin border rounded-xl bg-white shadow-sm p-1",
+                                        "overflow-x-auto scrollbar-thin border rounded-xl bg-white shadow-sm p-1 scroll-mt-6",
                                         tourHighlight(6),
                                     )}
                                 >
@@ -1784,22 +2006,34 @@ const AuditPrograms = () => {
                                             })}
                                             {/* Custom Rows Render */}
                                             {customRows.map((cRow) => (
-                                                <tr key={cRow.id} className="group transition-colors bg-slate-50/30 w-full hover:bg-slate-50">
-                                                    <td colSpan={selectedStandards.length + periods.length}
-                                                        className="text-[11px] py-1 border-b border-slate-200 align-middle pl-6 pr-2 bg-white"
+                                                <tr key={cRow.id} className="group transition-colors bg-slate-50/30 hover:bg-slate-50">
+                                                    <td
+                                                        colSpan={selectedStandards.length}
+                                                        className="text-[11px] py-1 border-b border-r border-slate-200 align-middle pl-6 pr-2 bg-white group-hover:bg-slate-50"
                                                     >
                                                         <div className="flex items-center gap-2 sticky left-0 w-max max-w-full z-10">
                                                             <Input
                                                                 value={cRow.text}
                                                                 onChange={(e) => setCustomRows(prev => prev.map(r => r.id === cRow.id ? { ...r, text: e.target.value } : r))}
-                                                                className="h-8 text-[11px] bg-white border-slate-200 placeholder:text-slate-400 w-[500px] font-semibold"
+                                                                className="h-8 text-[11px] bg-white border-slate-200 placeholder:text-slate-400 w-[500px] font-semibold italic text-slate-600"
                                                                 placeholder="Enter custom requirement..."
                                                                 disabled={view === "view"}
                                                             />
                                                             {view !== "view" && (
                                                                 <button
                                                                     type="button"
-                                                                    onClick={() => setCustomRows(prev => prev.filter(r => r.id !== cRow.id))}
+                                                                    onClick={() => {
+                                                                        setCustomRows(prev => prev.filter(r => r.id !== cRow.id));
+                                                                        setSelectedCells(prev => {
+                                                                            const next = { ...prev };
+                                                                            Object.keys(next).forEach((key) => {
+                                                                                if (key.startsWith(`custom_${cRow.id}-`)) {
+                                                                                    delete next[key];
+                                                                                }
+                                                                            });
+                                                                            return next;
+                                                                        });
+                                                                    }}
                                                                     className="text-red-400 hover:text-red-600 transition-colors p-1 rounded-md hover:bg-red-50 flex-shrink-0"
                                                                 >
                                                                     <Trash2 className="w-4 h-4" />
@@ -1807,6 +2041,34 @@ const AuditPrograms = () => {
                                                             )}
                                                         </div>
                                                     </td>
+
+                                                    {periods.map((_, colIndex) => {
+                                                        const isChecked = selectedCells[`custom_${cRow.id}-${colIndex}`];
+                                                        return (
+                                                            <td
+                                                                key={`custom-check-${cRow.id}-${colIndex}`}
+                                                                className="p-1 border-b border-slate-100 align-middle bg-white group-hover:bg-slate-50"
+                                                            >
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => toggleCell(`custom_${cRow.id}`, colIndex)}
+                                                                    disabled={view === "view"}
+                                                                    className={cn(
+                                                                        "w-full h-8 rounded-md border flex items-center justify-center transition-all duration-200",
+                                                                        isChecked
+                                                                            ? "bg-emerald-100/80 border-emerald-400 border-2 text-emerald-600 shadow-sm shadow-emerald-500/10 hover:bg-emerald-200/80 cursor-pointer"
+                                                                            : "bg-white border-slate-200 hover:border-emerald-400 hover:bg-emerald-50/50 cursor-pointer hover:shadow-inner",
+                                                                    )}
+                                                                >
+                                                                    {isChecked && (
+                                                                        <div className="animate-in zoom-in-75 duration-200">
+                                                                            <Check className="w-4 h-4 stroke-[4px]" />
+                                                                        </div>
+                                                                    )}
+                                                                </button>
+                                                            </td>
+                                                        );
+                                                    })}
                                                 </tr>
                                             ))}
                                         </tbody>

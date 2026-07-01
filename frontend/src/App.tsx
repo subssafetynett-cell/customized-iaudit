@@ -8,8 +8,6 @@ import { AppLayout } from "./components/AppLayout";
 import { ProtectedRoute } from "./components/ProtectedRoute";
 import { SuperAdminProtectedRoute } from "./components/SuperAdminProtectedRoute";
 import { PageLoader } from "./components/PageLoader";
-import Watermark from "./components/Watermark";
-
 const Index = lazy(() => import("./pages/Index"));
 const Companies = lazy(() => import("./pages/Companies"));
 const CompanyDetail = lazy(() => import("./pages/CompanyDetail"));
@@ -59,7 +57,6 @@ const App = () => (
       <Toaster />
       <Sonner />
       <BrowserRouter>
-        <Watermark />
         <Suspense fallback={<PageLoader />}>
           <Routes>
             {/* Public Auth Routes */}

@@ -741,9 +741,10 @@ const CompaniesPage = () => {
                   setAddDeptSiteId(null);
                 }}
                 onSubmit={async (data) => {
+                  const targetSiteId = data.siteId ?? deptModalSite.id;
                   const res = await addDepartment(
                     selectedCompany.id,
-                    deptModalSite.id,
+                    targetSiteId,
                     data.name,
                     data
                   );
@@ -753,7 +754,8 @@ const CompaniesPage = () => {
                     setAddDeptSiteId(null);
                   }
                 }}
-                siteName={deptModalSite.name}
+                sites={selectedCompany.sites.map((s) => ({ id: s.id, name: s.name }))}
+                initialSiteId={deptModalSite.id}
                 mode="create"
               />
             );
@@ -799,12 +801,15 @@ const CompaniesPage = () => {
 
           {editDept && (
             <DepartmentModal
+              key={`edit-dept-${editDept.dept.id}`}
               open={!!editDept}
               onClose={() => setEditDept(null)}
               onSubmit={(data) => {
                 updateDepartment(selectedCompany.id, editDept.siteId, editDept.dept.id, data);
                 setEditDept(null);
               }}
+              initialData={editDept.dept}
+              siteName={selectedCompany.sites.find((s) => s.id === editDept.siteId)?.name}
               mode="edit"
             />
           )}

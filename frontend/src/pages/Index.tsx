@@ -38,7 +38,6 @@ import CompanyModal from "@/components/CompanyModal";
 import SiteModal from "@/components/SiteModal";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import TrialBanner from "@/components/TrialBanner";
 import { TourStepPopover } from "@/components/TourStepPopover";
 import { ONBOARDING_TOTAL_STEPS } from "@/lib/onboardingTour";
 import {
@@ -402,11 +401,6 @@ const Index = () => {
   return (
     <div className="min-h-screen bg-transparent px-6 py-6">
       <div className="max-w-[1600px] mx-auto space-y-6">
-        <TrialBanner
-          subscriptionStatus={currentUser?.subscriptionStatus}
-          trialEndDate={currentUser?.trialEndDate}
-        />
-
         {/* Top Stats Cards */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4">
           {stats.map((stat, i) => (

@@ -225,28 +225,21 @@ const LOGIN_SUCCESS_USER_SELECT = {
     emailVerifiedAt: true
 };
 
-const TRIAL_DURATION_DAYS = 14;
-
-/** Start a 14-day trial for eligible users (first login / signup). No-op if trial dates already exist or user is active/superadmin. */
+/** Trial removed — grant full access on first login/signup instead of starting a 14-day trial. */
 async function ensureUserTrialStarted(userId) {
     const user = await prisma.user.findUnique({
         where: { id: userId },
-        select: { id: true, role: true, subscriptionStatus: true, trialEndDate: true }
+        select: { id: true, role: true, subscriptionStatus: true }
     });
     if (!user || user.role === 'superadmin') return false;
     if (user.subscriptionStatus === 'active') return false;
-    if (user.trialEndDate) return false;
-
-    const trialStartDate = new Date();
-    const trialEndDate = new Date();
-    trialEndDate.setDate(trialStartDate.getDate() + TRIAL_DURATION_DAYS);
 
     await prisma.user.update({
         where: { id: userId },
         data: {
-            trialStartDate,
-            trialEndDate,
-            subscriptionStatus: 'trial'
+            subscriptionStatus: 'active',
+            trialStartDate: null,
+            trialEndDate: null,
         }
     });
     return true;
@@ -1081,99 +1074,9 @@ app.use('/', (req, res, next) => {
     next();
 });
 
-// Middleware to check if a user's trial has expired
-const checkTrialExpiration = async (req, res, next) => {
-    let userId;
-
-    if (req.user != null && req.user.id != null) {
-        const jwtId = Number.parseInt(String(req.user.id), 10);
-        const spoof =
-            (req.query && req.query.userId) ||
-            (req.body && req.body.userId) ||
-            (req.params && req.params.userId) ||
-            (req.headers && req.headers['x-user-id']);
-        if (spoof != null && spoof !== undefined && String(spoof) !== 'undefined' && String(spoof) !== 'null') {
-            const alt = Number.parseInt(String(spoof), 10);
-            if (!Number.isNaN(alt) && alt !== jwtId) {
-                return res.status(403).json({
-                    error: 'Forbidden',
-                    message: 'User scope does not match your session.'
-                });
-            }
-        }
-        userId = jwtId;
-    } else {
-        userId =
-            (req.query && req.query.userId) ||
-            (req.body && req.body.userId) ||
-            (req.params && req.params.userId) ||
-            (req.headers && req.headers['x-user-id']);
-    }
-
-    if (userId === undefined || userId === null || userId === 'undefined' || userId === 'null') {
-        return next();
-    }
-
-    try {
-        const parsedUserId = typeof userId === 'number' ? userId : Number.parseInt(String(userId), 10);
-        if (Number.isNaN(parsedUserId)) return next();
-
-        const user = await prisma.user.findUnique({
-            where: { id: parsedUserId },
-            select: { subscriptionStatus: true, trialEndDate: true, role: true }
-        });
-
-        if (!user) return next();
-
-        if (user.role === 'superadmin') {
-            return next();
-        }
-
-        // 1. Handle No Subscription Status (New Users)
-        // Allow the request so the frontend can display the TrialModal on the dashboard.
-        if (!user.subscriptionStatus) {
-            return next();
-        }
-
-        // 2. Handle Trial Status
-        if (user.subscriptionStatus === 'trial') {
-            const isExpired = user.trialEndDate && new Date(user.trialEndDate) < new Date();
-
-            if (isExpired) {
-                // Automatically update the status in DB for cleaner future checks
-                await prisma.user.update({
-                    where: { id: parsedUserId },
-                    data: { subscriptionStatus: 'expired' }
-                });
-
-                return res.status(403).json({
-                    error: 'TrialExpired',
-                    message: 'Your free trial has expired. Please upgrade to a subscription to continue.'
-                });
-            }
-
-            // Trial is still active
-            return next();
-        }
-
-        // 3. Handle Explicitly Expired Status
-        if (user.subscriptionStatus === 'expired') {
-            return res.status(403).json({
-                error: 'TrialExpired',
-                message: 'Your free trial has ended. Please upgrade your plan to continue using premium features.'
-            });
-        }
-
-        // 4. Handle Active Subscription
-        if (user.subscriptionStatus === 'active') {
-            return next();
-        }
-
-        next();
-    } catch (error) {
-        console.error('Middleware Trial Check Error:', error);
-        next();
-    }
+/** Trial removed — all non-superadmin users have full access without expiration checks. */
+const checkTrialExpiration = async (_req, _res, next) => {
+    next();
 };
 
 const TRIAL_GAP_ANALYSIS_LIMIT = 3;
@@ -1238,19 +1141,7 @@ async function countOrgSelfAssessments(actorId) {
     return total;
 }
 
-async function rejectIfTrialLimitExceeded(actorId, resource, projectedCount) {
-    const user = await loadUserSubscriptionFlags(actorId);
-    if (!userRequiresTrialLimits(user)) return null;
-    const limits = {
-        gapAnalysis: TRIAL_GAP_ANALYSIS_LIMIT,
-        selfAssessment: TRIAL_SELF_ASSESSMENT_LIMIT,
-        auditProgram: TRIAL_AUDIT_PROGRAM_LIMIT,
-    };
-    const limit = limits[resource];
-    if (limit == null) return null;
-    if (projectedCount > limit) {
-        return trialLimitResponse(resource, limit);
-    }
+async function rejectIfTrialLimitExceeded(_actorId, _resource, _projectedCount) {
     return null;
 }
 
@@ -3805,8 +3696,16 @@ app.get('/users/:id/status', authenticateToken, async (req, res) => {
         }
 
         let currentStatus = user.subscriptionStatus;
-        if (currentStatus === 'trial' && user.trialEndDate && new Date(user.trialEndDate) < new Date()) {
-            currentStatus = 'expired';
+        if (user.role !== 'superadmin' && currentStatus !== 'active') {
+            await prisma.user.update({
+                where: { id: targetId },
+                data: {
+                    subscriptionStatus: 'active',
+                    trialStartDate: null,
+                    trialEndDate: null,
+                },
+            });
+            currentStatus = 'active';
         }
 
         const viewingSelf = actorId === targetId;
@@ -4594,48 +4493,19 @@ app.post('/users/:id/start-trial', authenticateToken, async (req, res) => {
             return res.status(403).json({ error: 'Forbidden' });
         }
 
-        const existing = await prisma.user.findUnique({
+        await ensureUserTrialStarted(targetId);
+
+        const full = await prisma.user.findUnique({
             where: { id: targetId },
-            select: { trialStartDate: true, trialEndDate: true, subscriptionStatus: true, role: true }
+            select: LOGIN_SUCCESS_USER_SELECT
         });
-        if (!existing) {
+        if (!full) {
             return res.status(404).json({ error: 'User not found' });
         }
-        if (existing.role === 'superadmin') {
-            return res.status(400).json({ error: 'Trial is not available for this account' });
-        }
-        if (existing.subscriptionStatus === 'active') {
-            return res.status(400).json({ error: 'User already has an active subscription' });
-        }
-        if (existing.trialEndDate) {
-            const full = await prisma.user.findUnique({
-                where: { id: targetId },
-                select: LOGIN_SUCCESS_USER_SELECT
-            });
-            if (!full) {
-                return res.status(404).json({ error: 'User not found' });
-            }
-            return res.json(full);
-        }
-
-        const trialStartDate = new Date();
-        const trialEndDate = new Date();
-        trialEndDate.setDate(trialStartDate.getDate() + TRIAL_DURATION_DAYS);
-
-        const user = await prisma.user.update({
-            where: { id: targetId },
-            data: {
-                trialStartDate,
-                trialEndDate,
-                subscriptionStatus: 'trial'
-            }
-        });
-
-        const { password: _, ...userWithoutPassword } = user;
-        res.json(userWithoutPassword);
+        res.json(full);
     } catch (error) {
-        console.error('Failed to start trial:', error);
-        res.status(500).json({ error: 'Failed to start trial' });
+        console.error('Failed to activate user access:', error);
+        res.status(500).json({ error: 'Failed to activate user access' });
     }
 });
 
@@ -5071,7 +4941,7 @@ app.get('/audit-plans/:id', authenticateToken, checkTrialExpiration, async (req,
                 auditors: true,
                 auditProgram: {
                     include: {
-                        site: true,
+                        site: { include: { company: true } },
                         auditors: true,
                         leadAuditor: true
                     }
