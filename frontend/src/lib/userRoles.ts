@@ -98,3 +98,24 @@ export function mergeAuditorUserOptions<T extends { id?: number | string | null 
 
     return Array.from(byId.values());
 }
+
+/** Match a saved display name back to an org user id (for draft restore). */
+export function resolveOrgUserIdByDisplayName<
+    T extends {
+        id?: number | string | null;
+        firstName?: string | null;
+        lastName?: string | null;
+        email?: string | null;
+    },
+>(
+    users: T[],
+    displayName: string,
+    normalizeForMatch: (name: string) => string = (name) => name.trim().replace(/\s+/g, " "),
+): string | null {
+    const normalized = normalizeForMatch(displayName).toLowerCase();
+    if (!normalized) return null;
+    const match = users.find(
+        (u) => normalizeForMatch(formatUserDisplayName(u)).toLowerCase() === normalized,
+    );
+    return match?.id != null ? String(match.id) : null;
+}

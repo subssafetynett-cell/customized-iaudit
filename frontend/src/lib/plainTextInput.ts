@@ -174,6 +174,19 @@ export function sanitizeSelfAssessmentNameField(
     return s;
 }
 
+/** Same rules as saved person names — use when matching drafts to org users. */
+function normalizeSelfAssessmentPersonNameForMatchWithMax(value: string, maxLen: number): string {
+    return sanitizeSelfAssessmentNameField(value, maxLen, true);
+}
+
+export function normalizeSelfAssessmentAuditorNameForMatch(value: string): string {
+    return normalizeSelfAssessmentPersonNameForMatchWithMax(value, SELF_ASSESSMENT_NAME_MAX);
+}
+
+export function normalizeSelfAssessmentRepNameForMatch(value: string): string {
+    return normalizeSelfAssessmentPersonNameForMatchWithMax(value, SELF_ASSESSMENT_REP_MAX);
+}
+
 export function sanitizeSelfAssessmentEmail(value: string): string {
     let s = sanitizePlainTextInput(value, { maxLen: SELF_ASSESSMENT_EMAIL_MAX });
     return s.replace(/[^\w.@+-]/g, "").toLowerCase();

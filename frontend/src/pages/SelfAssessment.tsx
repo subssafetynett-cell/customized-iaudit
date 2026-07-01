@@ -45,6 +45,8 @@ import {
     sanitizeSelfAssessmentQuestionText,
     sanitizeSelfAssessmentScope,
     SELF_ASSESSMENT_REP_MAX,
+    normalizeSelfAssessmentAuditorNameForMatch,
+    normalizeSelfAssessmentRepNameForMatch,
 } from "@/lib/plainTextInput";
 import {
     PDF_EXPORT_JPEG_QUALITY,
@@ -64,6 +66,7 @@ import {
 import {
     canManageOrgUsers,
     formatUserDisplayName,
+    resolveOrgUserIdByDisplayName,
     usersEligibleAsAuditors,
 } from "@/lib/userRoles";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, PieChart, Pie, Legend } from "recharts";
@@ -426,6 +429,7 @@ const SelfAssessment = () => {
 
     const [currentClauseIndex, setCurrentClauseIndex] = useState(0);
     const draftSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const draftPendingSyncRef = useRef<Record<string, unknown> | null>(null);
 
     const buildSelfAssessmentDraft = useCallback((): Record<string, unknown> | null => {
         if (step !== "setup" && step !== "assessment") return null;
@@ -438,6 +442,8 @@ const SelfAssessment = () => {
             auditCompany,
             auditLocation,
             auditRepresentatives,
+            selectedAuditorUserId,
+            selectedRepresentativeUserId,
             contactEmail,
             auditScope,
             auditDate,
@@ -454,6 +460,8 @@ const SelfAssessment = () => {
         auditCompany,
         auditLocation,
         auditRepresentatives,
+        selectedAuditorUserId,
+        selectedRepresentativeUserId,
         contactEmail,
         auditScope,
         auditDate,
@@ -498,6 +506,58 @@ const SelfAssessment = () => {
         );
     }, [orgUsers, loggedInUser]);
 
+    const syncSelectionsFromDraft = useCallback((draft: Record<string, unknown>): boolean => {
+        if (orgUsers.length === 0) return false;
+
+        const resolveUser = (userId: string) =>
+            orgUsers.find((u) => String(u.id) === userId) ??
+            (loggedInUser && String(loggedInUser.id) === userId ? loggedInUser : null);
+
+        const savedAuditorId =
+            draft.selectedAuditorUserId != null ? String(draft.selectedAuditorUserId) : null;
+        const auditorId =
+            savedAuditorId ??
+            resolveOrgUserIdByDisplayName(
+                orgUsers,
+                String(draft.auditorName ?? ""),
+                normalizeSelfAssessmentAuditorNameForMatch,
+            );
+        let auditorResolved = false;
+        if (auditorId && resolveUser(auditorId)) {
+            applyAuditorUser(auditorId);
+            auditorResolved = true;
+        }
+
+        const savedRepId =
+            draft.selectedRepresentativeUserId != null
+                ? String(draft.selectedRepresentativeUserId)
+                : null;
+        const repId =
+            savedRepId ??
+            resolveOrgUserIdByDisplayName(
+                orgUsers,
+                String(draft.auditRepresentatives ?? ""),
+                normalizeSelfAssessmentRepNameForMatch,
+            );
+        let representativeResolved = false;
+        if (repId && resolveUser(repId)) {
+            applyRepresentativeUser(repId);
+            representativeResolved = true;
+        }
+
+        const fallbackUid = getStoredUserId();
+        if (fallbackUid != null) {
+            const fallbackId = String(fallbackUid);
+            if (!auditorResolved) applyAuditorUser(fallbackId);
+            if (!representativeResolved) applyRepresentativeUser(fallbackId);
+        }
+
+        return true;
+    }, [orgUsers, loggedInUser, applyAuditorUser, applyRepresentativeUser]);
+
+    const syncSelectionsFromDraftRef = useRef(syncSelectionsFromDraft);
+    syncSelectionsFromDraftRef.current = syncSelectionsFromDraft;
+
     useEffect(() => {
         let cancelled = false;
         (async () => {
@@ -522,10 +582,27 @@ const SelfAssessment = () => {
 
     useEffect(() => {
         if (orgUsers.length === 0) return;
+
+        if (draftPendingSyncRef.current) {
+            const pendingDraft = draftPendingSyncRef.current;
+            if (syncSelectionsFromDraft(pendingDraft)) {
+                draftPendingSyncRef.current = null;
+            }
+            return;
+        }
+
         const uid = getStoredUserId();
-        if (!uid || selectedAuditorUserId) return;
-        applyAuditorUser(String(uid));
-    }, [orgUsers, selectedAuditorUserId, applyAuditorUser]);
+        if (!uid) return;
+        if (!selectedAuditorUserId) applyAuditorUser(String(uid));
+        if (!selectedRepresentativeUserId) applyRepresentativeUser(String(uid));
+    }, [
+        orgUsers,
+        selectedAuditorUserId,
+        selectedRepresentativeUserId,
+        applyAuditorUser,
+        applyRepresentativeUser,
+        syncSelectionsFromDraft,
+    ]);
 
     const loadSavedAssessments = useCallback(async (restoreDraft = false) => {
         if (!dataOwnerUserId) return;
@@ -537,28 +614,42 @@ const SelfAssessment = () => {
         );
         setSavedAssessments(merged);
 
-        if (
-            restoreDraft &&
-            draft &&
-            typeof draft === "object" &&
-            draft.step === "assessment" &&
-            Array.isArray(draft.questions)
-        ) {
-            setStandard((draft.standard as typeof standard) || "");
-            setCompanyName(String(draft.companyName ?? ""));
-            setAuditorName(String(draft.auditorName ?? ""));
-            setAuditorPosition(String(draft.auditorPosition ?? ""));
-            setAuditCompany(String(draft.auditCompany ?? ""));
-            setAuditLocation(String(draft.auditLocation ?? ""));
-            setAuditRepresentatives(String(draft.auditRepresentatives ?? ""));
-            setContactEmail(String(draft.contactEmail ?? ""));
-            setAuditScope(String(draft.auditScope ?? ""));
-            setAuditDate(String(draft.auditDate ?? format(new Date(), "yyyy-MM-dd")));
-            setQuestions(draft.questions as Question[]);
-            setCurrentClauseIndex(
-                typeof draft.currentClauseIndex === "number" ? draft.currentClauseIndex : 0,
-            );
-            setStep("assessment");
+        if (restoreDraft && draft && typeof draft === "object") {
+            const draftStep = draft.step;
+            const canRestoreAssessment =
+                draftStep === "assessment" && Array.isArray(draft.questions);
+            const canRestoreSetup = draftStep === "setup";
+
+            if (canRestoreAssessment || canRestoreSetup) {
+                setStandard((draft.standard as typeof standard) || "");
+                setCompanyName(String(draft.companyName ?? ""));
+                setAuditorName(String(draft.auditorName ?? ""));
+                setAuditorPosition(String(draft.auditorPosition ?? ""));
+                setAuditCompany(String(draft.auditCompany ?? ""));
+                setAuditLocation(String(draft.auditLocation ?? ""));
+                setAuditRepresentatives(String(draft.auditRepresentatives ?? ""));
+                setContactEmail(String(draft.contactEmail ?? ""));
+                setAuditScope(String(draft.auditScope ?? ""));
+                setAuditDate(String(draft.auditDate ?? format(new Date(), "yyyy-MM-dd")));
+
+                if (canRestoreAssessment) {
+                    setQuestions(draft.questions as Question[]);
+                    setCurrentClauseIndex(
+                        typeof draft.currentClauseIndex === "number"
+                            ? draft.currentClauseIndex
+                            : 0,
+                    );
+                    setStep("assessment");
+                } else {
+                    setStep("setup");
+                }
+
+                if (!syncSelectionsFromDraftRef.current(draft)) {
+                    draftPendingSyncRef.current = draft;
+                } else {
+                    draftPendingSyncRef.current = null;
+                }
+            }
         }
     }, [dataOwnerUserId]);
 
