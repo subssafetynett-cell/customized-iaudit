@@ -7,6 +7,7 @@ let globalCompanies: Company[] = [];
 let listeners: Array<() => void> = [];
 let isInitialized = false;
 let globalLoading = false;
+let hasFetchedCompanies = false;
 let initializedUserId: string | null = null;
 
 function notify() {
@@ -48,6 +49,7 @@ async function fetchCompaniesFromApi() {
     const storedUser = localStorage.getItem("user");
     if (!storedUser) {
       globalLoading = false;
+      hasFetchedCompanies = true;
       notify();
       return;
     }
@@ -55,11 +57,13 @@ async function fetchCompaniesFromApi() {
     const user = JSON.parse(storedUser);
     if (!user.id) {
       globalLoading = false;
+      hasFetchedCompanies = true;
       notify();
       return;
     }
 
     globalLoading = true;
+    hasFetchedCompanies = false;
     notify();
 
     const response = await apiFetch(`/companies?_t=${Date.now()}`);
@@ -67,11 +71,11 @@ async function fetchCompaniesFromApi() {
       const data = await response.json();
       globalCompanies = data.map(normalizeCompany);
     }
-    globalLoading = false;
-    notify();
   } catch (error) {
     console.error("Failed to fetch companies:", error);
+  } finally {
     globalLoading = false;
+    hasFetchedCompanies = true;
     notify();
   }
 }
@@ -92,6 +96,11 @@ export function useCompanyStore() {
     if (isInitialized && initializedUserId !== String(currentUserId)) {
       isInitialized = false;
       globalCompanies = [];
+      hasFetchedCompanies = false;
+    }
+
+    if (!currentUserId) {
+      hasFetchedCompanies = true;
     }
 
     if (!isInitialized && currentUserId) {
@@ -320,21 +329,50 @@ export function useCompanyStore() {
       });
       if (response.ok) {
         const updated = await response.json();
-        globalCompanies = globalCompanies.map((c) =>
-          c.id === companyId
-            ? {
+        const targetSiteId = String(updated.siteId ?? data.siteId ?? siteId);
+        const sourceSiteId = String(siteId);
+
+        globalCompanies = globalCompanies.map((c) => {
+          if (c.id !== companyId) return c;
+
+          if (targetSiteId === sourceSiteId) {
+            return {
               ...c,
               sites: c.sites.map((s) =>
-                s.id === siteId
+                s.id === sourceSiteId
                   ? {
                     ...s,
-                    departments: s.departments.map((d) => d.id === deptId ? { ...d, ...updated, id: String(updated.id) } : d)
+                    departments: s.departments.map((d) =>
+                      d.id === deptId ? { ...d, ...updated, id: String(updated.id) } : d,
+                    ),
                   }
-                  : s
+                  : s,
               ),
-            }
-            : c
-        );
+            };
+          }
+
+          const existingDept = c.sites
+            .find((s) => s.id === sourceSiteId)
+            ?.departments.find((d) => d.id === deptId);
+
+          return {
+            ...c,
+            sites: c.sites.map((s) => {
+              if (s.id === sourceSiteId) {
+                return { ...s, departments: s.departments.filter((d) => d.id !== deptId) };
+              }
+              if (s.id === targetSiteId) {
+                const movedDept = {
+                  ...(existingDept ?? { id: deptId }),
+                  ...updated,
+                  id: String(updated.id),
+                };
+                return { ...s, departments: [...s.departments, movedDept] };
+              }
+              return s;
+            }),
+          };
+        });
         notify();
       }
     } catch (error) {
@@ -378,6 +416,7 @@ export function useCompanyStore() {
     updateCompany,
     refetchCompanies: fetchCompaniesFromApi,
     isLoading: globalLoading,
+    hasFetchedCompanies,
     getCompany: (id: string) => globalCompanies.find((c) => c.id === id),
   };
 }

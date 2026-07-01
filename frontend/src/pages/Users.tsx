@@ -179,7 +179,9 @@ function UsersPage() {
                     loggedInUser = null;
                 }
                 if (loggedInUser?.id != null) {
-                    const isCurrentUserInList = data.some((u: any) => u.id === loggedInUser!.id);
+                    const isCurrentUserInList = data.some(
+                        (u: any) => String(u.id) === String(loggedInUser!.id),
+                    );
                     if (!isCurrentUserInList) {
                         data.unshift(loggedInUser as any);
                     }

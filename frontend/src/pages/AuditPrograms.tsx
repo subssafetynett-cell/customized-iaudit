@@ -272,7 +272,7 @@ const AuditPrograms = () => {
                 const [sitesRes, companiesRes, usersRes, programsRes] = await Promise.all([
                     apiFetch("/sites"),
                     apiFetch("/companies"),
-                    apiFetch(`/users?creatorId=${user.id}`),
+                    apiFetch("/users"),
                     apiFetch(`/audit-programs?scope=org&full=true`),
                 ]);
                 const sitesData = sitesRes.ok ? await sitesRes.json() : [];
@@ -282,7 +282,7 @@ const AuditPrograms = () => {
 
                 if (user && user.id) {
                     if (Array.isArray(usersData)) {
-                        if (!usersData.some((u: any) => u.id === user.id)) {
+                        if (!usersData.some((u: any) => String(u.id) === String(user.id))) {
                             usersData.unshift(user);
                         }
                     } else {

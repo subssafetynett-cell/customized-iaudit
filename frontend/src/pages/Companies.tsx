@@ -809,7 +809,8 @@ const CompaniesPage = () => {
                 setEditDept(null);
               }}
               initialData={editDept.dept}
-              siteName={selectedCompany.sites.find((s) => s.id === editDept.siteId)?.name}
+              sites={selectedCompany.sites.map((s) => ({ id: s.id, name: s.name }))}
+              initialSiteId={editDept.siteId}
               mode="edit"
             />
           )}

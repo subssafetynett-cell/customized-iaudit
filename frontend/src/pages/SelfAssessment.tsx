@@ -59,7 +59,13 @@ import {
     persistSelfAssessmentsList,
     persistSelfAssessmentDraft,
     deleteSelfAssessmentPersisted,
+    type PersistedDataOwnerOptions,
 } from "@/lib/userPersistedData";
+import {
+    canManageOrgUsers,
+    formatUserDisplayName,
+    usersEligibleAsAuditors,
+} from "@/lib/userRoles";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, PieChart, Pie, Legend } from "recharts";
 
 // --- Types ---
@@ -372,6 +378,42 @@ const SelfAssessment = () => {
     const [contactEmail, setContactEmail] = useState("");
     const [auditScope, setAuditScope] = useState("");
 
+    type OrgUser = {
+        id: number | string;
+        firstName?: string | null;
+        lastName?: string | null;
+        email?: string | null;
+        role?: string;
+    };
+
+    const loggedInUser = React.useMemo(() => {
+        try {
+            return JSON.parse(localStorage.getItem("user") || "{}") as OrgUser & {
+                creatorId?: number | null;
+                role?: string;
+            };
+        } catch {
+            return null;
+        }
+    }, []);
+
+    const [orgUsers, setOrgUsers] = useState<OrgUser[]>([]);
+    const [dataOwnerUserId, setDataOwnerUserId] = useState<number | null>(() => getStoredUserId());
+    const [selectedAuditorUserId, setSelectedAuditorUserId] = useState("");
+    const [selectedRepresentativeUserId, setSelectedRepresentativeUserId] = useState("");
+
+    const dataOwnerOptions: PersistedDataOwnerOptions | undefined = React.useMemo(
+        () => (dataOwnerUserId ? { ownerUserId: dataOwnerUserId } : undefined),
+        [dataOwnerUserId],
+    );
+
+    const auditorOptions = React.useMemo(
+        () => usersEligibleAsAuditors(orgUsers),
+        [orgUsers],
+    );
+
+    const canPickOtherAccounts = canManageOrgUsers(loggedInUser) && auditorOptions.length > 1;
+
     // New State for enhancements
     const [savedAssessments, setSavedAssessments] = useState<SavedAssessment[]>([]);
     const [showValidationErrors, setShowValidationErrors] = useState(false);
@@ -423,12 +465,73 @@ const SelfAssessment = () => {
         if (draftSaveTimerRef.current) clearTimeout(draftSaveTimerRef.current);
         draftSaveTimerRef.current = setTimeout(() => {
             const draft = buildSelfAssessmentDraft();
-            if (draft) void persistSelfAssessmentDraft(draft);
+            if (draft) void persistSelfAssessmentDraft(draft, dataOwnerOptions);
         }, 1500);
-    }, [buildSelfAssessmentDraft]);
+    }, [buildSelfAssessmentDraft, dataOwnerOptions]);
+
+    const applyAuditorUser = useCallback((userId: string) => {
+        const user =
+            orgUsers.find((u) => String(u.id) === userId) ??
+            (loggedInUser && String(loggedInUser.id) === userId ? loggedInUser : null);
+        if (!user) return;
+
+        const numericId = Number(userId);
+        setSelectedAuditorUserId(userId);
+        if (Number.isFinite(numericId) && numericId > 0) {
+            setDataOwnerUserId(numericId);
+        }
+        setAuditorName(sanitizeSelfAssessmentNameField(formatUserDisplayName(user)));
+        if (user.email?.trim()) {
+            setContactEmail(sanitizeSelfAssessmentEmail(user.email));
+        }
+    }, [orgUsers, loggedInUser]);
+
+    const applyRepresentativeUser = useCallback((userId: string) => {
+        const user =
+            orgUsers.find((u) => String(u.id) === userId) ??
+            (loggedInUser && String(loggedInUser.id) === userId ? loggedInUser : null);
+        if (!user) return;
+
+        setSelectedRepresentativeUserId(userId);
+        setAuditRepresentatives(
+            sanitizeSelfAssessmentNameField(formatUserDisplayName(user), SELF_ASSESSMENT_REP_MAX),
+        );
+    }, [orgUsers, loggedInUser]);
+
+    useEffect(() => {
+        let cancelled = false;
+        (async () => {
+            try {
+                const res = await apiFetch("/users");
+                if (!res.ok || cancelled) return;
+                const data = await res.json();
+                const list: OrgUser[] = Array.isArray(data) ? data : [];
+                const uid = getStoredUserId();
+                if (uid && loggedInUser && !list.some((u) => String(u.id) === String(uid))) {
+                    list.unshift(loggedInUser);
+                }
+                if (!cancelled) setOrgUsers(list);
+            } catch (error) {
+                console.error("Failed to load users for self assessment", error);
+            }
+        })();
+        return () => {
+            cancelled = true;
+        };
+    }, [loggedInUser]);
+
+    useEffect(() => {
+        if (orgUsers.length === 0) return;
+        const uid = getStoredUserId();
+        if (!uid || selectedAuditorUserId) return;
+        applyAuditorUser(String(uid));
+    }, [orgUsers, selectedAuditorUserId, applyAuditorUser]);
 
     const loadSavedAssessments = useCallback(async (restoreDraft = false) => {
-        const { assessments, draft } = await fetchSelfAssessmentsPersisted<SavedAssessment>();
+        if (!dataOwnerUserId) return;
+        const { assessments, draft } = await fetchSelfAssessmentsPersisted<SavedAssessment>({
+            ownerUserId: dataOwnerUserId,
+        });
         const merged = await migrateLocalSelfAssessmentsToServer(
             assessments.map((a) => sanitizeSavedSelfAssessment(a) as SavedAssessment),
         );
@@ -457,7 +560,7 @@ const SelfAssessment = () => {
             );
             setStep("assessment");
         }
-    }, []);
+    }, [dataOwnerUserId]);
 
     useEffect(() => {
         void loadSavedAssessments(true);
@@ -475,7 +578,7 @@ const SelfAssessment = () => {
     };
 
     const saveToHistory = async (newAssessment: SavedAssessment): Promise<boolean> => {
-        const userId = getStoredUserId();
+        const userId = dataOwnerUserId ?? getStoredUserId();
         const safe = sanitizeSavedSelfAssessment({
             ...newAssessment,
             ...(userId ? { createdByUserId: userId, userId } : {}),
@@ -492,20 +595,20 @@ const SelfAssessment = () => {
             draftSaveTimerRef.current = null;
         }
 
-        const persisted = await persistSelfAssessmentsList(updated);
+        const persisted = await persistSelfAssessmentsList(updated, dataOwnerOptions);
         if (!persisted) {
             setSavedAssessments(previous);
             return false;
         }
-        await persistSelfAssessmentDraft(null);
+        await persistSelfAssessmentDraft(null, dataOwnerOptions);
         return persisted;
     };
 
     const deleteSavedAssessment = (id: string) => {
         const updated = savedAssessments.filter(a => a.id !== id);
         setSavedAssessments(updated);
-        void persistSelfAssessmentsList(updated);
-        void deleteSelfAssessmentPersisted(id);
+        void persistSelfAssessmentsList(updated, dataOwnerOptions);
+        void deleteSelfAssessmentPersisted(id, dataOwnerOptions);
         toast.success("Assessment deleted from history");
     };
 
@@ -561,20 +664,20 @@ const SelfAssessment = () => {
             toast.error("Please enter the Auditor Company Name.");
             return;
         }
-        if (!auditorName.trim()) {
-            toast.error("Please enter the Auditor Name.");
+        if (!selectedAuditorUserId) {
+            toast.error("Please select an auditor.");
             return;
         }
         if (!auditorPosition.trim()) {
             toast.error("Please enter the Auditor Position.");
             return;
         }
-        if (!auditLocation.trim()) {
-            toast.error("Please enter the Audit Location.");
+        if (!selectedRepresentativeUserId) {
+            toast.error("Please select company representatives.");
             return;
         }
-        if (!auditRepresentatives.trim()) {
-            toast.error("Please enter Company Representatives.");
+        if (!auditLocation.trim()) {
+            toast.error("Please enter the Audit Location.");
             return;
         }
         if (!contactEmail.trim()) {
@@ -612,7 +715,7 @@ const SelfAssessment = () => {
             questions: JSON.parse(JSON.stringify(initialQuestions)),
             step: "assessment",
             currentClauseIndex: 0,
-        });
+        }, dataOwnerOptions);
     };
 
     const handleAnswer = (id: string, answer: "yes" | "no") => {
@@ -1770,6 +1873,27 @@ const SelfAssessment = () => {
                             <>
                                 {/* Filters Row */}
                                 <div className="flex flex-col md:flex-row gap-4 mb-6">
+                                    {canPickOtherAccounts && (
+                                        <Select
+                                            value={selectedAuditorUserId}
+                                            onValueChange={applyAuditorUser}
+                                        >
+                                            <SelectTrigger className="w-full md:w-[240px] h-12 rounded-2xl border-slate-200 bg-white shadow-sm hover:border-slate-300 focus:ring-[#213847]/40">
+                                                <SelectValue placeholder="Select auditor account" />
+                                            </SelectTrigger>
+                                            <SelectContent className="rounded-xl border-slate-200 shadow-lg">
+                                                {auditorOptions.map((u) => (
+                                                    <SelectItem
+                                                        key={String(u.id)}
+                                                        value={String(u.id)}
+                                                        className="rounded-lg cursor-pointer"
+                                                    >
+                                                        {formatUserDisplayName(u)}
+                                                    </SelectItem>
+                                                ))}
+                                            </SelectContent>
+                                        </Select>
+                                    )}
                                     <div className="relative flex-1">
                                         <Search className="absolute left-4 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                                         <Input
@@ -1968,17 +2092,28 @@ const SelfAssessment = () => {
                                     {/* 5. Company Representatives */}
                                     <div className="space-y-2">
                                         <Label htmlFor="auditRepresentatives" className="text-sm font-semibold text-slate-700">Company Representatives <span className="text-red-500">*</span></Label>
-                                        <Input
-                                            id="auditRepresentatives"
-                                            placeholder="Enter names of representatives"
-                                            value={auditRepresentatives}
-                                            onChange={(e) =>
-                                            setAuditRepresentatives(
-                                                sanitizeSelfAssessmentNameField(e.target.value, SELF_ASSESSMENT_REP_MAX)
-                                            )
-                                        }
-                                            className="h-12 rounded-xl border-slate-200 bg-slate-50 shadow-sm focus-visible:ring-1 focus-visible:ring-[#213847]/40 w-full"
-                                        />
+                                        <Select
+                                            value={selectedRepresentativeUserId}
+                                            onValueChange={applyRepresentativeUser}
+                                        >
+                                            <SelectTrigger
+                                                id="auditRepresentatives"
+                                                className="h-12 rounded-xl border-slate-200 bg-slate-50 shadow-sm focus:ring-[#213847]/40 w-full"
+                                            >
+                                                <SelectValue placeholder="Select company representative" />
+                                            </SelectTrigger>
+                                            <SelectContent className="rounded-xl border-slate-200 shadow-lg">
+                                                {orgUsers.map((u) => (
+                                                    <SelectItem
+                                                        key={String(u.id)}
+                                                        value={String(u.id)}
+                                                        className="rounded-lg cursor-pointer"
+                                                    >
+                                                        {formatUserDisplayName(u)}
+                                                    </SelectItem>
+                                                ))}
+                                            </SelectContent>
+                                        </Select>
                                     </div>
                                 </div>
 
@@ -1988,13 +2123,28 @@ const SelfAssessment = () => {
                                         <Label htmlFor="auditor" className="text-sm font-semibold text-slate-700">
                                             Name of Auditor <span className="text-red-500">*</span>
                                         </Label>
-                                        <Input
-                                            id="auditor"
-                                            placeholder="Enter auditor name"
-                                            value={auditorName}
-                                            onChange={(e) => setAuditorName(sanitizeSelfAssessmentNameField(e.target.value))}
-                                            className="h-12 rounded-xl border-slate-200 bg-slate-50 shadow-sm focus-visible:ring-1 focus-visible:ring-[#213847]/40 w-full"
-                                        />
+                                        <Select
+                                            value={selectedAuditorUserId}
+                                            onValueChange={applyAuditorUser}
+                                        >
+                                            <SelectTrigger
+                                                id="auditor"
+                                                className="h-12 rounded-xl border-slate-200 bg-slate-50 shadow-sm focus:ring-[#213847]/40 w-full"
+                                            >
+                                                <SelectValue placeholder="Select auditor" />
+                                            </SelectTrigger>
+                                            <SelectContent className="rounded-xl border-slate-200 shadow-lg">
+                                                {auditorOptions.map((u) => (
+                                                    <SelectItem
+                                                        key={String(u.id)}
+                                                        value={String(u.id)}
+                                                        className="rounded-lg cursor-pointer"
+                                                    >
+                                                        {formatUserDisplayName(u)}
+                                                    </SelectItem>
+                                                ))}
+                                            </SelectContent>
+                                        </Select>
                                     </div>
 
                                     {/* 6.1 Auditor Position */}

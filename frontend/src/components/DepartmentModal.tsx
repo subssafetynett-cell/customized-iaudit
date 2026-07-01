@@ -22,7 +22,6 @@ interface Props {
     onSubmit: (data: any) => void;
     initialData?: Partial<Department>;
     mode?: "create" | "edit";
-    siteName?: string;
     sites?: SiteOption[];
     initialSiteId?: string;
     hideOverlay?: boolean;
@@ -65,7 +64,6 @@ export default function DepartmentModal({
     onSubmit,
     initialData,
     mode = "create",
-    siteName,
     sites = [],
     initialSiteId,
     hideOverlay = false,
@@ -162,7 +160,7 @@ export default function DepartmentModal({
             setSiteId("");
             return;
         }
-        if (mode !== "create" || sites.length === 0) {
+        if (sites.length === 0) {
             setSiteId("");
             return;
         }
@@ -172,7 +170,7 @@ export default function DepartmentModal({
                 ? initialSiteId
                 : sites[0].id;
         setSiteId(defaultId);
-    }, [open, mode, initialSiteId, siteOptionsKey, sites]);
+    }, [open, initialSiteId, siteOptionsKey, sites]);
 
     const handleSubmit = () => {
         const trimmedName = name.trim();
@@ -184,7 +182,7 @@ export default function DepartmentModal({
             setError(DEPT_NAME_ERROR_MESSAGE);
             return;
         }
-        if (mode === "create" && sites.length > 0 && !siteId) {
+        if (sites.length > 0 && !siteId) {
             setError("Please select a site");
             return;
         }
@@ -194,7 +192,7 @@ export default function DepartmentModal({
             status,
             manager,
             description: description.trim(),
-            ...(mode === "create" && siteId ? { siteId } : {}),
+            ...(siteId ? { siteId } : {}),
         });
         onClose();
     };
@@ -222,11 +220,6 @@ export default function DepartmentModal({
                             </>
                         )}
                     </DialogTitle>
-                    {mode === "edit" && siteName && (
-                        <p className="text-sm text-muted-foreground mt-1">
-                            For site: <span className="font-medium text-foreground">{siteName}</span>
-                        </p>
-                    )}
                 </DialogHeader>
 
                 <div className="flex-1 overflow-y-auto p-6 py-4 space-y-8">
@@ -238,7 +231,7 @@ export default function DepartmentModal({
                     </div>
 
                     <div className="space-y-4">
-                        {mode === "create" && sites.length > 0 && (
+                        {sites.length > 0 && (
                             <div className="space-y-2">
                                 <Label htmlFor="dept-site">Site *</Label>
                                 <Select value={siteId} onValueChange={(value) => { setSiteId(value); setError(""); }}>

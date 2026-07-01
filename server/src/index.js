@@ -1239,6 +1239,42 @@ async function collectOrgSubtreeUserIds(orgRootId) {
     return rows.map((r) => Number(r.id));
 }
 
+/**
+ * Org members visible to actor: walk up to account root, then include the full subtree.
+ * Ensures inviter, invitees, and sibling teammates all share one user list.
+ */
+async function collectOrgMemberUserIds(actorId) {
+    const id = Number(actorId);
+    if (!Number.isInteger(id) || id < 1) return [];
+
+    const rows = await prisma.$queryRaw`
+        WITH RECURSIVE ancestor AS (
+            SELECT id, "creatorId" FROM "User" WHERE id = ${id}
+            UNION
+            SELECT u.id, u."creatorId" FROM "User" u
+            INNER JOIN ancestor a ON u.id = a."creatorId"
+        ),
+        org_root AS (
+            SELECT id FROM ancestor WHERE "creatorId" IS NULL
+            LIMIT 1
+        ),
+        subtree AS (
+            SELECT id FROM org_root
+            UNION
+            SELECT u.id FROM "User" u
+            INNER JOIN subtree s ON u."creatorId" = s.id
+        )
+        SELECT id FROM subtree
+    `;
+    const memberIds = rows.map((r) => Number(r.id)).filter((n) => Number.isInteger(n) && n > 0);
+    if (memberIds.length > 0) return memberIds;
+
+    const orgRootId = await resolveActorOrgRootId(id);
+    const fromRoot = await collectOrgSubtreeUserIds(orgRootId);
+    if (fromRoot.length > 0) return fromRoot;
+    return [id];
+}
+
 async function actorCanAccessTargetUser(actorId, targetUserId) {
     if (actorId === targetUserId) return true;
     const [actor, target] = await Promise.all([
@@ -1321,12 +1357,25 @@ async function rejectIfAuditee(actorId, res, message = 'Forbidden') {
 
 async function actorCanAccessAuditProgram(actorId, program) {
     if (!program) return false;
-    if (await actorIsAuditee(actorId)) {
-        return auditeeCanAccessSiteId(actorId, program.siteId);
+    const actorIdNum = Number(actorId);
+    if (!Number.isInteger(actorIdNum) || actorIdNum < 1) return false;
+
+    if (await actorIsAuditee(actorIdNum)) {
+        return auditeeCanAccessSiteId(actorIdNum, program.siteId);
     }
-    if (program.userId != null && (await actorCanAccessTargetUser(actorId, program.userId))) return true;
-    if (program.leadAuditorId === actorId) return true;
-    if (Array.isArray(program.auditors) && program.auditors.some((a) => a.id === actorId)) return true;
+
+    if (program.userId === actorIdNum) return true;
+    if (program.leadAuditorId === actorIdNum) return true;
+    if (Array.isArray(program.auditors) && program.auditors.some((a) => Number(a.id) === actorIdNum)) {
+        return true;
+    }
+
+    if (await actorHasFullOrgAuditVisibility(actorIdNum)) {
+        if (program.userId != null && (await actorCanAccessTargetUser(actorIdNum, program.userId))) {
+            return true;
+        }
+    }
+
     return false;
 }
 
@@ -1442,18 +1491,39 @@ const ASSIGNED_FINDINGS_PLAN_SELECT = {
 
 async function actorCanAccessAuditPlan(actorId, plan) {
     if (!plan) return false;
-    if (await actorIsAuditee(actorId)) {
+    const actorIdNum = Number(actorId);
+    if (!Number.isInteger(actorIdNum) || actorIdNum < 1) return false;
+
+    if (await actorIsAuditee(actorIdNum)) {
         const siteId = plan.auditProgram?.siteId ?? plan.siteId;
-        if (siteId != null && (await auditeeCanAccessSiteId(actorId, siteId))) return true;
-        if (await actorIsFindingAssignee(actorId, plan)) return true;
+        if (siteId != null && (await auditeeCanAccessSiteId(actorIdNum, siteId))) return true;
+        if (await actorIsFindingAssignee(actorIdNum, plan)) return true;
         return false;
     }
-    if (plan.userId != null && (await actorCanAccessTargetUser(actorId, plan.userId))) return true;
-    if (plan.userId === actorId) return true;
-    if (plan.leadAuditorId === actorId) return true;
-    if (Array.isArray(plan.auditors) && plan.auditors.some((a) => a.id === actorId)) return true;
-    if (plan.auditProgram && await actorCanAccessAuditProgram(actorId, plan.auditProgram)) return true;
-    if (await actorIsFindingAssignee(actorId, plan)) return true;
+
+    if (plan.userId === actorIdNum) return true;
+    if (plan.leadAuditorId === actorIdNum) return true;
+    if (Array.isArray(plan.auditors) && plan.auditors.some((a) => Number(a.id) === actorIdNum)) {
+        return true;
+    }
+
+    if (plan.auditProgram) {
+        if (plan.auditProgram.userId === actorIdNum) return true;
+        if (plan.auditProgram.leadAuditorId === actorIdNum) return true;
+        if (
+            Array.isArray(plan.auditProgram.auditors) &&
+            plan.auditProgram.auditors.some((a) => Number(a.id) === actorIdNum)
+        ) {
+            return true;
+        }
+    }
+
+    if (await actorHasFullOrgAuditVisibility(actorIdNum)) {
+        if (plan.userId != null && (await actorCanAccessTargetUser(actorIdNum, plan.userId))) return true;
+        if (plan.auditProgram && (await actorCanAccessAuditProgram(actorIdNum, plan.auditProgram))) return true;
+    }
+
+    if (await actorIsFindingAssignee(actorIdNum, plan)) return true;
     return false;
 }
 
@@ -1949,6 +2019,33 @@ function selfAssessmentDraftForUser(draft, userId) {
     return { ...draft, ownerUserId: userId };
 }
 
+/** Gap/self-assessment rows are keyed per user; org admins may manage a teammate's store. */
+async function resolveAssessmentStoreOwnerId(actorId, requestedOwnerId) {
+    const actor = Number(actorId);
+    if (!Number.isInteger(actor) || actor < 1) {
+        const err = new Error('Forbidden');
+        err.statusCode = 403;
+        throw err;
+    }
+    const requested =
+        requestedOwnerId != null && requestedOwnerId !== ''
+            ? Number(requestedOwnerId)
+            : actor;
+    if (!Number.isInteger(requested) || requested < 1) return actor;
+    if (requested === actor) return actor;
+    if (!(await actorCanAccessTargetUser(actor, requested))) {
+        const err = new Error('Forbidden');
+        err.statusCode = 403;
+        throw err;
+    }
+    if (!(await actorCanManageOrgUsers(actor))) {
+        const err = new Error('Forbidden');
+        err.statusCode = 403;
+        throw err;
+    }
+    return requested;
+}
+
 /** One-time import: only records explicitly owned by this user (never unowned org-wide rows). */
 async function importOwnedSelfAssessmentsFromOrgStore(actorId) {
     const orgRootUserId = await resolveActorOrgRootId(actorId);
@@ -2022,6 +2119,43 @@ function buildOrgSubtreePlanVisibilityOr(subtreeIds) {
         { auditProgram: { is: { leadAuditorId: { in: subtreeIds } } } },
         { auditProgram: { is: { auditors: { some: { id: { in: subtreeIds } } } } } }
     ];
+}
+
+/** Programs visible to a user through direct ownership or auditor assignment only. */
+function buildAssignedAuditProgramVisibilityOr(actorId) {
+    const id = Number(actorId);
+    if (!Number.isInteger(id) || id < 1) return [{ userId: -1 }];
+    return [
+        { userId: id },
+        { leadAuditorId: id },
+        { auditors: { some: { id } } },
+    ];
+}
+
+/** Plans visible through direct assignment or via an assigned audit program. */
+function buildAssignedAuditPlanVisibilityOr(actorId) {
+    const id = Number(actorId);
+    if (!Number.isInteger(id) || id < 1) return [{ userId: -1 }];
+    return [
+        { userId: id },
+        { leadAuditorId: id },
+        { auditors: { some: { id } } },
+        { auditProgram: { is: { userId: id } } },
+        { auditProgram: { is: { leadAuditorId: id } } },
+        { auditProgram: { is: { auditors: { some: { id } } } } },
+    ];
+}
+
+/** Org admins / account owners see the full org audit catalog; invited teammates see assignments only. */
+async function actorHasFullOrgAuditVisibility(actorId) {
+    const id = Number(actorId);
+    if (!Number.isInteger(id) || id < 1) return false;
+    const actor = await prisma.user.findUnique({
+        where: { id },
+        select: { role: true },
+    });
+    if (normalizeUserRole(actor?.role) === 'superadmin') return true;
+    return actorCanManageOrgUsers(id);
 }
 
 // Basic health check endpoint (includes DB — avoids marking server healthy when Prisma is broken)
@@ -2404,9 +2538,28 @@ app.post('/sites/:siteId/departments', authenticateToken, checkTrialExpiration, 
 
 // Update a department
 app.put('/departments/:id', authenticateToken, checkTrialExpiration, async (req, res) => {
+    const actorId = Number(req.user.id);
+    if (await rejectIfAuditee(actorId, res)) return;
+
     const { id } = req.params;
-    const { name, code, status, manager, description } = req.body;
+    const { name, code, status, manager, description, siteId } = req.body;
     try {
+        const parsedDeptId = Number.parseInt(id, 10);
+        if (!Number.isFinite(parsedDeptId)) {
+            return res.status(400).json({ error: 'Invalid department ID' });
+        }
+
+        const existing = await prisma.department.findUnique({
+            where: { id: parsedDeptId },
+            include: { site: { select: { id: true, companyId: true } } },
+        });
+        if (!existing?.site) {
+            return res.status(404).json({ error: 'Department not found' });
+        }
+        if (!(await actorCanAssignAuditeeToSite(actorId, existing.site.id))) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
+
         const data = {};
         if (name !== undefined) {
             const deptNameLenErr = organizationTextLengthError(name, DEPT_TEXT_LIMITS.name, 'Department name');
@@ -2431,13 +2584,35 @@ app.put('/departments/:id', authenticateToken, checkTrialExpiration, async (req,
         if (description !== undefined) {
             data.description = sanitizePlainText(description, DEPT_TEXT_LIMITS.description, { preserveNewlines: true });
         }
+        if (siteId !== undefined) {
+            const parsedSiteId = Number.parseInt(siteId, 10);
+            if (!Number.isFinite(parsedSiteId)) {
+                return res.status(400).json({ error: 'Invalid site ID' });
+            }
+            const targetSite = await prisma.site.findUnique({
+                where: { id: parsedSiteId },
+                select: { id: true, companyId: true },
+            });
+            if (!targetSite) {
+                return res.status(404).json({ error: 'Site not found' });
+            }
+            if (!(await actorCanAssignAuditeeToSite(actorId, targetSite.id))) {
+                return res.status(403).json({ error: 'Forbidden' });
+            }
+            if (targetSite.companyId !== existing.site.companyId) {
+                return res.status(400).json({
+                    error: 'Department can only be moved to a site within the same company',
+                });
+            }
+            data.siteId = parsedSiteId;
+        }
 
         if (Object.keys(data).length === 0) {
             return res.status(400).json({ error: 'No valid fields to update' });
         }
 
         const department = await prisma.department.update({
-            where: { id: Number.parseInt(id) },
+            where: { id: parsedDeptId },
             data
         });
         res.json(department);
@@ -3601,8 +3776,7 @@ app.get('/users', authenticateToken, async (req, res) => {
             const all = await prisma.user.findMany({ select: { id: true } });
             allowedIds = all.map((u) => u.id);
         } else {
-            const orgRootId = await getOrgRootUserId(actorId);
-            allowedIds = await collectOrgSubtreeUserIds(orgRootId);
+            allowedIds = await collectOrgMemberUserIds(actorId);
         }
 
         if (allowedIds.length === 0) {
@@ -3628,6 +3802,7 @@ app.get('/users', authenticateToken, async (req, res) => {
                 customRoleName: true,
                 isActive: true,
                 emailVerifiedAt: true,
+                creatorId: true,
                 createdAt: true
             },
             orderBy: [{ createdAt: 'desc' }, { id: 'desc' }]
@@ -4528,12 +4703,16 @@ app.get('/audit-programs', authenticateToken, checkTrialExpiration, async (req, 
             userId === 'null';
 
         if (useOrgScope && req.user.role !== 'superadmin') {
-            const orgRootId = await resolveActorOrgRootId(actorId);
-            if (!(await actorCanReadOrgAssessmentStore(actorId, orgRootId))) {
+            if (!(await actorCanReadOrgAssessmentStore(actorId, await resolveActorOrgRootId(actorId)))) {
                 return res.status(403).json({ error: 'Forbidden' });
             }
-            const subtreeIds = await collectOrgSubtreeUserIds(orgRootId);
-            programWhere = { OR: buildOrgSubtreeProgramVisibilityOr(subtreeIds) };
+            if (await actorHasFullOrgAuditVisibility(actorId)) {
+                const orgRootId = await resolveActorOrgRootId(actorId);
+                const subtreeIds = await collectOrgSubtreeUserIds(orgRootId);
+                programWhere = { OR: buildOrgSubtreeProgramVisibilityOr(subtreeIds) };
+            } else {
+                programWhere = { OR: buildAssignedAuditProgramVisibilityOr(actorId) };
+            }
         } else {
             let scopeUserId;
             if (userId && userId !== 'undefined' && userId !== 'null') {
@@ -4809,12 +4988,16 @@ app.get('/audit-plans', authenticateToken, checkTrialExpiration, async (req, res
                 userId === 'null';
 
             if (useOrgScope) {
-                const orgRootId = await resolveActorOrgRootId(actorId);
-                if (!(await actorCanReadOrgAssessmentStore(actorId, orgRootId))) {
+                if (!(await actorCanReadOrgAssessmentStore(actorId, await resolveActorOrgRootId(actorId)))) {
                     return res.status(403).json({ error: 'Forbidden' });
                 }
-                const subtreeIds = await collectOrgSubtreeUserIds(orgRootId);
-                whereClause.OR = buildOrgSubtreePlanVisibilityOr(subtreeIds);
+                if (await actorHasFullOrgAuditVisibility(actorId)) {
+                    const orgRootId = await resolveActorOrgRootId(actorId);
+                    const subtreeIds = await collectOrgSubtreeUserIds(orgRootId);
+                    whereClause.OR = buildOrgSubtreePlanVisibilityOr(subtreeIds);
+                } else {
+                    whereClause.OR = buildAssignedAuditPlanVisibilityOr(actorId);
+                }
             } else {
                 let scopeUserId = Number.parseInt(String(userId), 10);
                 if (Number.isNaN(scopeUserId)) {
@@ -5213,16 +5396,21 @@ app.get('/gap-analyses', authenticateToken, async (req, res) => {
                 canWrite: false,
             });
         }
-        const { userId, analyses, draft, row } = await ensureUserGapAnalysisStore(actorId);
+        const storeOwnerId = await resolveAssessmentStoreOwnerId(actorId, req.query.ownerUserId);
+        const { userId, analyses, draft, row } = await ensureUserGapAnalysisStore(storeOwnerId);
         res.json({
             userId,
             orgRootUserId: userId,
+            storeOwnerId,
             analyses,
             draft,
             updatedAt: row.updatedAt,
             canWrite: await actorCanWriteOrgAssessmentStore(actorId),
         });
     } catch (error) {
+        if (error?.statusCode === 403) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
         console.error('Error loading gap analyses:', error);
         res.status(500).json({ error: 'Failed to load gap analyses' });
     }
@@ -5234,22 +5422,23 @@ app.put('/gap-analyses', authenticateToken, async (req, res) => {
         if (!(await actorCanWriteOrgAssessmentStore(actorId))) {
             return res.status(403).json({ error: 'Forbidden', message: 'Read-only role cannot modify gap analyses.' });
         }
-        await ensureUserGapAnalysisStore(actorId);
+        const storeOwnerId = await resolveAssessmentStoreOwnerId(actorId, req.body?.ownerUserId);
+        await ensureUserGapAnalysisStore(storeOwnerId);
         const { analyses, draft } = req.body ?? {};
         const existing = await prisma.userGapAnalysisStore.findUnique({
-            where: { userId: actorId },
+            where: { userId: storeOwnerId },
         });
-        const ownedExisting = filterGapAnalysesForUser(existing?.analyses, actorId);
+        const ownedExisting = filterGapAnalysesForUser(existing?.analyses, storeOwnerId);
         const data = {
             analyses:
                 analyses !== undefined
-                    ? stampGapAnalysesForUser(filterGapAnalysesForUser(analyses, actorId), actorId)
+                    ? stampGapAnalysesForUser(filterGapAnalysesForUser(analyses, storeOwnerId), storeOwnerId)
                     : ownedExisting,
             draft:
                 draft !== undefined
                     ? draft === null
                         ? null
-                        : gapAnalysisDraftForUser({ ...draft, ownerUserId: actorId }, actorId)
+                        : gapAnalysisDraftForUser({ ...draft, ownerUserId: storeOwnerId }, storeOwnerId)
                     : (existing?.draft ?? null),
         };
         if (analyses !== undefined) {
@@ -5265,12 +5454,15 @@ app.put('/gap-analyses', authenticateToken, async (req, res) => {
             }
         }
         const row = await prisma.userGapAnalysisStore.upsert({
-            where: { userId: actorId },
-            create: { userId: actorId, ...data },
+            where: { userId: storeOwnerId },
+            create: { userId: storeOwnerId, ...data },
             update: data,
         });
-        res.json({ ok: true, userId: actorId, orgRootUserId: actorId, updatedAt: row.updatedAt });
+        res.json({ ok: true, userId: storeOwnerId, orgRootUserId: storeOwnerId, updatedAt: row.updatedAt });
     } catch (error) {
+        if (error?.statusCode === 403) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
         console.error('Error saving gap analyses:', error);
         res.status(500).json({ error: 'Failed to save gap analyses' });
     }
@@ -5282,18 +5474,22 @@ app.delete('/gap-analyses/:externalId', authenticateToken, async (req, res) => {
         if (!(await actorCanWriteOrgAssessmentStore(actorId))) {
             return res.status(403).json({ error: 'Forbidden' });
         }
-        const { analyses } = await ensureUserGapAnalysisStore(actorId);
+        const storeOwnerId = await resolveAssessmentStoreOwnerId(actorId, req.query.ownerUserId);
+        const { analyses } = await ensureUserGapAnalysisStore(storeOwnerId);
         const externalId = String(req.params.externalId || '');
         const next = analyses.filter((a) => String(a?.id) !== externalId);
         if (next.length === analyses.length) {
             return res.status(404).json({ error: 'Gap analysis not found' });
         }
         await prisma.userGapAnalysisStore.update({
-            where: { userId: actorId },
-            data: { analyses: stampGapAnalysesForUser(next, actorId) },
+            where: { userId: storeOwnerId },
+            data: { analyses: stampGapAnalysesForUser(next, storeOwnerId) },
         });
         res.status(204).send();
     } catch (error) {
+        if (error?.statusCode === 403) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
         console.error('Error deleting gap analysis:', error);
         res.status(500).json({ error: 'Failed to delete gap analysis' });
     }
@@ -5312,16 +5508,21 @@ app.get('/self-assessments', authenticateToken, async (req, res) => {
                 canWrite: false,
             });
         }
-        const { userId, assessments, draft, row } = await ensureUserSelfAssessmentStore(actorId);
+        const storeOwnerId = await resolveAssessmentStoreOwnerId(actorId, req.query.ownerUserId);
+        const { userId, assessments, draft, row } = await ensureUserSelfAssessmentStore(storeOwnerId);
         res.json({
             userId,
             orgRootUserId: userId,
+            storeOwnerId,
             assessments,
             draft,
             updatedAt: row.updatedAt,
             canWrite: actorCanWriteSelfAssessmentStore(actorId),
         });
     } catch (error) {
+        if (error?.statusCode === 403) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
         console.error('Error loading self assessments:', error);
         res.status(500).json({ error: 'Failed to load self assessments' });
     }
@@ -5333,25 +5534,26 @@ app.put('/self-assessments', authenticateToken, async (req, res) => {
         if (!actorCanWriteSelfAssessmentStore(actorId)) {
             return res.status(403).json({ error: 'Forbidden', message: 'Cannot modify self assessments.' });
         }
-        await ensureUserSelfAssessmentStore(actorId);
+        const storeOwnerId = await resolveAssessmentStoreOwnerId(actorId, req.body?.ownerUserId);
+        await ensureUserSelfAssessmentStore(storeOwnerId);
         const { assessments, draft } = req.body ?? {};
         const existing = await prisma.userSelfAssessmentStore.findUnique({
-            where: { userId: actorId },
+            where: { userId: storeOwnerId },
         });
-        const ownedExisting = filterSelfAssessmentsForUser(existing?.assessments, actorId);
+        const ownedExisting = filterSelfAssessmentsForUser(existing?.assessments, storeOwnerId);
         const data = {
             assessments:
                 assessments !== undefined
                     ? stampSelfAssessmentsForUser(
-                          filterSelfAssessmentsForUser(assessments, actorId),
-                          actorId,
+                          filterSelfAssessmentsForUser(assessments, storeOwnerId),
+                          storeOwnerId,
                       )
                     : ownedExisting,
             draft:
                 draft !== undefined
                     ? draft === null
                         ? null
-                        : selfAssessmentDraftForUser({ ...draft, ownerUserId: actorId }, actorId)
+                        : selfAssessmentDraftForUser({ ...draft, ownerUserId: storeOwnerId }, storeOwnerId)
                     : (existing?.draft ?? null),
         };
         if (assessments !== undefined) {
@@ -5367,12 +5569,15 @@ app.put('/self-assessments', authenticateToken, async (req, res) => {
             }
         }
         const row = await prisma.userSelfAssessmentStore.upsert({
-            where: { userId: actorId },
-            create: { userId: actorId, ...data },
+            where: { userId: storeOwnerId },
+            create: { userId: storeOwnerId, ...data },
             update: data,
         });
-        res.json({ ok: true, userId: actorId, orgRootUserId: actorId, updatedAt: row.updatedAt });
+        res.json({ ok: true, userId: storeOwnerId, orgRootUserId: storeOwnerId, updatedAt: row.updatedAt });
     } catch (error) {
+        if (error?.statusCode === 403) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
         console.error('Error saving self assessments:', error);
         res.status(500).json({ error: 'Failed to save self assessments' });
     }
@@ -5384,18 +5589,22 @@ app.delete('/self-assessments/:externalId', authenticateToken, async (req, res) 
         if (!actorCanWriteSelfAssessmentStore(actorId)) {
             return res.status(403).json({ error: 'Forbidden' });
         }
-        const { assessments } = await ensureUserSelfAssessmentStore(actorId);
+        const storeOwnerId = await resolveAssessmentStoreOwnerId(actorId, req.query.ownerUserId);
+        const { assessments } = await ensureUserSelfAssessmentStore(storeOwnerId);
         const externalId = String(req.params.externalId || '');
         const next = assessments.filter((a) => String(a?.id) !== externalId);
         if (next.length === assessments.length) {
             return res.status(404).json({ error: 'Self assessment not found' });
         }
         await prisma.userSelfAssessmentStore.update({
-            where: { userId: actorId },
-            data: { assessments: stampSelfAssessmentsForUser(next, actorId) },
+            where: { userId: storeOwnerId },
+            data: { assessments: stampSelfAssessmentsForUser(next, storeOwnerId) },
         });
         res.status(204).send();
     } catch (error) {
+        if (error?.statusCode === 403) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
         console.error('Error deleting self assessment:', error);
         res.status(500).json({ error: 'Failed to delete self assessment' });
     }

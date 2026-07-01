@@ -47,7 +47,13 @@ import {
     persistGapAnalysesList,
     persistGapAnalysisDraft,
     deleteGapAnalysisPersisted,
+    type PersistedDataOwnerOptions,
 } from "@/lib/userPersistedData";
+import {
+    canManageOrgUsers,
+    formatUserDisplayName,
+    usersEligibleAsAuditors,
+} from "@/lib/userRoles";
 import { guardTrialCreate } from "@/lib/trialLimits";
 import {
     sanitizeGapAnalysisField,
@@ -149,6 +155,42 @@ const GapAnalysis = () => {
     const [scope, setScope] = useState("");
     const [auditCompany, setAuditCompany] = useState("");
 
+    type OrgUser = {
+        id: number | string;
+        firstName?: string | null;
+        lastName?: string | null;
+        email?: string | null;
+        role?: string;
+    };
+
+    const loggedInUser = React.useMemo(() => {
+        try {
+            return JSON.parse(localStorage.getItem("user") || "{}") as OrgUser & {
+                creatorId?: number | null;
+                role?: string;
+            };
+        } catch {
+            return null;
+        }
+    }, []);
+
+    const [orgUsers, setOrgUsers] = useState<OrgUser[]>([]);
+    const [dataOwnerUserId, setDataOwnerUserId] = useState<number | null>(() => getStoredUserId());
+    const [selectedAuditorUserId, setSelectedAuditorUserId] = useState("");
+    const [selectedRepresentativeUserId, setSelectedRepresentativeUserId] = useState("");
+
+    const dataOwnerOptions: PersistedDataOwnerOptions | undefined = React.useMemo(
+        () => (dataOwnerUserId ? { ownerUserId: dataOwnerUserId } : undefined),
+        [dataOwnerUserId],
+    );
+
+    const auditorOptions = React.useMemo(
+        () => usersEligibleAsAuditors(orgUsers),
+        [orgUsers],
+    );
+
+    const canPickOtherAccounts = canManageOrgUsers(loggedInUser) && auditorOptions.length > 1;
+
     // Analysis State
     const [questions, setQuestions] = useState<AuditQuestion[]>([]);
     const [savedAnalyses, setSavedAnalyses] = useState<SavedGapAnalysis[]>([]);
@@ -215,15 +257,74 @@ const GapAnalysis = () => {
         if (draftSaveTimerRef.current) clearTimeout(draftSaveTimerRef.current);
         draftSaveTimerRef.current = setTimeout(() => {
             const draft = buildGapDraftPayload();
-            if (draft) void persistGapAnalysisDraft(draft);
+            if (draft) void persistGapAnalysisDraft(draft, dataOwnerOptions);
         }, 1500);
-    }, [buildGapDraftPayload]);
+    }, [buildGapDraftPayload, dataOwnerOptions]);
 
-    // Load saved analyses from API (with localStorage backup / migration)
+    const applyAuditorUser = React.useCallback((userId: string) => {
+        const user =
+            orgUsers.find((u) => String(u.id) === userId) ??
+            (loggedInUser && String(loggedInUser.id) === userId ? loggedInUser : null);
+        if (!user) return;
+
+        const numericId = Number(userId);
+        setSelectedAuditorUserId(userId);
+        if (Number.isFinite(numericId) && numericId > 0) {
+            setDataOwnerUserId(numericId);
+        }
+        setAuditorName(sanitizeGapAnalysisShortField(formatUserDisplayName(user)));
+        if (user.email?.trim()) {
+            setContactEmail(sanitizeGapAnalysisField(user.email));
+        }
+    }, [orgUsers, loggedInUser]);
+
+    const applyRepresentativeUser = React.useCallback((userId: string) => {
+        const user =
+            orgUsers.find((u) => String(u.id) === userId) ??
+            (loggedInUser && String(loggedInUser.id) === userId ? loggedInUser : null);
+        if (!user) return;
+
+        setSelectedRepresentativeUserId(userId);
+        setRepresentatives(sanitizeGapAnalysisLongField(formatUserDisplayName(user)));
+    }, [orgUsers, loggedInUser]);
+
     React.useEffect(() => {
         let cancelled = false;
         (async () => {
-            const { analyses, draft } = await fetchGapAnalysesPersisted<SavedGapAnalysis>();
+            try {
+                const res = await apiFetch("/users");
+                if (!res.ok || cancelled) return;
+                const data = await res.json();
+                const list: OrgUser[] = Array.isArray(data) ? data : [];
+                const uid = getStoredUserId();
+                if (uid && loggedInUser && !list.some((u) => String(u.id) === String(uid))) {
+                    list.unshift(loggedInUser);
+                }
+                if (!cancelled) setOrgUsers(list);
+            } catch (error) {
+                console.error("Failed to load users for gap analysis", error);
+            }
+        })();
+        return () => {
+            cancelled = true;
+        };
+    }, [loggedInUser]);
+
+    React.useEffect(() => {
+        if (orgUsers.length === 0) return;
+        const uid = getStoredUserId();
+        if (!uid || selectedAuditorUserId) return;
+        applyAuditorUser(String(uid));
+    }, [orgUsers, selectedAuditorUserId, applyAuditorUser]);
+
+    // Load saved analyses from API (with localStorage backup / migration)
+    React.useEffect(() => {
+        if (!dataOwnerUserId) return;
+        let cancelled = false;
+        (async () => {
+            const { analyses, draft } = await fetchGapAnalysesPersisted<SavedGapAnalysis>({
+                ownerUserId: dataOwnerUserId,
+            });
             if (cancelled) return;
             const merged = await migrateLocalGapAnalysesToServer(
                 analyses.map(sanitizeSavedGapAnalysis),
@@ -253,7 +354,7 @@ const GapAnalysis = () => {
         return () => {
             cancelled = true;
         };
-    }, []);
+    }, [dataOwnerUserId]);
 
     const openNewGapAnalysisSetup = () => {
         if (!guardTrialCreate("gapAnalysis", savedAnalyses.length)) return;
@@ -270,7 +371,7 @@ const GapAnalysis = () => {
         const isNew = !savedAnalyses.some((a) => a.id === analysisId);
         if (isNew && !guardTrialCreate("gapAnalysis", savedAnalyses.length)) return;
 
-        const userId = getStoredUserId();
+        const userId = dataOwnerUserId ?? getStoredUserId();
         const newAnalysis = sanitizeSavedGapAnalysis({
             id: analysisId,
             ...(userId ? { createdByUserId: userId, userId } : {}),
@@ -293,13 +394,13 @@ const GapAnalysis = () => {
             : [newAnalysis, ...savedAnalyses];
 
         setSavedAnalyses(updated);
-        const persisted = await persistGapAnalysesList(updated);
+        const persisted = await persistGapAnalysesList(updated, dataOwnerOptions);
         if (!persisted) {
             setSavedAnalyses(savedAnalyses);
             return;
         }
         if (status === "Completed") {
-            void persistGapAnalysisDraft(null);
+            void persistGapAnalysisDraft(null, dataOwnerOptions);
         }
 
         if (!currentId) setCurrentId(newAnalysis.id);
@@ -309,8 +410,8 @@ const GapAnalysis = () => {
     const deleteAnalysis = (id: string) => {
         const updated = savedAnalyses.filter(a => a.id !== id);
         setSavedAnalyses(updated);
-        void persistGapAnalysesList(updated);
-        void deleteGapAnalysisPersisted(id);
+        void persistGapAnalysesList(updated, dataOwnerOptions);
+        void deleteGapAnalysisPersisted(id, dataOwnerOptions);
         toast.success("Analysis deleted");
     };
 
@@ -331,7 +432,7 @@ const GapAnalysis = () => {
     };
 
     const startAnalysis = () => {
-        if (!companyName || !standard || !auditorName) {
+        if (!companyName || !standard || !selectedAuditorUserId) {
             toast.error("Please fill in all required fields.");
             return;
         }
@@ -363,7 +464,7 @@ const GapAnalysis = () => {
             status: "In Progress",
             step: "analysis",
             currentClauseIndex: 0,
-        });
+        }, dataOwnerOptions);
     };
 
     const uniqueClauses = Array.from(new Set(questions.map(q => q.clause)));
@@ -614,6 +715,29 @@ const GapAnalysis = () => {
                     <div className="space-y-6">
                         {/* Search and Filter */}
                         <div className="flex flex-col md:flex-row gap-4 px-4 sm:px-0">
+                            {canPickOtherAccounts && (
+                                <div className="w-full md:w-72">
+                                    <Select
+                                        value={selectedAuditorUserId}
+                                        onValueChange={applyAuditorUser}
+                                    >
+                                        <SelectTrigger className="h-10 rounded-xl border-slate-200 bg-white focus:ring-[#213847]/40 w-full text-slate-600 shadow-sm">
+                                            <SelectValue placeholder="Select auditor account" />
+                                        </SelectTrigger>
+                                        <SelectContent className="rounded-xl border-slate-200 shadow-lg">
+                                            {auditorOptions.map((u) => (
+                                                <SelectItem
+                                                    key={String(u.id)}
+                                                    value={String(u.id)}
+                                                    className="rounded-lg cursor-pointer"
+                                                >
+                                                    {formatUserDisplayName(u)}
+                                                </SelectItem>
+                                            ))}
+                                        </SelectContent>
+                                    </Select>
+                                </div>
+                            )}
                             <div className="relative flex-1 md:max-w-md">
                                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
                                 <Input
@@ -814,21 +938,47 @@ const GapAnalysis = () => {
                                         </div>
                                         <div className="space-y-2">
                                             <Label className="text-sm font-semibold text-slate-700">Representatives</Label>
-                                            <Input
-                                                value={representatives}
-                                                onChange={e => setRepresentatives(sanitizeGapAnalysisLongField(e.target.value))}
-                                                placeholder="Company Reps"
-                                                className="h-12 rounded-xl border-slate-200 bg-slate-50 shadow-sm focus-visible:ring-1 focus-visible:ring-[#213847]/40 w-full"
-                                            />
+                                            <Select
+                                                value={selectedRepresentativeUserId}
+                                                onValueChange={applyRepresentativeUser}
+                                            >
+                                                <SelectTrigger className="h-12 rounded-xl border-slate-200 bg-slate-50 shadow-sm focus:ring-[#213847]/40 w-full">
+                                                    <SelectValue placeholder="Select company representative" />
+                                                </SelectTrigger>
+                                                <SelectContent className="rounded-xl border-slate-200 shadow-lg">
+                                                    {orgUsers.map((u) => (
+                                                        <SelectItem
+                                                            key={String(u.id)}
+                                                            value={String(u.id)}
+                                                            className="rounded-lg cursor-pointer"
+                                                        >
+                                                            {formatUserDisplayName(u)}
+                                                        </SelectItem>
+                                                    ))}
+                                                </SelectContent>
+                                            </Select>
                                         </div>
                                         <div className="space-y-2">
                                             <Label className="text-sm font-semibold text-slate-700">Auditor Name <span className="text-red-500">*</span></Label>
-                                            <Input
-                                                value={auditorName}
-                                                onChange={e => setAuditorName(sanitizeGapAnalysisShortField(e.target.value))}
-                                                placeholder="Your Name"
-                                                className="h-12 rounded-xl border-slate-200 bg-slate-50 shadow-sm focus-visible:ring-1 focus-visible:ring-[#213847]/40 w-full"
-                                            />
+                                            <Select
+                                                value={selectedAuditorUserId}
+                                                onValueChange={applyAuditorUser}
+                                            >
+                                                <SelectTrigger className="h-12 rounded-xl border-slate-200 bg-slate-50 shadow-sm focus:ring-[#213847]/40 w-full">
+                                                    <SelectValue placeholder="Select auditor" />
+                                                </SelectTrigger>
+                                                <SelectContent className="rounded-xl border-slate-200 shadow-lg">
+                                                    {auditorOptions.map((u) => (
+                                                        <SelectItem
+                                                            key={String(u.id)}
+                                                            value={String(u.id)}
+                                                            className="rounded-lg cursor-pointer"
+                                                        >
+                                                            {formatUserDisplayName(u)}
+                                                        </SelectItem>
+                                                    ))}
+                                                </SelectContent>
+                                            </Select>
                                         </div>
                                         <div className="space-y-2">
                                             <Label className="text-sm font-semibold text-slate-700">Contact Email</Label>

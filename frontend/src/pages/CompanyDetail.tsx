@@ -308,7 +308,8 @@ export default function CompanyDetail() {
             setEditDept(null);
           }}
           initialData={editDept.dept}
-          siteName={company.sites.find((s) => s.id === editDept.siteId)?.name}
+          sites={company.sites.map((s) => ({ id: s.id, name: s.name }))}
+          initialSiteId={editDept.siteId}
           mode="edit"
         />
       )}
