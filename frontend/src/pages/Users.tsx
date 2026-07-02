@@ -7,7 +7,6 @@ import {
     UserPlus,
     Search,
     MoreHorizontal,
-    User as UserIcon,
     Mail,
     Shield,
     Smartphone,
@@ -119,10 +118,36 @@ function UsersPage() {
     const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
     const [userToDelete, setUserToDelete] = useState<any>(null);
     const [loggedInUserId, setLoggedInUserId] = useState<number | string | null>(null);
-    const { user: storedUser } = useStoredUser();
-    const isOrgAdmin = canManageOrgUsers(
+    const { user: storedUser, setUser: setStoredUser } = useStoredUser();
+    const clientCanManage = canManageOrgUsers(
         storedUser as { role?: string; creatorId?: number | null } | null,
     );
+    const [canManageUsers, setCanManageUsers] = useState(clientCanManage);
+
+    useEffect(() => {
+        setCanManageUsers(
+            canManageOrgUsers(
+                storedUser as { role?: string; creatorId?: number | null } | null,
+            ),
+        );
+    }, [storedUser]);
+
+    useEffect(() => {
+        let cancelled = false;
+        (async () => {
+            try {
+                const res = await apiFetch("/users/manage-access");
+                if (cancelled || !res.ok) return;
+                const data = await res.json();
+                if (!cancelled) setCanManageUsers(data.allowed === true);
+            } catch {
+                if (!cancelled) setCanManageUsers(clientCanManage);
+            }
+        })();
+        return () => {
+            cancelled = true;
+        };
+    }, [clientCanManage]);
 
     const isSignedInUser = (rowUser: { id?: number | string }) => {
         if (loggedInUserId == null || rowUser?.id == null) return false;
@@ -179,10 +204,12 @@ function UsersPage() {
                     loggedInUser = null;
                 }
                 if (loggedInUser?.id != null) {
-                    const isCurrentUserInList = data.some(
+                    const selfFromApi = data.find(
                         (u: any) => String(u.id) === String(loggedInUser!.id),
                     );
-                    if (!isCurrentUserInList) {
+                    if (selfFromApi) {
+                        setStoredUser({ ...loggedInUser, ...selfFromApi });
+                    } else {
                         data.unshift(loggedInUser as any);
                     }
                 }
@@ -252,7 +279,7 @@ function UsersPage() {
     };
 
     const handleToggleStatus = async (user: any) => {
-        if (!isOrgAdmin) {
+        if (!canManageUsers) {
             toast.error("Only administrators can change user status.");
             return;
         }
@@ -300,7 +327,7 @@ function UsersPage() {
 
     const handleDeleteUser = async () => {
         if (!userToDelete) return;
-        if (!isOrgAdmin) {
+        if (!canManageUsers) {
             toast.error("Only administrators can delete users.");
             return;
         }
@@ -362,7 +389,7 @@ function UsersPage() {
                         <p className="text-sm text-muted-foreground mt-0.5">Manage system users, their roles and access status</p>
                     </div>
 
-                    {isOrgAdmin && (
+                    {canManageUsers && (
                         <div>
                             <Button
                                 id="tour-step-create-user"
@@ -370,7 +397,7 @@ function UsersPage() {
                                 size="sm"
                                 className="w-full sm:w-auto gap-1.5 shadow-sm bg-[#213847] hover:bg-[#213847]/90 text-white rounded-xl px-5 h-11 transition-all"
                             >
-                                <UserPlus className="h-4 w-4" /> Create User
+                                <UserPlus className="h-4 w-4" /> Invite User
                             </Button>
                         </div>
                     )}
@@ -447,8 +474,17 @@ function UsersPage() {
                                     <TableRow>
                                         <TableCell colSpan={7} className="h-64 text-center">
                                             <div className="flex flex-col items-center justify-center py-10">
-                                                <UserIcon className="h-10 w-10 text-muted-foreground/40 mb-3" />
-                                                <p className="text-sm text-muted-foreground">No users found</p>
+                                                <UsersIcon className="h-10 w-10 text-muted-foreground/40 mb-3" />
+                                                <p className="text-sm text-muted-foreground mb-4">No users found</p>
+                                                {canManageUsers && (
+                                                    <Button
+                                                        onClick={() => openModal("create")}
+                                                        size="sm"
+                                                        className="gap-1.5 bg-[#213847] hover:bg-[#213847]/90 text-white rounded-xl"
+                                                    >
+                                                        <UserPlus className="h-4 w-4" /> Invite User
+                                                    </Button>
+                                                )}
                                             </div>
                                         </TableCell>
                                     </TableRow>
@@ -505,12 +541,12 @@ function UsersPage() {
                                                         <DropdownMenuItem onClick={() => openModal("view", user)} className="cursor-pointer">
                                                             <Eye className="h-4 w-4 mr-2" /> View Details
                                                         </DropdownMenuItem>
-                                                        {(isOrgAdmin || isSignedInUser(user)) && (
+                                                        {(canManageUsers || isSignedInUser(user)) && (
                                                             <DropdownMenuItem onClick={() => openModal("edit", user)} className="cursor-pointer">
                                                                 <Edit2 className="h-4 w-4 mr-2" /> Edit User
                                                             </DropdownMenuItem>
                                                         )}
-                                                        {isOrgAdmin && !user.emailVerifiedAt && (
+                                                        {canManageUsers && !user.emailVerifiedAt && (
                                                             <DropdownMenuItem
                                                                 onClick={() => handleResendVerification(user)}
                                                                 className="cursor-pointer font-medium"
@@ -518,7 +554,7 @@ function UsersPage() {
                                                                 <Mail className="h-4 w-4 mr-2" /> Resend verification
                                                             </DropdownMenuItem>
                                                         )}
-                                                        {isOrgAdmin && (
+                                                        {canManageUsers && (
                                                             <DropdownMenuItem
                                                                 onClick={() => handleToggleStatus(user)}
                                                                 className="cursor-pointer font-medium"
@@ -536,7 +572,7 @@ function UsersPage() {
                                                                 )}
                                                             </DropdownMenuItem>
                                                         )}
-                                                        {isOrgAdmin && !isSignedInUser(user) && (
+                                                        {canManageUsers && !isSignedInUser(user) && (
                                                             <>
                                                                 <DropdownMenuSeparator />
                                                                 <DropdownMenuItem
@@ -588,17 +624,17 @@ function UsersPage() {
                 }}
                 mode={modalMode}
                 initialData={selectedUser}
-                canManageRoles={isOrgAdmin}
+                canManageRoles={canManageUsers}
             />
 
-            {/* Step 10: Create User button */}
+            {/* Step 10: Invite User button */}
             {showOnboardingGuide && onboardingStep === 10 && (
                 <TourStepPopover
                     targetId="tour-step-create-user"
                     step={10}
                     totalSteps={ONBOARDING_TOTAL_STEPS}
-                    title="Add User"
-                    description="Click 'Create User' to start adding your team members."
+                    title="Invite User"
+                    description="Click 'Invite User' to start adding your team members."
                     onNext={() => goToTourStep(11)}
                     onBack={() => navigate("/companies?onboarding=true&step=9")}
                     onClose={() => {
@@ -618,14 +654,14 @@ function UsersPage() {
                 />
             )}
 
-            {/* Step 11: Create User modal */}
+            {/* Step 11: Invite User modal */}
             {showOnboardingGuide && onboardingStep === 11 && showCreate && (
                 <TourStepPopover
                     targetId="tour-step-user-modal"
                     step={11}
                     totalSteps={ONBOARDING_TOTAL_STEPS}
-                    title="Add User Details"
-                    description="Fill in the user details and assign a role, then click Create User, or press Next to continue."
+                    title="Invite User Details"
+                    description="Fill in the user details and assign a role, then click Invite User, or press Next to continue."
                     onNext={() => goToTourStep(12)}
                     onBack={() => goToTourStep(10)}
                     onClose={() => {

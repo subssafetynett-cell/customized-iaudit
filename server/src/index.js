@@ -3831,6 +3831,110 @@ app.get('/users/lookup-by-email', authenticateToken, async (req, res) => {
     }
 });
 
+app.get('/users/manage-access', authenticateToken, async (req, res) => {
+    const actorId = Number(req.user.id);
+    try {
+        const allowed = await actorCanManageOrgUsers(actorId);
+        res.json({ allowed });
+    } catch (error) {
+        console.error('Error checking user management access:', error);
+        res.status(500).json({ error: 'Failed to check access' });
+    }
+});
+
+app.get('/users/invite-auditee/access', authenticateToken, async (req, res) => {
+    const actorId = Number(req.user.id);
+    try {
+        const [allowed, isCompanyAdmin, isLeadAuditor] = await Promise.all([
+            actorCanInviteAuditee(actorId),
+            actorCanManageOrgUsers(actorId),
+            actorIsLeadAuditor(actorId),
+        ]);
+        res.json({ allowed, isCompanyAdmin, isLeadAuditor });
+    } catch (error) {
+        console.error('Error checking invite auditee access:', error);
+        res.status(500).json({ error: 'Failed to check access' });
+    }
+});
+
+app.get('/users/auditees', authenticateToken, async (req, res) => {
+    const actorId = Number(req.user.id);
+    if (!(await actorCanInviteAuditee(actorId))) {
+        return res.status(403).json({ error: 'Forbidden' });
+    }
+    try {
+        const orgRootId = await getOrgRootUserId(actorId);
+        const allowedIds =
+            orgRootId != null ? await collectOrgSubtreeUserIds(orgRootId) : [actorId];
+        if (allowedIds.length === 0) {
+            return res.json([]);
+        }
+
+        const auditees = await prisma.user.findMany({
+            where: {
+                id: { in: allowedIds },
+                role: 'auditee',
+            },
+            select: {
+                id: true,
+                firstName: true,
+                lastName: true,
+                email: true,
+                mobile: true,
+                role: true,
+                isActive: true,
+                emailVerifiedAt: true,
+                createdAt: true,
+            },
+            orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        });
+
+        if (auditees.length === 0) {
+            return res.json([]);
+        }
+
+        const auditeeIds = auditees.map((u) => u.id);
+        const sites = await prisma.site.findMany({
+            where: { userId: { in: auditeeIds } },
+            select: {
+                id: true,
+                name: true,
+                userId: true,
+                company: { select: { name: true } },
+            },
+            orderBy: { name: 'asc' },
+        });
+        const sitesByAuditeeId = new Map();
+        for (const site of sites) {
+            if (site.userId == null) continue;
+            const uid = Number(site.userId);
+            if (!sitesByAuditeeId.has(uid)) sitesByAuditeeId.set(uid, []);
+            sitesByAuditeeId.get(uid).push(site);
+        }
+
+        res.json(
+            auditees.map((u) => {
+                const assigned = sitesByAuditeeId.get(u.id) ?? [];
+                const siteIds = assigned.map((s) => s.id);
+                const siteLabels = assigned.map(
+                    (s) => `${s.name} (${s.company?.name ?? 'Company'})`,
+                );
+                const primary = assigned[0];
+                return {
+                    ...u,
+                    siteIds,
+                    siteLabels,
+                    siteId: primary?.id ?? null,
+                    siteLabel: siteLabels.length > 0 ? siteLabels.join(', ') : null,
+                };
+            }),
+        );
+    } catch (error) {
+        console.error('Error listing auditees:', error);
+        res.status(500).json({ error: 'Failed to list auditees' });
+    }
+});
+
 // Get single user status quickly (never return PII or raw Stripe price IDs)
 app.get('/users/:id/status', authenticateToken, async (req, res) => {
     const { id } = req.params;
@@ -3959,99 +4063,6 @@ app.post('/users/:id/resend-verification', authenticateToken, async (req, res) =
         }
         console.error('Error resending user verification:', error);
         res.status(500).json({ error: 'Failed to send verification code' });
-    }
-});
-
-app.get('/users/invite-auditee/access', authenticateToken, async (req, res) => {
-    const actorId = Number(req.user.id);
-    try {
-        const [allowed, isCompanyAdmin, isLeadAuditor] = await Promise.all([
-            actorCanInviteAuditee(actorId),
-            actorCanManageOrgUsers(actorId),
-            actorIsLeadAuditor(actorId),
-        ]);
-        res.json({ allowed, isCompanyAdmin, isLeadAuditor });
-    } catch (error) {
-        console.error('Error checking invite auditee access:', error);
-        res.status(500).json({ error: 'Failed to check access' });
-    }
-});
-
-app.get('/users/auditees', authenticateToken, async (req, res) => {
-    const actorId = Number(req.user.id);
-    if (!(await actorCanInviteAuditee(actorId))) {
-        return res.status(403).json({ error: 'Forbidden' });
-    }
-    try {
-        const orgRootId = await getOrgRootUserId(actorId);
-        const allowedIds =
-            orgRootId != null ? await collectOrgSubtreeUserIds(orgRootId) : [actorId];
-        if (allowedIds.length === 0) {
-            return res.json([]);
-        }
-
-        const auditees = await prisma.user.findMany({
-            where: {
-                id: { in: allowedIds },
-                role: 'auditee',
-            },
-            select: {
-                id: true,
-                firstName: true,
-                lastName: true,
-                email: true,
-                mobile: true,
-                role: true,
-                isActive: true,
-                emailVerifiedAt: true,
-                createdAt: true,
-            },
-            orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-        });
-
-        if (auditees.length === 0) {
-            return res.json([]);
-        }
-
-        const auditeeIds = auditees.map((u) => u.id);
-        const sites = await prisma.site.findMany({
-            where: { userId: { in: auditeeIds } },
-            select: {
-                id: true,
-                name: true,
-                userId: true,
-                company: { select: { name: true } },
-            },
-            orderBy: { name: 'asc' },
-        });
-        const sitesByAuditeeId = new Map();
-        for (const site of sites) {
-            if (site.userId == null) continue;
-            const uid = Number(site.userId);
-            if (!sitesByAuditeeId.has(uid)) sitesByAuditeeId.set(uid, []);
-            sitesByAuditeeId.get(uid).push(site);
-        }
-
-        res.json(
-            auditees.map((u) => {
-                const assigned = sitesByAuditeeId.get(u.id) ?? [];
-                const siteIds = assigned.map((s) => s.id);
-                const siteLabels = assigned.map(
-                    (s) => `${s.name} (${s.company?.name ?? 'Company'})`,
-                );
-                const primary = assigned[0];
-                return {
-                    ...u,
-                    siteIds,
-                    siteLabels,
-                    siteId: primary?.id ?? null,
-                    siteLabel: siteLabels.length > 0 ? siteLabels.join(', ') : null,
-                };
-            }),
-        );
-    } catch (error) {
-        console.error('Error listing auditees:', error);
-        res.status(500).json({ error: 'Failed to list auditees' });
     }
 });
 
