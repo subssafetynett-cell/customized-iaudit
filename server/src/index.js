@@ -3845,8 +3845,15 @@ app.get('/users/lookup-by-email', authenticateToken, async (req, res) => {
 app.get('/users/manage-access', authenticateToken, async (req, res) => {
     const actorId = Number(req.user.id);
     try {
-        const allowed = await actorCanManageOrgUsers(actorId);
-        res.json({ allowed });
+        const [canManageUsers, canInviteUsers] = await Promise.all([
+            actorCanManageOrgUsers(actorId),
+            actorCanInviteOrgUser(actorId),
+        ]);
+        res.json({
+            allowed: canInviteUsers,
+            canInviteUsers,
+            canManageUsers,
+        });
     } catch (error) {
         console.error('Error checking user management access:', error);
         res.status(500).json({ error: 'Failed to check access' });

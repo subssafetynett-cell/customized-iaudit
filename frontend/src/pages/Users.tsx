@@ -64,6 +64,12 @@ import {
 
 import { apiFetch } from "@/lib/api";
 
+type UsersAccessResponse = {
+    allowed?: boolean;
+    canInviteUsers?: boolean;
+    canManageUsers?: boolean;
+};
+
 export default function Users() {
     const [searchParams] = useSearchParams();
     if (searchParams.get("inviteAuditee") === "true") {
@@ -119,17 +125,22 @@ function UsersPage() {
     const [userToDelete, setUserToDelete] = useState<any>(null);
     const [loggedInUserId, setLoggedInUserId] = useState<number | string | null>(null);
     const { user: storedUser, setUser: setStoredUser } = useStoredUser();
-    const clientCanManage = canManageOrgUsers(
+    const clientCanManageUsers = canManageOrgUsers(
         storedUser as { role?: string; creatorId?: number | null } | null,
     );
-    const [canManageUsers, setCanManageUsers] = useState(clientCanManage);
+    const clientCanInviteUsers = !isAuditeeRole((storedUser as { role?: string } | null)?.role);
+    const [canManageUsers, setCanManageUsers] = useState(clientCanManageUsers);
+    const [canInviteUsers, setCanInviteUsers] = useState(clientCanInviteUsers);
 
     useEffect(() => {
-        setCanManageUsers(
-            canManageOrgUsers(
-                storedUser as { role?: string; creatorId?: number | null } | null,
-            ),
+        const nextCanManageUsers = canManageOrgUsers(
+            storedUser as { role?: string; creatorId?: number | null } | null,
         );
+        const nextCanInviteUsers = !isAuditeeRole((storedUser as { role?: string } | null)?.role);
+        setCanManageUsers(
+            nextCanManageUsers,
+        );
+        setCanInviteUsers(nextCanInviteUsers);
     }, [storedUser]);
 
     useEffect(() => {
@@ -138,16 +149,22 @@ function UsersPage() {
             try {
                 const res = await apiFetch("/users/manage-access");
                 if (cancelled || !res.ok) return;
-                const data = await res.json();
-                if (!cancelled) setCanManageUsers(data.allowed === true);
+                const data = (await res.json()) as UsersAccessResponse;
+                if (!cancelled) {
+                    setCanManageUsers(data.canManageUsers === true);
+                    setCanInviteUsers(data.canInviteUsers === true || data.allowed === true);
+                }
             } catch {
-                if (!cancelled) setCanManageUsers(clientCanManage);
+                if (!cancelled) {
+                    setCanManageUsers(clientCanManageUsers);
+                    setCanInviteUsers(clientCanInviteUsers);
+                }
             }
         })();
         return () => {
             cancelled = true;
         };
-    }, [clientCanManage]);
+    }, [clientCanManageUsers, clientCanInviteUsers]);
 
     const isSignedInUser = (rowUser: { id?: number | string }) => {
         if (loggedInUserId == null || rowUser?.id == null) return false;
@@ -389,16 +406,18 @@ function UsersPage() {
                         <p className="text-sm text-muted-foreground mt-0.5">Manage system users, their roles and access status</p>
                     </div>
 
-                    <div>
-                        <Button
-                            id="tour-step-create-user"
-                            onClick={() => openModal("create")}
-                            size="sm"
-                            className="w-full sm:w-auto gap-1.5 shadow-sm bg-[#213847] hover:bg-[#213847]/90 text-white rounded-xl px-5 h-11 transition-all"
-                        >
-                            <UserPlus className="h-4 w-4" /> Invite User
-                        </Button>
-                    </div>
+                    {canInviteUsers && (
+                        <div>
+                            <Button
+                                id="tour-step-create-user"
+                                onClick={() => openModal("create")}
+                                size="sm"
+                                className="w-full sm:w-auto gap-1.5 shadow-sm bg-[#213847] hover:bg-[#213847]/90 text-white rounded-xl px-5 h-11 transition-all"
+                            >
+                                <UserPlus className="h-4 w-4" /> Invite User
+                            </Button>
+                        </div>
+                    )}
                 </div>
 
                 {/* Filters Row */}
@@ -474,13 +493,15 @@ function UsersPage() {
                                             <div className="flex flex-col items-center justify-center py-10">
                                                 <UsersIcon className="h-10 w-10 text-muted-foreground/40 mb-3" />
                                                 <p className="text-sm text-muted-foreground mb-4">No users found</p>
-                                                <Button
-                                                    onClick={() => openModal("create")}
-                                                    size="sm"
-                                                    className="gap-1.5 bg-[#213847] hover:bg-[#213847]/90 text-white rounded-xl"
-                                                >
-                                                    <UserPlus className="h-4 w-4" /> Invite User
-                                                </Button>
+                                                {canInviteUsers && (
+                                                    <Button
+                                                        onClick={() => openModal("create")}
+                                                        size="sm"
+                                                        className="gap-1.5 bg-[#213847] hover:bg-[#213847]/90 text-white rounded-xl"
+                                                    >
+                                                        <UserPlus className="h-4 w-4" /> Invite User
+                                                    </Button>
+                                                )}
                                             </div>
                                         </TableCell>
                                     </TableRow>
