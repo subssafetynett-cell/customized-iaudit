@@ -389,18 +389,16 @@ function UsersPage() {
                         <p className="text-sm text-muted-foreground mt-0.5">Manage system users, their roles and access status</p>
                     </div>
 
-                    {canManageUsers && (
-                        <div>
-                            <Button
-                                id="tour-step-create-user"
-                                onClick={() => openModal("create")}
-                                size="sm"
-                                className="w-full sm:w-auto gap-1.5 shadow-sm bg-[#213847] hover:bg-[#213847]/90 text-white rounded-xl px-5 h-11 transition-all"
-                            >
-                                <UserPlus className="h-4 w-4" /> Invite User
-                            </Button>
-                        </div>
-                    )}
+                    <div>
+                        <Button
+                            id="tour-step-create-user"
+                            onClick={() => openModal("create")}
+                            size="sm"
+                            className="w-full sm:w-auto gap-1.5 shadow-sm bg-[#213847] hover:bg-[#213847]/90 text-white rounded-xl px-5 h-11 transition-all"
+                        >
+                            <UserPlus className="h-4 w-4" /> Invite User
+                        </Button>
+                    </div>
                 </div>
 
                 {/* Filters Row */}
@@ -476,15 +474,13 @@ function UsersPage() {
                                             <div className="flex flex-col items-center justify-center py-10">
                                                 <UsersIcon className="h-10 w-10 text-muted-foreground/40 mb-3" />
                                                 <p className="text-sm text-muted-foreground mb-4">No users found</p>
-                                                {canManageUsers && (
-                                                    <Button
-                                                        onClick={() => openModal("create")}
-                                                        size="sm"
-                                                        className="gap-1.5 bg-[#213847] hover:bg-[#213847]/90 text-white rounded-xl"
-                                                    >
-                                                        <UserPlus className="h-4 w-4" /> Invite User
-                                                    </Button>
-                                                )}
+                                                <Button
+                                                    onClick={() => openModal("create")}
+                                                    size="sm"
+                                                    className="gap-1.5 bg-[#213847] hover:bg-[#213847]/90 text-white rounded-xl"
+                                                >
+                                                    <UserPlus className="h-4 w-4" /> Invite User
+                                                </Button>
                                             </div>
                                         </TableCell>
                                     </TableRow>

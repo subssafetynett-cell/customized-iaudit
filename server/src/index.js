@@ -1648,6 +1648,17 @@ async function actorCanManageOrgUsers(actorId) {
     return false;
 }
 
+/** Any org member except auditees may invite teammates; role assignment stays admin-only. */
+async function actorCanInviteOrgUser(actorId) {
+    if (await actorCanManageOrgUsers(actorId)) return true;
+    const actor = await prisma.user.findUnique({
+        where: { id: actorId },
+        select: { role: true },
+    });
+    if (!actor) return false;
+    return normalizeUserRole(actor.role) !== 'auditee';
+}
+
 /** User is designated lead auditor on at least one audit program or plan. */
 async function actorIsLeadAuditor(actorId) {
     const id = Number(actorId);
@@ -4268,10 +4279,11 @@ app.patch('/users/:id/auditee-site', authenticateToken, async (req, res) => {
 app.post('/users', authenticateToken, async (req, res) => {
     const { firstName, lastName, email, mobile, role, customRoleName, password, sendWelcomeEmail } = req.body;
     const creatorId = req.user.id;
-    if (!(await actorCanManageOrgUsers(creatorId))) {
+    const canManageUsers = await actorCanManageOrgUsers(creatorId);
+    if (!(await actorCanInviteOrgUser(creatorId))) {
         return res.status(403).json({
             error: 'Forbidden',
-            message: 'Only administrators can create users.'
+            message: 'You do not have permission to invite users.'
         });
     }
     if (!password) {
@@ -4302,7 +4314,10 @@ app.post('/users', authenticateToken, async (req, res) => {
     }
 
     try {
-        const roleNorm = normalizeUserRole(sanitizeShortLabel(role, 80) || 'auditor');
+        let roleNorm = normalizeUserRole(sanitizeShortLabel(role, 80) || 'auditor');
+        if (!canManageUsers) {
+            roleNorm = 'auditor';
+        }
         if (!USER_ASSIGNABLE_ROLES.has(roleNorm)) {
             return res.status(400).json({ error: 'Invalid role' });
         }
@@ -4313,7 +4328,7 @@ app.post('/users', authenticateToken, async (req, res) => {
                 email: emailNorm,
                 mobile: userMobile,
                 role: roleNorm,
-                customRoleName: sanitizeShortLabel(customRoleName, 120),
+                customRoleName: canManageUsers ? sanitizeShortLabel(customRoleName, 120) : null,
                 isActive: false,
                 emailVerifiedAt: null,
                 password: await bcrypt.hash(password, 10),
