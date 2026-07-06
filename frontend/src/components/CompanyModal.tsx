@@ -15,6 +15,8 @@ import {
   COMPANY_DESCRIPTION_MAX,
   COMPANY_DESCRIPTION_ERROR_MESSAGE,
   COMPANY_LOGO_MAX_CHARS,
+  STREET_ADDRESS_ERROR_MESSAGE,
+  STREET_ADDRESS_MAX,
   isWithinMaxLength,
 } from "@/lib/validation";
 import { COMPANY_INDUSTRIES } from "@/lib/industries";
@@ -207,6 +209,9 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
     if (!contactNumber.trim()) errors.contactNumber = "Contact number is required";
     else if (!isTenDigitPhone(contactNumber)) errors.contactNumber = PHONE_10_ERROR_MESSAGE;
     if (!trimmedAddress) errors.streetAddress = "Street address is required";
+    else if (!isWithinMaxLength(trimmedAddress, STREET_ADDRESS_MAX)) {
+      errors.streetAddress = STREET_ADDRESS_ERROR_MESSAGE;
+    }
     if (!city.trim()) errors.city = "City is required";
     const countryName = Country.getCountryByCode(countryIso)?.name || "";
     const hasStates = hasStatesForCountry;
@@ -431,6 +436,7 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
             <Input
               id="street-address"
               placeholder="Street address"
+              maxLength={STREET_ADDRESS_MAX}
               className={`${fieldErrors.streetAddress ? "border-red-500 focus:ring-red-500" : ""}`}
               value={streetAddress}
               onChange={(e) => {
@@ -439,6 +445,9 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
                 setError("");
               }}
             />
+            <p className="text-[11px] text-muted-foreground ml-1">
+              {streetAddress.length}/{STREET_ADDRESS_MAX} characters
+            </p>
             {fieldErrors.streetAddress && <p className="text-[10px] text-red-500 mt-1 pl-1 font-medium">{fieldErrors.streetAddress}</p>}
           </div>
 

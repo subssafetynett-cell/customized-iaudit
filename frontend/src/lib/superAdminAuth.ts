@@ -1,4 +1,4 @@
-/** Super-admin console session (separate from regular app routes; uses same JWT as /auth/login). */
+/** Super-admin console session (separate from regular app routes; uses same server session cookie). */
 export const SUPER_ADMIN_AUTH_KEY = "isSuperAdminAuthenticated";
 
 /** Seeded platform super admin (see server/scripts/ensure-superadmin.js). */
@@ -7,6 +7,7 @@ export const SUPER_ADMIN_EMAIL = "admin@iaudit.global";
 export function isSuperAdminRole(role: unknown): boolean {
     return String(role || "").toLowerCase() === "superadmin";
 }
+
 const SESSION_EXPIRES_AT_KEY = "sessionExpiresAt";
 
 export function isSuperAdminLoginPath(pathname: string): boolean {
@@ -31,19 +32,17 @@ function getStoredUser(): { role?: string } | null {
     }
 }
 
-/** True when super-admin console flag, JWT, and DB role all align. */
+/** True when super-admin console flag, cached profile, and DB role all align. */
 export function hasValidSuperAdminSession(): boolean {
     if (localStorage.getItem(SUPER_ADMIN_AUTH_KEY) !== "true") return false;
-    if (!localStorage.getItem("token")) return false;
+    if (!getStoredUser()) return false;
     return isSuperAdminRole(getStoredUser()?.role);
 }
 
 export function persistSuperAdminSession(data: Record<string, unknown>) {
-    const { sessionExpiresAt, token, ...profile } = data;
+    const { sessionExpiresAt, token: _token, ...profile } = data;
+    localStorage.removeItem("token");
     localStorage.setItem("user", JSON.stringify(profile));
-    if (typeof token === "string" && token) {
-        localStorage.setItem("token", token);
-    }
     if (typeof sessionExpiresAt === "string" && sessionExpiresAt) {
         localStorage.setItem(SESSION_EXPIRES_AT_KEY, sessionExpiresAt);
     }

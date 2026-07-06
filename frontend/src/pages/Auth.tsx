@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
-import { apiFetch, parseApiJson, SESSION_EXPIRES_AT_KEY } from "@/lib/api";
+import { apiFetch, parseApiJson, SESSION_EXPIRES_AT_KEY, clearClientSession } from "@/lib/api";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -302,6 +302,9 @@ export default function Auth() {
             if (!response.ok) {
                 throw new Error(data.error || "Could not reset password.");
             }
+            if (data.reauthRequired) {
+                clearClientSession();
+            }
             setPostResetMessage(data.message || "Password has been reset. You can sign in with your new password.");
             closeForgotPassword();
         } catch (err: any) {
@@ -430,7 +433,7 @@ export default function Auth() {
                 throw new Error('Invalid credentials');
             }
 
-            const { sessionExpiresAt, token, ...profile } = data as Record<string, unknown> & {
+            const { sessionExpiresAt, token: _token, ...profile } = data as Record<string, unknown> & {
                 sessionExpiresAt?: string;
                 token?: string;
                 role?: string;
@@ -444,12 +447,12 @@ export default function Auth() {
 
             clearSuperAdminSession();
             localStorage.setItem("user", JSON.stringify(profile));
-            if (token) {
-                localStorage.setItem("token", token);
-            }
             if (sessionExpiresAt && typeof sessionExpiresAt === "string") {
                 localStorage.setItem(SESSION_EXPIRES_AT_KEY, sessionExpiresAt);
+            } else {
+                localStorage.removeItem(SESSION_EXPIRES_AT_KEY);
             }
+            localStorage.removeItem("token");
             if ((profile as { role?: string }).role === "superadmin") {
                 localStorage.setItem("isSuperAdminAuthenticated", "true");
             }
@@ -595,20 +598,20 @@ export default function Auth() {
                 throw new Error(data.error || 'Failed to verify OTP');
             }
 
-            // Success! Save user and token to local storage and navigate to dashboard
-            const { sessionExpiresAt, token, ...profile } = data as Record<string, unknown> & {
+            // Success! Session token is stored in an httpOnly cookie by the server.
+            const { sessionExpiresAt, token: _token, ...profile } = data as Record<string, unknown> & {
                 sessionExpiresAt?: string;
                 token?: string;
             };
             localStorage.setItem("user", JSON.stringify(profile));
+            localStorage.removeItem("token");
             if (profile.id != null) {
                 clearTrialWelcomeForUser(profile.id as number);
             }
-            if (token) {
-                localStorage.setItem("token", token);
-            }
             if (sessionExpiresAt && typeof sessionExpiresAt === "string") {
                 localStorage.setItem(SESSION_EXPIRES_AT_KEY, sessionExpiresAt);
+            } else {
+                localStorage.removeItem(SESSION_EXPIRES_AT_KEY);
             }
             if ((profile as { role?: string }).role === "superadmin") {
                 localStorage.setItem("isSuperAdminAuthenticated", "true");

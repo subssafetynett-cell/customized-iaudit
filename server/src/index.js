@@ -32,8 +32,80 @@ loadServerEnv();
 
 const PASSWORD_REGEX = /^(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*(),.?":{}|<>_+=\-\[\]\\\/~^]).{8,}$/;
 
-/** Server-side session lifetime (opaque token stored in DB, sent as Bearer token). */
-const SESSION_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+/** Server-side session lifetime (opaque token stored in DB; delivered via httpOnly cookie). */
+const SESSION_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+/** Renew session when less than this much time remains (sliding window). */
+const SESSION_RENEW_WHEN_REMAINING_MS = SESSION_MAX_AGE_MS / 2;
+const SESSION_EXPIRES_HEADER = 'X-Session-Expires-At';
+const SESSION_COOKIE_NAME = 'iaudit_session';
+
+function parseRequestCookies(req) {
+    const header = req.headers.cookie;
+    if (!header || typeof header !== 'string') return {};
+    return header.split(';').reduce((acc, part) => {
+        const idx = part.indexOf('=');
+        if (idx < 1) return acc;
+        const key = part.slice(0, idx).trim();
+        const value = part.slice(idx + 1).trim();
+        if (key) acc[key] = decodeURIComponent(value);
+        return acc;
+    }, {});
+}
+
+function sessionCookieSecure() {
+    if (process.env.COOKIE_SECURE === 'true') return true;
+    if (process.env.COOKIE_SECURE === 'false') return false;
+    return process.env.NODE_ENV === 'production';
+}
+
+function serializeSessionCookie(token, maxAgeMs) {
+    const maxAgeSeconds = Math.max(0, Math.floor(maxAgeMs / 1000));
+    const secure = sessionCookieSecure();
+    const parts = [
+        `${SESSION_COOKIE_NAME}=${encodeURIComponent(token)}`,
+        'Path=/',
+        `Max-Age=${maxAgeSeconds}`,
+        'HttpOnly',
+        'SameSite=Lax',
+    ];
+    if (secure) parts.push('Secure');
+    return parts.join('; ');
+}
+
+function appendSessionCookie(res, token, sessionExpiresAtIso) {
+    const ms = Date.parse(String(sessionExpiresAtIso)) - Date.now();
+    if (!Number.isFinite(ms) || ms <= 0) return;
+    res.append('Set-Cookie', serializeSessionCookie(token, ms));
+}
+
+function clearSessionCookie(res) {
+    const secure = sessionCookieSecure();
+    const parts = [
+        `${SESSION_COOKIE_NAME}=`,
+        'Path=/',
+        'Max-Age=0',
+        'HttpOnly',
+        'SameSite=Lax',
+    ];
+    if (secure) parts.push('Secure');
+    res.append('Set-Cookie', parts.join('; '));
+}
+
+function getSessionTokenFromRequest(req) {
+    const fromCookie = parseRequestCookies(req)[SESSION_COOKIE_NAME];
+    if (fromCookie) return fromCookie;
+    const authHeader = req.headers.authorization;
+    if (authHeader && typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
+        return authHeader.slice('Bearer '.length).trim() || null;
+    }
+    return null;
+}
+
+function sendAuthenticatedSession(res, profile, session) {
+    appendSessionCookie(res, session.token, session.sessionExpiresAt);
+    res.setHeader(SESSION_EXPIRES_HEADER, session.sessionExpiresAt);
+    return { ...profile, sessionExpiresAt: session.sessionExpiresAt };
+}
 
 /** Consecutive wrong passwords before login is blocked until password reset (env `LOGIN_MAX_FAILED_ATTEMPTS`, default 15, clamped 5–50). */
 const LOGIN_MAX_FAILED_ATTEMPTS = Math.min(
@@ -166,6 +238,34 @@ async function createSessionTokenForUser(userId) {
         }
     }).catch(() => {});
     return { token, sessionExpiresAt: expiresAt.toISOString() };
+}
+
+/** Remove all server sessions for a user (e.g. after password change or account lock). */
+async function invalidateAllUserSessions(userId) {
+    const uid = Number.parseInt(String(userId), 10);
+    if (!Number.isInteger(uid) || uid < 1) return 0;
+    const { count } = await prisma.session.deleteMany({ where: { userId: uid } });
+    return count;
+}
+
+/** Extend active sessions on use so working users are not logged out at a fixed deadline. */
+async function maybeRenewSessionExpiry(sessionToken, currentExpiresAt) {
+    const now = Date.now();
+    const expiresMs = currentExpiresAt instanceof Date
+        ? currentExpiresAt.getTime()
+        : new Date(currentExpiresAt).getTime();
+    if (!Number.isFinite(expiresMs)) {
+        return new Date(now + SESSION_MAX_AGE_MS).toISOString();
+    }
+    if (expiresMs - now > SESSION_RENEW_WHEN_REMAINING_MS) {
+        return new Date(expiresMs).toISOString();
+    }
+    const newExpiresAt = new Date(now + SESSION_MAX_AGE_MS);
+    await prisma.session.update({
+        where: { token: sessionToken },
+        data: { expiresAt: newExpiresAt },
+    });
+    return newExpiresAt.toISOString();
 }
 
 /** Same for unknown email and wrong password — never reveal whether an address is registered. */
@@ -310,7 +410,8 @@ app.use(cors({
         return callback(new Error(`CORS blocked for origin: ${origin}`));
     },
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'Cache-Control', 'Pragma', 'Expires', 'x-user-id']
+    allowedHeaders: ['Content-Type', 'Authorization', 'Cache-Control', 'Pragma', 'Expires', 'x-user-id'],
+    credentials: true,
 }));
 
 // Full `/api/auth/...` paths must be registered before `app.use('/api', mountedApiRouter)` so they are
@@ -1145,10 +1246,9 @@ async function rejectIfTrialLimitExceeded(_actorId, _resource, _projectedCount) 
     return null;
 }
 
-// Middleware: validate server-side session (DB row); each request must present a valid session token.
+// Middleware: validate server-side session (DB row); token is read from httpOnly cookie (preferred) or Bearer header.
 const authenticateToken = async (req, res, next) => {
-    const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1];
+    const token = getSessionTokenFromRequest(req);
 
     if (!token) {
         console.warn(`[SECURITY] Access denied to ${req.path}. No session token provided.`);
@@ -1177,7 +1277,12 @@ const authenticateToken = async (req, res, next) => {
             return res.status(403).json({ error: 'Account is deactivated' });
         }
 
+        const sessionExpiresAt = await maybeRenewSessionExpiry(session.token, session.expiresAt);
+        res.setHeader(SESSION_EXPIRES_HEADER, sessionExpiresAt);
+        appendSessionCookie(res, session.token, sessionExpiresAt);
+
         req.sessionToken = token;
+        req.sessionExpiresAt = sessionExpiresAt;
         req.user = {
             id: session.user.id,
             email: session.user.email,
@@ -1186,7 +1291,7 @@ const authenticateToken = async (req, res, next) => {
         next();
     } catch (err) {
         console.error(`[SECURITY] Session lookup failed for ${req.path}:`, err.message);
-        return res.status(401).json({ error: 'Session expired or invalid. Please log in again.' });
+        return res.status(503).json({ error: 'Authentication service temporarily unavailable. Please try again.' });
     }
 };
 
@@ -1697,6 +1802,206 @@ async function actorCanAssignAuditeeToSite(actorId, siteId) {
     if (Number.isNaN(parsed) || parsed < 1) return false;
     const allowed = await siteIdsInActorOrg(actorId);
     return allowed.has(parsed);
+}
+
+/** Org members eligible as lead auditor or team auditor (excludes auditees). */
+async function orgAuditorUserIdSet(actorId) {
+    const memberIds = await collectOrgMemberUserIds(actorId);
+    if (memberIds.length === 0) return new Set();
+    const users = await prisma.user.findMany({
+        where: {
+            id: { in: memberIds },
+            isActive: true,
+            role: { not: 'auditee' },
+        },
+        select: { id: true },
+    });
+    return new Set(users.map((u) => u.id));
+}
+
+function parsePositiveIntIds(raw) {
+    if (raw == null) return [];
+    const list = Array.isArray(raw) ? raw : [raw];
+    return [
+        ...new Set(
+            list
+                .map((id) => Number.parseInt(String(id), 10))
+                .filter((id) => Number.isInteger(id) && id > 0),
+        ),
+    ];
+}
+
+/** Reject lead/team auditor ids outside the actor's org (403 on tampered ids). */
+async function assertOrgAuditorUserIds(actorId, userIds, { allowEmpty = true } = {}) {
+    const normalized = parsePositiveIntIds(userIds);
+    if (normalized.length === 0) {
+        return allowEmpty
+            ? { ok: true, ids: [] }
+            : { ok: false, status: 400, error: 'Auditor user id is required' };
+    }
+    const allowed = await orgAuditorUserIdSet(actorId);
+    if (normalized.some((id) => !allowed.has(id))) {
+        return { ok: false, status: 403, error: 'Forbidden' };
+    }
+    return { ok: true, ids: normalized };
+}
+
+/** scheduleData.departmentIds must belong to the program site within the actor's org. */
+async function assertOrgSiteDepartments(actorId, siteId, scheduleData) {
+    if (!scheduleData || typeof scheduleData !== 'object' || Array.isArray(scheduleData)) {
+        return { ok: true };
+    }
+    const rawIds = scheduleData.departmentIds;
+    if (!Array.isArray(rawIds) || rawIds.length === 0) {
+        return { ok: true };
+    }
+    const parsedSiteId = Number.parseInt(String(siteId), 10);
+    if (!Number.isInteger(parsedSiteId) || parsedSiteId < 1) {
+        return { ok: false, status: 400, error: 'Invalid site ID' };
+    }
+    if (!(await actorCanAssignAuditeeToSite(actorId, parsedSiteId))) {
+        return { ok: false, status: 403, error: 'Forbidden' };
+    }
+    const deptIds = parsePositiveIntIds(rawIds);
+    if (deptIds.length === 0) {
+        return { ok: true };
+    }
+    const departments = await prisma.department.findMany({
+        where: { id: { in: deptIds } },
+        select: { id: true, siteId: true },
+    });
+    if (departments.length !== deptIds.length) {
+        return { ok: false, status: 403, error: 'Forbidden' };
+    }
+    if (departments.some((dept) => dept.siteId !== parsedSiteId)) {
+        return { ok: false, status: 403, error: 'Forbidden' };
+    }
+    return { ok: true };
+}
+
+async function validateAuditProgramAssignments(actorId, { siteId, leadAuditorId, auditorIds, scheduleData }) {
+    const parsedSiteId = Number.parseInt(String(siteId), 10);
+    if (!Number.isInteger(parsedSiteId) || parsedSiteId < 1) {
+        return { ok: false, status: 400, error: 'Invalid site ID' };
+    }
+    if (!(await actorCanAssignAuditeeToSite(actorId, parsedSiteId))) {
+        return { ok: false, status: 403, error: 'Forbidden' };
+    }
+    if (leadAuditorId != null && leadAuditorId !== '') {
+        const leadCheck = await assertOrgAuditorUserIds(actorId, [leadAuditorId], { allowEmpty: false });
+        if (!leadCheck.ok) return leadCheck;
+    }
+    const auditorCheck = await assertOrgAuditorUserIds(actorId, auditorIds ?? [], { allowEmpty: true });
+    if (!auditorCheck.ok) return auditorCheck;
+    const deptCheck = await assertOrgSiteDepartments(actorId, parsedSiteId, scheduleData);
+    if (!deptCheck.ok) return deptCheck;
+    const parsedLead =
+        leadAuditorId != null && leadAuditorId !== ''
+            ? Number.parseInt(String(leadAuditorId), 10)
+            : null;
+    return {
+        ok: true,
+        siteId: parsedSiteId,
+        leadAuditorId: Number.isInteger(parsedLead) && parsedLead > 0 ? parsedLead : null,
+        auditorIds: auditorCheck.ids,
+    };
+}
+
+/** Active non-auditee users in the company owner's team (same company as a site/program). */
+async function companyAuditorUserIdSet(companyId) {
+    const parsedCompanyId = Number.parseInt(String(companyId), 10);
+    if (!Number.isInteger(parsedCompanyId) || parsedCompanyId < 1) {
+        return new Set();
+    }
+    const company = await prisma.company.findUnique({
+        where: { id: parsedCompanyId },
+        select: { userId: true },
+    });
+    if (!company?.userId) {
+        return new Set();
+    }
+    const memberIds = await collectOrgSubtreeUserIds(company.userId);
+    if (memberIds.length === 0) {
+        return new Set();
+    }
+    const users = await prisma.user.findMany({
+        where: {
+            id: { in: memberIds },
+            isActive: true,
+            role: { not: 'auditee' },
+        },
+        select: { id: true },
+    });
+    return new Set(users.map((u) => u.id));
+}
+
+/** Reject auditor ids outside the audit program's company (403 on tampered ids). */
+async function assertCompanyAuditorUserIds(companyId, userIds, { allowEmpty = true } = {}) {
+    const normalized = parsePositiveIntIds(userIds);
+    if (normalized.length === 0) {
+        return allowEmpty
+            ? { ok: true, ids: [] }
+            : { ok: false, status: 400, error: 'Auditor user id is required' };
+    }
+    const allowed = await companyAuditorUserIdSet(companyId);
+    if (normalized.some((id) => !allowed.has(id))) {
+        return { ok: false, status: 403, error: 'Forbidden' };
+    }
+    return { ok: true, ids: normalized };
+}
+
+async function resolveAuditProgramCompanyId(program) {
+    if (program?.site?.companyId != null) {
+        return Number(program.site.companyId);
+    }
+    const siteId = program?.siteId;
+    if (siteId == null) {
+        return null;
+    }
+    const site = await prisma.site.findUnique({
+        where: { id: Number(siteId) },
+        select: { companyId: true },
+    });
+    return site?.companyId ?? null;
+}
+
+async function validateAuditPlanAuditorAssignments(actorId, { companyId, leadAuditorId, auditorIds }) {
+    const parsedCompanyId = Number.parseInt(String(companyId), 10);
+    if (!Number.isInteger(parsedCompanyId) || parsedCompanyId < 1) {
+        return { ok: false, status: 400, error: 'Invalid company for audit plan' };
+    }
+    const company = await prisma.company.findUnique({
+        where: { id: parsedCompanyId },
+        select: { userId: true },
+    });
+    if (!company?.userId) {
+        return { ok: false, status: 403, error: 'Forbidden' };
+    }
+    if (!(await actorCanAccessTargetUser(actorId, company.userId))) {
+        return { ok: false, status: 403, error: 'Forbidden' };
+    }
+
+    if (leadAuditorId != null && leadAuditorId !== '') {
+        const leadCheck = await assertCompanyAuditorUserIds(
+            parsedCompanyId,
+            [leadAuditorId],
+            { allowEmpty: false },
+        );
+        if (!leadCheck.ok) return leadCheck;
+    }
+    const auditorCheck = await assertCompanyAuditorUserIds(parsedCompanyId, auditorIds ?? [], {
+        allowEmpty: true,
+    });
+    if (!auditorCheck.ok) return auditorCheck;
+    const parsedLead =
+        leadAuditorId != null && leadAuditorId !== ''
+            ? Number.parseInt(String(leadAuditorId), 10)
+            : null;
+    return {
+        ok: true,
+        leadAuditorId: Number.isInteger(parsedLead) && parsedLead > 0 ? parsedLead : null,
+        auditorIds: auditorCheck.ids,
+    };
 }
 
 /** True when Site.userId references an auditee (not a legacy creator id from older site creation). */
@@ -2333,9 +2638,17 @@ app.post('/companies/:companyId/sites', authenticateToken, checkTrialExpiration,
         if (siteNameLenErr) {
             return res.status(400).json({ error: siteNameLenErr });
         }
+        const siteAddressLenErr = organizationTextLengthError(address, SITE_TEXT_LIMITS.address, 'Address');
+        if (siteAddressLenErr) {
+            return res.status(400).json({ error: siteAddressLenErr });
+        }
         const sName = sanitizeOrganizationText(name, SITE_TEXT_LIMITS.name);
         if (!sName) {
             return res.status(400).json({ error: 'Site name is required' });
+        }
+        const sAddress = sanitizeOrganizationText(address, SITE_TEXT_LIMITS.address);
+        if (!sAddress) {
+            return res.status(400).json({ error: 'Address is required' });
         }
 
         const sitePhone = sanitizePhoneField(contactNumber);
@@ -2351,7 +2664,7 @@ app.post('/companies/:companyId/sites', authenticateToken, checkTrialExpiration,
                 description: sanitizePlainText(description, SITE_TEXT_LIMITS.description, { preserveNewlines: true }),
                 siteType: sanitizePlainText(siteType, SITE_TEXT_LIMITS.siteType),
                 status: sanitizePlainText(status, SITE_TEXT_LIMITS.status) || 'Active',
-                address: sanitizeOrganizationText(address, SITE_TEXT_LIMITS.address),
+                address: sAddress,
                 city: sanitizePlainText(city, SITE_TEXT_LIMITS.city),
                 state: sanitizePlainText(state, SITE_TEXT_LIMITS.state),
                 country: sanitizePlainText(country, SITE_TEXT_LIMITS.country),
@@ -2444,7 +2757,15 @@ app.put('/sites/:id', authenticateToken, checkTrialExpiration, async (req, res) 
             data.status = sanitizePlainText(status, SITE_TEXT_LIMITS.status);
         }
         if (address !== undefined) {
-            data.address = sanitizeOrganizationText(address, SITE_TEXT_LIMITS.address);
+            const siteAddressLenErr = organizationTextLengthError(address, SITE_TEXT_LIMITS.address, 'Address');
+            if (siteAddressLenErr) {
+                return res.status(400).json({ error: siteAddressLenErr });
+            }
+            const sAddress = sanitizeOrganizationText(address, SITE_TEXT_LIMITS.address);
+            if (!sAddress) {
+                return res.status(400).json({ error: 'Address is required' });
+            }
+            data.address = sAddress;
         }
         if (city !== undefined) {
             data.city = sanitizePlainText(city, SITE_TEXT_LIMITS.city);
@@ -2518,7 +2839,18 @@ app.delete('/sites/:id', authenticateToken, checkTrialExpiration, async (req, re
 
 // Create a department
 app.post('/sites/:siteId/departments', authenticateToken, checkTrialExpiration, async (req, res) => {
+    const actorId = Number(req.user.id);
+    if (await rejectIfAuditee(actorId, res)) return;
+
     const { siteId } = req.params;
+    const parsedSiteId = Number.parseInt(siteId, 10);
+    if (!Number.isFinite(parsedSiteId)) {
+        return res.status(400).json({ error: 'Invalid site ID' });
+    }
+    if (!(await actorCanAssignAuditeeToSite(actorId, parsedSiteId))) {
+        return res.status(403).json({ error: 'Forbidden' });
+    }
+
     const { name, code, status, manager, description } = req.body;
     try {
         const deptNameLenErr = organizationTextLengthError(name, DEPT_TEXT_LIMITS.name, 'Department name');
@@ -2537,7 +2869,7 @@ app.post('/sites/:siteId/departments', authenticateToken, checkTrialExpiration, 
                 status: sanitizePlainText(status, DEPT_TEXT_LIMITS.status) || 'Active',
                 manager: sanitizePlainText(manager, DEPT_TEXT_LIMITS.manager),
                 description: sanitizePlainText(description, DEPT_TEXT_LIMITS.description, { preserveNewlines: true }),
-                siteId: Number.parseInt(siteId)
+                siteId: parsedSiteId
             }
         });
         res.status(201).json(department);
@@ -2673,6 +3005,19 @@ app.post('/companies', authenticateToken, checkTrialExpiration, async (req, res)
             return res.status(400).json({ error: 'Company name is required' });
         }
 
+        const streetAddressLenErr = organizationTextLengthError(
+            streetAddress,
+            COMPANY_TEXT_LIMITS.streetAddress,
+            'Street address'
+        );
+        if (streetAddressLenErr) {
+            return res.status(400).json({ error: streetAddressLenErr });
+        }
+        const sStreetAddress = sanitizeOrganizationText(streetAddress, COMPANY_TEXT_LIMITS.streetAddress);
+        if (!sStreetAddress) {
+            return res.status(400).json({ error: 'Street address is required' });
+        }
+
         const sCity = sanitizePlainText(city, COMPANY_TEXT_LIMITS.city);
         const sCountry = sanitizePlainText(country, COMPANY_TEXT_LIMITS.country);
 
@@ -2701,7 +3046,7 @@ app.post('/companies', authenticateToken, checkTrialExpiration, async (req, res)
                 description: sanitizePlainText(description, COMPANY_TEXT_LIMITS.description, { preserveNewlines: true }),
                 logo: sanitizedLogo,
                 contactNumber: companyPhone,
-                streetAddress: sanitizeOrganizationText(streetAddress, COMPANY_TEXT_LIMITS.streetAddress),
+                streetAddress: sStreetAddress,
                 city: sCity,
                 state: sanitizePlainText(state, COMPANY_TEXT_LIMITS.state),
                 country: sCountry,
@@ -2774,7 +3119,19 @@ app.put('/companies/:id', authenticateToken, checkTrialExpiration, async (req, r
             }
         }
         if (streetAddress !== undefined) {
-            data.streetAddress = sanitizeOrganizationText(streetAddress, COMPANY_TEXT_LIMITS.streetAddress);
+            const streetAddressLenErr = organizationTextLengthError(
+                streetAddress,
+                COMPANY_TEXT_LIMITS.streetAddress,
+                'Street address'
+            );
+            if (streetAddressLenErr) {
+                return res.status(400).json({ error: streetAddressLenErr });
+            }
+            const sStreetAddress = sanitizeOrganizationText(streetAddress, COMPANY_TEXT_LIMITS.streetAddress);
+            if (!sStreetAddress) {
+                return res.status(400).json({ error: 'Street address is required' });
+            }
+            data.streetAddress = sStreetAddress;
         }
         if (state !== undefined) {
             data.state = sanitizePlainText(state, COMPANY_TEXT_LIMITS.state);
@@ -3294,9 +3651,9 @@ app.post('/auth/verify-otp-and-signup', async (req, res) => {
             return res.status(500).json({ error: 'Account creation could not be completed' });
         }
 
-        const { token, sessionExpiresAt } = await createSessionTokenForUser(profile.id);
+        const session = await createSessionTokenForUser(profile.id);
 
-        res.status(201).json({ ...profile, token, sessionExpiresAt });
+        res.status(201).json(sendAuthenticatedSession(res, profile, session));
     } catch (error) {
         console.error('Error creating user during OTP verification:', error);
         if (error.code === 'P2002') {
@@ -3525,10 +3882,10 @@ app.post('/auth/login', loginIpRateLimit, async (req, res) => {
             return res.status(500).json({ error: 'Login could not be completed' });
         }
 
-        const { token, sessionExpiresAt } = await createSessionTokenForUser(profile.id);
+        const session = await createSessionTokenForUser(profile.id);
 
         console.log(`[AUTH] Login successful for user: ${profile.id}, onboardingCompleted: ${profile.onboardingCompleted}`);
-        res.status(200).json({ ...profile, token, sessionExpiresAt });
+        res.status(200).json(sendAuthenticatedSession(res, profile, session));
 
     } catch (error) {
         handlePrismaError(error, 'login');
@@ -3634,10 +3991,14 @@ async function handleResetPassword(req, res) {
                 data: { password: hashedPassword, failedLoginAttempts: 0 }
             }),
             prisma.otp.delete({ where: { email } }),
-            prisma.session.deleteMany({ where: { userId: user.id } })
         ]);
+        await invalidateAllUserSessions(user.id);
+        clearSessionCookie(res);
 
-        return res.status(200).json({ message: 'Password has been reset. You can sign in with your new password.' });
+        return res.status(200).json({
+            message: 'Password has been reset. You can sign in with your new password.',
+            reauthRequired: true,
+        });
     } catch (error) {
         console.error('reset-password error:', error);
         return res.status(500).json({ error: 'Could not reset password' });
@@ -3656,6 +4017,7 @@ async function handleLogout(req, res) {
         }
         const { count } = await prisma.session.deleteMany({ where: { userId } });
         console.log(`[AUTH] Logout: removed ${count} session(s) for user ${userId}`);
+        clearSessionCookie(res);
         res.status(204).send();
     } catch (error) {
         console.error('[AUTH] Logout error:', error);
@@ -3666,6 +4028,26 @@ async function handleLogout(req, res) {
 app.post('/api/auth/logout', authenticateToken, handleLogout);
 app.post('/auth/logout', authenticateToken, handleLogout);
 mountedApiRouter.post('/auth/logout', authenticateToken, handleLogout);
+
+/** Lightweight session check — renews sliding expiry and returns client sync timestamp. */
+app.get('/auth/session', authenticateToken, (req, res) => {
+    res.json({
+        ok: true,
+        sessionExpiresAt: req.sessionExpiresAt || res.getHeader(SESSION_EXPIRES_HEADER) || null,
+    });
+});
+app.get('/api/auth/session', authenticateToken, (req, res) => {
+    res.json({
+        ok: true,
+        sessionExpiresAt: req.sessionExpiresAt || res.getHeader(SESSION_EXPIRES_HEADER) || null,
+    });
+});
+mountedApiRouter.get('/auth/session', authenticateToken, (req, res) => {
+    res.json({
+        ok: true,
+        sessionExpiresAt: req.sessionExpiresAt || res.getHeader(SESSION_EXPIRES_HEADER) || null,
+    });
+});
 
 const SUPER_ADMIN_USER_LIST_SELECT = {
     id: true,
@@ -3972,6 +4354,7 @@ app.get('/users/:id/status', authenticateToken, async (req, res) => {
                 where: { id: targetId },
                 select: {
                     id: true,
+                    role: true,
                     isActive: true,
                     trialStartDate: true,
                     trialEndDate: true,
@@ -4615,13 +4998,29 @@ app.put('/users/:id', authenticateToken, async (req, res) => {
             updateData.failedLoginAttempts = 0;
         }
 
+        const passwordWillChange = Boolean(password);
+
         const user = await prisma.user.update({
             where: { id: targetId },
             data: updateData
         });
 
+        if (passwordWillChange) {
+            const revoked = await invalidateAllUserSessions(targetId);
+            console.log(`[AUTH] Password changed for user ${targetId}; revoked ${revoked} session(s)`);
+        }
+
         const { password: _, ...userWithoutPassword } = user;
-        res.json(userWithoutPassword);
+        const responseBody = { ...userWithoutPassword };
+        if (passwordWillChange) {
+            if (targetId === actorId) {
+                clearSessionCookie(res);
+                responseBody.reauthRequired = true;
+            } else {
+                responseBody.targetSessionsRevoked = true;
+            }
+        }
+        res.json(responseBody);
     } catch (error) {
         console.error('Error updating user:', error);
         if (error.code === 'P2002') {
@@ -4884,17 +5283,27 @@ app.post('/audit-programs', authenticateToken, checkTrialExpiration, async (req,
             return res.status(403).json(trialRejected);
         }
 
+        const assignmentCheck = await validateAuditProgramAssignments(actorId, {
+            siteId,
+            leadAuditorId,
+            auditorIds,
+            scheduleData,
+        });
+        if (!assignmentCheck.ok) {
+            return res.status(assignmentCheck.status).json({ error: assignmentCheck.error });
+        }
+
         const program = await prisma.auditProgram.create({
             data: {
                 name,
                 isoStandard,
                 frequency,
                 duration: Number.parseInt(duration),
-                siteId: Number.parseInt(siteId),
+                siteId: assignmentCheck.siteId,
                 auditors: {
-                    connect: auditorIds.map(id => ({ id: Number.parseInt(id) }))
+                    connect: assignmentCheck.auditorIds.map((id) => ({ id })),
                 },
-                leadAuditorId: leadAuditorId ? Number.parseInt(leadAuditorId) : null,
+                leadAuditorId: assignmentCheck.leadAuditorId,
                 scheduleData: scheduleData || {},
                 status: 'Draft',
                 userId: ownerId
@@ -4925,6 +5334,26 @@ app.put('/audit-programs/:id', authenticateToken, checkTrialExpiration, async (r
             return res.status(403).json({ error: 'Forbidden' });
         }
 
+        const actorId = Number(req.user.id);
+        const effectiveSiteId = siteId != null ? siteId : existing.siteId;
+        const effectiveLeadAuditorId =
+            leadAuditorId !== undefined ? leadAuditorId : existing.leadAuditorId;
+        const effectiveAuditorIds =
+            auditorIds !== undefined
+                ? auditorIds
+                : existing.auditors.map((a) => a.id);
+        const effectiveScheduleData =
+            scheduleData !== undefined ? scheduleData : existing.scheduleData;
+        const assignmentCheck = await validateAuditProgramAssignments(actorId, {
+            siteId: effectiveSiteId,
+            leadAuditorId: effectiveLeadAuditorId,
+            auditorIds: effectiveAuditorIds,
+            scheduleData: effectiveScheduleData,
+        });
+        if (!assignmentCheck.ok) {
+            return res.status(assignmentCheck.status).json({ error: assignmentCheck.error });
+        }
+
         // Disconnect all current auditors first before connecting new ones to ensure clean update
         await prisma.auditProgram.update({
             where: { id: Number.parseInt(id) },
@@ -4942,11 +5371,11 @@ app.put('/audit-programs/:id', authenticateToken, checkTrialExpiration, async (r
                 isoStandard,
                 frequency,
                 duration: Number.parseInt(duration),
-                siteId: Number.parseInt(siteId),
+                siteId: assignmentCheck.siteId,
                 auditors: {
-                    connect: auditorIds.map(aid => ({ id: Number.parseInt(aid) }))
+                    connect: assignmentCheck.auditorIds.map((id) => ({ id })),
                 },
-                leadAuditorId: leadAuditorId ? Number.parseInt(leadAuditorId) : null,
+                leadAuditorId: assignmentCheck.leadAuditorId,
                 scheduleData: scheduleData || {},
                 status: status || 'Draft'
             },
@@ -5191,7 +5620,11 @@ app.post('/audit-plans', authenticateToken, checkTrialExpiration, async (req, re
     try {
         const program = await prisma.auditProgram.findUnique({
             where: { id: Number.parseInt(auditProgramId, 10) },
-            include: { auditors: true, leadAuditor: true }
+            include: {
+                auditors: true,
+                leadAuditor: true,
+                site: { select: { companyId: true } },
+            },
         });
         if (!program) return res.status(404).json({ error: 'Audit program not found' });
         if (!(await actorCanAccessAuditProgram(req.user.id, program))) {
@@ -5202,6 +5635,16 @@ app.post('/audit-plans', authenticateToken, checkTrialExpiration, async (req, re
         const planOwnerId = userId != null ? Number.parseInt(String(userId), 10) : actorId;
         if (Number.isNaN(planOwnerId) || !(await actorCanAccessTargetUser(actorId, planOwnerId))) {
             return res.status(403).json({ error: 'Forbidden' });
+        }
+
+        const programCompanyId = await resolveAuditProgramCompanyId(program);
+        const auditorCheck = await validateAuditPlanAuditorAssignments(actorId, {
+            companyId: programCompanyId,
+            leadAuditorId,
+            auditorIds,
+        });
+        if (!auditorCheck.ok) {
+            return res.status(auditorCheck.status).json({ error: auditorCheck.error });
         }
 
         const plan = await prisma.auditPlan.create({
@@ -5216,9 +5659,9 @@ app.post('/audit-plans', authenticateToken, checkTrialExpiration, async (req, re
                 scope,
                 objective,
                 criteria,
-                leadAuditorId: leadAuditorId ? Number.parseInt(leadAuditorId) : null,
+                leadAuditorId: auditorCheck.leadAuditorId,
                 auditors: {
-                    connect: auditorIds ? auditorIds.map(id => ({ id: Number.parseInt(id) })) : []
+                    connect: auditorCheck.auditorIds.map((id) => ({ id })),
                 },
                 itinerary: itinerary || [],
                 userId: planOwnerId
@@ -5249,8 +5692,14 @@ app.put('/audit-plans/:id', authenticateToken, checkTrialExpiration, async (req,
             where: { id: Number.parseInt(id) },
             include: {
                 auditors: true,
-                auditProgram: { include: { auditors: true, leadAuditor: true } }
-            }
+                auditProgram: {
+                    include: {
+                        auditors: true,
+                        leadAuditor: true,
+                        site: { select: { companyId: true } },
+                    },
+                },
+            },
         });
         if (!existing) return res.status(404).json({ error: 'Audit plan not found' });
         if (!(await actorCanAccessAuditPlan(req.user.id, existing))) {
@@ -5262,6 +5711,26 @@ app.put('/audit-plans/:id', authenticateToken, checkTrialExpiration, async (req,
             });
         }
 
+        const actorId = Number(req.user.id);
+        const programCompanyId = await resolveAuditProgramCompanyId(existing.auditProgram);
+        let validatedAuditors = null;
+        if (leadAuditorId !== undefined || auditorIds !== undefined) {
+            const effectiveLeadAuditorId =
+                leadAuditorId !== undefined ? leadAuditorId : existing.leadAuditorId;
+            const effectiveAuditorIds =
+                auditorIds !== undefined
+                    ? auditorIds
+                    : existing.auditors.map((a) => a.id);
+            validatedAuditors = await validateAuditPlanAuditorAssignments(actorId, {
+                companyId: programCompanyId,
+                leadAuditorId: effectiveLeadAuditorId,
+                auditorIds: effectiveAuditorIds,
+            });
+            if (!validatedAuditors.ok) {
+                return res.status(validatedAuditors.status).json({ error: validatedAuditors.error });
+            }
+        }
+
         const updateData = {};
         if (auditType !== undefined) updateData.auditType = auditType;
         if (auditName !== undefined) updateData.auditName = auditName;
@@ -5271,11 +5740,13 @@ app.put('/audit-plans/:id', authenticateToken, checkTrialExpiration, async (req,
         if (scope !== undefined) updateData.scope = scope;
         if (objective !== undefined) updateData.objective = objective;
         if (criteria !== undefined) updateData.criteria = criteria;
-        if (leadAuditorId !== undefined) updateData.leadAuditorId = leadAuditorId ? Number.parseInt(leadAuditorId) : null;
-        if (auditorIds !== undefined) {
+        if (leadAuditorId !== undefined && validatedAuditors) {
+            updateData.leadAuditorId = validatedAuditors.leadAuditorId;
+        }
+        if (auditorIds !== undefined && validatedAuditors) {
             updateData.auditors = {
                 set: [],
-                connect: auditorIds.map(aid => ({ id: Number.parseInt(aid) }))
+                connect: validatedAuditors.auditorIds.map((aid) => ({ id: aid })),
             };
         }
         if (itinerary !== undefined) updateData.itinerary = itinerary;

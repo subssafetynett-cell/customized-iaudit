@@ -29,7 +29,11 @@ export function useUserStatus() {
         if (!userId) return;
 
         try {
-            const res = await apiFetch(`/users/${userId}/status`);
+            const res = await apiFetch(`/users/${userId}/status`, { skipSessionLogout: true });
+            if (res.status === 401) {
+                clearSessionAndRedirectToLogin();
+                return;
+            }
             if (!res.ok) return; // Server error: don't force logout (could be temporary)
 
             const data = await res.json();

@@ -16,6 +16,7 @@ import { Site, Department, ISOStandard } from "@/types/company";
 import {
   formatDeleteDepartmentDescription,
   formatDeleteSiteDescription,
+  SITE_ADDRESS_MAX,
   SITE_NAME_MAX,
   truncateForDisplay,
 } from "@/lib/validation";
@@ -172,7 +173,11 @@ export default function CompanyDetail() {
                             <p className="font-medium text-sm break-all line-clamp-2" title={site.name}>
                               {truncateForDisplay(site.name, SITE_NAME_MAX)}
                             </p>
-                            {site.address && <p className="text-xs text-muted-foreground truncate">{site.address}</p>}
+                            {site.address && (
+                              <p className="text-xs text-muted-foreground truncate" title={site.address}>
+                                {truncateForDisplay(site.address, SITE_ADDRESS_MAX)}
+                              </p>
+                            )}
                           </div>
                         </div>
                         <div className="flex items-center gap-1">

@@ -33,10 +33,8 @@ function resolveApiBaseUrl(): string {
     if (fromEnv !== undefined) {
         return fromEnv;
     }
-    if (typeof window === "undefined") {
-        return "";
-    }
-    return getIsLocalhost() ? "http://localhost:3001" : "";
+    // Same-origin `/api` (nginx or Vite proxy) — required for httpOnly session cookies.
+    return "";
 }
 
 export const API_BASE_URL = resolveApiBaseUrl();
