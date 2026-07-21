@@ -31,6 +31,15 @@ export function isTenDigitPhone(value: string): boolean {
 
 export const PHONE_10_ERROR_MESSAGE = `Phone number must be exactly ${PHONE_DIGITS_LENGTH} digits.`;
 
+/** Person first/last name (matches server PERSON_NAME_MAX). */
+export const PERSON_NAME_MAX = 100;
+
+export const PERSON_NAME_ERROR_MESSAGE = `Name must be at most ${PERSON_NAME_MAX} characters.`;
+
+export function normalizePersonNameInput(value: string): string {
+    return String(value || "").slice(0, PERSON_NAME_MAX);
+}
+
 /** Department name (matches server DEPT_TEXT_LIMITS.name). */
 export const DEPT_NAME_MAX = 100;
 

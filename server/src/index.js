@@ -10,6 +10,7 @@ import Stripe from 'stripe';
 import { STRIPE_CONFIG } from './stripe-config.js';
 import { ensureSuperAdminUser } from './ensureSuperAdmin.js';
 import { deleteUserCompletely } from './deleteUser.js';
+import { buildSelfAssessmentReportPdf } from './buildSelfAssessmentReportPdf.js';
 import {
     COMPANY_TEXT_LIMITS,
     DEPT_TEXT_LIMITS,
@@ -31,6 +32,8 @@ import {
 loadServerEnv();
 
 const PASSWORD_REGEX = /^(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*(),.?":{}|<>_+=\-\[\]\\\/~^]).{8,}$/;
+const NEW_PASSWORD_SAME_AS_CURRENT_MESSAGE =
+    'The new password must be different from your current password.';
 
 /** Server-side session lifetime (opaque token stored in DB; delivered via httpOnly cookie). */
 const SESSION_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -165,6 +168,27 @@ const OTP_SEND_IP_MAX_IN_WINDOW = Math.min(
 );
 const otpSendIpBuckets = new Map();
 
+/** PSZL-009: sliding window for POST /auth/reset-password verification (default 1 hour). */
+const RESET_PASSWORD_VERIFY_WINDOW_MS = Math.max(
+    60_000,
+    Number.parseInt(process.env.RESET_PASSWORD_VERIFY_WINDOW_MS || String(60 * 60 * 1000), 10) || 60 * 60 * 1000
+);
+
+/** Max reset-password verification attempts per IP per window (default 20). */
+const RESET_PASSWORD_VERIFY_MAX_PER_IP = Math.min(
+    100,
+    Math.max(5, Number.parseInt(process.env.RESET_PASSWORD_VERIFY_MAX_PER_IP || '20', 10) || 20)
+);
+
+/** Max reset-password verification attempts per email per window (default 20). */
+const RESET_PASSWORD_VERIFY_MAX_PER_EMAIL = Math.min(
+    100,
+    Math.max(5, Number.parseInt(process.env.RESET_PASSWORD_VERIFY_MAX_PER_EMAIL || '20', 10) || 20)
+);
+
+const resetPasswordVerifyIpBuckets = new Map();
+const resetPasswordVerifyEmailBuckets = new Map();
+
 function getClientIp(req) {
     const forwarded = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
     return forwarded || req.socket?.remoteAddress || 'unknown';
@@ -212,6 +236,50 @@ function sendOtpIpRateLimit(req, res, next) {
             retryAfterSeconds
         });
     }
+    next();
+}
+
+/** Rate limit password-reset token verification (brute-force protection). */
+function resetPasswordVerifyRateLimit(req, res, next) {
+    const ip = getClientIp(req);
+    const now = Date.now();
+
+    let ipBucket = resetPasswordVerifyIpBuckets.get(ip);
+    if (!ipBucket || now > ipBucket.resetAt) {
+        ipBucket = { n: 0, resetAt: now + RESET_PASSWORD_VERIFY_WINDOW_MS };
+        resetPasswordVerifyIpBuckets.set(ip, ipBucket);
+    }
+    ipBucket.n += 1;
+    if (ipBucket.n > RESET_PASSWORD_VERIFY_MAX_PER_IP) {
+        const retryAfterSeconds = Math.max(1, Math.ceil((ipBucket.resetAt - now) / 1000));
+        res.setHeader('Retry-After', String(retryAfterSeconds));
+        return res.status(429).json({
+            error: 'Too many password reset attempts. Please try again later.',
+            retryAfterSeconds
+        });
+    }
+
+    const emailRaw = req.body?.email;
+    if (typeof emailRaw === 'string') {
+        const emailKey = emailRaw.toLowerCase().trim();
+        if (emailKey) {
+            let emailBucket = resetPasswordVerifyEmailBuckets.get(emailKey);
+            if (!emailBucket || now > emailBucket.resetAt) {
+                emailBucket = { n: 0, resetAt: now + RESET_PASSWORD_VERIFY_WINDOW_MS };
+                resetPasswordVerifyEmailBuckets.set(emailKey, emailBucket);
+            }
+            emailBucket.n += 1;
+            if (emailBucket.n > RESET_PASSWORD_VERIFY_MAX_PER_EMAIL) {
+                const retryAfterSeconds = Math.max(1, Math.ceil((emailBucket.resetAt - now) / 1000));
+                res.setHeader('Retry-After', String(retryAfterSeconds));
+                return res.status(429).json({
+                    error: 'Too many password reset attempts for this email. Please try again later.',
+                    retryAfterSeconds
+                });
+            }
+        }
+    }
+
     next();
 }
 
@@ -417,7 +485,7 @@ app.use(cors({
 // Full `/api/auth/...` paths must be registered before `app.use('/api', mountedApiRouter)` so they are
 // not lost when the sub-router has no match (and so they work even if `/auth/...` aliases are missing).
 app.post('/api/auth/forgot-password', express.json({ limit: '50mb' }), sendOtpIpRateLimit, handleForgotPassword);
-app.post('/api/auth/reset-password', express.json({ limit: '50mb' }), handleResetPassword);
+app.post('/api/auth/reset-password', express.json({ limit: '50mb' }), resetPasswordVerifyRateLimit, handleResetPassword);
 
 app.use('/api', mountedApiRouter);
 
@@ -1153,6 +1221,7 @@ app.use(express.json({ limit: '50mb' }));
 
 // Content Security Policy middleware to allow Google Fonts and self-hosted resources
 app.use((req, res, next) => {
+    res.setHeader('X-Frame-Options', 'SAMEORIGIN');
     res.setHeader(
         'Content-Security-Policy',
         "default-src 'self' https://iaudit.global https://*.iaudit.global; " +
@@ -1160,7 +1229,8 @@ app.use((req, res, next) => {
         "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
         "script-src 'self' 'unsafe-inline'; " +
         "img-src 'self' data:; " +
-        "connect-src 'self' https://iaudit.global https://*.iaudit.global https://fonts.googleapis.com;"
+        "connect-src 'self' https://iaudit.global https://*.iaudit.global https://fonts.googleapis.com; " +
+        "frame-ancestors 'self';"
     );
 
     next();
@@ -1302,10 +1372,34 @@ const router = express.Router();
 // Temporary in-memory store for OTPs - REMOVED for AWS scalability
 // const otpStore = new Map();
 
-// Helper function to generate a 6 digit code
+// Helper function to generate a 6 digit code (signup and other short-lived codes)
 const generateOTP = () => {
     return Math.floor(100000 + Math.random() * 900000).toString();
 };
+
+/** High-entropy password reset token (PSZL-009 — not brute-forceable like 6 digits). */
+const PASSWORD_RESET_TOKEN_BYTES = 24;
+const PASSWORD_RESET_CODE_MIN_LENGTH = 20;
+const PASSWORD_RESET_CODE_MAX_LENGTH = 256;
+
+function generateVerificationCode(purpose) {
+    if (purpose === 'password_reset') {
+        return crypto.randomBytes(PASSWORD_RESET_TOKEN_BYTES).toString('base64url');
+    }
+    return generateOTP();
+}
+
+function verificationCodesMatch(stored, provided) {
+    if (typeof stored !== 'string' || typeof provided !== 'string') {
+        return false;
+    }
+    const a = Buffer.from(stored);
+    const b = Buffer.from(provided);
+    if (a.length !== b.length) {
+        return false;
+    }
+    return crypto.timingSafeEqual(a, b);
+}
 
 /** In-memory cooldown for authenticated assessment report emails (per user id). */
 const assessmentReportEmailLastSent = new Map();
@@ -1753,6 +1847,74 @@ async function actorCanManageOrgUsers(actorId) {
     return false;
 }
 
+const PROTECTED_COMPANY_OWNER_MESSAGE =
+    'The company owner account cannot be removed or deactivated by other administrators.';
+
+/** PSZL-013: org root (signup account) and registered company owner are not removable by peer admins. */
+async function isProtectedCompanyOwnerUserId(userId) {
+    const id = Number(userId);
+    if (!Number.isInteger(id) || id < 1) return false;
+    const orgRootId = await getOrgRootUserId(id);
+    if (orgRootId === id) return true;
+    const ownedCompany = await prisma.company.findFirst({
+        where: { userId: id },
+        select: { id: true },
+    });
+    return Boolean(ownedCompany);
+}
+
+/** Returns ok:false when a non-owner admin tries to delete/deactivate the protected company owner. */
+async function assertActorMayModifyProtectedCompanyOwner(actorId, targetId) {
+    if (!(await isProtectedCompanyOwnerUserId(targetId))) {
+        return { ok: true };
+    }
+    const actorNum = Number(actorId);
+    const targetNum = Number(targetId);
+    if (actorNum === targetNum) {
+        return { ok: true };
+    }
+    const actor = await prisma.user.findUnique({
+        where: { id: actorNum },
+        select: { role: true },
+    });
+    if (normalizeUserRole(actor?.role) === 'superadmin') {
+        return { ok: true };
+    }
+    const [actorRoot, targetRoot] = await Promise.all([
+        getOrgRootUserId(actorNum),
+        getOrgRootUserId(targetNum),
+    ]);
+    if (actorRoot != null && actorRoot === targetRoot) {
+        return { ok: false, status: 403, error: PROTECTED_COMPANY_OWNER_MESSAGE };
+    }
+    return { ok: true };
+}
+
+/** Same privilege model as actorCanManageOrgUsers, applied to a loaded user row. */
+function userRowHasOrgAdminPrivileges(user) {
+    if (!user) return false;
+    const r = normalizeUserRole(user.role);
+    if (r === 'superadmin' || r === 'admin') return true;
+    if (user.creatorId == null && r !== 'auditee') return true;
+    return false;
+}
+
+/** PSZL-014: active org members who can administer users (admin / org root). */
+async function countActiveOrgAdministrators(actorId) {
+    const orgRootId = await getOrgRootUserId(actorId);
+    if (orgRootId == null) return 0;
+    const memberIds = await collectOrgSubtreeUserIds(orgRootId);
+    if (memberIds.length === 0) return 0;
+    const users = await prisma.user.findMany({
+        where: { id: { in: memberIds }, isActive: true },
+        select: { id: true, role: true, creatorId: true },
+    });
+    return users.filter((u) => userRowHasOrgAdminPrivileges(u)).length;
+}
+
+const LAST_ACTIVE_ADMIN_MESSAGE =
+    'You are the only active administrator in this organization. Invite or activate another administrator before deactivating your account.';
+
 /** Any org member except auditees may invite teammates; role assignment stays admin-only. */
 async function actorCanInviteOrgUser(actorId) {
     if (await actorCanManageOrgUsers(actorId)) return true;
@@ -1803,6 +1965,71 @@ async function actorCanAssignAuditeeToSite(actorId, siteId) {
     const allowed = await siteIdsInActorOrg(actorId);
     return allowed.has(parsed);
 }
+
+/** PSZL-010: site must exist and belong to the actor's organization before mutate. */
+async function assertActorCanManageSite(actorId, siteId) {
+    const parsed = Number.parseInt(String(siteId), 10);
+    if (!Number.isInteger(parsed) || parsed < 1) {
+        return { ok: false, status: 400, error: 'Invalid site ID' };
+    }
+    if (await actorIsAuditee(actorId)) {
+        return { ok: false, status: 403, error: 'Forbidden' };
+    }
+    const site = await prisma.site.findUnique({
+        where: { id: parsed },
+        select: { id: true },
+    });
+    if (!site) {
+        return { ok: false, status: 404, error: 'Site not found' };
+    }
+    const actor = await prisma.user.findUnique({
+        where: { id: Number(actorId) },
+        select: { role: true },
+    });
+    if (actor?.role === 'superadmin') {
+        return { ok: true, siteId: parsed };
+    }
+    if (!(await actorCanAssignAuditeeToSite(actorId, parsed))) {
+        return { ok: false, status: 403, error: 'Forbidden' };
+    }
+    return { ok: true, siteId: parsed };
+}
+
+/** Resolve department and ensure the actor may manage its parent site (PSZL-011 / PSZL-012). */
+async function assertActorCanManageDepartment(actorId, departmentId) {
+    const parsed = Number.parseInt(String(departmentId), 10);
+    if (!Number.isInteger(parsed) || parsed < 1) {
+        return { ok: false, status: 400, error: 'Invalid department ID' };
+    }
+    const department = await prisma.department.findUnique({
+        where: { id: parsed },
+        select: { id: true, siteId: true },
+    });
+    if (!department) {
+        return { ok: false, status: 404, error: 'Department not found' };
+    }
+    const siteAccess = await assertActorCanManageSite(actorId, department.siteId);
+    if (!siteAccess.ok) {
+        return siteAccess;
+    }
+    return { ok: true, departmentId: parsed, siteId: siteAccess.siteId };
+}
+
+/** Reject tampered body siteId on POST .../sites/:id/departments (path is authoritative). */
+function assertDepartmentCreateBodySiteId(body, pathSiteId) {
+    if (body?.siteId === undefined || body?.siteId === null || String(body.siteId).trim() === '') {
+        return null;
+    }
+    const fromBody = Number.parseInt(String(body.siteId), 10);
+    if (!Number.isInteger(fromBody) || fromBody !== pathSiteId) {
+        return 'Invalid request';
+    }
+    return null;
+}
+
+const DEPARTMENT_CREATE_ALLOWED_BODY_KEYS = new Set([
+    'name', 'code', 'status', 'manager', 'description', 'siteId',
+]);
 
 /** Org members eligible as lead auditor or team auditor (excludes auditees). */
 async function orgAuditorUserIdSet(actorId) {
@@ -2728,6 +2955,11 @@ app.get('/sites', authenticateToken, checkTrialExpiration, async (req, res) => {
 // Update a site
 app.put('/sites/:id', authenticateToken, checkTrialExpiration, async (req, res) => {
     const { id } = req.params;
+    const actorId = Number(req.user.id);
+    const access = await assertActorCanManageSite(actorId, id);
+    if (!access.ok) {
+        return res.status(access.status).json({ error: access.error });
+    }
     const {
         name, description, siteType, status,
         address, city, state, country, postalCode,
@@ -2813,11 +3045,14 @@ app.put('/sites/:id', authenticateToken, checkTrialExpiration, async (req, res) 
         }
 
         const site = await prisma.site.update({
-            where: { id: Number.parseInt(id) },
+            where: { id: access.siteId },
             data
         });
         res.json(site);
     } catch (error) {
+        if (error?.code === 'P2025') {
+            return res.status(404).json({ error: 'Site not found' });
+        }
         console.error('Error updating site:', error);
         res.status(500).json({ error: 'Failed to update site' });
     }
@@ -2826,12 +3061,20 @@ app.put('/sites/:id', authenticateToken, checkTrialExpiration, async (req, res) 
 // Delete a site
 app.delete('/sites/:id', authenticateToken, checkTrialExpiration, async (req, res) => {
     const { id } = req.params;
+    const actorId = Number(req.user.id);
+    const access = await assertActorCanManageSite(actorId, id);
+    if (!access.ok) {
+        return res.status(access.status).json({ error: access.error });
+    }
     try {
         await prisma.site.delete({
-            where: { id: Number.parseInt(id) }
+            where: { id: access.siteId }
         });
         res.status(204).send();
     } catch (error) {
+        if (error?.code === 'P2025') {
+            return res.status(404).json({ error: 'Site not found' });
+        }
         console.error('Error deleting site:', error);
         res.status(500).json({ error: 'Failed to delete site' });
     }
@@ -2840,15 +3083,20 @@ app.delete('/sites/:id', authenticateToken, checkTrialExpiration, async (req, re
 // Create a department
 app.post('/sites/:siteId/departments', authenticateToken, checkTrialExpiration, async (req, res) => {
     const actorId = Number(req.user.id);
-    if (await rejectIfAuditee(actorId, res)) return;
+    const badKeys = getDisallowedExtraKeysError(req.body, DEPARTMENT_CREATE_ALLOWED_BODY_KEYS);
+    if (badKeys) {
+        return res.status(400).json({ error: badKeys });
+    }
 
     const { siteId } = req.params;
-    const parsedSiteId = Number.parseInt(siteId, 10);
-    if (!Number.isFinite(parsedSiteId)) {
-        return res.status(400).json({ error: 'Invalid site ID' });
+    const access = await assertActorCanManageSite(actorId, siteId);
+    if (!access.ok) {
+        return res.status(access.status).json({ error: access.error });
     }
-    if (!(await actorCanAssignAuditeeToSite(actorId, parsedSiteId))) {
-        return res.status(403).json({ error: 'Forbidden' });
+
+    const siteIdMismatch = assertDepartmentCreateBodySiteId(req.body, access.siteId);
+    if (siteIdMismatch) {
+        return res.status(400).json({ error: siteIdMismatch });
     }
 
     const { name, code, status, manager, description } = req.body;
@@ -2869,7 +3117,7 @@ app.post('/sites/:siteId/departments', authenticateToken, checkTrialExpiration, 
                 status: sanitizePlainText(status, DEPT_TEXT_LIMITS.status) || 'Active',
                 manager: sanitizePlainText(manager, DEPT_TEXT_LIMITS.manager),
                 description: sanitizePlainText(description, DEPT_TEXT_LIMITS.description, { preserveNewlines: true }),
-                siteId: parsedSiteId
+                siteId: access.siteId
             }
         });
         res.status(201).json(department);
@@ -2882,15 +3130,14 @@ app.post('/sites/:siteId/departments', authenticateToken, checkTrialExpiration, 
 // Update a department
 app.put('/departments/:id', authenticateToken, checkTrialExpiration, async (req, res) => {
     const actorId = Number(req.user.id);
-    if (await rejectIfAuditee(actorId, res)) return;
-
     const { id } = req.params;
     const { name, code, status, manager, description, siteId } = req.body;
     try {
-        const parsedDeptId = Number.parseInt(id, 10);
-        if (!Number.isFinite(parsedDeptId)) {
-            return res.status(400).json({ error: 'Invalid department ID' });
+        const access = await assertActorCanManageDepartment(actorId, id);
+        if (!access.ok) {
+            return res.status(access.status).json({ error: access.error });
         }
+        const parsedDeptId = access.departmentId;
 
         const existing = await prisma.department.findUnique({
             where: { id: parsedDeptId },
@@ -2898,9 +3145,6 @@ app.put('/departments/:id', authenticateToken, checkTrialExpiration, async (req,
         });
         if (!existing?.site) {
             return res.status(404).json({ error: 'Department not found' });
-        }
-        if (!(await actorCanAssignAuditeeToSite(actorId, existing.site.id))) {
-            return res.status(403).json({ error: 'Forbidden' });
         }
 
         const data = {};
@@ -2947,7 +3191,7 @@ app.put('/departments/:id', authenticateToken, checkTrialExpiration, async (req,
                     error: 'Department can only be moved to a site within the same company',
                 });
             }
-            data.siteId = parsedSiteId;
+            data.siteId = targetSite.id;
         }
 
         if (Object.keys(data).length === 0) {
@@ -2965,15 +3209,23 @@ app.put('/departments/:id', authenticateToken, checkTrialExpiration, async (req,
     }
 });
 
-// Delete a department
+// Delete a department (PSZL-012: org-scoped via assertActorCanManageDepartment)
 app.delete('/departments/:id', authenticateToken, checkTrialExpiration, async (req, res) => {
+    const actorId = Number(req.user.id);
     const { id } = req.params;
+    const access = await assertActorCanManageDepartment(actorId, id);
+    if (!access.ok) {
+        return res.status(access.status).json({ error: access.error });
+    }
     try {
         await prisma.department.delete({
-            where: { id: Number.parseInt(id) }
+            where: { id: access.departmentId }
         });
         res.status(204).send();
     } catch (error) {
+        if (error?.code === 'P2025') {
+            return res.status(404).json({ error: 'Department not found' });
+        }
         console.error('Error deleting department:', error);
         res.status(500).json({ error: 'Failed to delete department' });
     }
@@ -3215,7 +3467,8 @@ app.delete('/companies/:id', authenticateToken, checkTrialExpiration, async (req
 
 function getOtpTtlMinutes(purpose) {
     if (purpose === 'signup') return 1;
-    if (purpose === 'password_reset' || purpose === 'email_change') return 15;
+    if (purpose === 'password_reset') return 5;
+    if (purpose === 'email_change') return 15;
     if (purpose === 'user_invite') return 30;
     return 10;
 }
@@ -3265,6 +3518,87 @@ async function sendOtpToEmailAddress(normalizedEmail, purpose, options = {}) {
 function getAppLoginUrl() {
     const base = String(process.env.FRONTEND_URL || 'http://localhost:8080').trim().replace(/\/$/, '');
     return `${base}/auth`;
+}
+
+/** PSZL-019 / VDP-020: notify account owner after a successful password change. */
+async function sendPasswordChangedNotificationEmail({ toEmail, firstName, lastName, changedBySelf = true }) {
+    if (!isSmtpConfigured()) {
+        console.warn('[AUTH] SMTP not configured; skipping password change notification email.');
+        return { sent: false, skipped: true };
+    }
+    const normalizedTo = String(toEmail || '').trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedTo)) {
+        return { sent: false, skipped: true };
+    }
+
+    const displayName = escapeHtml(`${firstName || ''} ${lastName || ''}`.trim() || 'there');
+    const safeEmail = escapeHtml(normalizedTo);
+    const loginUrl = getAppLoginUrl();
+    const changedAt = new Date().toLocaleString('en-US', {
+        dateStyle: 'full',
+        timeStyle: 'short',
+        timeZone: 'UTC',
+    });
+    const intro = changedBySelf
+        ? 'Your iAudit Global account password was changed successfully.'
+        : 'The password for your iAudit Global account was changed by an administrator.';
+
+    const subject = 'Your iAudit Global password was changed';
+    const html = `
+        <div style="font-family: Arial, sans-serif; max-width: 560px; margin: 0 auto; color: #1e293b;">
+            <div style="background:#213847;padding:24px 28px;border-radius:8px 8px 0 0;">
+                <h1 style="margin:0;color:#ffffff;font-size:20px;font-weight:700;">Password changed</h1>
+            </div>
+            <div style="background:#ffffff;padding:28px;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 8px 8px;">
+                <p style="font-size:15px;line-height:1.6;margin:0 0 16px;">Hello ${displayName},</p>
+                <p style="font-size:15px;line-height:1.6;margin:0 0 16px;">${intro}</p>
+                <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:16px;margin:20px 0;">
+                    <p style="margin:0 0 6px;font-size:12px;color:#64748b;text-transform:uppercase;letter-spacing:0.05em;">When</p>
+                    <p style="margin:0;font-size:14px;font-weight:600;">${escapeHtml(changedAt)} UTC</p>
+                </div>
+                <p style="font-size:14px;line-height:1.6;color:#475569;margin:0 0 20px;">
+                    If you did not make this change, contact us immediately at
+                    <a href="mailto:support@iaudit.global" style="color:#1e855e;">support@iaudit.global</a>
+                    and reset your password using the forgot-password flow on the sign-in page.
+                </p>
+                <p style="margin:24px 0;">
+                    <a href="${loginUrl}" style="display:inline-block;background:#1e855e;color:#ffffff;text-decoration:none;padding:12px 24px;border-radius:8px;font-weight:bold;">
+                        Sign in
+                    </a>
+                </p>
+                <hr style="border:0;border-top:1px solid #e5e7eb;margin:28px 0;" />
+                <p style="margin:0;font-size:11px;color:#94a3b8;text-align:center;">
+                    This security notification was sent to ${safeEmail}. Please do not reply to this automated message.
+                </p>
+            </div>
+        </div>
+    `;
+    const text = [
+        `Hello ${`${firstName || ''} ${lastName || ''}`.trim() || 'there'},`,
+        '',
+        intro,
+        '',
+        `Time (UTC): ${changedAt}`,
+        '',
+        'If you did not make this change, contact support@iaudit.global immediately.',
+        '',
+        `Sign in: ${loginUrl}`,
+    ].join('\n');
+
+    try {
+        await transporter.sendMail({
+            from: { name: 'iAudit Global', address: getSmtpFromAddress() },
+            to: normalizedTo,
+            subject,
+            html,
+            text,
+        });
+        console.log(`[AUTH] Password change notification sent to ${normalizedTo}`);
+        return { sent: true };
+    } catch (err) {
+        console.error('[AUTH] Failed to send password change notification:', err.message);
+        return { sent: false, error: err.message };
+    }
 }
 
 /** Combined welcome email for admin-created users (credentials + verification code). */
@@ -3346,7 +3680,7 @@ async function sendOtpToEmailAddressUnderLock(normalizedEmail, purpose, options 
             }
         }
 
-        const otp = generateOTP();
+        const otp = generateVerificationCode(purpose);
         const devConsoleOnly = !isSmtpConfigured() && allowDevConsoleOtp();
         if (!devConsoleOnly) {
             assertSmtpConfiguredForOtp();
@@ -3426,7 +3760,9 @@ async function sendOtpToEmailAddressUnderLock(normalizedEmail, purpose, options 
                     </p>
                     <div style="background-color: #f3f4f6; padding: 24px; border-radius: 8px; text-align: center; margin-bottom: 32px;">
                         <p style="text-transform: uppercase; font-size: 14px; font-weight: 600; color: #6b7280; margin: 0 0 12px 0; letter-spacing: 1px;">Verification code</p>
-                        <h2 style="font-size: 42px; font-weight: 800; color: #111827; letter-spacing: 8px; margin: 0;">${otp}</h2>
+                        ${isPasswordReset
+                            ? `<p style="margin: 0; font-size: 14px; font-weight: 600; color: #111827; word-break: break-all; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; line-height: 1.5;">${escapeHtml(otp)}</p>`
+                            : `<h2 style="font-size: 42px; font-weight: 800; color: #111827; letter-spacing: 8px; margin: 0;">${otp}</h2>`}
                     </div>
                     <p style="color: #4b5563; font-size: 14px; line-height: 1.5;">
                         This code will expire in <strong>${expireLabel}</strong>. If you did not request this, you can ignore this email.
@@ -3960,6 +4296,12 @@ async function handleResetPassword(req, res) {
     }
     email = email.toLowerCase().trim();
     const otpTrim = String(otp).trim();
+    if (
+        otpTrim.length < PASSWORD_RESET_CODE_MIN_LENGTH
+        || otpTrim.length > PASSWORD_RESET_CODE_MAX_LENGTH
+    ) {
+        return res.status(400).json({ error: 'Invalid or expired verification code' });
+    }
     if (!PASSWORD_REGEX.test(newPassword)) {
         return res.status(400).json({
             error: 'Password must be at least 8 characters long and include at least one uppercase letter, one number, and one special character.'
@@ -3967,7 +4309,10 @@ async function handleResetPassword(req, res) {
     }
 
     try {
-        const user = await prisma.user.findFirst({ where: { email }, select: { id: true, isActive: true } });
+        const user = await prisma.user.findFirst({
+            where: { email },
+            select: { id: true, isActive: true, email: true, firstName: true, lastName: true },
+        });
         if (!user || !user.isActive) {
             return res.status(400).json({ error: 'Invalid or expired verification code' });
         }
@@ -3980,7 +4325,7 @@ async function handleResetPassword(req, res) {
             await prisma.otp.delete({ where: { email } }).catch(() => {});
             return res.status(400).json({ error: 'Verification code has expired. Request a new code.' });
         }
-        if (storedData.code !== otpTrim) {
+        if (!verificationCodesMatch(storedData.code, otpTrim)) {
             return res.status(400).json({ error: 'Invalid verification code' });
         }
 
@@ -3995,6 +4340,13 @@ async function handleResetPassword(req, res) {
         await invalidateAllUserSessions(user.id);
         clearSessionCookie(res);
 
+        await sendPasswordChangedNotificationEmail({
+            toEmail: user.email,
+            firstName: user.firstName,
+            lastName: user.lastName,
+            changedBySelf: true,
+        });
+
         return res.status(200).json({
             message: 'Password has been reset. You can sign in with your new password.',
             reauthRequired: true,
@@ -4006,7 +4358,7 @@ async function handleResetPassword(req, res) {
 }
 
 app.post('/auth/forgot-password', sendOtpIpRateLimit, handleForgotPassword);
-app.post('/auth/reset-password', handleResetPassword);
+app.post('/auth/reset-password', resetPasswordVerifyRateLimit, handleResetPassword);
 
 /** Invalidate every server session for this user (all devices/browsers). */
 async function handleLogout(req, res) {
@@ -4884,6 +5236,26 @@ app.put('/users/:id', authenticateToken, async (req, res) => {
             return res.status(403).json({ error: 'Forbidden' });
         }
 
+        if (isActive === false && targetId !== actorId) {
+            const ownerGuard = await assertActorMayModifyProtectedCompanyOwner(actorId, targetId);
+            if (!ownerGuard.ok) {
+                return res.status(ownerGuard.status).json({ error: ownerGuard.error });
+            }
+        }
+
+        if (isActive === false && targetId === actorId) {
+            const actorAdminRow = await prisma.user.findUnique({
+                where: { id: actorId },
+                select: { role: true, creatorId: true, isActive: true },
+            });
+            if (userRowHasOrgAdminPrivileges(actorAdminRow)) {
+                const activeAdminCount = await countActiveOrgAdministrators(actorId);
+                if (activeAdminCount <= 1) {
+                    return res.status(400).json({ error: LAST_ACTIVE_ADMIN_MESSAGE });
+                }
+            }
+        }
+
         const privilegeFieldsRequested =
             role !== undefined ||
             customRoleName !== undefined ||
@@ -4994,6 +5366,16 @@ app.put('/users/:id', authenticateToken, async (req, res) => {
             if (!PASSWORD_REGEX.test(password)) {
                 return res.status(400).json({ error: 'Password must be at least 8 characters long and include at least one uppercase letter, one number, and one special character.' });
             }
+            const pwdRow = await prisma.user.findUnique({
+                where: { id: targetId },
+                select: { password: true },
+            });
+            if (
+                pwdRow?.password
+                && (await bcrypt.compare(String(password), pwdRow.password))
+            ) {
+                return res.status(400).json({ error: NEW_PASSWORD_SAME_AS_CURRENT_MESSAGE });
+            }
             updateData.password = await bcrypt.hash(password, 10);
             updateData.failedLoginAttempts = 0;
         }
@@ -5008,6 +5390,12 @@ app.put('/users/:id', authenticateToken, async (req, res) => {
         if (passwordWillChange) {
             const revoked = await invalidateAllUserSessions(targetId);
             console.log(`[AUTH] Password changed for user ${targetId}; revoked ${revoked} session(s)`);
+            await sendPasswordChangedNotificationEmail({
+                toEmail: user.email,
+                firstName: user.firstName,
+                lastName: user.lastName,
+                changedBySelf: targetId === actorId,
+            });
         }
 
         const { password: _, ...userWithoutPassword } = user;
@@ -5056,6 +5444,11 @@ app.delete('/users/:id', authenticateToken, async (req, res) => {
             return res.status(400).json({
                 error: 'You cannot delete your own account while signed in. Sign out or use another admin account.'
             });
+        }
+
+        const ownerGuard = await assertActorMayModifyProtectedCompanyOwner(actorId, targetId);
+        if (!ownerGuard.ok) {
+            return res.status(ownerGuard.status).json({ error: ownerGuard.error });
         }
 
         const target = await prisma.user.findUnique({
@@ -6235,23 +6628,28 @@ app.delete('/audit-plans/:id', authenticateToken, checkTrialExpiration, async (r
 });
 
 
-// Send Self Assessment Report by email
+// Send Self Assessment Report by email (PSZL-015: server PDF + account email only)
 app.post('/send-assessment-report', authenticateToken, async (req, res) => {
     const raw = req.body || {};
-    const to = sanitizePlainText(raw.to, 254)?.toLowerCase().replace(/[^\w.@+-]/g, '') || '';
     const companyName = sanitizePersonName(raw.companyName, 200) || '';
     const auditorName = sanitizePersonName(raw.auditorName, 200) || '';
     const auditCompany = raw.auditCompany ? sanitizePersonName(raw.auditCompany, 200) : '';
     const standard = sanitizeShortLabel(raw.standard, 80) || '';
     const score = Number(raw.score);
     const date = raw.date;
-    const questions = Array.isArray(raw.questions) ? raw.questions : [];
+    const questions = Array.isArray(raw.questions) ? raw.questions.slice(0, 500) : [];
 
-    if (!to || !companyName || !standard) {
-        return res.status(400).json({ error: 'Missing required fields' });
+    const recipientEmail = String(req.user.email || '').toLowerCase().trim();
+    if (!recipientEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recipientEmail)) {
+        return res.status(400).json({ error: 'Your account does not have a valid email for report delivery.' });
     }
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) {
-        return res.status(400).json({ error: 'Invalid email address' });
+
+    if (raw.pdfBase64) {
+        console.warn(`[assessment-report] Ignored client pdfBase64 from user ${req.user.id} (PSZL-015)`);
+    }
+
+    if (!companyName || !standard) {
+        return res.status(400).json({ error: 'Missing required fields' });
     }
 
     const uid = req.user.id;
@@ -6305,7 +6703,7 @@ app.post('/send-assessment-report', authenticateToken, async (req, res) => {
 
         const mailOptions = {
             from: { name: 'iAudit Global', address: getSmtpFromAddress() },
-            to,
+            to: recipientEmail,
             subject: `Your ${escapeHtml(standard)} Self Assessment Report — ${escapeHtml(companyName)}`,
             html: `
             <div style="font-family:Arial,sans-serif;max-width:680px;margin:0 auto;background:#f8fafc;">
@@ -6353,18 +6751,24 @@ app.post('/send-assessment-report', authenticateToken, async (req, res) => {
             </div>`
         };
 
-        // Attach PDF if provided
-        if (req.body.pdfBase64) {
-            mailOptions.attachments = [{
-                filename: `Self_Assessment_${companyName.replace(/\s+/g, '_')}_Report.pdf`,
-                content: Buffer.from(req.body.pdfBase64, 'base64'),
-                contentType: 'application/pdf'
-            }];
-        }
+        const pdfBuffer = await buildSelfAssessmentReportPdf({
+            companyName,
+            auditorName,
+            auditCompany,
+            standard,
+            score,
+            date,
+            questions,
+        });
+        mailOptions.attachments = [{
+            filename: `Self_Assessment_${companyName.replace(/\s+/g, '_')}_Report.pdf`,
+            content: pdfBuffer,
+            contentType: 'application/pdf',
+        }];
 
         // Fire-and-forget: report is already saved client-side; do not block on SMTP latency.
         transporter.sendMail(mailOptions)
-            .then(() => console.log(`Assessment report sent to ${to}`))
+            .then(() => console.log(`Assessment report sent to ${recipientEmail}`))
             .catch((err) => console.error('Failed to send assessment report email:', err));
 
         res.json({ success: true });
