@@ -12,12 +12,11 @@ export function SuperAdminProtectedRoute({ children }: { children: React.ReactNo
 
     if (!hasValidSuperAdminSession()) {
         const raw = localStorage.getItem("user");
-        const token = localStorage.getItem("token");
-        if (raw && token) {
+        if (raw) {
             try {
                 const user = JSON.parse(raw) as { role?: string };
                 if (isSuperAdminRole(user.role)) {
-                    persistSuperAdminSession({ ...user, token });
+                    persistSuperAdminSession(user);
                 }
             } catch {
                 /* ignore */

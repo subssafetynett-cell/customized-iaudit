@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
-import { apiFetch, SESSION_EXPIRES_AT_KEY } from "@/lib/api";
+import { apiFetch, parseApiJson, SESSION_EXPIRES_AT_KEY, clearClientSession } from "@/lib/api";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -10,6 +10,9 @@ import gsap from "gsap";
 import { PhoneInputWithCountryCode } from "@/components/PhoneInputWithCountryCode";
 import { DEFAULT_PHONE_COUNTRY_CODE } from "@/lib/phoneCountries";
 import { PASSWORD_REGEX, PASSWORD_ERROR_MESSAGE, isTenDigitPhone, normalizePhone10Digits, PHONE_10_ERROR_MESSAGE } from "@/lib/validation";
+
+/** Must match server PASSWORD_RESET_CODE_MIN_LENGTH (high-entropy reset token). */
+const PASSWORD_RESET_CODE_MIN_LENGTH = 20;
 import {
     clearSuperAdminSession,
     hasValidSuperAdminSession,
@@ -276,8 +279,8 @@ export default function Auth() {
     const handleResetPasswordSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
         setErrorMessage("");
-        if (forgotOtp.trim().length < 6) {
-            setErrorMessage("Enter the 6-digit code from your email.");
+        if (forgotOtp.trim().length < PASSWORD_RESET_CODE_MIN_LENGTH) {
+            setErrorMessage("Paste the full reset code from your email.");
             return;
         }
         if (!PASSWORD_REGEX.test(forgotNewPassword)) {
@@ -301,6 +304,9 @@ export default function Auth() {
             const data = await response.json().catch(() => ({}));
             if (!response.ok) {
                 throw new Error(data.error || "Could not reset password.");
+            }
+            if (data.reauthRequired) {
+                clearClientSession();
             }
             setPostResetMessage(data.message || "Password has been reset. You can sign in with your new password.");
             closeForgotPassword();
@@ -430,7 +436,7 @@ export default function Auth() {
                 throw new Error('Invalid credentials');
             }
 
-            const { sessionExpiresAt, token, ...profile } = data as Record<string, unknown> & {
+            const { sessionExpiresAt, token: _token, ...profile } = data as Record<string, unknown> & {
                 sessionExpiresAt?: string;
                 token?: string;
                 role?: string;
@@ -444,12 +450,12 @@ export default function Auth() {
 
             clearSuperAdminSession();
             localStorage.setItem("user", JSON.stringify(profile));
-            if (token) {
-                localStorage.setItem("token", token);
-            }
             if (sessionExpiresAt && typeof sessionExpiresAt === "string") {
                 localStorage.setItem(SESSION_EXPIRES_AT_KEY, sessionExpiresAt);
+            } else {
+                localStorage.removeItem(SESSION_EXPIRES_AT_KEY);
             }
+            localStorage.removeItem("token");
             if ((profile as { role?: string }).role === "superadmin") {
                 localStorage.setItem("isSuperAdminAuthenticated", "true");
             }
@@ -507,7 +513,7 @@ export default function Auth() {
                 body: JSON.stringify({ email: signupEmail })
             });
 
-            const data = await response.json();
+            const data = await parseApiJson<{ error?: string; retryAfterSeconds?: number }>(response);
 
             if (!response.ok) {
                 if (response.status === 429 && typeof data.retryAfterSeconds === "number") {
@@ -543,7 +549,7 @@ export default function Auth() {
                 body: JSON.stringify({ email: signupEmail })
             });
 
-            const data = await response.json();
+            const data = await parseApiJson<{ error?: string; retryAfterSeconds?: number }>(response);
 
             if (!response.ok) {
                 if (response.status === 429 && typeof data.retryAfterSeconds === "number") {
@@ -595,20 +601,20 @@ export default function Auth() {
                 throw new Error(data.error || 'Failed to verify OTP');
             }
 
-            // Success! Save user and token to local storage and navigate to dashboard
-            const { sessionExpiresAt, token, ...profile } = data as Record<string, unknown> & {
+            // Success! Session token is stored in an httpOnly cookie by the server.
+            const { sessionExpiresAt, token: _token, ...profile } = data as Record<string, unknown> & {
                 sessionExpiresAt?: string;
                 token?: string;
             };
             localStorage.setItem("user", JSON.stringify(profile));
+            localStorage.removeItem("token");
             if (profile.id != null) {
                 clearTrialWelcomeForUser(profile.id as number);
             }
-            if (token) {
-                localStorage.setItem("token", token);
-            }
             if (sessionExpiresAt && typeof sessionExpiresAt === "string") {
                 localStorage.setItem(SESSION_EXPIRES_AT_KEY, sessionExpiresAt);
+            } else {
+                localStorage.removeItem(SESSION_EXPIRES_AT_KEY);
             }
             if ((profile as { role?: string }).role === "superadmin") {
                 localStorage.setItem("isSuperAdminAuthenticated", "true");
@@ -892,8 +898,8 @@ export default function Auth() {
                                         <h2 className="text-xl font-bold text-[#111827] tracking-tight">Reset password</h2>
                                         <p className="text-sm text-[#6B7280] mt-1">
                                             {forgotStep === "email"
-                                                ? "Enter your account email and we will send you a verification code."
-                                                : `Enter the code sent to ${resetEmail} and choose a new password.`}
+                                                ? "Enter your account email and we will send you a secure reset code."
+                                                : `Paste the reset code sent to ${resetEmail} and choose a new password. Codes expire in 5 minutes.`}
                                         </p>
                                     </div>
 
@@ -931,17 +937,15 @@ export default function Auth() {
                                     ) : (
                                         <form onSubmit={handleResetPasswordSubmit} className="space-y-4">
                                             <div className="space-y-2">
-                                                <Label className="text-xs font-semibold text-[#4B5563] uppercase tracking-wider">Verification code</Label>
+                                                <Label className="text-xs font-semibold text-[#4B5563] uppercase tracking-wider">Reset code</Label>
                                                 <Input
                                                     type="text"
-                                                    inputMode="numeric"
-                                                    maxLength={6}
-                                                    placeholder="123456"
+                                                    placeholder="Paste reset code from email"
                                                     value={forgotOtp}
-                                                    onChange={(e) => setForgotOtp(e.target.value.replace(/\D/g, ""))}
+                                                    onChange={(e) => setForgotOtp(e.target.value.trim())}
                                                     disabled={isSubmitting}
                                                     autoComplete="one-time-code"
-                                                    className="h-14 text-center text-2xl tracking-[0.35em] font-mono bg-[#F9FAFB] border-[#E5E7EB] rounded-xl text-[#111827] placeholder:text-[#9CA3AF] focus:ring-1 focus:ring-[#00875B]"
+                                                    className="h-12 text-sm font-mono bg-[#F9FAFB] border-[#E5E7EB] rounded-xl text-[#111827] placeholder:text-[#9CA3AF] focus:ring-1 focus:ring-[#00875B]"
                                                 />
                                             </div>
                                             <div className="space-y-2">
@@ -990,7 +994,7 @@ export default function Auth() {
                                             </div>
                                             <p className="text-[11px] text-[#6B7280]">{PASSWORD_ERROR_MESSAGE}</p>
                                             <Button
-                                                disabled={isSubmitting || forgotOtp.length !== 6}
+                                                disabled={isSubmitting || forgotOtp.trim().length < PASSWORD_RESET_CODE_MIN_LENGTH}
                                                 type="submit"
                                                 className="w-full h-12 text-base font-bold bg-[#00875B] text-white hover:bg-[#006E4A] rounded-xl shadow-lg shadow-[#00875B]/10 transition-all duration-200 active:scale-[0.98]"
                                             >

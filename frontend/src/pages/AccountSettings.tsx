@@ -5,7 +5,7 @@ import { Label } from "@/components/ui/label";
 import { Lock, Loader2, Check, CreditCard, ExternalLink } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import { useNavigate } from "react-router-dom";
-import { apiFetch } from "@/lib/api";
+import { apiFetch, clearSessionAndRedirectToLogin } from "@/lib/api";
 import { PASSWORD_REGEX, PASSWORD_ERROR_MESSAGE } from "@/lib/validation";
 
 export default function AccountSettings() {
@@ -100,6 +100,15 @@ export default function AccountSettings() {
                 newPassword: "",
                 confirmPassword: ""
             });
+
+            if (data.reauthRequired) {
+                toast({
+                    title: "Password updated",
+                    description: "Sign in again with your new password.",
+                });
+                clearSessionAndRedirectToLogin();
+                return;
+            }
 
             toast({
                 title: "Success",

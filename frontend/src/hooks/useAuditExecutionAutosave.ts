@@ -68,14 +68,13 @@ export function useAuditExecutionAutosave({
             const auditData = buildRef.current();
             const json = JSON.stringify(auditData);
             if (json === lastJsonRef.current) return;
-            const token = localStorage.getItem("token");
             try {
                 fetch(resolveApiUrl(`/audit-plans/${planId}`), {
                     method: "PUT",
                     headers: {
                         "Content-Type": "application/json",
-                        ...(token ? { Authorization: `Bearer ${token}` } : {}),
                     },
+                    credentials: "include",
                     body: JSON.stringify({ auditData }),
                     keepalive: true,
                 });

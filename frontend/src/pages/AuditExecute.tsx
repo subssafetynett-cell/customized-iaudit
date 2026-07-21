@@ -59,6 +59,7 @@ import { useAuditExecutionAutosave } from "@/hooks/useAuditExecutionAutosave";
 import { useAssigneeEmailLookup } from "@/hooks/useAssigneeEmailLookup";
 import { AssigneeEmailFields } from "@/components/AssigneeEmailFields";
 import { AuditEvidenceAttachmentList } from "@/components/AuditEvidenceAttachmentList";
+import { QuestionEvidenceUpload } from "@/components/QuestionEvidenceUpload";
 import {
   AUDIT_EVIDENCE_ACCEPT,
   AUDIT_EVIDENCE_UNSUPPORTED_MESSAGE,
@@ -67,12 +68,32 @@ import {
   type AuditEvidenceMedia,
 } from "@/lib/evidenceImageUpload";
 import { generateAuditReportPdf, generateAuditReportDocx, downloadAuditReport } from "@/utils/auditReportExport";
+import {
+  collectAuditFindingSources,
+  syncNonConformancesFromSources,
+  syncOpportunitiesFromSources,
+} from "@/lib/syncAuditFindingsSummary";
 import { AuditFindingsReportForm } from "@/components/AuditFindingsReportForm";
 import {
   buildFindingsReportDefaults,
   defaultFindingsReportForm,
   type FindingsReportForm,
 } from "@/lib/findingsReportForm";
+import {
+  DEFAULT_DETAILS_OF_CHANGES_ROWS,
+  defaultAuditExecuteLayout,
+  getColumnLabel,
+  getSectionLabel,
+  isColumnVisible,
+  isSectionVisible,
+  mergeAuditExecuteLayout,
+  type AuditExecuteLayout,
+  type AuditExecuteTableId,
+} from "@/lib/auditExecuteLayout";
+import { EditableTableColumnHeader } from "@/components/EditableTableColumnHeader";
+import {
+  resolveDepartmentsFromProgram,
+} from "@/lib/auditProgramDepartments";
 
 import { CLAUSE_MATRIX, ClauseMatrixRow } from "@/data/clauseMapping";
 
@@ -181,7 +202,12 @@ const AuditExecute = () => {
 
   // State for the loaded plan
   const [currentPlan, setCurrentPlan] = useState<any>(location.state?.plan);
+  const [companies, setCompanies] = useState<any[]>([]);
   const plan = currentPlan;
+  const programDepartments = useMemo(
+    () => resolveDepartmentsFromProgram(plan?.auditProgram, companies),
+    [plan?.auditProgram, companies],
+  );
 
   // State to filter for findings only
   const [focusFindings, setFocusFindings] = useState<boolean>(
@@ -413,7 +439,9 @@ const AuditExecute = () => {
             if (data.clauseData) setClauseData(data.clauseData);
             if (data.previousFindings) setPreviousFindings(data.previousFindings);
             if (data.detailsOfChanges) setDetailsOfChanges(data.detailsOfChanges);
-            if (data.participants) setParticipants(data.participants);
+            if (data.auditExecuteLayout) {
+              setAuditExecuteLayout(mergeAuditExecuteLayout(data.auditExecuteLayout));
+            }
             if (data.positiveAspects) setPositiveAspects(data.positiveAspects);
             if (data.opportunities) setOpportunities(data.opportunities);
             if (data.nonConformances) setNonConformances(data.nonConformances);
@@ -424,7 +452,6 @@ const AuditExecute = () => {
             if (data.processAudits) setProcessAudits(data.processAudits);
             if (data.extraChecklistItems) setExtraChecklistItems(data.extraChecklistItems);
             if (data.showExecutiveSummary !== undefined) setShowExecutiveSummary(data.showExecutiveSummary);
-            if (data.showAuditParticipants !== undefined) setShowAuditParticipants(data.showAuditParticipants);
             if (data.showAuditFindings !== undefined) setShowAuditFindings(data.showAuditFindings);
             if (data.clauseFiles) setClauseFiles(sanitizeAuditEvidenceMediaMap(data.clauseFiles));
             if (data.genericFiles) setGenericFiles(sanitizeAuditEvidenceMediaMap(data.genericFiles));
@@ -452,6 +479,21 @@ const AuditExecute = () => {
     };
     fetchPlanDetails();
   }, [id]);
+
+  useEffect(() => {
+    const fetchCompanies = async () => {
+      try {
+        const res = await apiFetch("/companies");
+        if (res.ok) {
+          const data = await res.json();
+          setCompanies(Array.isArray(data) ? data : []);
+        }
+      } catch (error) {
+        console.error("Failed to fetch companies for departments:", error);
+      }
+    };
+    fetchCompanies();
+  }, []);
 
   useEffect(() => {
     if (!focusFindingId || !plan) return;
@@ -509,20 +551,11 @@ const AuditExecute = () => {
   // Extended Sections State
   const [previousFindings, setPreviousFindings] = useState("");
   const [detailsOfChanges, setDetailsOfChanges] = useState([
-    { item: "Scope", actionRequired: false, notes: "" },
-    { item: "Boundary", actionRequired: false, notes: "" },
-    {
-      item: "Key IMS documented information",
-      actionRequired: false,
-      notes: "",
-    },
-    { item: "Organisational structure", actionRequired: false, notes: "" },
-    { item: "Compliance Obligations", actionRequired: false, notes: "" },
-    { item: "Other noteworthy changes", actionRequired: false, notes: "" },
+    ...DEFAULT_DETAILS_OF_CHANGES_ROWS,
   ]);
-  const [participants, setParticipants] = useState([
-    { name: "", position: "", opening: false, closing: false, interviewed: "" },
-  ]);
+  const [auditExecuteLayout, setAuditExecuteLayout] = useState<AuditExecuteLayout>(
+    defaultAuditExecuteLayout(),
+  );
   const [positiveAspects, setPositiveAspects] = useState([
     { id: "PA-01", standardClause: "", areaProcess: "", aspect: "" },
   ]);
@@ -605,7 +638,6 @@ const AuditExecute = () => {
 
   // Visibility toggles for the Process Audit top sections
   const [showExecutiveSummary, setShowExecutiveSummary] = useState(true);
-  const [showAuditParticipants, setShowAuditParticipants] = useState(true);
   const [showAuditFindings, setShowAuditFindings] = useState(true);
 
   // Derived Progress logic
@@ -679,7 +711,7 @@ const AuditExecute = () => {
         clauseData,
         previousFindings,
         detailsOfChanges,
-        participants,
+        auditExecuteLayout,
         positiveAspects,
         opportunities,
         nonConformances,
@@ -690,7 +722,6 @@ const AuditExecute = () => {
         processAudits,
         extraChecklistItems,
         showExecutiveSummary,
-        showAuditParticipants,
         showAuditFindings,
         findingsReportForm: {
           ...findingsReportForm,
@@ -727,7 +758,7 @@ const AuditExecute = () => {
       clauseData,
       previousFindings,
       detailsOfChanges,
-      participants,
+      auditExecuteLayout,
       positiveAspects,
       opportunities,
       nonConformances,
@@ -739,7 +770,6 @@ const AuditExecute = () => {
       processAudits,
       extraChecklistItems,
       showExecutiveSummary,
-      showAuditParticipants,
       showAuditFindings,
       progressValue,
       editableChecklist,
@@ -810,11 +840,13 @@ const AuditExecute = () => {
       });
     }
 
-    if (template?.type === "checklist") {
+    if (template?.type === "checklist" || template?.isTripleMapping) {
       Object.entries(checklistData).forEach(([idx, data]) => {
         const type = data.findings;
         if (type && type !== "C" && type !== "") {
-          const item = (template?.content as ChecklistContent[])?.[Number(idx)];
+          const item =
+            editableChecklist[Number(idx)] ||
+            (template?.content as ChecklistContent[])?.[Number(idx)];
           findings.push({
             source: "checklist",
             id: idx,
@@ -857,6 +889,34 @@ const AuditExecute = () => {
 
   const findingsList = collectFindings();
 
+  useEffect(() => {
+    if (!template || focusFindings) return;
+    if (template.type !== "checklist" && template.type !== "clause-checklist") return;
+
+    const sources = collectAuditFindingSources({
+      checklistData,
+      editableChecklist,
+      extraChecklistItems,
+      clauseData,
+    });
+
+    setOpportunities((current) => {
+      const next = syncOpportunitiesFromSources(current, sources);
+      return JSON.stringify(current) === JSON.stringify(next) ? current : next;
+    });
+    setNonConformances((current) => {
+      const next = syncNonConformancesFromSources(current, sources);
+      return JSON.stringify(current) === JSON.stringify(next) ? current : next;
+    });
+  }, [
+    checklistData,
+    clauseData,
+    extraChecklistItems,
+    editableChecklist,
+    template?.type,
+    focusFindings,
+  ]);
+
   if (!plan || !template) {
     return (
       <div className="flex-1 p-8 pt-6 min-h-screen flex items-center justify-center">
@@ -872,17 +932,6 @@ const AuditExecute = () => {
     );
   }
 
-  const addParticipant = () =>
-    setParticipants([
-      ...participants,
-      {
-        name: "",
-        position: "",
-        opening: false,
-        closing: false,
-        interviewed: "",
-      },
-    ]);
   const addPositiveAspect = () =>
     setPositiveAspects([
       ...positiveAspects,
@@ -917,14 +966,90 @@ const AuditExecute = () => {
     ]);
 
 
-  const removeParticipant = (index: number) =>
-    setParticipants(participants.filter((_, i) => i !== index));
   const removePositiveAspect = (index: number) =>
     setPositiveAspects(positiveAspects.filter((_, i) => i !== index));
   const removeOpportunity = (index: number) =>
     setOpportunities(opportunities.filter((_, i) => i !== index));
   const removeNonConformance = (index: number) =>
     setNonConformances(nonConformances.filter((_, i) => i !== index));
+
+  const setLayoutSectionLabel = (
+    key: keyof AuditExecuteLayout["sectionLabels"],
+    label: string,
+  ) =>
+    setAuditExecuteLayout({
+      ...auditExecuteLayout,
+      sectionLabels: { ...auditExecuteLayout.sectionLabels, [key]: label },
+    });
+
+  const hideLayoutSection = (key: string) =>
+    setAuditExecuteLayout({
+      ...auditExecuteLayout,
+      hiddenSections: Array.from(
+        new Set([...(auditExecuteLayout.hiddenSections || []), key]),
+      ),
+    });
+
+  const setLayoutColumnLabel = (
+    tableId: AuditExecuteTableId,
+    columnKey: string,
+    label: string,
+  ) =>
+    setAuditExecuteLayout({
+      ...auditExecuteLayout,
+      columnLabels: {
+        ...auditExecuteLayout.columnLabels,
+        [tableId]: {
+          ...auditExecuteLayout.columnLabels?.[tableId],
+          [columnKey]: label,
+        },
+      },
+    });
+
+  const hideLayoutColumn = (tableId: AuditExecuteTableId, columnKey: string) =>
+    setAuditExecuteLayout({
+      ...auditExecuteLayout,
+      hiddenColumns: {
+        ...auditExecuteLayout.hiddenColumns,
+        [tableId]: Array.from(
+          new Set([...(auditExecuteLayout.hiddenColumns?.[tableId] || []), columnKey]),
+        ),
+      },
+    });
+
+  const resetExecuteLayout = () => {
+    setAuditExecuteLayout(defaultAuditExecuteLayout());
+    setDetailsOfChanges([...DEFAULT_DETAILS_OF_CHANGES_ROWS]);
+    toast.success("Layout reset to defaults");
+  };
+
+  const addDetailsOfChange = () =>
+    setDetailsOfChanges([
+      ...detailsOfChanges,
+      { item: "New item", actionRequired: false, notes: "" },
+    ]);
+
+  const removeDetailsOfChange = (index: number) => {
+    if (detailsOfChanges.length <= 1) return;
+    setDetailsOfChanges(detailsOfChanges.filter((_, i) => i !== index));
+  };
+
+  const renderLayoutColumnHeader = (
+    tableId: AuditExecuteTableId,
+    columnKey: string,
+    widthClass?: string,
+  ) => {
+    if (!isColumnVisible(auditExecuteLayout, tableId, columnKey)) return null;
+    return (
+      <TableHead className={widthClass}>
+        <EditableTableColumnHeader
+          label={getColumnLabel(auditExecuteLayout, tableId, columnKey)}
+          onLabelChange={(label) => setLayoutColumnLabel(tableId, columnKey, label)}
+          onDelete={() => hideLayoutColumn(tableId, columnKey)}
+        />
+      </TableHead>
+    );
+  };
 
   const handleChecklistChange = (
     index: number,
@@ -1033,6 +1158,94 @@ const AuditExecute = () => {
     });
   };
 
+  const updateGenericFileDescription = (
+    key: string,
+    index: number,
+    description: string,
+  ) => {
+    setGenericFiles((prev) => {
+      const list = [...(prev[key] || [])];
+      if (!list[index]) return prev;
+      list[index] = {
+        ...list[index],
+        description: description.trim() || undefined,
+      };
+      return { ...prev, [key]: list };
+    });
+  };
+
+  const persistGenericFileDescription = (
+    key: string,
+    index: number,
+    description: string,
+  ) => {
+    let nextGenericFiles: Record<string, AuditEvidenceMedia[]>;
+    setGenericFiles((prev) => {
+      const list = [...(prev[key] || [])];
+      if (!list[index]) return prev;
+      list[index] = {
+        ...list[index],
+        description: description.trim() || undefined,
+      };
+      nextGenericFiles = { ...prev, [key]: list };
+      return nextGenericFiles;
+    });
+    void saveNow({
+      genericFiles: sanitizeAuditEvidenceMediaMap(nextGenericFiles!),
+    });
+  };
+
+  const genericEvidenceDescriptionHandlers = (key: string) => ({
+    onDescriptionChange: (index: number, description: string) =>
+      updateGenericFileDescription(key, index, description),
+    onDescriptionBlur: (index: number, description: string) =>
+      persistGenericFileDescription(key, index, description),
+  });
+
+  const updateClauseFileDescription = (
+    clause: string,
+    index: number,
+    description: string,
+  ) => {
+    setClauseFiles((prev) => {
+      const list = [...(prev[clause] || [])];
+      if (!list[index]) return prev;
+      list[index] = {
+        ...list[index],
+        description: description.trim() || undefined,
+      };
+      return { ...prev, [clause]: list };
+    });
+  };
+
+  const persistClauseFileDescription = (
+    clause: string,
+    index: number,
+    description: string,
+  ) => {
+    let nextClauseFiles: Record<string, AuditEvidenceMedia[]>;
+    setClauseFiles((prev) => {
+      const list = [...(prev[clause] || [])];
+      if (!list[index]) return prev;
+      list[index] = {
+        ...list[index],
+        description: description.trim() || undefined,
+      };
+      nextClauseFiles = { ...prev, [clause]: list };
+      return nextClauseFiles;
+    });
+    void saveNow({
+      clauseFiles: sanitizeAuditEvidenceMediaMap(nextClauseFiles!),
+    });
+  };
+
+  const clauseEvidenceDescriptionHandlers = (clause: string) => ({
+    onDescriptionChange: (index: number, description: string) =>
+      updateClauseFileDescription(clause, index, description),
+    onDescriptionBlur: (index: number, description: string) =>
+      persistClauseFileDescription(clause, index, description),
+  });
+
   const handleSectionChange = (index: number, value: string) => {
     setSectionData((prev) => ({ ...prev, [index]: value }));
   };
@@ -1133,8 +1346,8 @@ const AuditExecute = () => {
   };
 
 
-  const exportToExcel = () => {
-    downloadAuditReport({ ...plan, auditData: buildAuditDataPayload() }, "excel");
+  const exportToExcel = async () => {
+    await downloadAuditReport({ ...plan, auditData: buildAuditDataPayload() }, "excel");
   };
 
   const exportToWord = async () => {
@@ -1225,6 +1438,24 @@ const AuditExecute = () => {
                     {plan.site?.name || plan.location || "N/A"}
                   </span>
                 </div>
+                {programDepartments.length > 0 && (
+                  <div className="grid grid-cols-[120px_1fr] items-start gap-4">
+                    <span className="text-sm font-medium text-slate-500 pt-0.5">
+                      Departments
+                    </span>
+                    <div className="flex flex-wrap gap-1.5">
+                      {programDepartments.map((dept) => (
+                        <Badge
+                          key={dept.id}
+                          variant="outline"
+                          className="text-xs font-medium bg-emerald-50 border-emerald-200 text-slate-800"
+                        >
+                          {dept.name}
+                        </Badge>
+                      ))}
+                    </div>
+                  </div>
+                )}
                 <div className="grid grid-cols-[120px_1fr] items-center gap-4">
                   <span className="text-sm font-medium text-slate-500">
                     Date
@@ -1467,14 +1698,46 @@ const AuditExecute = () => {
         {(template.type === "clause-checklist" ||
           template.type === "checklist") && !focusFindings && (
             <div className="space-y-8 bg-white rounded-xl p-6 shadow-sm border border-slate-200">
-              {/* Previous Audit Findings */}
+              <div className="flex justify-end">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="gap-2 text-slate-600"
+                  onClick={resetExecuteLayout}
+                >
+                  <RefreshCw className="h-4 w-4" />
+                  Reset Layout
+                </Button>
+              </div>
+
+              {isSectionVisible(auditExecuteLayout, "previousFindings") && (
               <div className="space-y-4">
-                <h3 className="text-lg font-bold text-slate-900 border-b border-slate-100 pb-2">
-                  Previous Audit Findings
-                </h3>
+                <div className="flex items-center gap-2 border-b border-slate-100 pb-2">
+                  <Input
+                    value={getSectionLabel(auditExecuteLayout, "previousFindings")}
+                    onChange={(e) => setLayoutSectionLabel("previousFindings", e.target.value)}
+                    className="text-lg font-bold text-slate-900 border-0 shadow-none px-0 h-auto flex-1"
+                  />
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8 text-slate-400 hover:text-red-600"
+                    onClick={() => hideLayoutSection("previousFindings")}
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
+                </div>
                 <div className="border border-slate-200 rounded-md overflow-hidden">
-                  <div className="bg-slate-50 text-slate-700 font-bold p-3 text-sm border-b border-slate-200">
-                    Closure of Findings from Previous Audit
+                  <div className="bg-slate-50 text-slate-700 font-bold p-3 text-sm border-b border-slate-200 flex items-center gap-2">
+                    <Input
+                      value={getSectionLabel(auditExecuteLayout, "previousFindingsClosure")}
+                      onChange={(e) =>
+                        setLayoutSectionLabel("previousFindingsClosure", e.target.value)
+                      }
+                      className="h-8 text-sm font-bold border-dashed border-slate-300 bg-white flex-1"
+                    />
                   </div>
                   <Textarea
                     className="min-h-[120px] border-0 rounded-none focus-visible:ring-0 resize-y p-4 bg-white"
@@ -1484,25 +1747,34 @@ const AuditExecute = () => {
                   />
                 </div>
               </div>
+              )}
 
-              {/* Details of Changes */}
+              {isSectionVisible(auditExecuteLayout, "detailsOfChanges") && (
               <div className="space-y-4">
-                <h3 className="text-lg font-bold text-slate-900 border-b border-slate-100 pb-2">
-                  Details of Changes
-                </h3>
+                <div className="flex items-center gap-2 border-b border-slate-100 pb-2">
+                  <Input
+                    value={getSectionLabel(auditExecuteLayout, "detailsOfChanges")}
+                    onChange={(e) => setLayoutSectionLabel("detailsOfChanges", e.target.value)}
+                    className="text-lg font-bold text-slate-900 border-0 shadow-none px-0 h-auto flex-1"
+                  />
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8 text-slate-400 hover:text-red-600"
+                    onClick={() => hideLayoutSection("detailsOfChanges")}
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
+                </div>
                 <div className="border border-slate-200 rounded-md overflow-hidden overflow-x-auto shadow-sm">
                   <Table>
                     <TableHeader className="bg-slate-50">
                       <TableRow className="hover:bg-slate-50">
-                        <TableHead className="font-bold text-slate-700 w-[40%]">
-                          Change Management monitoring in relation to:
-                        </TableHead>
-                        <TableHead className="font-bold text-slate-700 w-[12%]">
-                          Action Required
-                        </TableHead>
-                        <TableHead className="font-bold text-slate-700">
-                          Notes
-                        </TableHead>
+                        {renderLayoutColumnHeader("detailsOfChanges", "item", "font-bold text-slate-700 w-[40%]")}
+                        {renderLayoutColumnHeader("detailsOfChanges", "actionRequired", "font-bold text-slate-700 w-[12%]")}
+                        {renderLayoutColumnHeader("detailsOfChanges", "notes", "font-bold text-slate-700")}
+                        <TableHead className="w-[5%]" />
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -1511,9 +1783,20 @@ const AuditExecute = () => {
                           key={idx}
                           className="divide-x divide-slate-100 bg-white hover:bg-slate-50 transition-colors"
                         >
-                          <TableCell className="font-medium text-slate-700 py-3">
-                            {change.item}
+                          {isColumnVisible(auditExecuteLayout, "detailsOfChanges", "item") && (
+                          <TableCell className="py-2">
+                            <Input
+                              className="border-dashed border-slate-300 font-medium text-slate-700"
+                              value={change.item}
+                              onChange={(e) => {
+                                const newChanges = [...detailsOfChanges];
+                                newChanges[idx].item = e.target.value;
+                                setDetailsOfChanges(newChanges);
+                              }}
+                            />
                           </TableCell>
+                          )}
+                          {isColumnVisible(auditExecuteLayout, "detailsOfChanges", "actionRequired") && (
                           <TableCell className="text-center align-middle py-3">
                             <input
                               type="checkbox"
@@ -1526,6 +1809,8 @@ const AuditExecute = () => {
                               }}
                             />
                           </TableCell>
+                          )}
+                          {isColumnVisible(auditExecuteLayout, "detailsOfChanges", "notes") && (
                           <TableCell className="p-0">
                             <Input
                               className="border-0 focus-visible:ring-0 rounded-none bg-transparent h-full min-h-[44px] px-4"
@@ -1538,117 +1823,12 @@ const AuditExecute = () => {
                               }}
                             />
                           </TableCell>
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                </div>
-              </div>
-
-              {/* Audit Participants */}
-              <div className="space-y-4">
-                <h3 className="text-lg font-bold text-slate-900 border-b border-slate-100 pb-2">
-                  Audit Participants
-                </h3>
-                <div className="border border-slate-200 rounded-md overflow-hidden overflow-x-auto shadow-sm">
-                  <Table>
-                    <TableHeader className="bg-slate-50">
-                      <TableRow className="hover:bg-slate-50">
-                        <TableHead className="font-bold text-slate-700 w-[25%]">
-                          Name
-                        </TableHead>
-                        <TableHead className="font-bold text-slate-700 w-[25%]">
-                          Position
-                        </TableHead>
-                        <TableHead className="font-bold text-slate-700 w-[10%] text-center leading-tight">
-                          Opening
-                          <br />
-                          meeting
-                        </TableHead>
-                        <TableHead className="font-bold text-slate-700 w-[10%] text-center leading-tight">
-                          Closing
-                          <br />
-                          meeting
-                        </TableHead>
-                        <TableHead className="font-bold text-slate-700 w-[25%] leading-tight">
-                          Interviewed
-                          <br />
-                          (processes)
-                        </TableHead>
-                        <TableHead className="w-[5%]"></TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {participants.map((p, idx) => (
-                        <TableRow
-                          key={idx}
-                          className="divide-x divide-slate-100 bg-white hover:bg-slate-50 transition-colors"
-                        >
-                          <TableCell className="p-0">
-                            <Input
-                              placeholder="Name..."
-                              className="border-0 focus-visible:ring-0 rounded-none bg-transparent min-h-[44px] px-4"
-                              value={p.name}
-                              onChange={(e) => {
-                                const n = [...participants];
-                                n[idx].name = e.target.value;
-                                setParticipants(n);
-                              }}
-                            />
-                          </TableCell>
-                          <TableCell className="p-0">
-                            <Input
-                              placeholder="Position..."
-                              className="border-0 focus-visible:ring-0 rounded-none bg-transparent min-h-[44px] px-4"
-                              value={p.position}
-                              onChange={(e) => {
-                                const n = [...participants];
-                                n[idx].position = e.target.value;
-                                setParticipants(n);
-                              }}
-                            />
-                          </TableCell>
-                          <TableCell className="text-center align-middle">
-                            <input
-                              type="checkbox"
-                              className="w-4 h-4 cursor-pointer text-emerald-600 rounded border-slate-300 focus:ring-emerald-500"
-                              checked={p.opening}
-                              onChange={(e) => {
-                                const n = [...participants];
-                                n[idx].opening = e.target.checked;
-                                setParticipants(n);
-                              }}
-                            />
-                          </TableCell>
-                          <TableCell className="text-center align-middle">
-                            <input
-                              type="checkbox"
-                              className="w-4 h-4 cursor-pointer text-emerald-600 rounded border-slate-300 focus:ring-emerald-500"
-                              checked={p.closing}
-                              onChange={(e) => {
-                                const n = [...participants];
-                                n[idx].closing = e.target.checked;
-                                setParticipants(n);
-                              }}
-                            />
-                          </TableCell>
-                          <TableCell className="p-0">
-                            <Input
-                              placeholder="Processes..."
-                              className="border-0 focus-visible:ring-0 rounded-none bg-transparent min-h-[44px] px-4"
-                              value={p.interviewed}
-                              onChange={(e) => {
-                                const n = [...participants];
-                                n[idx].interviewed = e.target.value;
-                                setParticipants(n);
-                              }}
-                            />
-                          </TableCell>
+                          )}
                           <TableCell className="p-2 text-center">
-                            {participants.length > 1 && (
+                            {detailsOfChanges.length > 1 && (
                               <Trash2
                                 className="w-4 h-4 text-slate-400 cursor-pointer hover:text-red-500 mx-auto transition-colors"
-                                onClick={() => removeParticipant(idx)}
+                                onClick={() => removeDetailsOfChange(idx)}
                               />
                             )}
                           </TableCell>
@@ -1660,46 +1840,63 @@ const AuditExecute = () => {
                     <Button
                       variant="outline"
                       size="sm"
-                      onClick={addParticipant}
+                      onClick={addDetailsOfChange}
                       className="gap-2 text-slate-600 border-dashed border-slate-300 hover:bg-slate-50 hover:text-slate-900 w-full max-w-xs"
                     >
-                      <Plus className="w-4 h-4" /> Add Participant
+                      <Plus className="w-4 h-4" /> Add Row
                     </Button>
                   </div>
                 </div>
               </div>
+              )}
 
-              {/* Audit Findings Summary */}
+              {isSectionVisible(auditExecuteLayout, "nationalFindingsLog") && (
               <div className="space-y-6 pt-6 border-t border-slate-100 mt-8">
-                <div>
-                  <h3 className="text-xl font-bold text-slate-900 mb-6 flex items-center gap-2">
-                    <CheckCircle2 className="w-5 h-5 text-emerald-500" />
-                    Global Findings Log
-                  </h3>
+                <div className="flex items-center gap-2 mb-6">
+                  <CheckCircle2 className="w-5 h-5 text-emerald-500 shrink-0" />
+                  <Input
+                    value={getSectionLabel(auditExecuteLayout, "nationalFindingsLog")}
+                    onChange={(e) => setLayoutSectionLabel("nationalFindingsLog", e.target.value)}
+                    className="text-xl font-bold text-slate-900 border-0 shadow-none px-0 h-auto flex-1"
+                  />
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8 text-slate-400 hover:text-red-600"
+                    onClick={() => hideLayoutSection("nationalFindingsLog")}
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
+                </div>
 
-                  {/* Positive Aspects */}
+                  {isSectionVisible(auditExecuteLayout, "positiveAspects") && (
                   <div className="space-y-3 mb-8">
-                    <h4 className="font-semibold text-base text-slate-800">
-                      Positive Aspects
-                    </h4>
+                    <div className="flex items-center gap-2">
+                      <Input
+                        value={getSectionLabel(auditExecuteLayout, "positiveAspects")}
+                        onChange={(e) => setLayoutSectionLabel("positiveAspects", e.target.value)}
+                        className="font-semibold text-base text-slate-800 border-0 shadow-none px-0 h-auto flex-1"
+                      />
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8 text-slate-400 hover:text-red-600"
+                        onClick={() => hideLayoutSection("positiveAspects")}
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </div>
                     <div className="border border-slate-200 rounded-md overflow-hidden overflow-x-auto shadow-sm">
                       <Table>
                         <TableHeader className="bg-slate-50">
                           <TableRow className="hover:bg-slate-50">
-                            <TableHead className="font-bold text-slate-700 w-[8%]">
-                              No.
-                            </TableHead>
-                            <TableHead className="font-bold text-slate-700 w-[20%]">
-                              Standard &<br />
-                              Clause No.
-                            </TableHead>
-                            <TableHead className="font-bold text-slate-700 w-[25%]">
-                              Area / Process
-                            </TableHead>
-                            <TableHead className="font-bold text-slate-700">
-                              Positive Aspect
-                            </TableHead>
-                            <TableHead className="w-[5%]"></TableHead>
+                            {renderLayoutColumnHeader("positiveAspects", "no", "font-bold text-slate-700 w-[8%]")}
+                            {renderLayoutColumnHeader("positiveAspects", "standardClause", "font-bold text-slate-700 w-[20%]")}
+                            {renderLayoutColumnHeader("positiveAspects", "areaProcess", "font-bold text-slate-700 w-[25%]")}
+                            {renderLayoutColumnHeader("positiveAspects", "aspect", "font-bold text-slate-700")}
+                            <TableHead className="w-[5%]" />
                           </TableRow>
                         </TableHeader>
                         <TableBody>
@@ -1708,9 +1905,12 @@ const AuditExecute = () => {
                               key={idx}
                               className="divide-x divide-slate-100 bg-white hover:bg-slate-50 transition-colors"
                             >
+                              {isColumnVisible(auditExecuteLayout, "positiveAspects", "no") && (
                               <TableCell className="font-bold text-slate-500 bg-slate-50/50 text-center">
                                 {pa.id}
                               </TableCell>
+                              )}
+                              {isColumnVisible(auditExecuteLayout, "positiveAspects", "standardClause") && (
                               <TableCell className="p-0">
                                 <Input
                                   className="border-0 focus-visible:ring-0 rounded-none bg-transparent min-h-[44px] px-4"
@@ -1723,6 +1923,8 @@ const AuditExecute = () => {
                                   }}
                                 />
                               </TableCell>
+                              )}
+                              {isColumnVisible(auditExecuteLayout, "positiveAspects", "areaProcess") && (
                               <TableCell className="p-0">
                                 <Input
                                   className="border-0 focus-visible:ring-0 rounded-none bg-transparent min-h-[44px] px-4"
@@ -1735,6 +1937,8 @@ const AuditExecute = () => {
                                   }}
                                 />
                               </TableCell>
+                              )}
+                              {isColumnVisible(auditExecuteLayout, "positiveAspects", "aspect") && (
                               <TableCell className="p-0">
                                 <Input
                                   className="border-0 focus-visible:ring-0 rounded-none bg-transparent min-h-[44px] px-4"
@@ -1747,6 +1951,7 @@ const AuditExecute = () => {
                                   }}
                                 />
                               </TableCell>
+                              )}
                               <TableCell className="p-2 text-center">
                                 {positiveAspects.length > 1 && (
                                   <Trash2
@@ -1771,47 +1976,58 @@ const AuditExecute = () => {
                       </div>
                     </div>
                   </div>
+                  )}
 
-                  {/* Opportunities for Improvement */}
+                  {isSectionVisible(auditExecuteLayout, "opportunities") && (
                   <div className="space-y-3 mb-8">
-                    <div>
-                      <h4 className="font-semibold text-base text-slate-800">
-                        Opportunities for Improvement (OFI)
-                      </h4>
-                      <p className="text-sm text-slate-500 mt-1">
-                        Recommendations to ensure continuous improvement.
-                      </p>
+                    <div className="flex items-start gap-2">
+                      <div className="flex-1 space-y-1">
+                        <Input
+                          value={getSectionLabel(auditExecuteLayout, "opportunities")}
+                          onChange={(e) => setLayoutSectionLabel("opportunities", e.target.value)}
+                          className="font-semibold text-base text-slate-800 border-0 shadow-none px-0 h-auto"
+                        />
+                        <Input
+                          value={getSectionLabel(auditExecuteLayout, "opportunitiesSubtitle")}
+                          onChange={(e) =>
+                            setLayoutSectionLabel("opportunitiesSubtitle", e.target.value)
+                          }
+                          className="text-sm text-slate-500 border-dashed border-slate-300 h-8"
+                        />
+                      </div>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8 text-slate-400 hover:text-red-600 shrink-0"
+                        onClick={() => hideLayoutSection("opportunities")}
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
                     </div>
                     <div className="border border-slate-200 rounded-md overflow-hidden overflow-x-auto shadow-sm">
                       <Table>
                         <TableHeader className="bg-slate-50">
                           <TableRow className="hover:bg-slate-50">
-                            <TableHead className="font-bold text-slate-700 w-[8%]">
-                              No.
-                            </TableHead>
-                            <TableHead className="font-bold text-slate-700 w-[20%]">
-                              Standard
-                              <br />
-                              Clause
-                            </TableHead>
-                            <TableHead className="font-bold text-slate-700 w-[25%]">
-                              Area / Process
-                            </TableHead>
-                            <TableHead className="font-bold text-slate-700">
-                              Opportunity for Improvement
-                            </TableHead>
-                            <TableHead className="w-[5%]"></TableHead>
+                            {renderLayoutColumnHeader("opportunities", "no", "font-bold text-slate-700 w-[8%]")}
+                            {renderLayoutColumnHeader("opportunities", "standardClause", "font-bold text-slate-700 w-[20%]")}
+                            {renderLayoutColumnHeader("opportunities", "areaProcess", "font-bold text-slate-700 w-[25%]")}
+                            {renderLayoutColumnHeader("opportunities", "opportunity", "font-bold text-slate-700")}
+                            <TableHead className="w-[5%]" />
                           </TableRow>
                         </TableHeader>
                         <TableBody>
                           {opportunities.map((ofi, idx) => (
                             <TableRow
-                              key={idx}
-                              className="divide-x divide-slate-100 bg-white hover:bg-slate-50 transition-colors"
+                              key={ofi.sourceKey || `manual-ofi-${idx}`}
+                              className={`divide-x divide-slate-100 bg-white hover:bg-slate-50 transition-colors ${ofi.sourceKey ? "bg-amber-50/20" : ""}`}
                             >
+                              {isColumnVisible(auditExecuteLayout, "opportunities", "no") && (
                               <TableCell className="font-bold text-amber-600 bg-slate-50/50 text-center">
                                 {ofi.id}
                               </TableCell>
+                              )}
+                              {isColumnVisible(auditExecuteLayout, "opportunities", "standardClause") && (
                               <TableCell className="p-0">
                                 <Input
                                   className="border-0 focus-visible:ring-0 rounded-none bg-transparent min-h-[44px] px-4"
@@ -1824,6 +2040,8 @@ const AuditExecute = () => {
                                   }}
                                 />
                               </TableCell>
+                              )}
+                              {isColumnVisible(auditExecuteLayout, "opportunities", "areaProcess") && (
                               <TableCell className="p-0">
                                 <Input
                                   className="border-0 focus-visible:ring-0 rounded-none bg-transparent min-h-[44px] px-4"
@@ -1836,20 +2054,23 @@ const AuditExecute = () => {
                                   }}
                                 />
                               </TableCell>
+                              )}
+                              {isColumnVisible(auditExecuteLayout, "opportunities", "opportunity") && (
                               <TableCell className="p-0">
-                                <Input
-                                  className="border-0 focus-visible:ring-0 rounded-none bg-transparent min-h-[44px] px-4"
+                                <Textarea
+                                  className="min-h-[44px] border-0 focus-visible:ring-0 rounded-none bg-transparent resize-y p-3 text-sm"
                                   placeholder="Detail..."
                                   value={ofi.opportunity}
                                   onChange={(e) => {
                                     const n = [...opportunities];
-                                    n[idx].opportunity = e.target.value;
+                                    n[idx] = { ...n[idx], opportunity: e.target.value };
                                     setOpportunities(n);
                                   }}
                                 />
                               </TableCell>
+                              )}
                               <TableCell className="p-2 text-center">
-                                {opportunities.length > 1 && (
+                                {!ofi.sourceKey && opportunities.length > 1 && (
                                   <Trash2
                                     className="w-4 h-4 text-slate-400 cursor-pointer hover:text-red-500 mx-auto transition-colors"
                                     onClick={() => removeOpportunity(idx)}
@@ -1872,52 +2093,60 @@ const AuditExecute = () => {
                       </div>
                     </div>
                   </div>
+                  )}
 
-                  {/* Non-conformance */}
+                  {isSectionVisible(auditExecuteLayout, "nonConformances") && (
                   <div className="space-y-3">
-                    <div>
-                      <h4 className="font-semibold text-base text-slate-800">
-                        Non-conformances (NCR)
-                      </h4>
-                      <p className="text-sm text-slate-500 mt-1">
-                        Incomplete compliance requiring corrective action.
-                      </p>
+                    <div className="flex items-start gap-2">
+                      <div className="flex-1 space-y-1">
+                        <Input
+                          value={getSectionLabel(auditExecuteLayout, "nonConformances")}
+                          onChange={(e) => setLayoutSectionLabel("nonConformances", e.target.value)}
+                          className="font-semibold text-base text-slate-800 border-0 shadow-none px-0 h-auto"
+                        />
+                        <Input
+                          value={getSectionLabel(auditExecuteLayout, "nonConformancesSubtitle")}
+                          onChange={(e) =>
+                            setLayoutSectionLabel("nonConformancesSubtitle", e.target.value)
+                          }
+                          className="text-sm text-slate-500 border-dashed border-slate-300 h-8"
+                        />
+                      </div>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8 text-slate-400 hover:text-red-600 shrink-0"
+                        onClick={() => hideLayoutSection("nonConformances")}
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
                     </div>
                     <div className="border border-slate-200 rounded-md overflow-hidden overflow-x-auto shadow-sm">
                       <Table>
                         <TableHeader className="bg-slate-50">
                           <TableRow className="hover:bg-slate-50">
-                            <TableHead className="font-bold text-slate-700 w-[8%]">
-                              No.
-                            </TableHead>
-                            <TableHead className="font-bold text-slate-700 w-[18%]">
-                              Standard &<br />
-                              Clause No.
-                            </TableHead>
-                            <TableHead className="font-bold text-slate-700 w-[20%]">
-                              Area / Process
-                            </TableHead>
-                            <TableHead className="font-bold text-slate-700">
-                              Statement of Non-conformance
-                            </TableHead>
-                            <TableHead className="font-bold text-slate-700 w-[15%]">
-                              Due Date
-                            </TableHead>
-                            <TableHead className="font-bold text-slate-700 w-[13%]">
-                              Action By
-                            </TableHead>
-                            <TableHead className="w-[5%]"></TableHead>
+                            {renderLayoutColumnHeader("nonConformances", "no", "font-bold text-slate-700 w-[8%]")}
+                            {renderLayoutColumnHeader("nonConformances", "standardClause", "font-bold text-slate-700 w-[18%]")}
+                            {renderLayoutColumnHeader("nonConformances", "areaProcess", "font-bold text-slate-700 w-[20%]")}
+                            {renderLayoutColumnHeader("nonConformances", "statement", "font-bold text-slate-700")}
+                            {renderLayoutColumnHeader("nonConformances", "dueDate", "font-bold text-slate-700 w-[15%]")}
+                            {renderLayoutColumnHeader("nonConformances", "actionBy", "font-bold text-slate-700 w-[13%]")}
+                            <TableHead className="w-[5%]" />
                           </TableRow>
                         </TableHeader>
                         <TableBody>
                           {nonConformances.map((ncr, idx) => (
                             <TableRow
-                              key={idx}
-                              className="divide-x divide-slate-100 bg-white hover:bg-slate-50 transition-colors"
+                              key={ncr.sourceKey || `manual-ncr-${idx}`}
+                              className={`divide-x divide-slate-100 bg-white hover:bg-slate-50 transition-colors ${ncr.sourceKey ? "bg-red-50/20" : ""}`}
                             >
+                              {isColumnVisible(auditExecuteLayout, "nonConformances", "no") && (
                               <TableCell className="font-bold text-red-600 bg-slate-50/50 text-center">
                                 {ncr.id}
                               </TableCell>
+                              )}
+                              {isColumnVisible(auditExecuteLayout, "nonConformances", "standardClause") && (
                               <TableCell className="p-0">
                                 <Input
                                   className="border-0 focus-visible:ring-0 rounded-none bg-transparent min-h-[44px] px-4"
@@ -1930,6 +2159,8 @@ const AuditExecute = () => {
                                   }}
                                 />
                               </TableCell>
+                              )}
+                              {isColumnVisible(auditExecuteLayout, "nonConformances", "areaProcess") && (
                               <TableCell className="p-0">
                                 <Input
                                   className="border-0 focus-visible:ring-0 rounded-none bg-transparent min-h-[44px] px-4"
@@ -1942,6 +2173,8 @@ const AuditExecute = () => {
                                   }}
                                 />
                               </TableCell>
+                              )}
+                              {isColumnVisible(auditExecuteLayout, "nonConformances", "statement") && (
                               <TableCell className="p-0">
                                 <Textarea
                                   className="min-h-[44px] border-0 focus-visible:ring-0 rounded-none bg-transparent resize-y p-3"
@@ -1954,6 +2187,8 @@ const AuditExecute = () => {
                                   }}
                                 />
                               </TableCell>
+                              )}
+                              {isColumnVisible(auditExecuteLayout, "nonConformances", "dueDate") && (
                               <TableCell className="p-0">
                                 <Input
                                   type="date"
@@ -1966,6 +2201,8 @@ const AuditExecute = () => {
                                   }}
                                 />
                               </TableCell>
+                              )}
+                              {isColumnVisible(auditExecuteLayout, "nonConformances", "actionBy") && (
                               <TableCell className="p-0">
                                 <Input
                                   className="border-0 focus-visible:ring-0 rounded-none bg-transparent min-h-[44px] px-4"
@@ -1978,8 +2215,9 @@ const AuditExecute = () => {
                                   }}
                                 />
                               </TableCell>
+                              )}
                               <TableCell className="p-2 text-center">
-                                {nonConformances.length > 1 && (
+                                {!ncr.sourceKey && nonConformances.length > 1 && (
                                   <Trash2
                                     className="w-4 h-4 text-slate-400 cursor-pointer hover:text-red-500 mx-auto transition-colors"
                                     onClick={() => removeNonConformance(idx)}
@@ -2002,8 +2240,9 @@ const AuditExecute = () => {
                       </div>
                     </div>
                   </div>
-                </div>
+                  )}
               </div>
+              )}
             </div>
           )}
 
@@ -2514,6 +2753,7 @@ const AuditExecute = () => {
                         onRemove={(fileIdx) =>
                           removeGenericFile(`clause_checklist_${clause.id}`, fileIdx)
                         }
+                        {...genericEvidenceDescriptionHandlers(`clause_checklist_${clause.id}`)}
                         readOnly={isAuditeeReadOnly}
                       />
                     </div>
@@ -2561,6 +2801,7 @@ const AuditExecute = () => {
                     <AuditEvidenceAttachmentList
                       files={genericFiles[`section_${index}`] ?? []}
                       onRemove={(fileIdx) => removeGenericFile(`section_${index}`, fileIdx)}
+                      {...genericEvidenceDescriptionHandlers(`section_${index}`)}
                       readOnly={isAuditeeReadOnly}
                       className="w-full p-3 border-t border-slate-200 bg-white"
                     />
@@ -2595,17 +2836,6 @@ const AuditExecute = () => {
                       <input
                         type="checkbox"
                         className="w-4 h-4 text-emerald-500 rounded border-slate-600 focus:ring-emerald-500 cursor-pointer"
-                        checked={showAuditParticipants}
-                        onChange={(e) => setShowAuditParticipants(e.target.checked)}
-                      />
-                      <span className="text-sm font-bold text-slate-200">
-                        Audit Participants
-                      </span>
-                    </label>
-                    <label className="flex items-center gap-3 bg-slate-800 px-4 py-2 rounded-lg cursor-pointer hover:bg-slate-700 transition-colors border border-slate-700">
-                      <input
-                        type="checkbox"
-                        className="w-4 h-4 text-emerald-500 rounded border-slate-600 focus:ring-emerald-500 cursor-pointer"
                         checked={showAuditFindings}
                         onChange={(e) => setShowAuditFindings(e.target.checked)}
                       />
@@ -2619,9 +2849,7 @@ const AuditExecute = () => {
             )}
 
             {/* Executive Summary & Findings Overview */}
-            {!focusFindings && (showExecutiveSummary ||
-              showAuditParticipants ||
-              showAuditFindings) && (
+            {!focusFindings && (showExecutiveSummary || showAuditFindings) && (
                 <div className="space-y-8 bg-white rounded-xl p-6 shadow-sm border border-slate-200 mt-6">
                   {/* Metadata Table (The requested 3 columns) */}
                   <div className="bg-white rounded-lg overflow-hidden border border-slate-200">
@@ -2674,7 +2902,14 @@ const AuditExecute = () => {
                           className="min-h-[200px] border-0 border-b border-slate-800 rounded-none focus-visible:ring-0 resize-y p-6 text-base bg-white placeholder:text-slate-300"
                           placeholder="Type your overall audit summary here..."
                           value={executiveSummary}
-                          onChange={(e) => setExecutiveSummary(e.target.value)}
+                          onChange={(e) => {
+                            const next = e.target.value;
+                            setExecutiveSummary(next);
+                            setFindingsReportForm((prev) => ({
+                              ...prev,
+                              generalComment: next,
+                            }));
+                          }}
                         />
                         {/* Refined Executive Summary Table - Single row with 8 cells */}
                         <Table>
@@ -2736,129 +2971,6 @@ const AuditExecute = () => {
                             </TableRow>
                           </TableBody>
                         </Table>
-                      </div>
-                    </div>
-                  )}
-
-                  {showAuditParticipants && (
-                    <div className="space-y-4 pt-4 border-t border-slate-100">
-                      <h3 className="text-xl font-bold text-slate-900 border-b border-slate-200 pb-2">
-                        Audit Participants
-                      </h3>
-                      <div className="border-2 border-slate-800 rounded-lg overflow-hidden overflow-x-auto shadow-sm">
-                        <Table>
-                          <TableHeader className="bg-slate-800">
-                            <TableRow className="hover:bg-slate-800 divide-x divide-slate-600">
-                              <TableHead className="font-bold text-white w-[25%] px-4 py-3">
-                                Name
-                              </TableHead>
-                              <TableHead className="font-bold text-white w-[25%] px-4 py-3">
-                                Position
-                              </TableHead>
-                              <TableHead className="font-bold text-white w-[12%] text-center px-2 py-3 leading-tight">
-                                Opening meeting
-                              </TableHead>
-                              <TableHead className="font-bold text-white w-[12%] text-center px-2 py-3 leading-tight">
-                                Closing meeting
-                              </TableHead>
-                              <TableHead className="font-bold text-white w-[26%] px-4 py-3 leading-tight">
-                                Interviewed (processes)
-                              </TableHead>
-                              <TableHead className="w-[50px] bg-slate-800"></TableHead>
-                            </TableRow>
-                          </TableHeader>
-                          <TableBody>
-                            {participants.map((p, idx) => (
-                              <TableRow
-                                key={idx}
-                                className="bg-white hover:bg-slate-50 transition-colors divide-x divide-slate-200"
-                              >
-                                <TableCell className="p-0">
-                                  <Input
-                                    placeholder="Enter Name..."
-                                    className="border-0 focus-visible:ring-0 rounded-none bg-transparent min-h-[48px] px-4 shadow-none"
-                                    value={p.name}
-                                    onChange={(e) => {
-                                      const n = [...participants];
-                                      n[idx].name = e.target.value;
-                                      setParticipants(n);
-                                    }}
-                                  />
-                                </TableCell>
-                                <TableCell className="p-0">
-                                  <Input
-                                    placeholder="Enter Position..."
-                                    className="border-0 focus-visible:ring-0 rounded-none bg-transparent min-h-[48px] px-4 shadow-none"
-                                    value={p.position}
-                                    onChange={(e) => {
-                                      const n = [...participants];
-                                      n[idx].position = e.target.value;
-                                      setParticipants(n);
-                                    }}
-                                  />
-                                </TableCell>
-                                <TableCell className="p-0 text-center align-middle">
-                                  <div className="flex justify-center items-center h-full min-h-[48px]">
-                                    <input
-                                      type="checkbox"
-                                      className="w-4 h-4 cursor-pointer accent-emerald-600"
-                                      checked={p.opening}
-                                      onChange={(e) => {
-                                        const n = [...participants];
-                                        n[idx].opening = e.target.checked;
-                                        setParticipants(n);
-                                      }}
-                                    />
-                                  </div>
-                                </TableCell>
-                                <TableCell className="p-0 text-center align-middle">
-                                  <div className="flex justify-center items-center h-full min-h-[48px]">
-                                    <input
-                                      type="checkbox"
-                                      className="w-4 h-4 cursor-pointer accent-emerald-600"
-                                      checked={p.closing}
-                                      onChange={(e) => {
-                                        const n = [...participants];
-                                        n[idx].closing = e.target.checked;
-                                        setParticipants(n);
-                                      }}
-                                    />
-                                  </div>
-                                </TableCell>
-                                <TableCell className="p-0">
-                                  <Input
-                                    placeholder="Enter processes interviewed..."
-                                    className="border-0 focus-visible:ring-0 rounded-none bg-transparent min-h-[48px] px-4 shadow-none"
-                                    value={p.interviewed}
-                                    onChange={(e) => {
-                                      const n = [...participants];
-                                      n[idx].interviewed = e.target.value;
-                                      setParticipants(n);
-                                    }}
-                                  />
-                                </TableCell>
-                                <TableCell className="p-0 text-center align-middle">
-                                  {participants.length > 1 && (
-                                    <Trash2
-                                      className="w-4 h-4 text-slate-400 cursor-pointer hover:text-red-500 mx-auto transition-colors"
-                                      onClick={() => removeParticipant(idx)}
-                                    />
-                                  )}
-                                </TableCell>
-                              </TableRow>
-                            ))}
-                          </TableBody>
-                        </Table>
-                        <div className="bg-slate-50 p-2 border-t border-slate-200 flex justify-center">
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={addParticipant}
-                            className="text-emerald-700 font-bold hover:bg-emerald-50 hover:text-emerald-800 gap-2 px-6"
-                          >
-                            <Plus className="w-4 h-4" /> Add Another Participant
-                          </Button>
-                        </div>
                       </div>
                     </div>
                   )}
@@ -3278,6 +3390,7 @@ const AuditExecute = () => {
                         <AuditEvidenceAttachmentList
                           files={genericFiles[`process_audit_${index}`] ?? []}
                           onRemove={(fileIdx) => removeGenericFile(`process_audit_${index}`, fileIdx)}
+                          {...genericEvidenceDescriptionHandlers(`process_audit_${index}`)}
                           readOnly={isAuditeeReadOnly}
                           className="w-full mt-4"
                           chipClassName="text-sm"
@@ -3445,7 +3558,20 @@ const AuditExecute = () => {
                                     onChange={(e) => handleEditQuestion(dataIndex, e.target.value)}
                                   />
                                 ) : (
-                                  item.question
+                                  <>
+                                    {item.question}
+                                    <QuestionEvidenceUpload
+                                      files={genericFiles[`clause_checklist_${dataIndex}`] ?? []}
+                                      onUpload={(files) =>
+                                        void handleGenericFileUpload(`clause_checklist_${dataIndex}`, files)
+                                      }
+                                      onRemove={(fileIdx) =>
+                                        removeGenericFile(`clause_checklist_${dataIndex}`, fileIdx)
+                                      }
+                                      {...genericEvidenceDescriptionHandlers(`clause_checklist_${dataIndex}`)}
+                                      readOnly={isAuditeeReadOnly}
+                                    />
+                                  </>
                                 )}
                               </div>
                             </TableCell>
@@ -3696,7 +3822,20 @@ const AuditExecute = () => {
                                   />
                                 </div>
                               ) : (
-                                item.question
+                                <>
+                                  {item.question}
+                                  <QuestionEvidenceUpload
+                                    files={genericFiles[`clause_checklist_${index}`] ?? []}
+                                    onUpload={(files) =>
+                                      void handleGenericFileUpload(`clause_checklist_${index}`, files)
+                                    }
+                                    onRemove={(fileIdx) =>
+                                      removeGenericFile(`clause_checklist_${index}`, fileIdx)
+                                    }
+                                    {...genericEvidenceDescriptionHandlers(`clause_checklist_${index}`)}
+                                    readOnly={isAuditeeReadOnly}
+                                  />
+                                </>
                               )}
                             </TableCell>
 
@@ -3936,44 +4075,8 @@ const AuditExecute = () => {
                             </TableRow>
                           )}
 
-                          {/* Upload Evidence per Clause Group */}
                           {isLastInGroup && (
                             <>
-                              <TableRow className="bg-slate-50 border-b-4 border-slate-200">
-                                <TableCell colSpan={4} className="p-0">
-                                  <label className="flex items-center justify-center p-3 bg-slate-50 border-t border-slate-200 cursor-pointer hover:bg-slate-100 transition-colors group">
-                                    <input
-                                      type="file"
-                                      multiple
-                                      accept={AUDIT_EVIDENCE_ACCEPT}
-                                      className="hidden"
-                                      onChange={(e) => {
-                                        void handleClauseFileUpload(item.clause, e.target.files);
-                                        e.target.value = "";
-                                      }}
-                                    />
-                                    <div className="flex flex-col items-center gap-1 text-slate-500 group-hover:text-slate-700">
-                                      <div className="bg-white p-2 text-slate-400 group-hover:text-amber-600 rounded-full shadow-sm border border-slate-200 group-hover:border-amber-200 transition-all">
-                                        <Upload className="w-4 h-4" />
-                                      </div>
-                                      <span className="text-xs font-semibold">
-                                        Upload evidence (images, docs, pdfs) for Clause {item.clause}
-                                      </span>
-                                    </div>
-                                  </label>
-                                </TableCell>
-                              </TableRow>
-                              {(clauseFiles[item.clause]?.length ?? 0) > 0 && (
-                                <TableRow className="bg-white border-b-2 border-slate-100">
-                                  <TableCell colSpan={4} className="py-3 px-6">
-                                    <AuditEvidenceAttachmentList
-                                      files={clauseFiles[item.clause] ?? []}
-                                      onRemove={(fileIdx) => removeClauseFile(item.clause, fileIdx)}
-                                      readOnly={isAuditeeReadOnly}
-                                    />
-                                  </TableCell>
-                                </TableRow>
-                              )}
                               {/* Extra custom questions added for this clause */}
                               {(extraChecklistItems[item.clause] || []).map((eq, eqIdx) => {
                                 const eqType = eq.findings;
@@ -4069,6 +4172,7 @@ const AuditExecute = () => {
               value={findingsReportForm}
               onChange={handleFindingsReportFormChange}
               section="footer"
+              nonConformances={nonConformances}
             />
           </div>
         )}

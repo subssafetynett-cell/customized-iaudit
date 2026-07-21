@@ -33,10 +33,23 @@ import { useAuditeeReadOnly } from "@/lib/auditeeAccess";
 import { toast } from "sonner";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
-import { Document, Packer, Paragraph, TextRun, ImageRun, Table as DocxTable, TableRow as DocxTableRow, TableCell as DocxTableCell, WidthType, BorderStyle } from "docx";
+import { Document, Packer, Paragraph, TextRun, ImageRun, AlignmentType, Table as DocxTable, TableRow as DocxTableRow, TableCell as DocxTableCell, WidthType, BorderStyle } from "docx";
 import { saveAs } from "file-saver";
-import logoImg from "@/assets/logo.png";
-import { auditTemplates } from "@/data/auditTemplates";
+import {
+    applyBuiltWithIauditPdfFooter,
+    buildIauditDocxFooter,
+    IAUDIT_AUDIT_PLAN_FOOTER_LOGO_SIZE_MM,
+    IAUDIT_AUDIT_PLAN_FOOTER_LOGO_SIZE_PX,
+    IAUDIT_FOOTER_LOGO_SRC,
+    IAUDIT_FOOTER_RESERVE_MM,
+    imageAssetToBuffer,
+    loadImageAsset,
+    resolveProgramCompany,
+} from "@/utils/pdfBranding";
+import {
+    formatDepartmentNames,
+    resolveDepartmentsFromProgram,
+} from "@/lib/auditProgramDepartments";
 import { CLAUSE_MATRIX, ClauseMatrixRow } from "@/data/clauseMapping";
 import { TourStepPopover } from "@/components/TourStepPopover";
 import {
@@ -55,6 +68,7 @@ interface Clause {
 
 const AuditProgramPage = () => {
     const [sites, setSites] = useState<any[]>([]);
+    const [companies, setCompanies] = useState<any[]>([]);
     const [auditPrograms, setAuditPrograms] = useState<any[]>([]);
     const [auditPlans, setAuditPlans] = useState<any[]>([]);
     const [loading, setLoading] = useState(true);
@@ -130,6 +144,7 @@ const AuditProgramPage = () => {
                 const validPlans = Array.isArray(plansData) ? plansData : [];
 
                 setSites(validSites);
+                setCompanies(Array.isArray(companiesData) ? companiesData : []);
                 setAuditPrograms(validPrograms);
                 setAuditPlans(validPlans);
 
@@ -274,6 +289,32 @@ const AuditProgramPage = () => {
         return executions;
     };
 
+    const getExecutionPeriodIndex = (program: any, executionTitle: string) => {
+        const loadData = program.scheduleData || {};
+        const programPeriods = calculatePeriods(
+            program.frequency,
+            program.duration,
+            loadData.startDate || program.createdAt,
+        );
+        const periodLabel = executionTitle.includes(" - ")
+            ? executionTitle.split(" - ").slice(1).join(" - ")
+            : executionTitle;
+        return programPeriods.findIndex((period) => period === periodLabel);
+    };
+
+    const getSelectedCustomRequirements = (program: any, executionTitle: string): string[] => {
+        const colIndex = getExecutionPeriodIndex(program, executionTitle);
+        if (colIndex < 0) return [];
+        const customRows = (program.scheduleData?.customRows || []) as {
+            id: string;
+            text: string;
+        }[];
+        return customRows
+            .filter((row) => program.scheduleData?.[`custom_${row.id}-${colIndex}`])
+            .map((row) => row.text?.trim() || "Custom Requirement")
+            .filter(Boolean);
+    };
+
     const hasPlan = (programId: number, executionId: string) => {
         return (auditPlans || []).some(p => p.auditProgramId === programId && p.executionId === executionId);
     };
@@ -366,38 +407,36 @@ const AuditProgramPage = () => {
             const plan = await res.json();
 
             const doc = new jsPDF();
-            const template = (auditTemplates || []).find(t => t.id === plan.templateId);
             const fileName = `Audit_Plan_${executionTitle.replace(/[^a-z0-9]/gi, '_')}`;
             const MARGIN = 20;
             const CONTENT_WIDTH = 210 - (2 * MARGIN);
+            const FOOTER_RESERVE = IAUDIT_FOOTER_RESERVE_MM;
+            const program = programStub || plan.auditProgram;
+            const company = resolveProgramCompany(program, sites);
+            const departmentsText = formatDepartmentNames(
+                resolveDepartmentsFromProgram(program, companies),
+            );
 
-            // --- Logo - improved transparency handling ---
-            try {
-                const response = await fetch("/iAudit Global-01.png");
-                const blob = await response.blob();
-                const base64Compressed = await new Promise<string>((resolve, reject) => {
-                    const img = new Image();
-                    img.onload = () => {
-                        const MAX = 120;
-                        const canvas = document.createElement("canvas");
-                        let { width, height } = img;
-                        if (width > MAX || height > MAX) {
-                            if (width > height) { height = Math.round(height * MAX / width); width = MAX; }
-                            else { width = Math.round(width * MAX / height); height = MAX; }
-                        }
-                        canvas.width = width;
-                        canvas.height = height;
-                        const ctx = canvas.getContext("2d")!;
-                        ctx.clearRect(0, 0, width, height);
-                        ctx.drawImage(img, 0, 0, width, height);
-                        resolve(canvas.toDataURL("image/png"));
-                    };
-                    img.onerror = reject;
-                    img.src = URL.createObjectURL(blob);
-                });
-                doc.addImage(base64Compressed, 'PNG', MARGIN, 10, 25, 25, undefined, 'FAST');
-            } catch (e) {
-                console.warn("Logo could not be loaded for PDF", e);
+            const companyLogoAsset = company.logo ? await loadImageAsset(company.logo, 140) : null;
+            const iauditLogoAsset = await loadImageAsset(IAUDIT_FOOTER_LOGO_SRC, 100);
+
+            if (companyLogoAsset) {
+                const maxLogoW = 32;
+                const maxLogoH = 22;
+                let logoW = maxLogoW;
+                let logoH = logoW * companyLogoAsset.ratio;
+                if (logoH > maxLogoH) {
+                    logoH = maxLogoH;
+                    logoW = logoH / companyLogoAsset.ratio;
+                }
+                doc.addImage(
+                    companyLogoAsset.dataUrl,
+                    companyLogoAsset.format,
+                    MARGIN,
+                    10,
+                    logoW,
+                    logoH,
+                );
             }
 
             // --- Header banner ---
@@ -434,15 +473,20 @@ const AuditProgramPage = () => {
 
             const standardsRaw = programStub?.isoStandard || plan.isoStandard || "";
             const standardsText = standardsRaw ? standardsRaw.split(", ").join("  |  ") : "N/A";
+            const planDate = plan.date ? new Date(plan.date).toLocaleDateString() : "TBD";
 
-            addRow('Execution', executionTitle);
-            addRow('Audit Name', plan.auditName || plan.auditType);
-            addRow('Template', template?.title || plan.templateId);
-            addRow('ISO Standards', standardsText);
-            addRow('Date', plan.date ? new Date(plan.date).toLocaleDateString() : 'TBD');
-            addRow('Location', plan.location);
-            addRow('Lead Auditor', plan.leadAuditor ? `${plan.leadAuditor.firstName} ${plan.leadAuditor.lastName}` : '-');
-            addRow('Criteria', plan.criteria);
+            addRow("Date", planDate);
+            addRow("Audit Name", plan.auditName || plan.auditType);
+            addRow("ISO Standards", standardsText);
+            addRow("Location", plan.location);
+            addRow("Departments", departmentsText);
+            addRow(
+                "Lead Auditor",
+                plan.leadAuditor
+                    ? `${plan.leadAuditor.firstName} ${plan.leadAuditor.lastName}`
+                    : "-",
+            );
+            addRow("Criteria", plan.criteria);
 
             y += 4;
             addTwoLineField('Scope', plan.scope);
@@ -462,7 +506,7 @@ const AuditProgramPage = () => {
                     body: itinerary.map((item: any) => [`${item.startTime || ''} - ${item.endTime || ''}`, item.activity || '', item.notes || item.auditee || ' ']),
                     headStyles: { fillColor: [33, 56, 71], fontSize: 9 },
                     bodyStyles: { fontSize: 8 },
-                    margin: { left: MARGIN, right: MARGIN },
+                    margin: { left: MARGIN, right: MARGIN, bottom: FOOTER_RESERVE },
                     theme: 'grid'
                 });
                 y = (doc as any).lastAutoTable.finalY + 10;
@@ -475,7 +519,7 @@ const AuditProgramPage = () => {
                 doc.setFont('helvetica', 'bold'); doc.setFontSize(11); doc.setTextColor(33, 56, 71);
                 doc.text('Scheduled Clauses', MARGIN, y); y += 6;
                 execClauses.forEach((clause: any) => {
-                    if (y > 280) { doc.addPage(); y = MARGIN; }
+                    if (y > 280 - FOOTER_RESERVE) { doc.addPage(); y = MARGIN; }
                     doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(60, 60, 60);
                     const clauseText = clause.standard ? `[${clause.standard}] ${clause.name}` : clause.name;
                     const splitClause = doc.splitTextToSize(`• ${clauseText}`, CONTENT_WIDTH);
@@ -484,6 +528,21 @@ const AuditProgramPage = () => {
                 });
             }
 
+            const customRequirements = getSelectedCustomRequirements(program, executionTitle);
+            if (customRequirements.length > 0) {
+                if (y > 250) { doc.addPage(); y = MARGIN; }
+                doc.setFont('helvetica', 'bold'); doc.setFontSize(11); doc.setTextColor(33, 56, 71);
+                doc.text('Custom Requirements', MARGIN, y); y += 6;
+                customRequirements.forEach((requirement) => {
+                    if (y > 280 - FOOTER_RESERVE) { doc.addPage(); y = MARGIN; }
+                    doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(60, 60, 60);
+                    const splitRequirement = doc.splitTextToSize(`• ${requirement}`, CONTENT_WIDTH);
+                    doc.text(splitRequirement, MARGIN, y);
+                    y += splitRequirement.length * 5 + 2;
+                });
+            }
+
+            applyBuiltWithIauditPdfFooter(doc, iauditLogoAsset, MARGIN, IAUDIT_AUDIT_PLAN_FOOTER_LOGO_SIZE_MM);
             doc.save(`${fileName}.pdf`);
             toast.success("PDF Downloaded");
         } catch (error) {
@@ -501,49 +560,32 @@ const AuditProgramPage = () => {
             if (!res.ok) throw new Error("Failed to fetch full plan details");
             const plan = await res.json();
 
-            const template = (auditTemplates || []).find(t => t.id === plan.templateId);
             const fileName = `Audit_Plan_${executionTitle.replace(/[^a-z0-9]/gi, '_')}`;
+            const program = programStub || plan.auditProgram;
+            const standardsRaw = program?.isoStandard || plan.isoStandard || "";
+            const standardsText = standardsRaw
+                ? standardsRaw.split(", ").join("  |  ")
+                : "N/A";
+            const planDate = plan.date ? new Date(plan.date).toLocaleDateString() : "TBD";
+            const company = resolveProgramCompany(program, sites);
+            const departmentsText = formatDepartmentNames(
+                resolveDepartmentsFromProgram(program, companies),
+            );
 
-            // Fetch logo for DOCX
-            let logoBuffer: ArrayBuffer | null = null;
-            try {
-                const response = await fetch('/iAudit Global-01.png');
-                const blob = await response.blob();
-                logoBuffer = await new Promise<ArrayBuffer>((resolve, reject) => {
-                    const img = new Image();
-                    img.onload = () => {
-                        const MAX = 120;
-                        const canvas = document.createElement("canvas");
-                        let { width, height } = img;
-                        if (width > MAX || height > MAX) {
-                            if (width > height) { height = Math.round(height * MAX / width); width = MAX; }
-                            else { width = Math.round(width * MAX / height); height = MAX; }
-                        }
-                        canvas.width = width;
-                        canvas.height = height;
-                        const ctx = canvas.getContext("2d")!;
-                        ctx.clearRect(0, 0, width, height);
-                        ctx.drawImage(img, 0, 0, width, height);
-                        canvas.toBlob((cb) => {
-                            if (cb) cb.arrayBuffer().then(resolve).catch(reject);
-                            else reject(new Error("Canvas toBlob failed"));
-                        }, "image/png");
-                    };
-                    img.onerror = reject;
-                    img.src = URL.createObjectURL(blob);
-                });
-            } catch (e) {
-                console.warn("Logo failed for DOCX", e);
-            }
+            const companyLogoAsset = company.logo ? await loadImageAsset(company.logo, 140) : null;
+            const iauditLogoAsset = await loadImageAsset(IAUDIT_FOOTER_LOGO_SRC, 100);
+            const companyLogoBuffer = await imageAssetToBuffer(companyLogoAsset);
+            const iauditLogoBuffer = await imageAssetToBuffer(iauditLogoAsset);
+            const iauditLogoRatio = iauditLogoAsset?.ratio ?? 1;
 
             const primaryColor = '213847';
             const children: any[] = [];
             const MARGIN_TWIPS = 1440; // 1 inch
 
-            if (logoBuffer) {
+            if (companyLogoBuffer) {
                 children.push(new Paragraph({
-                    children: [new ImageRun({ data: logoBuffer, transformation: { width: 80, height: 60 } })],
-                    spacing: { after: 200 }
+                    children: [new ImageRun({ data: companyLogoBuffer, transformation: { width: 110, height: 50 } })],
+                    spacing: { after: 200 },
                 }));
             }
 
@@ -573,14 +615,15 @@ const AuditProgramPage = () => {
                     children: [new TextRun({ text: 'AUDIT PLAN REPORT', bold: true, size: 40, color: primaryColor })],
                     spacing: { after: 400 }
                 }),
-                kv('Execution', executionTitle),
+                kv('Date', planDate),
                 kv('Audit Name', plan.auditName || plan.auditType),
-                kv('Date', plan.date ? new Date(plan.date).toLocaleDateString() : 'TBD'),
+                kv('ISO Standards', standardsText),
                 kv('Location', plan.location),
+                kv('Departments', departmentsText),
                 kv('Lead Auditor', plan.leadAuditor ? `${plan.leadAuditor.firstName} ${plan.leadAuditor.lastName}` : '-'),
+                kv('Criteria', plan.criteria),
                 ...kvTwoLine('Scope', plan.scope),
                 ...kvTwoLine('Objective', plan.objective),
-                kv('Criteria', plan.criteria),
             );
 
             // Itinerary
@@ -613,6 +656,35 @@ const AuditProgramPage = () => {
                 }));
             }
 
+            const execClauses = getAuditExecutions(program).find((e) => e.id === executionTitle)?.clauses || [];
+            if (execClauses.length > 0) {
+                children.push(heading('Scheduled Clauses'));
+                execClauses.forEach((clause: { standard?: string; name: string }) => {
+                    const clauseText = clause.standard
+                        ? `[${clause.standard}] ${clause.name}`
+                        : clause.name;
+                    children.push(
+                        new Paragraph({
+                            children: [new TextRun({ text: `• ${clauseText}` })],
+                            spacing: { after: 80 },
+                        }),
+                    );
+                });
+            }
+
+            const customRequirements = getSelectedCustomRequirements(program, executionTitle);
+            if (customRequirements.length > 0) {
+                children.push(heading('Custom Requirements'));
+                customRequirements.forEach((requirement) => {
+                    children.push(
+                        new Paragraph({
+                            children: [new TextRun({ text: `• ${requirement}` })],
+                            spacing: { after: 80 },
+                        }),
+                    );
+                });
+            }
+
             const doc = new Document({
                 sections: [{
                     properties: {
@@ -624,6 +696,13 @@ const AuditProgramPage = () => {
                                 left: MARGIN_TWIPS,
                             },
                         },
+                    },
+                    footers: {
+                        default: buildIauditDocxFooter(
+                            iauditLogoBuffer,
+                            iauditLogoRatio,
+                            IAUDIT_AUDIT_PLAN_FOOTER_LOGO_SIZE_PX,
+                        ),
                     },
                     children
                 }]
@@ -794,6 +873,7 @@ const AuditProgramPage = () => {
                                 >
                                     {(allExecutions || []).map((exec, idx) => {
                                         const siteProgram = (auditPrograms || []).find(p => p.id === exec.programId);
+                                        const executionDepartments = resolveDepartmentsFromProgram(siteProgram, companies);
                                         const plan = (auditPlans || []).find(p => p.auditProgramId === exec.programId && p.executionId === exec.id);
                                         const planExists = !!plan;
                                         const isCreatePlanTourTarget =
@@ -829,6 +909,19 @@ const AuditProgramPage = () => {
                                                                 {planExists ? format(new Date(plan.date), 'MMM dd, yyyy') : exec.title.split(' - ')[1]}
                                                             </span>
                                                         </h3>
+                                                        {executionDepartments.length > 0 && (
+                                                            <div className="flex flex-wrap gap-1 mt-2">
+                                                                {executionDepartments.map((dept) => (
+                                                                    <Badge
+                                                                        key={dept.id}
+                                                                        variant="outline"
+                                                                        className="text-[9px] font-medium bg-white border-slate-200 text-slate-600"
+                                                                    >
+                                                                        {dept.name}
+                                                                    </Badge>
+                                                                ))}
+                                                            </div>
+                                                        )}
                                                     </div>
                                                     <div className="flex items-center gap-2">
                                                         <Badge variant="outline" className="text-[10px] font-bold px-2 py-1 border-slate-100 text-slate-500 bg-slate-50 rounded-lg whitespace-nowrap">
@@ -957,6 +1050,19 @@ const AuditProgramPage = () => {
                                                             {exec.siteName}
                                                         </Badge>
                                                     </div>
+                                                    {executionDepartments.length > 0 && (
+                                                        <div className="flex flex-wrap gap-1">
+                                                            {executionDepartments.map((dept) => (
+                                                                <Badge
+                                                                    key={dept.id}
+                                                                    variant="outline"
+                                                                    className="text-[10px] font-medium bg-slate-50 border-slate-200 text-slate-600"
+                                                                >
+                                                                    {dept.name}
+                                                                </Badge>
+                                                            ))}
+                                                        </div>
+                                                    )}
                                                     <div className="flex flex-col gap-2">
                                                         {(() => {
                                                             const groups = new Map<string, Clause[]>();

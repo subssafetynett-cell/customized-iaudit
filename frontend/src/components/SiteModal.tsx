@@ -15,6 +15,8 @@ import {
     isWithinMaxLength,
     normalizePhone10Digits,
     PHONE_10_ERROR_MESSAGE,
+    SITE_ADDRESS_ERROR_MESSAGE,
+    SITE_ADDRESS_MAX,
     SITE_NAME_ERROR_MESSAGE,
     SITE_NAME_MAX,
 } from "@/lib/validation";
@@ -117,7 +119,11 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
         if (!trimmedDescription) errors.description = "Description is required";
         if (!siteType) errors.siteType = "Site type is required";
         if (!status) errors.status = "Status is required";
-        if (!trimmedAddress) errors.address = "Address is required";
+        if (!trimmedAddress) {
+            errors.address = "Address is required";
+        } else if (!isWithinMaxLength(trimmedAddress, SITE_ADDRESS_MAX)) {
+            errors.address = SITE_ADDRESS_ERROR_MESSAGE;
+        }
         if (!trimmedCity) errors.city = "City is required";
         if (!countryIso) errors.country = "Country is required";
         if (hasStates) {
@@ -284,10 +290,14 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
                             <Input
                                 id="site-address"
                                 placeholder="Street address"
+                                maxLength={SITE_ADDRESS_MAX}
                                 className={fieldErrorClass("address")}
                                 value={address}
                                 onChange={(e) => { setAddress(e.target.value); clearFieldError("address"); }}
                             />
+                            <p className="text-[11px] text-muted-foreground ml-1">
+                                {address.length}/{SITE_ADDRESS_MAX} characters
+                            </p>
                             {fieldErrors.address && <p className="text-[10px] text-red-500 mt-1 pl-1 font-medium">{fieldErrors.address}</p>}
                         </div>
 

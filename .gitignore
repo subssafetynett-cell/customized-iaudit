@@ -26,3 +26,6 @@ yarn-error.log*
 
 # Vite temp files
 vite.config.ts.timestamp-*
+
+# Local Docker overrides (port bindings for dev — not for production/Coolify)
+docker-compose.override.yml

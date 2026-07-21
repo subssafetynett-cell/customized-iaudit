@@ -261,7 +261,7 @@ export default function UserModal({
         if (isViewMode) return isAuditeeUser ? "Auditee Details" : "User Details";
         if (isEditMode) return isAuditeeUser ? "Edit Auditee" : "Edit User";
         if (defaultCreateRole === "auditee") return "Invite Auditee";
-        return "Create New User";
+        return "Invite User";
     };
 
     const getIcon = () => {
@@ -274,7 +274,7 @@ export default function UserModal({
         if (isViewMode) return "Close";
         if (isEditMode) return isAuditeeUser ? "Save changes" : "Update User";
         if (defaultCreateRole === "auditee") return "Send Invite";
-        return "Create User";
+        return "Invite User";
     };
 
     return (
@@ -296,7 +296,7 @@ export default function UserModal({
                             ? "View user profile and account details."
                             : isEditMode
                               ? "Update this user’s profile and access settings."
-                              : "Create a new user account for your organization."}
+                              : "Invite a new user to your organization."}
                     </DialogDescription>
                 </DialogHeader>
 

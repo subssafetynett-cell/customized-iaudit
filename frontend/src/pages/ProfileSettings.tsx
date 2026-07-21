@@ -8,7 +8,7 @@ import { useNavigate } from "react-router-dom";
 import { apiFetch } from "@/lib/api";
 import { PhoneInputWithCountryCode } from "@/components/PhoneInputWithCountryCode";
 import { DEFAULT_PHONE_COUNTRY_CODE, getDialForCountryCode } from "@/lib/phoneCountries";
-import { isTenDigitPhone, normalizePhone10Digits, PHONE_10_ERROR_MESSAGE } from "@/lib/validation";
+import { isTenDigitPhone, normalizePhone10Digits, PHONE_10_ERROR_MESSAGE, normalizePersonNameInput, PERSON_NAME_MAX, PERSON_NAME_ERROR_MESSAGE, isWithinMaxLength } from "@/lib/validation";
 
 export default function ProfileSettings() {
     const { toast } = useToast();
@@ -49,9 +49,13 @@ export default function ProfileSettings() {
 
     const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         const { name, value } = e.target;
+        let next = value;
+        if (name === "firstName" || name === "lastName") {
+            next = normalizePersonNameInput(value);
+        }
         setFormData((prev) => ({
             ...prev,
-            [name]: value,
+            [name]: next,
         }));
     };
 
@@ -91,14 +95,38 @@ export default function ProfileSettings() {
             return;
         }
 
+        const firstName = formData.firstName.trim();
+        const lastName = formData.lastName.trim();
+        if (!firstName || !lastName) {
+            toast({
+                title: "Name required",
+                description: "First name and last name are required.",
+                variant: "destructive",
+            });
+            setIsLoading(false);
+            return;
+        }
+        if (
+            !isWithinMaxLength(firstName, PERSON_NAME_MAX)
+            || !isWithinMaxLength(lastName, PERSON_NAME_MAX)
+        ) {
+            toast({
+                title: "Name too long",
+                description: PERSON_NAME_ERROR_MESSAGE,
+                variant: "destructive",
+            });
+            setIsLoading(false);
+            return;
+        }
+
         try {
             const userId = user.id || user._id;
 
             const response = await apiFetch(`/users/${userId}`, {
                 method: 'PUT',
                 body: JSON.stringify({
-                    firstName: formData.firstName,
-                    lastName: formData.lastName,
+                    firstName,
+                    lastName,
                     email: formData.email,
                     mobile: mobileDigits.length === 10 ? mobileDigits : "",
                     role: user.role, // Preserve existing role
@@ -174,7 +202,9 @@ export default function ProfileSettings() {
                             <div className="h-28 w-28 rounded-full bg-white/10 flex items-center justify-center border-4 border-white shadow-lg mb-4 text-white">
                                 <span className="text-4xl font-bold tracking-wider">{initials}</span>
                             </div>
-                            <h2 className="text-2xl font-bold text-white">{formData.firstName} {formData.lastName}</h2>
+                            <h2 className="text-2xl font-bold text-white text-center break-words max-w-full px-4 leading-snug">
+                                {formData.firstName} {formData.lastName}
+                            </h2>
                             <p className="text-sm text-slate-300 mt-1">{user.role || "User"}</p>
                         </div>
 
@@ -198,10 +228,12 @@ export default function ProfileSettings() {
                                             value={formData.firstName}
                                             onChange={handleInputChange}
                                             required
+                                            maxLength={PERSON_NAME_MAX}
+                                            autoComplete="given-name"
                                             className="h-11 bg-white border-slate-200 focus:border-[#213847] focus:ring-[#213847] text-[#101828]"
                                         />
                                     ) : (
-                                        <p className="text-[#101828] font-medium h-11 flex items-center px-3 bg-slate-50 border border-transparent rounded-md">{formData.firstName}</p>
+                                        <p className="text-[#101828] font-medium min-h-11 flex items-center px-3 py-2 bg-slate-50 border border-transparent rounded-md break-words">{formData.firstName}</p>
                                     )}
                                 </div>
 
@@ -217,10 +249,12 @@ export default function ProfileSettings() {
                                             value={formData.lastName}
                                             onChange={handleInputChange}
                                             required
+                                            maxLength={PERSON_NAME_MAX}
+                                            autoComplete="family-name"
                                             className="h-11 bg-white border-slate-200 focus:border-[#213847] focus:ring-[#213847] text-[#101828]"
                                         />
                                     ) : (
-                                        <p className="text-[#101828] font-medium h-11 flex items-center px-3 bg-slate-50 border border-transparent rounded-md">{formData.lastName}</p>
+                                        <p className="text-[#101828] font-medium min-h-11 flex items-center px-3 py-2 bg-slate-50 border border-transparent rounded-md break-words">{formData.lastName}</p>
                                     )}
                                 </div>
 

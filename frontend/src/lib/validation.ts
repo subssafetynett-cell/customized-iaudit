@@ -31,6 +31,15 @@ export function isTenDigitPhone(value: string): boolean {
 
 export const PHONE_10_ERROR_MESSAGE = `Phone number must be exactly ${PHONE_DIGITS_LENGTH} digits.`;
 
+/** Person first/last name (matches server PERSON_NAME_MAX). */
+export const PERSON_NAME_MAX = 100;
+
+export const PERSON_NAME_ERROR_MESSAGE = `Name must be at most ${PERSON_NAME_MAX} characters.`;
+
+export function normalizePersonNameInput(value: string): string {
+    return String(value || "").slice(0, PERSON_NAME_MAX);
+}
+
 /** Department name (matches server DEPT_TEXT_LIMITS.name). */
 export const DEPT_NAME_MAX = 100;
 
@@ -41,6 +50,11 @@ export const SITE_NAME_MAX = 50;
 
 export const SITE_NAME_ERROR_MESSAGE = `Site name must be at most ${SITE_NAME_MAX} characters.`;
 
+/** Site street address (matches server SITE_TEXT_LIMITS.address). */
+export const SITE_ADDRESS_MAX = 500;
+
+export const SITE_ADDRESS_ERROR_MESSAGE = `Address must be at most ${SITE_ADDRESS_MAX} characters.`;
+
 /** Company name (matches server COMPANY_TEXT_LIMITS.name). */
 export const COMPANY_NAME_MAX = 100;
 
@@ -50,6 +64,11 @@ export const COMPANY_NAME_ERROR_MESSAGE = `Company name must be at most ${COMPAN
 export const COMPANY_DESCRIPTION_MAX = 500;
 
 export const COMPANY_DESCRIPTION_ERROR_MESSAGE = `Description must be at most ${COMPANY_DESCRIPTION_MAX} characters.`;
+
+/** Company street address (matches server COMPANY_TEXT_LIMITS.streetAddress). */
+export const STREET_ADDRESS_MAX = 500;
+
+export const STREET_ADDRESS_ERROR_MESSAGE = `Street address must be at most ${STREET_ADDRESS_MAX} characters.`;
 
 /** Max stored logo payload (base64 data URL, matches server COMPANY_TEXT_LIMITS.logo). */
 export const COMPANY_LOGO_MAX_CHARS = 500_000;

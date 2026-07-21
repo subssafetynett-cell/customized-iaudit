@@ -1,6 +1,13 @@
 import { API_BASE_URL } from "@/config";
 import { clearSuperAdminSession, isSuperAdminConsolePath } from "@/lib/superAdminAuth";
 
+// Remove legacy bearer tokens from localStorage (session is httpOnly cookie only).
+try {
+    localStorage.removeItem("token");
+} catch {
+    /* ignore */
+}
+
 /** Full URL for an API path (e.g. `/users`). Only this module reads `API_BASE_URL` — use `apiFetch` from app code. */
 export function resolveApiUrl(endpoint: string): string {
     if (endpoint.startsWith("http")) return endpoint;
@@ -10,8 +17,24 @@ export function resolveApiUrl(endpoint: string): string {
 
 /** ISO timestamp from server — when reached, client should clear session (matches DB session expiry). */
 export const SESSION_EXPIRES_AT_KEY = "sessionExpiresAt";
+export const SESSION_EXPIRY_UPDATED_EVENT = "session-expiry-updated";
+
+export type ApiFetchOptions = RequestInit & {
+    /** When true, a 401 response will not clear local auth (caller handles session expiry). */
+    skipSessionLogout?: boolean;
+};
+
+/** Whether the client believes the user is signed in (profile cached; session token is httpOnly). */
+export function hasClientAuthSession(): boolean {
+    try {
+        return Boolean(localStorage.getItem("user"));
+    } catch {
+        return false;
+    }
+}
 
 export function clearClientSession() {
+    // Legacy: bearer tokens must not remain in localStorage.
     localStorage.removeItem("token");
     localStorage.removeItem("user");
     localStorage.removeItem(SESSION_EXPIRES_AT_KEY);
@@ -36,14 +59,36 @@ export function clearSessionAndRedirectToLogin() {
     redirectToLoginIfNeeded();
 }
 
-export async function apiFetch(endpoint: string, options: RequestInit = {}) {
-    const token = localStorage.getItem("token");
+/** Persist server-issued sliding session expiry and notify listeners to reschedule timers. */
+export function applySessionExpiryFromResponse(response: Response) {
+    const raw = response.headers.get("X-Session-Expires-At");
+    if (!raw) return;
+    const t = Date.parse(raw);
+    if (!Number.isFinite(t)) return;
+    localStorage.setItem(SESSION_EXPIRES_AT_KEY, raw);
+    window.dispatchEvent(new CustomEvent(SESSION_EXPIRY_UPDATED_EVENT, { detail: raw }));
+}
+
+export async function parseApiJson<T = unknown>(response: Response): Promise<T> {
+    const contentType = response.headers.get("content-type") || "";
+    if (!contentType.includes("application/json")) {
+        const text = await response.text();
+        if (response.status === 502 || response.status === 503 || response.status === 504) {
+            throw new Error("The API is temporarily unavailable. Please wait a moment and try again.");
+        }
+        throw new Error(text?.slice(0, 200) || `Unexpected response (${response.status})`);
+    }
+    return response.json() as Promise<T>;
+}
+
+export async function apiFetch(endpoint: string, options: ApiFetchOptions = {}) {
+    const { skipSessionLogout = false, ...fetchOptions } = options;
+    const hadSession = hasClientAuthSession();
 
     const headers: Record<string, string> = {
         "Content-Type": "application/json",
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
     };
-    const extra = options.headers;
+    const extra = fetchOptions.headers;
     if (extra && typeof extra === "object" && !Array.isArray(extra) && !(extra instanceof Headers)) {
         Object.assign(headers, extra as Record<string, string>);
     }
@@ -51,11 +96,14 @@ export async function apiFetch(endpoint: string, options: RequestInit = {}) {
     const url = resolveApiUrl(endpoint);
 
     const response = await fetch(url, {
-        ...options,
+        ...fetchOptions,
         headers,
+        credentials: "include",
     });
 
-    if (response.status === 401) {
+    applySessionExpiryFromResponse(response);
+
+    if (response.status === 401 && hadSession && !skipSessionLogout) {
         clearSessionAndRedirectToLogin();
     }
 

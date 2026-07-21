@@ -16,6 +16,7 @@ import { Site, Department, ISOStandard } from "@/types/company";
 import {
   formatDeleteDepartmentDescription,
   formatDeleteSiteDescription,
+  SITE_ADDRESS_MAX,
   SITE_NAME_MAX,
   truncateForDisplay,
 } from "@/lib/validation";
@@ -172,7 +173,11 @@ export default function CompanyDetail() {
                             <p className="font-medium text-sm break-all line-clamp-2" title={site.name}>
                               {truncateForDisplay(site.name, SITE_NAME_MAX)}
                             </p>
-                            {site.address && <p className="text-xs text-muted-foreground truncate">{site.address}</p>}
+                            {site.address && (
+                              <p className="text-xs text-muted-foreground truncate" title={site.address}>
+                                {truncateForDisplay(site.address, SITE_ADDRESS_MAX)}
+                              </p>
+                            )}
                           </div>
                         </div>
                         <div className="flex items-center gap-1">
@@ -272,10 +277,12 @@ export default function CompanyDetail() {
           open={!!addDeptSiteId}
           onClose={() => setAddDeptSiteId(null)}
           onSubmit={async (data) => {
-            await addDepartment(company.id, activeSite.id, data.name, data);
+            const targetSiteId = data.siteId ?? activeSite.id;
+            await addDepartment(company.id, targetSiteId, data.name, data);
             setAddDeptSiteId(null);
           }}
-          siteName={activeSite.name}
+          sites={company.sites.map((s) => ({ id: s.id, name: s.name }))}
+          initialSiteId={activeSite.id}
           mode="create"
         />
       )}
@@ -298,12 +305,16 @@ export default function CompanyDetail() {
 
       {editDept && (
         <DepartmentModal
+          key={`edit-dept-${editDept.dept.id}`}
           open={!!editDept}
           onClose={() => setEditDept(null)}
           onSubmit={(data) => {
             updateDepartment(company.id, editDept.siteId, editDept.dept.id, data);
             setEditDept(null);
           }}
+          initialData={editDept.dept}
+          sites={company.sites.map((s) => ({ id: s.id, name: s.name }))}
+          initialSiteId={editDept.siteId}
           mode="edit"
         />
       )}

@@ -95,6 +95,7 @@ export function collectAuditEvidenceMedia(
                     name: m.name || "file",
                     data: m.data,
                     type: m.type || "",
+                    description: m.description,
                 });
             }
         }

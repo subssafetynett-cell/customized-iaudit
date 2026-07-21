@@ -4,7 +4,6 @@ import { useLocation } from "react-router-dom";
 import { apiFetch } from "@/lib/api";
 import { NavLink } from "@/components/NavLink";
 import { cn } from "@/lib/utils";
-import { TrialSidebarBadge } from "@/components/TrialSidebarBadge";
 import { isAuditeeUser, AUDITEE_SIDEBAR_URLS } from "@/lib/auditeeAccess";
 import { useStoredUser } from "@/hooks/useStoredUser";
 
@@ -358,7 +357,6 @@ export function AppSidebar() {
           </SidebarGroup>
         )}
         </div>
-        <TrialSidebarBadge />
       </SidebarContent>
     </Sidebar>
   );

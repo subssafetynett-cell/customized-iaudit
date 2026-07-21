@@ -11,12 +11,18 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { auditTemplates, ChecklistContent, SectionContent, ClauseChecklistContent, ProcessAuditContent } from "@/data/auditTemplates";
 import { toast } from "sonner";
 import { TourStepPopover } from "@/components/TourStepPopover";
+import { QuestionEvidenceUploadPreview } from "@/components/QuestionEvidenceUploadPreview";
 import {
     AUDIT_TEMPLATES_LIST_MAX_STEP,
     AUDIT_TEMPLATES_TOUR_TOTAL_STEPS,
     getAuditTemplatesTourStepConfig,
 } from "@/lib/auditTemplatesOnboardingTour";
 import { cn } from "@/lib/utils";
+import {
+    collectAuditFindingSources,
+    syncNonConformancesFromSources,
+    syncOpportunitiesFromSources,
+} from "@/lib/syncAuditFindingsSummary";
 
 const ExecuteAuditTemplate = () => {
     const { id } = useParams();
@@ -72,7 +78,6 @@ const ExecuteAuditTemplate = () => {
     const [isEditMode, setIsEditMode] = useState(false);
     const [editableChecklist, setEditableChecklist] = useState<any[]>([]);
 
-    const [clauseFiles, setClauseFiles] = useState<Record<string, File[]>>({});
     const [genericFiles, setGenericFiles] = useState<Record<string, File[]>>({});
 
     // Initialize state
@@ -143,15 +148,7 @@ const ExecuteAuditTemplate = () => {
     const removeOpportunity = (index: number) => setOpportunities(opportunities.filter((_, i) => i !== index));
     const removeNonConformance = (index: number) => setNonConformances(nonConformances.filter((_, i) => i !== index));
 
-    const firstClauseUploadIndex = React.useMemo(() => {
-        for (let i = 0; i < editableChecklist.length; i++) {
-            const isLast =
-                i === editableChecklist.length - 1 ||
-                editableChecklist[i + 1]?.clause !== editableChecklist[i]?.clause;
-            if (isLast) return i;
-        }
-        return 0;
-    }, [editableChecklist]);
+    const firstQuestionUploadIndex = 0;
 
     useEffect(() => {
         if (!auditTemplatesTourActive || !auditTemplatesTourStepConfig) return;
@@ -175,6 +172,26 @@ const ExecuteAuditTemplate = () => {
         auditTemplatesTourStepConfig?.targetId,
     ]);
 
+    useEffect(() => {
+        if (!template) return;
+        if (template.type !== "clause-checklist" && template.type !== "checklist") return;
+
+        const sources = collectAuditFindingSources({
+            checklistData,
+            editableChecklist,
+            clauseData,
+        });
+
+        setOpportunities((current) => {
+            const next = syncOpportunitiesFromSources(current, sources);
+            return JSON.stringify(current) === JSON.stringify(next) ? current : next;
+        });
+        setNonConformances((current) => {
+            const next = syncNonConformancesFromSources(current, sources);
+            return JSON.stringify(current) === JSON.stringify(next) ? current : next;
+        });
+    }, [template, checklistData, clauseData, editableChecklist]);
+
     if (!template) {
         return <div className="p-8">Template not found</div>;
     }
@@ -188,23 +205,6 @@ const ExecuteAuditTemplate = () => {
         }
         newData[index] = { ...newData[index], [field]: value };
         setChecklistData(newData);
-    };
-
-    const handleClauseFileUpload = (clause: string, files: FileList | null) => {
-        if (!files || files.length === 0) return;
-        const newFiles = Array.from(files);
-        setClauseFiles(prev => ({
-            ...prev,
-            [clause]: [...(prev[clause] || []), ...newFiles]
-        }));
-        toast.success(`${newFiles.length} file(s) attached for Clause ${clause}`);
-    };
-
-    const removeClauseFile = (clause: string, indexToRemove: number) => {
-        setClauseFiles(prev => ({
-            ...prev,
-            [clause]: prev[clause].filter((_, index) => index !== indexToRemove)
-        }));
     };
 
     const handleGenericFileUpload = (key: string, files: FileList | null) => {
@@ -1346,43 +1346,20 @@ const ExecuteAuditTemplate = () => {
                                         )}
 
                                         {!templateViewOnly && (
-                                        <div className="border-t border-slate-200 pt-3 mt-2 flex flex-col gap-3">
-                                            <label
-                                                id={index === 0 ? "tour-step-template-upload-evidence" : undefined}
+                                        <div className="border-t border-slate-200 pt-3 mt-2">
+                                            <QuestionEvidenceUploadPreview
+                                                uploadId={index === 0 ? "tour-step-template-upload-evidence" : undefined}
                                                 className={cn(
-                                                    "flex items-center justify-center p-4 border border-dashed border-slate-300 rounded-lg hover:bg-slate-50 bg-slate-50/50 cursor-pointer transition-colors group",
                                                     index === 0 && tourTemplateHighlight(14),
                                                 )}
-                                            >
-                                                <input
-                                                    type="file"
-                                                    multiple
-                                                    className="hidden"
-                                                    onChange={(e) => handleGenericFileUpload(`clause_checklist_${index}`, e.target.files)}
-                                                />
-                                                <div className="flex items-center gap-2 text-slate-500 group-hover:text-slate-700">
-                                                    <Upload className="w-4 h-4" />
-                                                    <span>Add / Upload / Insert record or picture</span>
-                                                </div>
-                                            </label>
-
-                                            {genericFiles[`clause_checklist_${index}`] && genericFiles[`clause_checklist_${index}`].length > 0 && (
-                                                <div className="w-full flex flex-col gap-2 p-2">
-                                                    <span className="text-xs font-bold text-slate-500 uppercase">Attached Files</span>
-                                                    <div className="flex flex-wrap gap-2">
-                                                        {genericFiles[`clause_checklist_${index}`].map((file, fileIdx) => (
-                                                            <div key={fileIdx} className="flex items-center gap-2 bg-slate-50 border border-slate-200 text-slate-700 px-3 py-1.5 rounded-md text-xs shadow-sm">
-                                                                <FileText className="w-4 h-4 text-emerald-600" />
-                                                                <span className="max-w-[150px] truncate" title={file.name}>{file.name}</span>
-                                                                <Trash2
-                                                                    className="w-3.5 h-3.5 text-slate-400 hover:text-red-500 cursor-pointer ml-1 transition-colors"
-                                                                    onClick={() => removeGenericFile(`clause_checklist_${index}`, fileIdx)}
-                                                                />
-                                                            </div>
-                                                        ))}
-                                                    </div>
-                                                </div>
-                                            )}
+                                                files={genericFiles[`clause_checklist_${index}`] ?? []}
+                                                onUpload={(files) =>
+                                                    handleGenericFileUpload(`clause_checklist_${index}`, files)
+                                                }
+                                                onRemove={(fileIdx) =>
+                                                    removeGenericFile(`clause_checklist_${index}`, fileIdx)
+                                                }
+                                            />
                                         </div>
                                         )}
                                     </CardContent>
@@ -1526,7 +1503,35 @@ const ExecuteAuditTemplate = () => {
                                                                 </Button>
                                                             </div>
                                                         ) : (
-                                                            item.question
+                                                            <>
+                                                                {item.question}
+                                                                {!templateViewOnly && (
+                                                                    <QuestionEvidenceUploadPreview
+                                                                        uploadId={
+                                                                            index === firstQuestionUploadIndex
+                                                                                ? "tour-step-template-upload-evidence"
+                                                                                : undefined
+                                                                        }
+                                                                        className={cn(
+                                                                            index === firstQuestionUploadIndex &&
+                                                                                tourTemplateHighlight(14),
+                                                                        )}
+                                                                        files={genericFiles[`clause_checklist_${index}`] ?? []}
+                                                                        onUpload={(files) =>
+                                                                            handleGenericFileUpload(
+                                                                                `clause_checklist_${index}`,
+                                                                                files,
+                                                                            )
+                                                                        }
+                                                                        onRemove={(fileIdx) =>
+                                                                            removeGenericFile(
+                                                                                `clause_checklist_${index}`,
+                                                                                fileIdx,
+                                                                            )
+                                                                        }
+                                                                    />
+                                                                )}
+                                                            </>
                                                         )}
                                                     </TableCell>
 
@@ -1654,77 +1659,19 @@ const ExecuteAuditTemplate = () => {
                                                     </TableRow>
                                                 )}
 
-                                                {/* Upload Evidence / Add Question per Clause Group */}
-                                                {isLastInGroup && !templateViewOnly && (
-                                                    <>
-                                                        {!showEditMode ? (
-                                                            <>
-                                                                <TableRow className="bg-slate-50 border-b-4 border-slate-200">
-                                                                    <TableCell colSpan={4} className="p-0">
-                                                                        <label
-                                                                            id={
-                                                                                index === firstClauseUploadIndex
-                                                                                    ? "tour-step-template-upload-evidence"
-                                                                                    : undefined
-                                                                            }
-                                                                            className={cn(
-                                                                                "flex items-center justify-center p-3 bg-slate-50 border-t border-slate-200 cursor-pointer hover:bg-slate-100 transition-colors group",
-                                                                                index === firstClauseUploadIndex &&
-                                                                                    tourTemplateHighlight(14),
-                                                                            )}
-                                                                        >
-                                                                            <input
-                                                                                type="file"
-                                                                                multiple
-                                                                                className="hidden"
-                                                                                onChange={(e) => handleClauseFileUpload(item.clause, e.target.files)}
-                                                                            />
-                                                                            <div className="flex flex-col items-center gap-1 text-slate-500 group-hover:text-slate-700">
-                                                                                <div className="bg-white p-2 text-slate-400 group-hover:text-amber-600 rounded-full shadow-sm border border-slate-200 group-hover:border-amber-200 transition-all">
-                                                                                    <Upload className="w-4 h-4" />
-                                                                                </div>
-                                                                                <span className="text-xs font-semibold">Upload evidence (images, docs, pdfs) for Clause {item.clause}</span>
-                                                                            </div>
-                                                                        </label>
-                                                                    </TableCell>
-                                                                </TableRow>
-                                                                {clauseFiles[item.clause] && clauseFiles[item.clause].length > 0 && (
-                                                                    <TableRow className="bg-white border-b-2 border-slate-100">
-                                                                        <TableCell colSpan={4} className="py-3 px-6">
-                                                                            <div className="flex flex-col gap-2">
-                                                                                <span className="text-xs font-bold text-slate-500 uppercase">Attached Files</span>
-                                                                                <div className="flex flex-wrap gap-2">
-                                                                                    {clauseFiles[item.clause].map((file, fileIdx) => (
-                                                                                        <div key={fileIdx} className="flex items-center gap-2 bg-slate-50 border border-slate-200 text-slate-700 px-3 py-1.5 rounded-md text-xs shadow-sm">
-                                                                                            <FileText className="w-4 h-4 text-emerald-600" />
-                                                                                            <span className="max-w-[150px] truncate" title={file.name}>{file.name}</span>
-                                                                                            <Trash2
-                                                                                                className="w-3.5 h-3.5 text-slate-400 hover:text-red-500 cursor-pointer ml-1 transition-colors"
-                                                                                                onClick={() => removeClauseFile(item.clause, fileIdx)}
-                                                                                            />
-                                                                                        </div>
-                                                                                    ))}
-                                                                                </div>
-                                                                            </div>
-                                                                        </TableCell>
-                                                                    </TableRow>
-                                                                )}
-                                                            </>
-                                                        ) : (
-                                                            <TableRow className="bg-slate-50/50 border-b-4 border-slate-200">
-                                                                <TableCell colSpan={2} className="p-4 text-center">
-                                                                    <Button 
-                                                                        variant="outline" 
-                                                                        size="sm" 
-                                                                        className="text-amber-700 border-amber-300 hover:bg-amber-50 gap-2"
-                                                                        onClick={() => handleAddQuestion(item.clause, index)}
-                                                                    >
-                                                                        <Plus className="w-4 h-4" /> Add Question to Clause {item.clause}
-                                                                    </Button>
-                                                                </TableCell>
-                                                            </TableRow>
-                                                        )}
-                                                    </>
+                                                {isLastInGroup && !templateViewOnly && showEditMode && (
+                                                    <TableRow className="bg-slate-50/50 border-b-4 border-slate-200">
+                                                        <TableCell colSpan={2} className="p-4 text-center">
+                                                            <Button 
+                                                                variant="outline" 
+                                                                size="sm" 
+                                                                className="text-amber-700 border-amber-300 hover:bg-amber-50 gap-2"
+                                                                onClick={() => handleAddQuestion(item.clause, index)}
+                                                            >
+                                                                <Plus className="w-4 h-4" /> Add Question to Clause {item.clause}
+                                                            </Button>
+                                                        </TableCell>
+                                                    </TableRow>
                                                 )}
                                             </React.Fragment>
                                         );

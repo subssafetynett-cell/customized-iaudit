@@ -9,13 +9,12 @@ export type CompanyLogoUploadResult = {
 
 /** Upload a company logo file to Cloudinary via the API (requires auth). */
 export async function uploadCompanyLogoFile(file: File): Promise<CompanyLogoUploadResult> {
-    const token = localStorage.getItem("token");
     const formData = new FormData();
     formData.append("logo", file);
 
     const response = await fetch(resolveApiUrl("/uploads/company-logo"), {
         method: "POST",
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        credentials: "include",
         body: formData,
     });
 

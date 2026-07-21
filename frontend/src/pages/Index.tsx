@@ -38,7 +38,6 @@ import CompanyModal from "@/components/CompanyModal";
 import SiteModal from "@/components/SiteModal";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import TrialBanner from "@/components/TrialBanner";
 import { TourStepPopover } from "@/components/TourStepPopover";
 import { ONBOARDING_TOTAL_STEPS } from "@/lib/onboardingTour";
 import {
@@ -55,7 +54,7 @@ import { getMergedPlanFindings } from "@/lib/auditFindings";
 
 const Index = () => {
     const navigate = useNavigate();
-    const { companies, isLoading, addCompany, addSite } = useCompanyStore();
+    const { companies, hasFetchedCompanies, addCompany, addSite } = useCompanyStore();
     const [users, setUsers] = useState<any[]>([]);
     const [auditPlans, setAuditPlans] = useState<any[]>([]);
     const [auditPrograms, setAuditPrograms] = useState<any[]>([]);
@@ -96,22 +95,28 @@ const Index = () => {
     const userJson = localStorage.getItem("user");
     const user = userJson ? JSON.parse(userJson) : null;
 
-    if (!user || user.onboardingCompleted || companies.length > 0) return;
+    if (!hasFetchedCompanies) return;
+
+    if (!user || user.onboardingCompleted || companies.length > 0) {
+      setShowWelcome(false);
+      return;
+    }
 
     if (shouldAwaitTrialWelcome(user) && !trialWelcomeDismissed) {
       setShowWelcome(false);
       return;
     }
 
-    if (!isLoading) {
-      setShowWelcome(true);
-      setOnboardingStep(1);
-    }
-  }, [isLoading, companies.length, totalSites, trialWelcomeDismissed]);
+    setShowWelcome(true);
+    setOnboardingStep(1);
+  }, [hasFetchedCompanies, companies.length, trialWelcomeDismissed]);
 
   useEffect(() => {
     const handleRestart = (e: any) => {
-      const step = e.detail?.step || 2;
+      let step = e.detail?.step || 2;
+      if (step === 1 && companies.length > 0) {
+        step = 2;
+      }
       if (step >= 4) {
         navigate(`/companies?onboarding=true&step=${step}`);
         return;
@@ -127,7 +132,10 @@ const Index = () => {
 
     const params = new URLSearchParams(window.location.search);
     if (params.get('restartOnboarding') === 'true') {
-      const step = Number(params.get('step')) || 2;
+      let step = Number(params.get('step')) || 2;
+      if (step === 1 && companies.length > 0) {
+        step = 2;
+      }
       if (step >= 4) {
         navigate(`/companies?onboarding=true&step=${step}`);
         window.history.replaceState({}, '', window.location.pathname);
@@ -136,7 +144,7 @@ const Index = () => {
       const userJson = localStorage.getItem('user');
       const user = userJson ? JSON.parse(userJson) : null;
       const blocked = user && shouldAwaitTrialWelcome(user) && !trialWelcomeDismissed;
-      if (!blocked) {
+      if (!blocked && !(step === 1 && companies.length > 0)) {
         setShowWelcome(true);
         setOnboardingStep(step);
       }
@@ -145,7 +153,7 @@ const Index = () => {
 
     window.addEventListener('restart-onboarding', handleRestart);
     return () => window.removeEventListener('restart-onboarding', handleRestart);
-  }, [trialWelcomeDismissed, navigate]);
+  }, [trialWelcomeDismissed, navigate, companies.length]);
 
   useEffect(() => {
     const userJson = localStorage.getItem('user');
@@ -169,7 +177,7 @@ const Index = () => {
       try {
         const user = JSON.parse(localStorage.getItem('user') || '{}');
         const [usersRes, plansRes, programsRes] = await Promise.all([
-          apiFetch(`/users?creatorId=${user.id}`),
+          apiFetch(`/users`),
           apiFetch(`/audit-plans?scope=org&includeData=true`),
           apiFetch(`/audit-programs?scope=org`)
         ]);
@@ -402,11 +410,6 @@ const Index = () => {
   return (
     <div className="min-h-screen bg-transparent px-6 py-6">
       <div className="max-w-[1600px] mx-auto space-y-6">
-        <TrialBanner
-          subscriptionStatus={currentUser?.subscriptionStatus}
-          trialEndDate={currentUser?.trialEndDate}
-        />
-
         {/* Top Stats Cards */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4">
           {stats.map((stat, i) => (

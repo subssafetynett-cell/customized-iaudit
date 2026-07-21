@@ -10,6 +10,7 @@ import Stripe from 'stripe';
 import { STRIPE_CONFIG } from './stripe-config.js';
 import { ensureSuperAdminUser } from './ensureSuperAdmin.js';
 import { deleteUserCompletely } from './deleteUser.js';
+import { buildSelfAssessmentReportPdf } from './buildSelfAssessmentReportPdf.js';
 import {
     COMPANY_TEXT_LIMITS,
     DEPT_TEXT_LIMITS,
@@ -31,9 +32,83 @@ import {
 loadServerEnv();
 
 const PASSWORD_REGEX = /^(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*(),.?":{}|<>_+=\-\[\]\\\/~^]).{8,}$/;
+const NEW_PASSWORD_SAME_AS_CURRENT_MESSAGE =
+    'The new password must be different from your current password.';
 
-/** Server-side session lifetime (opaque token stored in DB, sent as Bearer token). */
-const SESSION_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+/** Server-side session lifetime (opaque token stored in DB; delivered via httpOnly cookie). */
+const SESSION_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+/** Renew session when less than this much time remains (sliding window). */
+const SESSION_RENEW_WHEN_REMAINING_MS = SESSION_MAX_AGE_MS / 2;
+const SESSION_EXPIRES_HEADER = 'X-Session-Expires-At';
+const SESSION_COOKIE_NAME = 'iaudit_session';
+
+function parseRequestCookies(req) {
+    const header = req.headers.cookie;
+    if (!header || typeof header !== 'string') return {};
+    return header.split(';').reduce((acc, part) => {
+        const idx = part.indexOf('=');
+        if (idx < 1) return acc;
+        const key = part.slice(0, idx).trim();
+        const value = part.slice(idx + 1).trim();
+        if (key) acc[key] = decodeURIComponent(value);
+        return acc;
+    }, {});
+}
+
+function sessionCookieSecure() {
+    if (process.env.COOKIE_SECURE === 'true') return true;
+    if (process.env.COOKIE_SECURE === 'false') return false;
+    return process.env.NODE_ENV === 'production';
+}
+
+function serializeSessionCookie(token, maxAgeMs) {
+    const maxAgeSeconds = Math.max(0, Math.floor(maxAgeMs / 1000));
+    const secure = sessionCookieSecure();
+    const parts = [
+        `${SESSION_COOKIE_NAME}=${encodeURIComponent(token)}`,
+        'Path=/',
+        `Max-Age=${maxAgeSeconds}`,
+        'HttpOnly',
+        'SameSite=Lax',
+    ];
+    if (secure) parts.push('Secure');
+    return parts.join('; ');
+}
+
+function appendSessionCookie(res, token, sessionExpiresAtIso) {
+    const ms = Date.parse(String(sessionExpiresAtIso)) - Date.now();
+    if (!Number.isFinite(ms) || ms <= 0) return;
+    res.append('Set-Cookie', serializeSessionCookie(token, ms));
+}
+
+function clearSessionCookie(res) {
+    const secure = sessionCookieSecure();
+    const parts = [
+        `${SESSION_COOKIE_NAME}=`,
+        'Path=/',
+        'Max-Age=0',
+        'HttpOnly',
+        'SameSite=Lax',
+    ];
+    if (secure) parts.push('Secure');
+    res.append('Set-Cookie', parts.join('; '));
+}
+
+function getSessionTokenFromRequest(req) {
+    const fromCookie = parseRequestCookies(req)[SESSION_COOKIE_NAME];
+    if (fromCookie) return fromCookie;
+    const authHeader = req.headers.authorization;
+    if (authHeader && typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
+        return authHeader.slice('Bearer '.length).trim() || null;
+    }
+    return null;
+}
+
+function sendAuthenticatedSession(res, profile, session) {
+    appendSessionCookie(res, session.token, session.sessionExpiresAt);
+    res.setHeader(SESSION_EXPIRES_HEADER, session.sessionExpiresAt);
+    return { ...profile, sessionExpiresAt: session.sessionExpiresAt };
+}
 
 /** Consecutive wrong passwords before login is blocked until password reset (env `LOGIN_MAX_FAILED_ATTEMPTS`, default 15, clamped 5–50). */
 const LOGIN_MAX_FAILED_ATTEMPTS = Math.min(
@@ -93,6 +168,27 @@ const OTP_SEND_IP_MAX_IN_WINDOW = Math.min(
 );
 const otpSendIpBuckets = new Map();
 
+/** PSZL-009: sliding window for POST /auth/reset-password verification (default 1 hour). */
+const RESET_PASSWORD_VERIFY_WINDOW_MS = Math.max(
+    60_000,
+    Number.parseInt(process.env.RESET_PASSWORD_VERIFY_WINDOW_MS || String(60 * 60 * 1000), 10) || 60 * 60 * 1000
+);
+
+/** Max reset-password verification attempts per IP per window (default 20). */
+const RESET_PASSWORD_VERIFY_MAX_PER_IP = Math.min(
+    100,
+    Math.max(5, Number.parseInt(process.env.RESET_PASSWORD_VERIFY_MAX_PER_IP || '20', 10) || 20)
+);
+
+/** Max reset-password verification attempts per email per window (default 20). */
+const RESET_PASSWORD_VERIFY_MAX_PER_EMAIL = Math.min(
+    100,
+    Math.max(5, Number.parseInt(process.env.RESET_PASSWORD_VERIFY_MAX_PER_EMAIL || '20', 10) || 20)
+);
+
+const resetPasswordVerifyIpBuckets = new Map();
+const resetPasswordVerifyEmailBuckets = new Map();
+
 function getClientIp(req) {
     const forwarded = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
     return forwarded || req.socket?.remoteAddress || 'unknown';
@@ -143,6 +239,50 @@ function sendOtpIpRateLimit(req, res, next) {
     next();
 }
 
+/** Rate limit password-reset token verification (brute-force protection). */
+function resetPasswordVerifyRateLimit(req, res, next) {
+    const ip = getClientIp(req);
+    const now = Date.now();
+
+    let ipBucket = resetPasswordVerifyIpBuckets.get(ip);
+    if (!ipBucket || now > ipBucket.resetAt) {
+        ipBucket = { n: 0, resetAt: now + RESET_PASSWORD_VERIFY_WINDOW_MS };
+        resetPasswordVerifyIpBuckets.set(ip, ipBucket);
+    }
+    ipBucket.n += 1;
+    if (ipBucket.n > RESET_PASSWORD_VERIFY_MAX_PER_IP) {
+        const retryAfterSeconds = Math.max(1, Math.ceil((ipBucket.resetAt - now) / 1000));
+        res.setHeader('Retry-After', String(retryAfterSeconds));
+        return res.status(429).json({
+            error: 'Too many password reset attempts. Please try again later.',
+            retryAfterSeconds
+        });
+    }
+
+    const emailRaw = req.body?.email;
+    if (typeof emailRaw === 'string') {
+        const emailKey = emailRaw.toLowerCase().trim();
+        if (emailKey) {
+            let emailBucket = resetPasswordVerifyEmailBuckets.get(emailKey);
+            if (!emailBucket || now > emailBucket.resetAt) {
+                emailBucket = { n: 0, resetAt: now + RESET_PASSWORD_VERIFY_WINDOW_MS };
+                resetPasswordVerifyEmailBuckets.set(emailKey, emailBucket);
+            }
+            emailBucket.n += 1;
+            if (emailBucket.n > RESET_PASSWORD_VERIFY_MAX_PER_EMAIL) {
+                const retryAfterSeconds = Math.max(1, Math.ceil((emailBucket.resetAt - now) / 1000));
+                res.setHeader('Retry-After', String(retryAfterSeconds));
+                return res.status(429).json({
+                    error: 'Too many password reset attempts for this email. Please try again later.',
+                    retryAfterSeconds
+                });
+            }
+        }
+    }
+
+    next();
+}
+
 /** @returns {{ token: string, sessionExpiresAt: string }} ISO time when the DB session row expires */
 async function createSessionTokenForUser(userId) {
     await prisma.session.deleteMany({
@@ -166,6 +306,34 @@ async function createSessionTokenForUser(userId) {
         }
     }).catch(() => {});
     return { token, sessionExpiresAt: expiresAt.toISOString() };
+}
+
+/** Remove all server sessions for a user (e.g. after password change or account lock). */
+async function invalidateAllUserSessions(userId) {
+    const uid = Number.parseInt(String(userId), 10);
+    if (!Number.isInteger(uid) || uid < 1) return 0;
+    const { count } = await prisma.session.deleteMany({ where: { userId: uid } });
+    return count;
+}
+
+/** Extend active sessions on use so working users are not logged out at a fixed deadline. */
+async function maybeRenewSessionExpiry(sessionToken, currentExpiresAt) {
+    const now = Date.now();
+    const expiresMs = currentExpiresAt instanceof Date
+        ? currentExpiresAt.getTime()
+        : new Date(currentExpiresAt).getTime();
+    if (!Number.isFinite(expiresMs)) {
+        return new Date(now + SESSION_MAX_AGE_MS).toISOString();
+    }
+    if (expiresMs - now > SESSION_RENEW_WHEN_REMAINING_MS) {
+        return new Date(expiresMs).toISOString();
+    }
+    const newExpiresAt = new Date(now + SESSION_MAX_AGE_MS);
+    await prisma.session.update({
+        where: { token: sessionToken },
+        data: { expiresAt: newExpiresAt },
+    });
+    return newExpiresAt.toISOString();
 }
 
 /** Same for unknown email and wrong password — never reveal whether an address is registered. */
@@ -225,28 +393,21 @@ const LOGIN_SUCCESS_USER_SELECT = {
     emailVerifiedAt: true
 };
 
-const TRIAL_DURATION_DAYS = 14;
-
-/** Start a 14-day trial for eligible users (first login / signup). No-op if trial dates already exist or user is active/superadmin. */
+/** Trial removed — grant full access on first login/signup instead of starting a 14-day trial. */
 async function ensureUserTrialStarted(userId) {
     const user = await prisma.user.findUnique({
         where: { id: userId },
-        select: { id: true, role: true, subscriptionStatus: true, trialEndDate: true }
+        select: { id: true, role: true, subscriptionStatus: true }
     });
     if (!user || user.role === 'superadmin') return false;
     if (user.subscriptionStatus === 'active') return false;
-    if (user.trialEndDate) return false;
-
-    const trialStartDate = new Date();
-    const trialEndDate = new Date();
-    trialEndDate.setDate(trialStartDate.getDate() + TRIAL_DURATION_DAYS);
 
     await prisma.user.update({
         where: { id: userId },
         data: {
-            trialStartDate,
-            trialEndDate,
-            subscriptionStatus: 'trial'
+            subscriptionStatus: 'active',
+            trialStartDate: null,
+            trialEndDate: null,
         }
     });
     return true;
@@ -293,6 +454,7 @@ const CORS_ALLOWED_ORIGINS = new Set([
     'https://iaudit.global',
     'https://api.iaudit.global',
     'https://apps.iaudit.global',
+    'https://szl.iaudit.global',
     'http://localhost:5173',
     'http://localhost:5174',
     'http://localhost:8080',
@@ -305,6 +467,10 @@ app.use(cors({
         // Non-browser clients (curl, server-to-server) send no Origin header
         if (!origin) return callback(null, true);
         if (CORS_ALLOWED_ORIGINS.has(origin)) return callback(null, true);
+        // Allow any subdomain of iaudit.global
+        if (/^https?:\/\/([a-z0-9-]+\.)*iaudit\.global$/.test(origin)) {
+            return callback(null, true);
+        }
         // Any localhost port during local development (Vite may use 8080, 8081, 8082, …)
         if (/^http:\/\/localhost:\d+$/.test(origin) || /^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
             return callback(null, true);
@@ -312,13 +478,14 @@ app.use(cors({
         return callback(new Error(`CORS blocked for origin: ${origin}`));
     },
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'Cache-Control', 'Pragma', 'Expires', 'x-user-id']
+    allowedHeaders: ['Content-Type', 'Authorization', 'Cache-Control', 'Pragma', 'Expires', 'x-user-id'],
+    credentials: true,
 }));
 
 // Full `/api/auth/...` paths must be registered before `app.use('/api', mountedApiRouter)` so they are
 // not lost when the sub-router has no match (and so they work even if `/auth/...` aliases are missing).
 app.post('/api/auth/forgot-password', express.json({ limit: '50mb' }), sendOtpIpRateLimit, handleForgotPassword);
-app.post('/api/auth/reset-password', express.json({ limit: '50mb' }), handleResetPassword);
+app.post('/api/auth/reset-password', express.json({ limit: '50mb' }), resetPasswordVerifyRateLimit, handleResetPassword);
 
 app.use('/api', mountedApiRouter);
 
@@ -1054,14 +1221,16 @@ app.use(express.json({ limit: '50mb' }));
 
 // Content Security Policy middleware to allow Google Fonts and self-hosted resources
 app.use((req, res, next) => {
+    res.setHeader('X-Frame-Options', 'SAMEORIGIN');
     res.setHeader(
         'Content-Security-Policy',
-        "default-src 'self' https://iaudit.global https://api.iaudit.global https://apps.iaudit.global; " +
+        "default-src 'self' https://iaudit.global https://*.iaudit.global; " +
         "font-src 'self' data: https://fonts.gstatic.com; " +
         "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
         "script-src 'self' 'unsafe-inline'; " +
         "img-src 'self' data:; " +
-        "connect-src 'self' https://iaudit.global https://api.iaudit.global https://apps.iaudit.global https://fonts.googleapis.com;"
+        "connect-src 'self' https://iaudit.global https://*.iaudit.global https://fonts.googleapis.com; " +
+        "frame-ancestors 'self';"
     );
 
     next();
@@ -1076,99 +1245,9 @@ app.use('/', (req, res, next) => {
     next();
 });
 
-// Middleware to check if a user's trial has expired
-const checkTrialExpiration = async (req, res, next) => {
-    let userId;
-
-    if (req.user != null && req.user.id != null) {
-        const jwtId = Number.parseInt(String(req.user.id), 10);
-        const spoof =
-            (req.query && req.query.userId) ||
-            (req.body && req.body.userId) ||
-            (req.params && req.params.userId) ||
-            (req.headers && req.headers['x-user-id']);
-        if (spoof != null && spoof !== undefined && String(spoof) !== 'undefined' && String(spoof) !== 'null') {
-            const alt = Number.parseInt(String(spoof), 10);
-            if (!Number.isNaN(alt) && alt !== jwtId) {
-                return res.status(403).json({
-                    error: 'Forbidden',
-                    message: 'User scope does not match your session.'
-                });
-            }
-        }
-        userId = jwtId;
-    } else {
-        userId =
-            (req.query && req.query.userId) ||
-            (req.body && req.body.userId) ||
-            (req.params && req.params.userId) ||
-            (req.headers && req.headers['x-user-id']);
-    }
-
-    if (userId === undefined || userId === null || userId === 'undefined' || userId === 'null') {
-        return next();
-    }
-
-    try {
-        const parsedUserId = typeof userId === 'number' ? userId : Number.parseInt(String(userId), 10);
-        if (Number.isNaN(parsedUserId)) return next();
-
-        const user = await prisma.user.findUnique({
-            where: { id: parsedUserId },
-            select: { subscriptionStatus: true, trialEndDate: true, role: true }
-        });
-
-        if (!user) return next();
-
-        if (user.role === 'superadmin') {
-            return next();
-        }
-
-        // 1. Handle No Subscription Status (New Users)
-        // Allow the request so the frontend can display the TrialModal on the dashboard.
-        if (!user.subscriptionStatus) {
-            return next();
-        }
-
-        // 2. Handle Trial Status
-        if (user.subscriptionStatus === 'trial') {
-            const isExpired = user.trialEndDate && new Date(user.trialEndDate) < new Date();
-
-            if (isExpired) {
-                // Automatically update the status in DB for cleaner future checks
-                await prisma.user.update({
-                    where: { id: parsedUserId },
-                    data: { subscriptionStatus: 'expired' }
-                });
-
-                return res.status(403).json({
-                    error: 'TrialExpired',
-                    message: 'Your free trial has expired. Please upgrade to a subscription to continue.'
-                });
-            }
-
-            // Trial is still active
-            return next();
-        }
-
-        // 3. Handle Explicitly Expired Status
-        if (user.subscriptionStatus === 'expired') {
-            return res.status(403).json({
-                error: 'TrialExpired',
-                message: 'Your free trial has ended. Please upgrade your plan to continue using premium features.'
-            });
-        }
-
-        // 4. Handle Active Subscription
-        if (user.subscriptionStatus === 'active') {
-            return next();
-        }
-
-        next();
-    } catch (error) {
-        console.error('Middleware Trial Check Error:', error);
-        next();
-    }
+/** Trial removed — all non-superadmin users have full access without expiration checks. */
+const checkTrialExpiration = async (_req, _res, next) => {
+    next();
 };
 
 const TRIAL_GAP_ANALYSIS_LIMIT = 3;
@@ -1233,26 +1312,13 @@ async function countOrgSelfAssessments(actorId) {
     return total;
 }
 
-async function rejectIfTrialLimitExceeded(actorId, resource, projectedCount) {
-    const user = await loadUserSubscriptionFlags(actorId);
-    if (!userRequiresTrialLimits(user)) return null;
-    const limits = {
-        gapAnalysis: TRIAL_GAP_ANALYSIS_LIMIT,
-        selfAssessment: TRIAL_SELF_ASSESSMENT_LIMIT,
-        auditProgram: TRIAL_AUDIT_PROGRAM_LIMIT,
-    };
-    const limit = limits[resource];
-    if (limit == null) return null;
-    if (projectedCount > limit) {
-        return trialLimitResponse(resource, limit);
-    }
+async function rejectIfTrialLimitExceeded(_actorId, _resource, _projectedCount) {
     return null;
 }
 
-// Middleware: validate server-side session (DB row); each request must present a valid session token.
+// Middleware: validate server-side session (DB row); token is read from httpOnly cookie (preferred) or Bearer header.
 const authenticateToken = async (req, res, next) => {
-    const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1];
+    const token = getSessionTokenFromRequest(req);
 
     if (!token) {
         console.warn(`[SECURITY] Access denied to ${req.path}. No session token provided.`);
@@ -1281,7 +1347,12 @@ const authenticateToken = async (req, res, next) => {
             return res.status(403).json({ error: 'Account is deactivated' });
         }
 
+        const sessionExpiresAt = await maybeRenewSessionExpiry(session.token, session.expiresAt);
+        res.setHeader(SESSION_EXPIRES_HEADER, sessionExpiresAt);
+        appendSessionCookie(res, session.token, sessionExpiresAt);
+
         req.sessionToken = token;
+        req.sessionExpiresAt = sessionExpiresAt;
         req.user = {
             id: session.user.id,
             email: session.user.email,
@@ -1290,7 +1361,7 @@ const authenticateToken = async (req, res, next) => {
         next();
     } catch (err) {
         console.error(`[SECURITY] Session lookup failed for ${req.path}:`, err.message);
-        return res.status(401).json({ error: 'Session expired or invalid. Please log in again.' });
+        return res.status(503).json({ error: 'Authentication service temporarily unavailable. Please try again.' });
     }
 };
 
@@ -1301,10 +1372,34 @@ const router = express.Router();
 // Temporary in-memory store for OTPs - REMOVED for AWS scalability
 // const otpStore = new Map();
 
-// Helper function to generate a 6 digit code
+// Helper function to generate a 6 digit code (signup and other short-lived codes)
 const generateOTP = () => {
     return Math.floor(100000 + Math.random() * 900000).toString();
 };
+
+/** High-entropy password reset token (PSZL-009 — not brute-forceable like 6 digits). */
+const PASSWORD_RESET_TOKEN_BYTES = 24;
+const PASSWORD_RESET_CODE_MIN_LENGTH = 20;
+const PASSWORD_RESET_CODE_MAX_LENGTH = 256;
+
+function generateVerificationCode(purpose) {
+    if (purpose === 'password_reset') {
+        return crypto.randomBytes(PASSWORD_RESET_TOKEN_BYTES).toString('base64url');
+    }
+    return generateOTP();
+}
+
+function verificationCodesMatch(stored, provided) {
+    if (typeof stored !== 'string' || typeof provided !== 'string') {
+        return false;
+    }
+    const a = Buffer.from(stored);
+    const b = Buffer.from(provided);
+    if (a.length !== b.length) {
+        return false;
+    }
+    return crypto.timingSafeEqual(a, b);
+}
 
 /** In-memory cooldown for authenticated assessment report emails (per user id). */
 const assessmentReportEmailLastSent = new Map();
@@ -1341,6 +1436,42 @@ async function collectOrgSubtreeUserIds(orgRootId) {
         SELECT id FROM subtree
     `;
     return rows.map((r) => Number(r.id));
+}
+
+/**
+ * Org members visible to actor: walk up to account root, then include the full subtree.
+ * Ensures inviter, invitees, and sibling teammates all share one user list.
+ */
+async function collectOrgMemberUserIds(actorId) {
+    const id = Number(actorId);
+    if (!Number.isInteger(id) || id < 1) return [];
+
+    const rows = await prisma.$queryRaw`
+        WITH RECURSIVE ancestor AS (
+            SELECT id, "creatorId" FROM "User" WHERE id = ${id}
+            UNION
+            SELECT u.id, u."creatorId" FROM "User" u
+            INNER JOIN ancestor a ON u.id = a."creatorId"
+        ),
+        org_root AS (
+            SELECT id FROM ancestor WHERE "creatorId" IS NULL
+            LIMIT 1
+        ),
+        subtree AS (
+            SELECT id FROM org_root
+            UNION
+            SELECT u.id FROM "User" u
+            INNER JOIN subtree s ON u."creatorId" = s.id
+        )
+        SELECT id FROM subtree
+    `;
+    const memberIds = rows.map((r) => Number(r.id)).filter((n) => Number.isInteger(n) && n > 0);
+    if (memberIds.length > 0) return memberIds;
+
+    const orgRootId = await resolveActorOrgRootId(id);
+    const fromRoot = await collectOrgSubtreeUserIds(orgRootId);
+    if (fromRoot.length > 0) return fromRoot;
+    return [id];
 }
 
 async function actorCanAccessTargetUser(actorId, targetUserId) {
@@ -1425,12 +1556,25 @@ async function rejectIfAuditee(actorId, res, message = 'Forbidden') {
 
 async function actorCanAccessAuditProgram(actorId, program) {
     if (!program) return false;
-    if (await actorIsAuditee(actorId)) {
-        return auditeeCanAccessSiteId(actorId, program.siteId);
+    const actorIdNum = Number(actorId);
+    if (!Number.isInteger(actorIdNum) || actorIdNum < 1) return false;
+
+    if (await actorIsAuditee(actorIdNum)) {
+        return auditeeCanAccessSiteId(actorIdNum, program.siteId);
     }
-    if (program.userId != null && (await actorCanAccessTargetUser(actorId, program.userId))) return true;
-    if (program.leadAuditorId === actorId) return true;
-    if (Array.isArray(program.auditors) && program.auditors.some((a) => a.id === actorId)) return true;
+
+    if (program.userId === actorIdNum) return true;
+    if (program.leadAuditorId === actorIdNum) return true;
+    if (Array.isArray(program.auditors) && program.auditors.some((a) => Number(a.id) === actorIdNum)) {
+        return true;
+    }
+
+    if (await actorHasFullOrgAuditVisibility(actorIdNum)) {
+        if (program.userId != null && (await actorCanAccessTargetUser(actorIdNum, program.userId))) {
+            return true;
+        }
+    }
+
     return false;
 }
 
@@ -1546,18 +1690,39 @@ const ASSIGNED_FINDINGS_PLAN_SELECT = {
 
 async function actorCanAccessAuditPlan(actorId, plan) {
     if (!plan) return false;
-    if (await actorIsAuditee(actorId)) {
+    const actorIdNum = Number(actorId);
+    if (!Number.isInteger(actorIdNum) || actorIdNum < 1) return false;
+
+    if (await actorIsAuditee(actorIdNum)) {
         const siteId = plan.auditProgram?.siteId ?? plan.siteId;
-        if (siteId != null && (await auditeeCanAccessSiteId(actorId, siteId))) return true;
-        if (await actorIsFindingAssignee(actorId, plan)) return true;
+        if (siteId != null && (await auditeeCanAccessSiteId(actorIdNum, siteId))) return true;
+        if (await actorIsFindingAssignee(actorIdNum, plan)) return true;
         return false;
     }
-    if (plan.userId != null && (await actorCanAccessTargetUser(actorId, plan.userId))) return true;
-    if (plan.userId === actorId) return true;
-    if (plan.leadAuditorId === actorId) return true;
-    if (Array.isArray(plan.auditors) && plan.auditors.some((a) => a.id === actorId)) return true;
-    if (plan.auditProgram && await actorCanAccessAuditProgram(actorId, plan.auditProgram)) return true;
-    if (await actorIsFindingAssignee(actorId, plan)) return true;
+
+    if (plan.userId === actorIdNum) return true;
+    if (plan.leadAuditorId === actorIdNum) return true;
+    if (Array.isArray(plan.auditors) && plan.auditors.some((a) => Number(a.id) === actorIdNum)) {
+        return true;
+    }
+
+    if (plan.auditProgram) {
+        if (plan.auditProgram.userId === actorIdNum) return true;
+        if (plan.auditProgram.leadAuditorId === actorIdNum) return true;
+        if (
+            Array.isArray(plan.auditProgram.auditors) &&
+            plan.auditProgram.auditors.some((a) => Number(a.id) === actorIdNum)
+        ) {
+            return true;
+        }
+    }
+
+    if (await actorHasFullOrgAuditVisibility(actorIdNum)) {
+        if (plan.userId != null && (await actorCanAccessTargetUser(actorIdNum, plan.userId))) return true;
+        if (plan.auditProgram && (await actorCanAccessAuditProgram(actorIdNum, plan.auditProgram))) return true;
+    }
+
+    if (await actorIsFindingAssignee(actorIdNum, plan)) return true;
     return false;
 }
 
@@ -1682,6 +1847,85 @@ async function actorCanManageOrgUsers(actorId) {
     return false;
 }
 
+const PROTECTED_COMPANY_OWNER_MESSAGE =
+    'The company owner account cannot be removed or deactivated by other administrators.';
+
+/** PSZL-013: org root (signup account) and registered company owner are not removable by peer admins. */
+async function isProtectedCompanyOwnerUserId(userId) {
+    const id = Number(userId);
+    if (!Number.isInteger(id) || id < 1) return false;
+    const orgRootId = await getOrgRootUserId(id);
+    if (orgRootId === id) return true;
+    const ownedCompany = await prisma.company.findFirst({
+        where: { userId: id },
+        select: { id: true },
+    });
+    return Boolean(ownedCompany);
+}
+
+/** Returns ok:false when a non-owner admin tries to delete/deactivate the protected company owner. */
+async function assertActorMayModifyProtectedCompanyOwner(actorId, targetId) {
+    if (!(await isProtectedCompanyOwnerUserId(targetId))) {
+        return { ok: true };
+    }
+    const actorNum = Number(actorId);
+    const targetNum = Number(targetId);
+    if (actorNum === targetNum) {
+        return { ok: true };
+    }
+    const actor = await prisma.user.findUnique({
+        where: { id: actorNum },
+        select: { role: true },
+    });
+    if (normalizeUserRole(actor?.role) === 'superadmin') {
+        return { ok: true };
+    }
+    const [actorRoot, targetRoot] = await Promise.all([
+        getOrgRootUserId(actorNum),
+        getOrgRootUserId(targetNum),
+    ]);
+    if (actorRoot != null && actorRoot === targetRoot) {
+        return { ok: false, status: 403, error: PROTECTED_COMPANY_OWNER_MESSAGE };
+    }
+    return { ok: true };
+}
+
+/** Same privilege model as actorCanManageOrgUsers, applied to a loaded user row. */
+function userRowHasOrgAdminPrivileges(user) {
+    if (!user) return false;
+    const r = normalizeUserRole(user.role);
+    if (r === 'superadmin' || r === 'admin') return true;
+    if (user.creatorId == null && r !== 'auditee') return true;
+    return false;
+}
+
+/** PSZL-014: active org members who can administer users (admin / org root). */
+async function countActiveOrgAdministrators(actorId) {
+    const orgRootId = await getOrgRootUserId(actorId);
+    if (orgRootId == null) return 0;
+    const memberIds = await collectOrgSubtreeUserIds(orgRootId);
+    if (memberIds.length === 0) return 0;
+    const users = await prisma.user.findMany({
+        where: { id: { in: memberIds }, isActive: true },
+        select: { id: true, role: true, creatorId: true },
+    });
+    return users.filter((u) => userRowHasOrgAdminPrivileges(u)).length;
+}
+
+const LAST_ACTIVE_ADMIN_MESSAGE =
+    'You are the only active administrator in this organization. Invite or activate another administrator before deactivating your account.';
+
+/** Any org member except auditees may invite teammates; role assignment stays admin-only. */
+async function actorCanInviteOrgUser(actorId) {
+    if (await actorCanManageOrgUsers(actorId)) return true;
+    const actor = await prisma.user.findUnique({
+        where: { id: actorId },
+        select: { role: true },
+    });
+    if (!actor) return false;
+    return normalizeUserRole(actor.role) !== 'auditee';
+}
+
 /** User is designated lead auditor on at least one audit program or plan. */
 async function actorIsLeadAuditor(actorId) {
     const id = Number(actorId);
@@ -1720,6 +1964,271 @@ async function actorCanAssignAuditeeToSite(actorId, siteId) {
     if (Number.isNaN(parsed) || parsed < 1) return false;
     const allowed = await siteIdsInActorOrg(actorId);
     return allowed.has(parsed);
+}
+
+/** PSZL-010: site must exist and belong to the actor's organization before mutate. */
+async function assertActorCanManageSite(actorId, siteId) {
+    const parsed = Number.parseInt(String(siteId), 10);
+    if (!Number.isInteger(parsed) || parsed < 1) {
+        return { ok: false, status: 400, error: 'Invalid site ID' };
+    }
+    if (await actorIsAuditee(actorId)) {
+        return { ok: false, status: 403, error: 'Forbidden' };
+    }
+    const site = await prisma.site.findUnique({
+        where: { id: parsed },
+        select: { id: true },
+    });
+    if (!site) {
+        return { ok: false, status: 404, error: 'Site not found' };
+    }
+    const actor = await prisma.user.findUnique({
+        where: { id: Number(actorId) },
+        select: { role: true },
+    });
+    if (actor?.role === 'superadmin') {
+        return { ok: true, siteId: parsed };
+    }
+    if (!(await actorCanAssignAuditeeToSite(actorId, parsed))) {
+        return { ok: false, status: 403, error: 'Forbidden' };
+    }
+    return { ok: true, siteId: parsed };
+}
+
+/** Resolve department and ensure the actor may manage its parent site (PSZL-011 / PSZL-012). */
+async function assertActorCanManageDepartment(actorId, departmentId) {
+    const parsed = Number.parseInt(String(departmentId), 10);
+    if (!Number.isInteger(parsed) || parsed < 1) {
+        return { ok: false, status: 400, error: 'Invalid department ID' };
+    }
+    const department = await prisma.department.findUnique({
+        where: { id: parsed },
+        select: { id: true, siteId: true },
+    });
+    if (!department) {
+        return { ok: false, status: 404, error: 'Department not found' };
+    }
+    const siteAccess = await assertActorCanManageSite(actorId, department.siteId);
+    if (!siteAccess.ok) {
+        return siteAccess;
+    }
+    return { ok: true, departmentId: parsed, siteId: siteAccess.siteId };
+}
+
+/** Reject tampered body siteId on POST .../sites/:id/departments (path is authoritative). */
+function assertDepartmentCreateBodySiteId(body, pathSiteId) {
+    if (body?.siteId === undefined || body?.siteId === null || String(body.siteId).trim() === '') {
+        return null;
+    }
+    const fromBody = Number.parseInt(String(body.siteId), 10);
+    if (!Number.isInteger(fromBody) || fromBody !== pathSiteId) {
+        return 'Invalid request';
+    }
+    return null;
+}
+
+const DEPARTMENT_CREATE_ALLOWED_BODY_KEYS = new Set([
+    'name', 'code', 'status', 'manager', 'description', 'siteId',
+]);
+
+/** Org members eligible as lead auditor or team auditor (excludes auditees). */
+async function orgAuditorUserIdSet(actorId) {
+    const memberIds = await collectOrgMemberUserIds(actorId);
+    if (memberIds.length === 0) return new Set();
+    const users = await prisma.user.findMany({
+        where: {
+            id: { in: memberIds },
+            isActive: true,
+            role: { not: 'auditee' },
+        },
+        select: { id: true },
+    });
+    return new Set(users.map((u) => u.id));
+}
+
+function parsePositiveIntIds(raw) {
+    if (raw == null) return [];
+    const list = Array.isArray(raw) ? raw : [raw];
+    return [
+        ...new Set(
+            list
+                .map((id) => Number.parseInt(String(id), 10))
+                .filter((id) => Number.isInteger(id) && id > 0),
+        ),
+    ];
+}
+
+/** Reject lead/team auditor ids outside the actor's org (403 on tampered ids). */
+async function assertOrgAuditorUserIds(actorId, userIds, { allowEmpty = true } = {}) {
+    const normalized = parsePositiveIntIds(userIds);
+    if (normalized.length === 0) {
+        return allowEmpty
+            ? { ok: true, ids: [] }
+            : { ok: false, status: 400, error: 'Auditor user id is required' };
+    }
+    const allowed = await orgAuditorUserIdSet(actorId);
+    if (normalized.some((id) => !allowed.has(id))) {
+        return { ok: false, status: 403, error: 'Forbidden' };
+    }
+    return { ok: true, ids: normalized };
+}
+
+/** scheduleData.departmentIds must belong to the program site within the actor's org. */
+async function assertOrgSiteDepartments(actorId, siteId, scheduleData) {
+    if (!scheduleData || typeof scheduleData !== 'object' || Array.isArray(scheduleData)) {
+        return { ok: true };
+    }
+    const rawIds = scheduleData.departmentIds;
+    if (!Array.isArray(rawIds) || rawIds.length === 0) {
+        return { ok: true };
+    }
+    const parsedSiteId = Number.parseInt(String(siteId), 10);
+    if (!Number.isInteger(parsedSiteId) || parsedSiteId < 1) {
+        return { ok: false, status: 400, error: 'Invalid site ID' };
+    }
+    if (!(await actorCanAssignAuditeeToSite(actorId, parsedSiteId))) {
+        return { ok: false, status: 403, error: 'Forbidden' };
+    }
+    const deptIds = parsePositiveIntIds(rawIds);
+    if (deptIds.length === 0) {
+        return { ok: true };
+    }
+    const departments = await prisma.department.findMany({
+        where: { id: { in: deptIds } },
+        select: { id: true, siteId: true },
+    });
+    if (departments.length !== deptIds.length) {
+        return { ok: false, status: 403, error: 'Forbidden' };
+    }
+    if (departments.some((dept) => dept.siteId !== parsedSiteId)) {
+        return { ok: false, status: 403, error: 'Forbidden' };
+    }
+    return { ok: true };
+}
+
+async function validateAuditProgramAssignments(actorId, { siteId, leadAuditorId, auditorIds, scheduleData }) {
+    const parsedSiteId = Number.parseInt(String(siteId), 10);
+    if (!Number.isInteger(parsedSiteId) || parsedSiteId < 1) {
+        return { ok: false, status: 400, error: 'Invalid site ID' };
+    }
+    if (!(await actorCanAssignAuditeeToSite(actorId, parsedSiteId))) {
+        return { ok: false, status: 403, error: 'Forbidden' };
+    }
+    if (leadAuditorId != null && leadAuditorId !== '') {
+        const leadCheck = await assertOrgAuditorUserIds(actorId, [leadAuditorId], { allowEmpty: false });
+        if (!leadCheck.ok) return leadCheck;
+    }
+    const auditorCheck = await assertOrgAuditorUserIds(actorId, auditorIds ?? [], { allowEmpty: true });
+    if (!auditorCheck.ok) return auditorCheck;
+    const deptCheck = await assertOrgSiteDepartments(actorId, parsedSiteId, scheduleData);
+    if (!deptCheck.ok) return deptCheck;
+    const parsedLead =
+        leadAuditorId != null && leadAuditorId !== ''
+            ? Number.parseInt(String(leadAuditorId), 10)
+            : null;
+    return {
+        ok: true,
+        siteId: parsedSiteId,
+        leadAuditorId: Number.isInteger(parsedLead) && parsedLead > 0 ? parsedLead : null,
+        auditorIds: auditorCheck.ids,
+    };
+}
+
+/** Active non-auditee users in the company owner's team (same company as a site/program). */
+async function companyAuditorUserIdSet(companyId) {
+    const parsedCompanyId = Number.parseInt(String(companyId), 10);
+    if (!Number.isInteger(parsedCompanyId) || parsedCompanyId < 1) {
+        return new Set();
+    }
+    const company = await prisma.company.findUnique({
+        where: { id: parsedCompanyId },
+        select: { userId: true },
+    });
+    if (!company?.userId) {
+        return new Set();
+    }
+    const memberIds = await collectOrgSubtreeUserIds(company.userId);
+    if (memberIds.length === 0) {
+        return new Set();
+    }
+    const users = await prisma.user.findMany({
+        where: {
+            id: { in: memberIds },
+            isActive: true,
+            role: { not: 'auditee' },
+        },
+        select: { id: true },
+    });
+    return new Set(users.map((u) => u.id));
+}
+
+/** Reject auditor ids outside the audit program's company (403 on tampered ids). */
+async function assertCompanyAuditorUserIds(companyId, userIds, { allowEmpty = true } = {}) {
+    const normalized = parsePositiveIntIds(userIds);
+    if (normalized.length === 0) {
+        return allowEmpty
+            ? { ok: true, ids: [] }
+            : { ok: false, status: 400, error: 'Auditor user id is required' };
+    }
+    const allowed = await companyAuditorUserIdSet(companyId);
+    if (normalized.some((id) => !allowed.has(id))) {
+        return { ok: false, status: 403, error: 'Forbidden' };
+    }
+    return { ok: true, ids: normalized };
+}
+
+async function resolveAuditProgramCompanyId(program) {
+    if (program?.site?.companyId != null) {
+        return Number(program.site.companyId);
+    }
+    const siteId = program?.siteId;
+    if (siteId == null) {
+        return null;
+    }
+    const site = await prisma.site.findUnique({
+        where: { id: Number(siteId) },
+        select: { companyId: true },
+    });
+    return site?.companyId ?? null;
+}
+
+async function validateAuditPlanAuditorAssignments(actorId, { companyId, leadAuditorId, auditorIds }) {
+    const parsedCompanyId = Number.parseInt(String(companyId), 10);
+    if (!Number.isInteger(parsedCompanyId) || parsedCompanyId < 1) {
+        return { ok: false, status: 400, error: 'Invalid company for audit plan' };
+    }
+    const company = await prisma.company.findUnique({
+        where: { id: parsedCompanyId },
+        select: { userId: true },
+    });
+    if (!company?.userId) {
+        return { ok: false, status: 403, error: 'Forbidden' };
+    }
+    if (!(await actorCanAccessTargetUser(actorId, company.userId))) {
+        return { ok: false, status: 403, error: 'Forbidden' };
+    }
+
+    if (leadAuditorId != null && leadAuditorId !== '') {
+        const leadCheck = await assertCompanyAuditorUserIds(
+            parsedCompanyId,
+            [leadAuditorId],
+            { allowEmpty: false },
+        );
+        if (!leadCheck.ok) return leadCheck;
+    }
+    const auditorCheck = await assertCompanyAuditorUserIds(parsedCompanyId, auditorIds ?? [], {
+        allowEmpty: true,
+    });
+    if (!auditorCheck.ok) return auditorCheck;
+    const parsedLead =
+        leadAuditorId != null && leadAuditorId !== ''
+            ? Number.parseInt(String(leadAuditorId), 10)
+            : null;
+    return {
+        ok: true,
+        leadAuditorId: Number.isInteger(parsedLead) && parsedLead > 0 ? parsedLead : null,
+        auditorIds: auditorCheck.ids,
+    };
 }
 
 /** True when Site.userId references an auditee (not a legacy creator id from older site creation). */
@@ -2053,6 +2562,33 @@ function selfAssessmentDraftForUser(draft, userId) {
     return { ...draft, ownerUserId: userId };
 }
 
+/** Gap/self-assessment rows are keyed per user; org admins may manage a teammate's store. */
+async function resolveAssessmentStoreOwnerId(actorId, requestedOwnerId) {
+    const actor = Number(actorId);
+    if (!Number.isInteger(actor) || actor < 1) {
+        const err = new Error('Forbidden');
+        err.statusCode = 403;
+        throw err;
+    }
+    const requested =
+        requestedOwnerId != null && requestedOwnerId !== ''
+            ? Number(requestedOwnerId)
+            : actor;
+    if (!Number.isInteger(requested) || requested < 1) return actor;
+    if (requested === actor) return actor;
+    if (!(await actorCanAccessTargetUser(actor, requested))) {
+        const err = new Error('Forbidden');
+        err.statusCode = 403;
+        throw err;
+    }
+    if (!(await actorCanManageOrgUsers(actor))) {
+        const err = new Error('Forbidden');
+        err.statusCode = 403;
+        throw err;
+    }
+    return requested;
+}
+
 /** One-time import: only records explicitly owned by this user (never unowned org-wide rows). */
 async function importOwnedSelfAssessmentsFromOrgStore(actorId) {
     const orgRootUserId = await resolveActorOrgRootId(actorId);
@@ -2128,9 +2664,52 @@ function buildOrgSubtreePlanVisibilityOr(subtreeIds) {
     ];
 }
 
-// Basic health check endpoint
-app.get('/health', (req, res) => {
-    res.status(200).json({ status: 'ok' });
+/** Programs visible to a user through direct ownership or auditor assignment only. */
+function buildAssignedAuditProgramVisibilityOr(actorId) {
+    const id = Number(actorId);
+    if (!Number.isInteger(id) || id < 1) return [{ userId: -1 }];
+    return [
+        { userId: id },
+        { leadAuditorId: id },
+        { auditors: { some: { id } } },
+    ];
+}
+
+/** Plans visible through direct assignment or via an assigned audit program. */
+function buildAssignedAuditPlanVisibilityOr(actorId) {
+    const id = Number(actorId);
+    if (!Number.isInteger(id) || id < 1) return [{ userId: -1 }];
+    return [
+        { userId: id },
+        { leadAuditorId: id },
+        { auditors: { some: { id } } },
+        { auditProgram: { is: { userId: id } } },
+        { auditProgram: { is: { leadAuditorId: id } } },
+        { auditProgram: { is: { auditors: { some: { id } } } } },
+    ];
+}
+
+/** Org admins / account owners see the full org audit catalog; invited teammates see assignments only. */
+async function actorHasFullOrgAuditVisibility(actorId) {
+    const id = Number(actorId);
+    if (!Number.isInteger(id) || id < 1) return false;
+    const actor = await prisma.user.findUnique({
+        where: { id },
+        select: { role: true },
+    });
+    if (normalizeUserRole(actor?.role) === 'superadmin') return true;
+    return actorCanManageOrgUsers(id);
+}
+
+// Basic health check endpoint (includes DB — avoids marking server healthy when Prisma is broken)
+app.get('/health', async (req, res) => {
+    try {
+        await prisma.$queryRaw`SELECT 1`;
+        res.status(200).json({ status: 'ok', database: 'connected' });
+    } catch (error) {
+        console.error('[health] Database check failed:', error.message);
+        res.status(503).json({ status: 'degraded', database: 'unavailable', error: error.message });
+    }
 });
 
 // Root route to prevent 404
@@ -2286,9 +2865,17 @@ app.post('/companies/:companyId/sites', authenticateToken, checkTrialExpiration,
         if (siteNameLenErr) {
             return res.status(400).json({ error: siteNameLenErr });
         }
+        const siteAddressLenErr = organizationTextLengthError(address, SITE_TEXT_LIMITS.address, 'Address');
+        if (siteAddressLenErr) {
+            return res.status(400).json({ error: siteAddressLenErr });
+        }
         const sName = sanitizeOrganizationText(name, SITE_TEXT_LIMITS.name);
         if (!sName) {
             return res.status(400).json({ error: 'Site name is required' });
+        }
+        const sAddress = sanitizeOrganizationText(address, SITE_TEXT_LIMITS.address);
+        if (!sAddress) {
+            return res.status(400).json({ error: 'Address is required' });
         }
 
         const sitePhone = sanitizePhoneField(contactNumber);
@@ -2304,7 +2891,7 @@ app.post('/companies/:companyId/sites', authenticateToken, checkTrialExpiration,
                 description: sanitizePlainText(description, SITE_TEXT_LIMITS.description, { preserveNewlines: true }),
                 siteType: sanitizePlainText(siteType, SITE_TEXT_LIMITS.siteType),
                 status: sanitizePlainText(status, SITE_TEXT_LIMITS.status) || 'Active',
-                address: sanitizeOrganizationText(address, SITE_TEXT_LIMITS.address),
+                address: sAddress,
                 city: sanitizePlainText(city, SITE_TEXT_LIMITS.city),
                 state: sanitizePlainText(state, SITE_TEXT_LIMITS.state),
                 country: sanitizePlainText(country, SITE_TEXT_LIMITS.country),
@@ -2368,6 +2955,11 @@ app.get('/sites', authenticateToken, checkTrialExpiration, async (req, res) => {
 // Update a site
 app.put('/sites/:id', authenticateToken, checkTrialExpiration, async (req, res) => {
     const { id } = req.params;
+    const actorId = Number(req.user.id);
+    const access = await assertActorCanManageSite(actorId, id);
+    if (!access.ok) {
+        return res.status(access.status).json({ error: access.error });
+    }
     const {
         name, description, siteType, status,
         address, city, state, country, postalCode,
@@ -2397,7 +2989,15 @@ app.put('/sites/:id', authenticateToken, checkTrialExpiration, async (req, res) 
             data.status = sanitizePlainText(status, SITE_TEXT_LIMITS.status);
         }
         if (address !== undefined) {
-            data.address = sanitizeOrganizationText(address, SITE_TEXT_LIMITS.address);
+            const siteAddressLenErr = organizationTextLengthError(address, SITE_TEXT_LIMITS.address, 'Address');
+            if (siteAddressLenErr) {
+                return res.status(400).json({ error: siteAddressLenErr });
+            }
+            const sAddress = sanitizeOrganizationText(address, SITE_TEXT_LIMITS.address);
+            if (!sAddress) {
+                return res.status(400).json({ error: 'Address is required' });
+            }
+            data.address = sAddress;
         }
         if (city !== undefined) {
             data.city = sanitizePlainText(city, SITE_TEXT_LIMITS.city);
@@ -2445,11 +3045,14 @@ app.put('/sites/:id', authenticateToken, checkTrialExpiration, async (req, res) 
         }
 
         const site = await prisma.site.update({
-            where: { id: Number.parseInt(id) },
+            where: { id: access.siteId },
             data
         });
         res.json(site);
     } catch (error) {
+        if (error?.code === 'P2025') {
+            return res.status(404).json({ error: 'Site not found' });
+        }
         console.error('Error updating site:', error);
         res.status(500).json({ error: 'Failed to update site' });
     }
@@ -2458,12 +3061,20 @@ app.put('/sites/:id', authenticateToken, checkTrialExpiration, async (req, res) 
 // Delete a site
 app.delete('/sites/:id', authenticateToken, checkTrialExpiration, async (req, res) => {
     const { id } = req.params;
+    const actorId = Number(req.user.id);
+    const access = await assertActorCanManageSite(actorId, id);
+    if (!access.ok) {
+        return res.status(access.status).json({ error: access.error });
+    }
     try {
         await prisma.site.delete({
-            where: { id: Number.parseInt(id) }
+            where: { id: access.siteId }
         });
         res.status(204).send();
     } catch (error) {
+        if (error?.code === 'P2025') {
+            return res.status(404).json({ error: 'Site not found' });
+        }
         console.error('Error deleting site:', error);
         res.status(500).json({ error: 'Failed to delete site' });
     }
@@ -2471,7 +3082,23 @@ app.delete('/sites/:id', authenticateToken, checkTrialExpiration, async (req, re
 
 // Create a department
 app.post('/sites/:siteId/departments', authenticateToken, checkTrialExpiration, async (req, res) => {
+    const actorId = Number(req.user.id);
+    const badKeys = getDisallowedExtraKeysError(req.body, DEPARTMENT_CREATE_ALLOWED_BODY_KEYS);
+    if (badKeys) {
+        return res.status(400).json({ error: badKeys });
+    }
+
     const { siteId } = req.params;
+    const access = await assertActorCanManageSite(actorId, siteId);
+    if (!access.ok) {
+        return res.status(access.status).json({ error: access.error });
+    }
+
+    const siteIdMismatch = assertDepartmentCreateBodySiteId(req.body, access.siteId);
+    if (siteIdMismatch) {
+        return res.status(400).json({ error: siteIdMismatch });
+    }
+
     const { name, code, status, manager, description } = req.body;
     try {
         const deptNameLenErr = organizationTextLengthError(name, DEPT_TEXT_LIMITS.name, 'Department name');
@@ -2490,7 +3117,7 @@ app.post('/sites/:siteId/departments', authenticateToken, checkTrialExpiration, 
                 status: sanitizePlainText(status, DEPT_TEXT_LIMITS.status) || 'Active',
                 manager: sanitizePlainText(manager, DEPT_TEXT_LIMITS.manager),
                 description: sanitizePlainText(description, DEPT_TEXT_LIMITS.description, { preserveNewlines: true }),
-                siteId: Number.parseInt(siteId)
+                siteId: access.siteId
             }
         });
         res.status(201).json(department);
@@ -2502,9 +3129,24 @@ app.post('/sites/:siteId/departments', authenticateToken, checkTrialExpiration, 
 
 // Update a department
 app.put('/departments/:id', authenticateToken, checkTrialExpiration, async (req, res) => {
+    const actorId = Number(req.user.id);
     const { id } = req.params;
-    const { name, code, status, manager, description } = req.body;
+    const { name, code, status, manager, description, siteId } = req.body;
     try {
+        const access = await assertActorCanManageDepartment(actorId, id);
+        if (!access.ok) {
+            return res.status(access.status).json({ error: access.error });
+        }
+        const parsedDeptId = access.departmentId;
+
+        const existing = await prisma.department.findUnique({
+            where: { id: parsedDeptId },
+            include: { site: { select: { id: true, companyId: true } } },
+        });
+        if (!existing?.site) {
+            return res.status(404).json({ error: 'Department not found' });
+        }
+
         const data = {};
         if (name !== undefined) {
             const deptNameLenErr = organizationTextLengthError(name, DEPT_TEXT_LIMITS.name, 'Department name');
@@ -2529,13 +3171,35 @@ app.put('/departments/:id', authenticateToken, checkTrialExpiration, async (req,
         if (description !== undefined) {
             data.description = sanitizePlainText(description, DEPT_TEXT_LIMITS.description, { preserveNewlines: true });
         }
+        if (siteId !== undefined) {
+            const parsedSiteId = Number.parseInt(siteId, 10);
+            if (!Number.isFinite(parsedSiteId)) {
+                return res.status(400).json({ error: 'Invalid site ID' });
+            }
+            const targetSite = await prisma.site.findUnique({
+                where: { id: parsedSiteId },
+                select: { id: true, companyId: true },
+            });
+            if (!targetSite) {
+                return res.status(404).json({ error: 'Site not found' });
+            }
+            if (!(await actorCanAssignAuditeeToSite(actorId, targetSite.id))) {
+                return res.status(403).json({ error: 'Forbidden' });
+            }
+            if (targetSite.companyId !== existing.site.companyId) {
+                return res.status(400).json({
+                    error: 'Department can only be moved to a site within the same company',
+                });
+            }
+            data.siteId = targetSite.id;
+        }
 
         if (Object.keys(data).length === 0) {
             return res.status(400).json({ error: 'No valid fields to update' });
         }
 
         const department = await prisma.department.update({
-            where: { id: Number.parseInt(id) },
+            where: { id: parsedDeptId },
             data
         });
         res.json(department);
@@ -2545,15 +3209,23 @@ app.put('/departments/:id', authenticateToken, checkTrialExpiration, async (req,
     }
 });
 
-// Delete a department
+// Delete a department (PSZL-012: org-scoped via assertActorCanManageDepartment)
 app.delete('/departments/:id', authenticateToken, checkTrialExpiration, async (req, res) => {
+    const actorId = Number(req.user.id);
     const { id } = req.params;
+    const access = await assertActorCanManageDepartment(actorId, id);
+    if (!access.ok) {
+        return res.status(access.status).json({ error: access.error });
+    }
     try {
         await prisma.department.delete({
-            where: { id: Number.parseInt(id) }
+            where: { id: access.departmentId }
         });
         res.status(204).send();
     } catch (error) {
+        if (error?.code === 'P2025') {
+            return res.status(404).json({ error: 'Department not found' });
+        }
         console.error('Error deleting department:', error);
         res.status(500).json({ error: 'Failed to delete department' });
     }
@@ -2585,6 +3257,19 @@ app.post('/companies', authenticateToken, checkTrialExpiration, async (req, res)
             return res.status(400).json({ error: 'Company name is required' });
         }
 
+        const streetAddressLenErr = organizationTextLengthError(
+            streetAddress,
+            COMPANY_TEXT_LIMITS.streetAddress,
+            'Street address'
+        );
+        if (streetAddressLenErr) {
+            return res.status(400).json({ error: streetAddressLenErr });
+        }
+        const sStreetAddress = sanitizeOrganizationText(streetAddress, COMPANY_TEXT_LIMITS.streetAddress);
+        if (!sStreetAddress) {
+            return res.status(400).json({ error: 'Street address is required' });
+        }
+
         const sCity = sanitizePlainText(city, COMPANY_TEXT_LIMITS.city);
         const sCountry = sanitizePlainText(country, COMPANY_TEXT_LIMITS.country);
 
@@ -2613,7 +3298,7 @@ app.post('/companies', authenticateToken, checkTrialExpiration, async (req, res)
                 description: sanitizePlainText(description, COMPANY_TEXT_LIMITS.description, { preserveNewlines: true }),
                 logo: sanitizedLogo,
                 contactNumber: companyPhone,
-                streetAddress: sanitizeOrganizationText(streetAddress, COMPANY_TEXT_LIMITS.streetAddress),
+                streetAddress: sStreetAddress,
                 city: sCity,
                 state: sanitizePlainText(state, COMPANY_TEXT_LIMITS.state),
                 country: sCountry,
@@ -2686,7 +3371,19 @@ app.put('/companies/:id', authenticateToken, checkTrialExpiration, async (req, r
             }
         }
         if (streetAddress !== undefined) {
-            data.streetAddress = sanitizeOrganizationText(streetAddress, COMPANY_TEXT_LIMITS.streetAddress);
+            const streetAddressLenErr = organizationTextLengthError(
+                streetAddress,
+                COMPANY_TEXT_LIMITS.streetAddress,
+                'Street address'
+            );
+            if (streetAddressLenErr) {
+                return res.status(400).json({ error: streetAddressLenErr });
+            }
+            const sStreetAddress = sanitizeOrganizationText(streetAddress, COMPANY_TEXT_LIMITS.streetAddress);
+            if (!sStreetAddress) {
+                return res.status(400).json({ error: 'Street address is required' });
+            }
+            data.streetAddress = sStreetAddress;
         }
         if (state !== undefined) {
             data.state = sanitizePlainText(state, COMPANY_TEXT_LIMITS.state);
@@ -2770,7 +3467,8 @@ app.delete('/companies/:id', authenticateToken, checkTrialExpiration, async (req
 
 function getOtpTtlMinutes(purpose) {
     if (purpose === 'signup') return 1;
-    if (purpose === 'password_reset' || purpose === 'email_change') return 15;
+    if (purpose === 'password_reset') return 5;
+    if (purpose === 'email_change') return 15;
     if (purpose === 'user_invite') return 30;
     return 10;
 }
@@ -2820,6 +3518,87 @@ async function sendOtpToEmailAddress(normalizedEmail, purpose, options = {}) {
 function getAppLoginUrl() {
     const base = String(process.env.FRONTEND_URL || 'http://localhost:8080').trim().replace(/\/$/, '');
     return `${base}/auth`;
+}
+
+/** PSZL-019 / VDP-020: notify account owner after a successful password change. */
+async function sendPasswordChangedNotificationEmail({ toEmail, firstName, lastName, changedBySelf = true }) {
+    if (!isSmtpConfigured()) {
+        console.warn('[AUTH] SMTP not configured; skipping password change notification email.');
+        return { sent: false, skipped: true };
+    }
+    const normalizedTo = String(toEmail || '').trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedTo)) {
+        return { sent: false, skipped: true };
+    }
+
+    const displayName = escapeHtml(`${firstName || ''} ${lastName || ''}`.trim() || 'there');
+    const safeEmail = escapeHtml(normalizedTo);
+    const loginUrl = getAppLoginUrl();
+    const changedAt = new Date().toLocaleString('en-US', {
+        dateStyle: 'full',
+        timeStyle: 'short',
+        timeZone: 'UTC',
+    });
+    const intro = changedBySelf
+        ? 'Your iAudit Global account password was changed successfully.'
+        : 'The password for your iAudit Global account was changed by an administrator.';
+
+    const subject = 'Your iAudit Global password was changed';
+    const html = `
+        <div style="font-family: Arial, sans-serif; max-width: 560px; margin: 0 auto; color: #1e293b;">
+            <div style="background:#213847;padding:24px 28px;border-radius:8px 8px 0 0;">
+                <h1 style="margin:0;color:#ffffff;font-size:20px;font-weight:700;">Password changed</h1>
+            </div>
+            <div style="background:#ffffff;padding:28px;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 8px 8px;">
+                <p style="font-size:15px;line-height:1.6;margin:0 0 16px;">Hello ${displayName},</p>
+                <p style="font-size:15px;line-height:1.6;margin:0 0 16px;">${intro}</p>
+                <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:16px;margin:20px 0;">
+                    <p style="margin:0 0 6px;font-size:12px;color:#64748b;text-transform:uppercase;letter-spacing:0.05em;">When</p>
+                    <p style="margin:0;font-size:14px;font-weight:600;">${escapeHtml(changedAt)} UTC</p>
+                </div>
+                <p style="font-size:14px;line-height:1.6;color:#475569;margin:0 0 20px;">
+                    If you did not make this change, contact us immediately at
+                    <a href="mailto:support@iaudit.global" style="color:#1e855e;">support@iaudit.global</a>
+                    and reset your password using the forgot-password flow on the sign-in page.
+                </p>
+                <p style="margin:24px 0;">
+                    <a href="${loginUrl}" style="display:inline-block;background:#1e855e;color:#ffffff;text-decoration:none;padding:12px 24px;border-radius:8px;font-weight:bold;">
+                        Sign in
+                    </a>
+                </p>
+                <hr style="border:0;border-top:1px solid #e5e7eb;margin:28px 0;" />
+                <p style="margin:0;font-size:11px;color:#94a3b8;text-align:center;">
+                    This security notification was sent to ${safeEmail}. Please do not reply to this automated message.
+                </p>
+            </div>
+        </div>
+    `;
+    const text = [
+        `Hello ${`${firstName || ''} ${lastName || ''}`.trim() || 'there'},`,
+        '',
+        intro,
+        '',
+        `Time (UTC): ${changedAt}`,
+        '',
+        'If you did not make this change, contact support@iaudit.global immediately.',
+        '',
+        `Sign in: ${loginUrl}`,
+    ].join('\n');
+
+    try {
+        await transporter.sendMail({
+            from: { name: 'iAudit Global', address: getSmtpFromAddress() },
+            to: normalizedTo,
+            subject,
+            html,
+            text,
+        });
+        console.log(`[AUTH] Password change notification sent to ${normalizedTo}`);
+        return { sent: true };
+    } catch (err) {
+        console.error('[AUTH] Failed to send password change notification:', err.message);
+        return { sent: false, error: err.message };
+    }
 }
 
 /** Combined welcome email for admin-created users (credentials + verification code). */
@@ -2901,7 +3680,7 @@ async function sendOtpToEmailAddressUnderLock(normalizedEmail, purpose, options 
             }
         }
 
-        const otp = generateOTP();
+        const otp = generateVerificationCode(purpose);
         const devConsoleOnly = !isSmtpConfigured() && allowDevConsoleOtp();
         if (!devConsoleOnly) {
             assertSmtpConfiguredForOtp();
@@ -2981,7 +3760,9 @@ async function sendOtpToEmailAddressUnderLock(normalizedEmail, purpose, options 
                     </p>
                     <div style="background-color: #f3f4f6; padding: 24px; border-radius: 8px; text-align: center; margin-bottom: 32px;">
                         <p style="text-transform: uppercase; font-size: 14px; font-weight: 600; color: #6b7280; margin: 0 0 12px 0; letter-spacing: 1px;">Verification code</p>
-                        <h2 style="font-size: 42px; font-weight: 800; color: #111827; letter-spacing: 8px; margin: 0;">${otp}</h2>
+                        ${isPasswordReset
+                            ? `<p style="margin: 0; font-size: 14px; font-weight: 600; color: #111827; word-break: break-all; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; line-height: 1.5;">${escapeHtml(otp)}</p>`
+                            : `<h2 style="font-size: 42px; font-weight: 800; color: #111827; letter-spacing: 8px; margin: 0;">${otp}</h2>`}
                     </div>
                     <p style="color: #4b5563; font-size: 14px; line-height: 1.5;">
                         This code will expire in <strong>${expireLabel}</strong>. If you did not request this, you can ignore this email.
@@ -3102,8 +3883,14 @@ const sendOtpLogic = async (req, res) => {
             });
         }
         handlePrismaError(error, `sendOtpLogic at step: ${step}`);
-        res.status(500).json({
-            error: `Failed during: ${step}`,
+        const isSchemaDrift =
+            error.code === 'P2022' ||
+            /column .* does not exist/i.test(error.message || '') ||
+            /relation .* does not exist/i.test(error.message || '');
+        res.status(isSchemaDrift ? 503 : 500).json({
+            error: isSchemaDrift
+                ? 'Database schema is out of date. Redeploy the API or run database migrations.'
+                : `Failed during: ${step}`,
             message: error.message,
             code: error.code,
             step: step
@@ -3200,9 +3987,9 @@ app.post('/auth/verify-otp-and-signup', async (req, res) => {
             return res.status(500).json({ error: 'Account creation could not be completed' });
         }
 
-        const { token, sessionExpiresAt } = await createSessionTokenForUser(profile.id);
+        const session = await createSessionTokenForUser(profile.id);
 
-        res.status(201).json({ ...profile, token, sessionExpiresAt });
+        res.status(201).json(sendAuthenticatedSession(res, profile, session));
     } catch (error) {
         console.error('Error creating user during OTP verification:', error);
         if (error.code === 'P2002') {
@@ -3431,10 +4218,10 @@ app.post('/auth/login', loginIpRateLimit, async (req, res) => {
             return res.status(500).json({ error: 'Login could not be completed' });
         }
 
-        const { token, sessionExpiresAt } = await createSessionTokenForUser(profile.id);
+        const session = await createSessionTokenForUser(profile.id);
 
         console.log(`[AUTH] Login successful for user: ${profile.id}, onboardingCompleted: ${profile.onboardingCompleted}`);
-        res.status(200).json({ ...profile, token, sessionExpiresAt });
+        res.status(200).json(sendAuthenticatedSession(res, profile, session));
 
     } catch (error) {
         handlePrismaError(error, 'login');
@@ -3509,6 +4296,12 @@ async function handleResetPassword(req, res) {
     }
     email = email.toLowerCase().trim();
     const otpTrim = String(otp).trim();
+    if (
+        otpTrim.length < PASSWORD_RESET_CODE_MIN_LENGTH
+        || otpTrim.length > PASSWORD_RESET_CODE_MAX_LENGTH
+    ) {
+        return res.status(400).json({ error: 'Invalid or expired verification code' });
+    }
     if (!PASSWORD_REGEX.test(newPassword)) {
         return res.status(400).json({
             error: 'Password must be at least 8 characters long and include at least one uppercase letter, one number, and one special character.'
@@ -3516,7 +4309,10 @@ async function handleResetPassword(req, res) {
     }
 
     try {
-        const user = await prisma.user.findFirst({ where: { email }, select: { id: true, isActive: true } });
+        const user = await prisma.user.findFirst({
+            where: { email },
+            select: { id: true, isActive: true, email: true, firstName: true, lastName: true },
+        });
         if (!user || !user.isActive) {
             return res.status(400).json({ error: 'Invalid or expired verification code' });
         }
@@ -3529,7 +4325,7 @@ async function handleResetPassword(req, res) {
             await prisma.otp.delete({ where: { email } }).catch(() => {});
             return res.status(400).json({ error: 'Verification code has expired. Request a new code.' });
         }
-        if (storedData.code !== otpTrim) {
+        if (!verificationCodesMatch(storedData.code, otpTrim)) {
             return res.status(400).json({ error: 'Invalid verification code' });
         }
 
@@ -3540,10 +4336,21 @@ async function handleResetPassword(req, res) {
                 data: { password: hashedPassword, failedLoginAttempts: 0 }
             }),
             prisma.otp.delete({ where: { email } }),
-            prisma.session.deleteMany({ where: { userId: user.id } })
         ]);
+        await invalidateAllUserSessions(user.id);
+        clearSessionCookie(res);
 
-        return res.status(200).json({ message: 'Password has been reset. You can sign in with your new password.' });
+        await sendPasswordChangedNotificationEmail({
+            toEmail: user.email,
+            firstName: user.firstName,
+            lastName: user.lastName,
+            changedBySelf: true,
+        });
+
+        return res.status(200).json({
+            message: 'Password has been reset. You can sign in with your new password.',
+            reauthRequired: true,
+        });
     } catch (error) {
         console.error('reset-password error:', error);
         return res.status(500).json({ error: 'Could not reset password' });
@@ -3551,7 +4358,7 @@ async function handleResetPassword(req, res) {
 }
 
 app.post('/auth/forgot-password', sendOtpIpRateLimit, handleForgotPassword);
-app.post('/auth/reset-password', handleResetPassword);
+app.post('/auth/reset-password', resetPasswordVerifyRateLimit, handleResetPassword);
 
 /** Invalidate every server session for this user (all devices/browsers). */
 async function handleLogout(req, res) {
@@ -3562,6 +4369,7 @@ async function handleLogout(req, res) {
         }
         const { count } = await prisma.session.deleteMany({ where: { userId } });
         console.log(`[AUTH] Logout: removed ${count} session(s) for user ${userId}`);
+        clearSessionCookie(res);
         res.status(204).send();
     } catch (error) {
         console.error('[AUTH] Logout error:', error);
@@ -3572,6 +4380,26 @@ async function handleLogout(req, res) {
 app.post('/api/auth/logout', authenticateToken, handleLogout);
 app.post('/auth/logout', authenticateToken, handleLogout);
 mountedApiRouter.post('/auth/logout', authenticateToken, handleLogout);
+
+/** Lightweight session check — renews sliding expiry and returns client sync timestamp. */
+app.get('/auth/session', authenticateToken, (req, res) => {
+    res.json({
+        ok: true,
+        sessionExpiresAt: req.sessionExpiresAt || res.getHeader(SESSION_EXPIRES_HEADER) || null,
+    });
+});
+app.get('/api/auth/session', authenticateToken, (req, res) => {
+    res.json({
+        ok: true,
+        sessionExpiresAt: req.sessionExpiresAt || res.getHeader(SESSION_EXPIRES_HEADER) || null,
+    });
+});
+mountedApiRouter.get('/auth/session', authenticateToken, (req, res) => {
+    res.json({
+        ok: true,
+        sessionExpiresAt: req.sessionExpiresAt || res.getHeader(SESSION_EXPIRES_HEADER) || null,
+    });
+});
 
 const SUPER_ADMIN_USER_LIST_SELECT = {
     id: true,
@@ -3693,8 +4521,7 @@ app.get('/users', authenticateToken, async (req, res) => {
             const all = await prisma.user.findMany({ select: { id: true } });
             allowedIds = all.map((u) => u.id);
         } else {
-            const orgRootId = await getOrgRootUserId(actorId);
-            allowedIds = await collectOrgSubtreeUserIds(orgRootId);
+            allowedIds = await collectOrgMemberUserIds(actorId);
         }
 
         if (allowedIds.length === 0) {
@@ -3720,6 +4547,7 @@ app.get('/users', authenticateToken, async (req, res) => {
                 customRoleName: true,
                 isActive: true,
                 emailVerifiedAt: true,
+                creatorId: true,
                 createdAt: true
             },
             orderBy: [{ createdAt: 'desc' }, { id: 'desc' }]
@@ -3748,126 +4576,21 @@ app.get('/users/lookup-by-email', authenticateToken, async (req, res) => {
     }
 });
 
-// Get single user status quickly (never return PII or raw Stripe price IDs)
-app.get('/users/:id/status', authenticateToken, async (req, res) => {
-    const { id } = req.params;
-    const targetId = Number.parseInt(id, 10);
-    if (Number.isNaN(targetId)) {
-        return res.status(400).json({ error: 'Invalid user id' });
-    }
+app.get('/users/manage-access', authenticateToken, async (req, res) => {
     const actorId = Number(req.user.id);
     try {
-        if (!(await actorCanViewUserBillingStatus(actorId, targetId))) {
-            return res.status(403).json({ error: 'Forbidden' });
-        }
-
-        const [viewer, user] = await Promise.all([
-            prisma.user.findUnique({ where: { id: actorId }, select: { role: true } }),
-            prisma.user.findUnique({
-                where: { id: targetId },
-                select: {
-                    id: true,
-                    isActive: true,
-                    trialStartDate: true,
-                    trialEndDate: true,
-                    subscriptionStatus: true,
-                    subscriptionPlan: true,
-                    planStartDate: true,
-                    planExpiryDate: true,
-                    nextBillingDate: true,
-                    stripePriceId: true,
-                    renewalType: true,
-                    autopayConsent: true,
-                    onboardingCompleted: true
-                }
-            })
+        const [canManageUsers, canInviteUsers] = await Promise.all([
+            actorCanManageOrgUsers(actorId),
+            actorCanInviteOrgUser(actorId),
         ]);
-
-        if (!user) {
-            return res.json({ exists: false, isActive: false });
-        }
-
-        let currentStatus = user.subscriptionStatus;
-        if (currentStatus === 'trial' && user.trialEndDate && new Date(user.trialEndDate) < new Date()) {
-            currentStatus = 'expired';
-        }
-
-        const viewingSelf = actorId === targetId;
-        const fullBilling = viewingSelf || viewer?.role === 'superadmin';
-
-        // Org admin / delegate: only coarse flags — no billing internals, payment history, or plan details
-        if (!fullBilling) {
-            return res.json({
-                exists: true,
-                isActive: user.isActive,
-                subscriptionStatus: currentStatus,
-                onboardingCompleted: user.onboardingCompleted
-            });
-        }
-
-        const latestPayment = await prisma.payment.findFirst({
-            where: { userId: user.id, status: 'paid' },
-            orderBy: { createdAt: 'desc' },
-            select: { duration: true }
-        });
-
-        const priceIdLower = user.stripePriceId ? String(user.stripePriceId).toLowerCase() : '';
-        const isMonthlyPlan = priceIdLower.includes('month') || user.nextBillingDate != null;
-
         res.json({
-            exists: true,
-            isActive: user.isActive,
-            subscriptionStatus: currentStatus,
-            trialEndDate: user.trialEndDate,
-            trialStartDate: user.trialStartDate,
-            subscriptionPlan: user.subscriptionPlan,
-            planStartDate: user.planStartDate,
-            planExpiryDate: user.planExpiryDate,
-            nextBillingDate: user.nextBillingDate,
-            isMonthlyPlan,
-            renewalType: user.renewalType,
-            autopayConsent: user.autopayConsent,
-            onboardingCompleted: user.onboardingCompleted,
-            duration: latestPayment?.duration || null
+            allowed: canInviteUsers,
+            canInviteUsers,
+            canManageUsers,
         });
     } catch (error) {
-        console.error('Failed to fetch user status:', error);
-        res.status(500).json({ error: 'Failed to fetch user status' });
-    }
-});
-
-app.post('/users/:id/resend-verification', authenticateToken, async (req, res) => {
-    const targetId = Number.parseInt(req.params.id, 10);
-    const actorId = Number(req.user.id);
-    if (Number.isNaN(targetId)) {
-        return res.status(400).json({ error: 'Invalid user id' });
-    }
-    try {
-        if (!(await actorCanManageOrgUsers(actorId))) {
-            return res.status(403).json({ error: 'Forbidden', message: 'Only administrators can resend verification.' });
-        }
-        if (!(await actorCanAccessTargetUser(actorId, targetId))) {
-            return res.status(403).json({ error: 'Forbidden' });
-        }
-        const user = await prisma.user.findUnique({
-            where: { id: targetId },
-            select: { email: true, emailVerifiedAt: true, creatorId: true }
-        });
-        if (!user) return res.status(404).json({ error: 'User not found' });
-        if (user.creatorId == null) {
-            return res.status(400).json({ error: 'This user does not require invite verification' });
-        }
-        if (user.emailVerifiedAt) {
-            return res.status(400).json({ error: 'Email is already verified' });
-        }
-        await sendOtpToEmailAddress(user.email.toLowerCase().trim(), 'user_invite');
-        res.json({ message: 'Verification code sent.' });
-    } catch (error) {
-        if (error.code === 'OTP_COOLDOWN') {
-            return res.status(429).json({ error: error.message, retryAfterSeconds: error.retryAfterSeconds });
-        }
-        console.error('Error resending user verification:', error);
-        res.status(500).json({ error: 'Failed to send verification code' });
+        console.error('Error checking user management access:', error);
+        res.status(500).json({ error: 'Failed to check access' });
     }
 });
 
@@ -3961,6 +4684,138 @@ app.get('/users/auditees', authenticateToken, async (req, res) => {
     } catch (error) {
         console.error('Error listing auditees:', error);
         res.status(500).json({ error: 'Failed to list auditees' });
+    }
+});
+
+// Get single user status quickly (never return PII or raw Stripe price IDs)
+app.get('/users/:id/status', authenticateToken, async (req, res) => {
+    const { id } = req.params;
+    const targetId = Number.parseInt(id, 10);
+    if (Number.isNaN(targetId)) {
+        return res.status(400).json({ error: 'Invalid user id' });
+    }
+    const actorId = Number(req.user.id);
+    try {
+        if (!(await actorCanViewUserBillingStatus(actorId, targetId))) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
+
+        const [viewer, user] = await Promise.all([
+            prisma.user.findUnique({ where: { id: actorId }, select: { role: true } }),
+            prisma.user.findUnique({
+                where: { id: targetId },
+                select: {
+                    id: true,
+                    role: true,
+                    isActive: true,
+                    trialStartDate: true,
+                    trialEndDate: true,
+                    subscriptionStatus: true,
+                    subscriptionPlan: true,
+                    planStartDate: true,
+                    planExpiryDate: true,
+                    nextBillingDate: true,
+                    stripePriceId: true,
+                    renewalType: true,
+                    autopayConsent: true,
+                    onboardingCompleted: true
+                }
+            })
+        ]);
+
+        if (!user) {
+            return res.json({ exists: false, isActive: false });
+        }
+
+        let currentStatus = user.subscriptionStatus;
+        if (user.role !== 'superadmin' && currentStatus !== 'active') {
+            await prisma.user.update({
+                where: { id: targetId },
+                data: {
+                    subscriptionStatus: 'active',
+                    trialStartDate: null,
+                    trialEndDate: null,
+                },
+            });
+            currentStatus = 'active';
+        }
+
+        const viewingSelf = actorId === targetId;
+        const fullBilling = viewingSelf || viewer?.role === 'superadmin';
+
+        // Org admin / delegate: only coarse flags — no billing internals, payment history, or plan details
+        if (!fullBilling) {
+            return res.json({
+                exists: true,
+                isActive: user.isActive,
+                subscriptionStatus: currentStatus,
+                onboardingCompleted: user.onboardingCompleted
+            });
+        }
+
+        const latestPayment = await prisma.payment.findFirst({
+            where: { userId: user.id, status: 'paid' },
+            orderBy: { createdAt: 'desc' },
+            select: { duration: true }
+        });
+
+        const priceIdLower = user.stripePriceId ? String(user.stripePriceId).toLowerCase() : '';
+        const isMonthlyPlan = priceIdLower.includes('month') || user.nextBillingDate != null;
+
+        res.json({
+            exists: true,
+            isActive: user.isActive,
+            subscriptionStatus: currentStatus,
+            trialEndDate: user.trialEndDate,
+            trialStartDate: user.trialStartDate,
+            subscriptionPlan: user.subscriptionPlan,
+            planStartDate: user.planStartDate,
+            planExpiryDate: user.planExpiryDate,
+            nextBillingDate: user.nextBillingDate,
+            isMonthlyPlan,
+            renewalType: user.renewalType,
+            autopayConsent: user.autopayConsent,
+            onboardingCompleted: user.onboardingCompleted,
+            duration: latestPayment?.duration || null
+        });
+    } catch (error) {
+        console.error('Failed to fetch user status:', error);
+        res.status(500).json({ error: 'Failed to fetch user status' });
+    }
+});
+
+app.post('/users/:id/resend-verification', authenticateToken, async (req, res) => {
+    const targetId = Number.parseInt(req.params.id, 10);
+    const actorId = Number(req.user.id);
+    if (Number.isNaN(targetId)) {
+        return res.status(400).json({ error: 'Invalid user id' });
+    }
+    try {
+        if (!(await actorCanManageOrgUsers(actorId))) {
+            return res.status(403).json({ error: 'Forbidden', message: 'Only administrators can resend verification.' });
+        }
+        if (!(await actorCanAccessTargetUser(actorId, targetId))) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
+        const user = await prisma.user.findUnique({
+            where: { id: targetId },
+            select: { email: true, emailVerifiedAt: true, creatorId: true }
+        });
+        if (!user) return res.status(404).json({ error: 'User not found' });
+        if (user.creatorId == null) {
+            return res.status(400).json({ error: 'This user does not require invite verification' });
+        }
+        if (user.emailVerifiedAt) {
+            return res.status(400).json({ error: 'Email is already verified' });
+        }
+        await sendOtpToEmailAddress(user.email.toLowerCase().trim(), 'user_invite');
+        res.json({ message: 'Verification code sent.' });
+    } catch (error) {
+        if (error.code === 'OTP_COOLDOWN') {
+            return res.status(429).json({ error: error.message, retryAfterSeconds: error.retryAfterSeconds });
+        }
+        console.error('Error resending user verification:', error);
+        res.status(500).json({ error: 'Failed to send verification code' });
     }
 });
 
@@ -4166,10 +5021,11 @@ app.patch('/users/:id/auditee-site', authenticateToken, async (req, res) => {
 app.post('/users', authenticateToken, async (req, res) => {
     const { firstName, lastName, email, mobile, role, customRoleName, password, sendWelcomeEmail } = req.body;
     const creatorId = req.user.id;
-    if (!(await actorCanManageOrgUsers(creatorId))) {
+    const canManageUsers = await actorCanManageOrgUsers(creatorId);
+    if (!(await actorCanInviteOrgUser(creatorId))) {
         return res.status(403).json({
             error: 'Forbidden',
-            message: 'Only administrators can create users.'
+            message: 'You do not have permission to invite users.'
         });
     }
     if (!password) {
@@ -4200,7 +5056,10 @@ app.post('/users', authenticateToken, async (req, res) => {
     }
 
     try {
-        const roleNorm = normalizeUserRole(sanitizeShortLabel(role, 80) || 'auditor');
+        let roleNorm = normalizeUserRole(sanitizeShortLabel(role, 80) || 'auditor');
+        if (!canManageUsers) {
+            roleNorm = 'auditor';
+        }
         if (!USER_ASSIGNABLE_ROLES.has(roleNorm)) {
             return res.status(400).json({ error: 'Invalid role' });
         }
@@ -4211,7 +5070,7 @@ app.post('/users', authenticateToken, async (req, res) => {
                 email: emailNorm,
                 mobile: userMobile,
                 role: roleNorm,
-                customRoleName: sanitizeShortLabel(customRoleName, 120),
+                customRoleName: canManageUsers ? sanitizeShortLabel(customRoleName, 120) : null,
                 isActive: false,
                 emailVerifiedAt: null,
                 password: await bcrypt.hash(password, 10),
@@ -4377,6 +5236,26 @@ app.put('/users/:id', authenticateToken, async (req, res) => {
             return res.status(403).json({ error: 'Forbidden' });
         }
 
+        if (isActive === false && targetId !== actorId) {
+            const ownerGuard = await assertActorMayModifyProtectedCompanyOwner(actorId, targetId);
+            if (!ownerGuard.ok) {
+                return res.status(ownerGuard.status).json({ error: ownerGuard.error });
+            }
+        }
+
+        if (isActive === false && targetId === actorId) {
+            const actorAdminRow = await prisma.user.findUnique({
+                where: { id: actorId },
+                select: { role: true, creatorId: true, isActive: true },
+            });
+            if (userRowHasOrgAdminPrivileges(actorAdminRow)) {
+                const activeAdminCount = await countActiveOrgAdministrators(actorId);
+                if (activeAdminCount <= 1) {
+                    return res.status(400).json({ error: LAST_ACTIVE_ADMIN_MESSAGE });
+                }
+            }
+        }
+
         const privilegeFieldsRequested =
             role !== undefined ||
             customRoleName !== undefined ||
@@ -4487,17 +5366,49 @@ app.put('/users/:id', authenticateToken, async (req, res) => {
             if (!PASSWORD_REGEX.test(password)) {
                 return res.status(400).json({ error: 'Password must be at least 8 characters long and include at least one uppercase letter, one number, and one special character.' });
             }
+            const pwdRow = await prisma.user.findUnique({
+                where: { id: targetId },
+                select: { password: true },
+            });
+            if (
+                pwdRow?.password
+                && (await bcrypt.compare(String(password), pwdRow.password))
+            ) {
+                return res.status(400).json({ error: NEW_PASSWORD_SAME_AS_CURRENT_MESSAGE });
+            }
             updateData.password = await bcrypt.hash(password, 10);
             updateData.failedLoginAttempts = 0;
         }
+
+        const passwordWillChange = Boolean(password);
 
         const user = await prisma.user.update({
             where: { id: targetId },
             data: updateData
         });
 
+        if (passwordWillChange) {
+            const revoked = await invalidateAllUserSessions(targetId);
+            console.log(`[AUTH] Password changed for user ${targetId}; revoked ${revoked} session(s)`);
+            await sendPasswordChangedNotificationEmail({
+                toEmail: user.email,
+                firstName: user.firstName,
+                lastName: user.lastName,
+                changedBySelf: targetId === actorId,
+            });
+        }
+
         const { password: _, ...userWithoutPassword } = user;
-        res.json(userWithoutPassword);
+        const responseBody = { ...userWithoutPassword };
+        if (passwordWillChange) {
+            if (targetId === actorId) {
+                clearSessionCookie(res);
+                responseBody.reauthRequired = true;
+            } else {
+                responseBody.targetSessionsRevoked = true;
+            }
+        }
+        res.json(responseBody);
     } catch (error) {
         console.error('Error updating user:', error);
         if (error.code === 'P2002') {
@@ -4533,6 +5444,11 @@ app.delete('/users/:id', authenticateToken, async (req, res) => {
             return res.status(400).json({
                 error: 'You cannot delete your own account while signed in. Sign out or use another admin account.'
             });
+        }
+
+        const ownerGuard = await assertActorMayModifyProtectedCompanyOwner(actorId, targetId);
+        if (!ownerGuard.ok) {
+            return res.status(ownerGuard.status).json({ error: ownerGuard.error });
         }
 
         const target = await prisma.user.findUnique({
@@ -4577,48 +5493,19 @@ app.post('/users/:id/start-trial', authenticateToken, async (req, res) => {
             return res.status(403).json({ error: 'Forbidden' });
         }
 
-        const existing = await prisma.user.findUnique({
+        await ensureUserTrialStarted(targetId);
+
+        const full = await prisma.user.findUnique({
             where: { id: targetId },
-            select: { trialStartDate: true, trialEndDate: true, subscriptionStatus: true, role: true }
+            select: LOGIN_SUCCESS_USER_SELECT
         });
-        if (!existing) {
+        if (!full) {
             return res.status(404).json({ error: 'User not found' });
         }
-        if (existing.role === 'superadmin') {
-            return res.status(400).json({ error: 'Trial is not available for this account' });
-        }
-        if (existing.subscriptionStatus === 'active') {
-            return res.status(400).json({ error: 'User already has an active subscription' });
-        }
-        if (existing.trialEndDate) {
-            const full = await prisma.user.findUnique({
-                where: { id: targetId },
-                select: LOGIN_SUCCESS_USER_SELECT
-            });
-            if (!full) {
-                return res.status(404).json({ error: 'User not found' });
-            }
-            return res.json(full);
-        }
-
-        const trialStartDate = new Date();
-        const trialEndDate = new Date();
-        trialEndDate.setDate(trialStartDate.getDate() + TRIAL_DURATION_DAYS);
-
-        const user = await prisma.user.update({
-            where: { id: targetId },
-            data: {
-                trialStartDate,
-                trialEndDate,
-                subscriptionStatus: 'trial'
-            }
-        });
-
-        const { password: _, ...userWithoutPassword } = user;
-        res.json(userWithoutPassword);
+        res.json(full);
     } catch (error) {
-        console.error('Failed to start trial:', error);
-        res.status(500).json({ error: 'Failed to start trial' });
+        console.error('Failed to activate user access:', error);
+        res.status(500).json({ error: 'Failed to activate user access' });
     }
 });
 
@@ -4641,12 +5528,16 @@ app.get('/audit-programs', authenticateToken, checkTrialExpiration, async (req, 
             userId === 'null';
 
         if (useOrgScope && req.user.role !== 'superadmin') {
-            const orgRootId = await resolveActorOrgRootId(actorId);
-            if (!(await actorCanReadOrgAssessmentStore(actorId, orgRootId))) {
+            if (!(await actorCanReadOrgAssessmentStore(actorId, await resolveActorOrgRootId(actorId)))) {
                 return res.status(403).json({ error: 'Forbidden' });
             }
-            const subtreeIds = await collectOrgSubtreeUserIds(orgRootId);
-            programWhere = { OR: buildOrgSubtreeProgramVisibilityOr(subtreeIds) };
+            if (await actorHasFullOrgAuditVisibility(actorId)) {
+                const orgRootId = await resolveActorOrgRootId(actorId);
+                const subtreeIds = await collectOrgSubtreeUserIds(orgRootId);
+                programWhere = { OR: buildOrgSubtreeProgramVisibilityOr(subtreeIds) };
+            } else {
+                programWhere = { OR: buildAssignedAuditProgramVisibilityOr(actorId) };
+            }
         } else {
             let scopeUserId;
             if (userId && userId !== 'undefined' && userId !== 'null') {
@@ -4785,17 +5676,27 @@ app.post('/audit-programs', authenticateToken, checkTrialExpiration, async (req,
             return res.status(403).json(trialRejected);
         }
 
+        const assignmentCheck = await validateAuditProgramAssignments(actorId, {
+            siteId,
+            leadAuditorId,
+            auditorIds,
+            scheduleData,
+        });
+        if (!assignmentCheck.ok) {
+            return res.status(assignmentCheck.status).json({ error: assignmentCheck.error });
+        }
+
         const program = await prisma.auditProgram.create({
             data: {
                 name,
                 isoStandard,
                 frequency,
                 duration: Number.parseInt(duration),
-                siteId: Number.parseInt(siteId),
+                siteId: assignmentCheck.siteId,
                 auditors: {
-                    connect: auditorIds.map(id => ({ id: Number.parseInt(id) }))
+                    connect: assignmentCheck.auditorIds.map((id) => ({ id })),
                 },
-                leadAuditorId: leadAuditorId ? Number.parseInt(leadAuditorId) : null,
+                leadAuditorId: assignmentCheck.leadAuditorId,
                 scheduleData: scheduleData || {},
                 status: 'Draft',
                 userId: ownerId
@@ -4826,6 +5727,26 @@ app.put('/audit-programs/:id', authenticateToken, checkTrialExpiration, async (r
             return res.status(403).json({ error: 'Forbidden' });
         }
 
+        const actorId = Number(req.user.id);
+        const effectiveSiteId = siteId != null ? siteId : existing.siteId;
+        const effectiveLeadAuditorId =
+            leadAuditorId !== undefined ? leadAuditorId : existing.leadAuditorId;
+        const effectiveAuditorIds =
+            auditorIds !== undefined
+                ? auditorIds
+                : existing.auditors.map((a) => a.id);
+        const effectiveScheduleData =
+            scheduleData !== undefined ? scheduleData : existing.scheduleData;
+        const assignmentCheck = await validateAuditProgramAssignments(actorId, {
+            siteId: effectiveSiteId,
+            leadAuditorId: effectiveLeadAuditorId,
+            auditorIds: effectiveAuditorIds,
+            scheduleData: effectiveScheduleData,
+        });
+        if (!assignmentCheck.ok) {
+            return res.status(assignmentCheck.status).json({ error: assignmentCheck.error });
+        }
+
         // Disconnect all current auditors first before connecting new ones to ensure clean update
         await prisma.auditProgram.update({
             where: { id: Number.parseInt(id) },
@@ -4843,11 +5764,11 @@ app.put('/audit-programs/:id', authenticateToken, checkTrialExpiration, async (r
                 isoStandard,
                 frequency,
                 duration: Number.parseInt(duration),
-                siteId: Number.parseInt(siteId),
+                siteId: assignmentCheck.siteId,
                 auditors: {
-                    connect: auditorIds.map(aid => ({ id: Number.parseInt(aid) }))
+                    connect: assignmentCheck.auditorIds.map((id) => ({ id })),
                 },
-                leadAuditorId: leadAuditorId ? Number.parseInt(leadAuditorId) : null,
+                leadAuditorId: assignmentCheck.leadAuditorId,
                 scheduleData: scheduleData || {},
                 status: status || 'Draft'
             },
@@ -4922,12 +5843,16 @@ app.get('/audit-plans', authenticateToken, checkTrialExpiration, async (req, res
                 userId === 'null';
 
             if (useOrgScope) {
-                const orgRootId = await resolveActorOrgRootId(actorId);
-                if (!(await actorCanReadOrgAssessmentStore(actorId, orgRootId))) {
+                if (!(await actorCanReadOrgAssessmentStore(actorId, await resolveActorOrgRootId(actorId)))) {
                     return res.status(403).json({ error: 'Forbidden' });
                 }
-                const subtreeIds = await collectOrgSubtreeUserIds(orgRootId);
-                whereClause.OR = buildOrgSubtreePlanVisibilityOr(subtreeIds);
+                if (await actorHasFullOrgAuditVisibility(actorId)) {
+                    const orgRootId = await resolveActorOrgRootId(actorId);
+                    const subtreeIds = await collectOrgSubtreeUserIds(orgRootId);
+                    whereClause.OR = buildOrgSubtreePlanVisibilityOr(subtreeIds);
+                } else {
+                    whereClause.OR = buildAssignedAuditPlanVisibilityOr(actorId);
+                }
             } else {
                 let scopeUserId = Number.parseInt(String(userId), 10);
                 if (Number.isNaN(scopeUserId)) {
@@ -5054,7 +5979,7 @@ app.get('/audit-plans/:id', authenticateToken, checkTrialExpiration, async (req,
                 auditors: true,
                 auditProgram: {
                     include: {
-                        site: true,
+                        site: { include: { company: true } },
                         auditors: true,
                         leadAuditor: true
                     }
@@ -5088,7 +6013,11 @@ app.post('/audit-plans', authenticateToken, checkTrialExpiration, async (req, re
     try {
         const program = await prisma.auditProgram.findUnique({
             where: { id: Number.parseInt(auditProgramId, 10) },
-            include: { auditors: true, leadAuditor: true }
+            include: {
+                auditors: true,
+                leadAuditor: true,
+                site: { select: { companyId: true } },
+            },
         });
         if (!program) return res.status(404).json({ error: 'Audit program not found' });
         if (!(await actorCanAccessAuditProgram(req.user.id, program))) {
@@ -5099,6 +6028,16 @@ app.post('/audit-plans', authenticateToken, checkTrialExpiration, async (req, re
         const planOwnerId = userId != null ? Number.parseInt(String(userId), 10) : actorId;
         if (Number.isNaN(planOwnerId) || !(await actorCanAccessTargetUser(actorId, planOwnerId))) {
             return res.status(403).json({ error: 'Forbidden' });
+        }
+
+        const programCompanyId = await resolveAuditProgramCompanyId(program);
+        const auditorCheck = await validateAuditPlanAuditorAssignments(actorId, {
+            companyId: programCompanyId,
+            leadAuditorId,
+            auditorIds,
+        });
+        if (!auditorCheck.ok) {
+            return res.status(auditorCheck.status).json({ error: auditorCheck.error });
         }
 
         const plan = await prisma.auditPlan.create({
@@ -5113,9 +6052,9 @@ app.post('/audit-plans', authenticateToken, checkTrialExpiration, async (req, re
                 scope,
                 objective,
                 criteria,
-                leadAuditorId: leadAuditorId ? Number.parseInt(leadAuditorId) : null,
+                leadAuditorId: auditorCheck.leadAuditorId,
                 auditors: {
-                    connect: auditorIds ? auditorIds.map(id => ({ id: Number.parseInt(id) })) : []
+                    connect: auditorCheck.auditorIds.map((id) => ({ id })),
                 },
                 itinerary: itinerary || [],
                 userId: planOwnerId
@@ -5146,8 +6085,14 @@ app.put('/audit-plans/:id', authenticateToken, checkTrialExpiration, async (req,
             where: { id: Number.parseInt(id) },
             include: {
                 auditors: true,
-                auditProgram: { include: { auditors: true, leadAuditor: true } }
-            }
+                auditProgram: {
+                    include: {
+                        auditors: true,
+                        leadAuditor: true,
+                        site: { select: { companyId: true } },
+                    },
+                },
+            },
         });
         if (!existing) return res.status(404).json({ error: 'Audit plan not found' });
         if (!(await actorCanAccessAuditPlan(req.user.id, existing))) {
@@ -5159,6 +6104,26 @@ app.put('/audit-plans/:id', authenticateToken, checkTrialExpiration, async (req,
             });
         }
 
+        const actorId = Number(req.user.id);
+        const programCompanyId = await resolveAuditProgramCompanyId(existing.auditProgram);
+        let validatedAuditors = null;
+        if (leadAuditorId !== undefined || auditorIds !== undefined) {
+            const effectiveLeadAuditorId =
+                leadAuditorId !== undefined ? leadAuditorId : existing.leadAuditorId;
+            const effectiveAuditorIds =
+                auditorIds !== undefined
+                    ? auditorIds
+                    : existing.auditors.map((a) => a.id);
+            validatedAuditors = await validateAuditPlanAuditorAssignments(actorId, {
+                companyId: programCompanyId,
+                leadAuditorId: effectiveLeadAuditorId,
+                auditorIds: effectiveAuditorIds,
+            });
+            if (!validatedAuditors.ok) {
+                return res.status(validatedAuditors.status).json({ error: validatedAuditors.error });
+            }
+        }
+
         const updateData = {};
         if (auditType !== undefined) updateData.auditType = auditType;
         if (auditName !== undefined) updateData.auditName = auditName;
@@ -5168,11 +6133,13 @@ app.put('/audit-plans/:id', authenticateToken, checkTrialExpiration, async (req,
         if (scope !== undefined) updateData.scope = scope;
         if (objective !== undefined) updateData.objective = objective;
         if (criteria !== undefined) updateData.criteria = criteria;
-        if (leadAuditorId !== undefined) updateData.leadAuditorId = leadAuditorId ? Number.parseInt(leadAuditorId) : null;
-        if (auditorIds !== undefined) {
+        if (leadAuditorId !== undefined && validatedAuditors) {
+            updateData.leadAuditorId = validatedAuditors.leadAuditorId;
+        }
+        if (auditorIds !== undefined && validatedAuditors) {
             updateData.auditors = {
                 set: [],
-                connect: auditorIds.map(aid => ({ id: Number.parseInt(aid) }))
+                connect: validatedAuditors.auditorIds.map((aid) => ({ id: aid })),
             };
         }
         if (itinerary !== undefined) updateData.itinerary = itinerary;
@@ -5326,16 +6293,21 @@ app.get('/gap-analyses', authenticateToken, async (req, res) => {
                 canWrite: false,
             });
         }
-        const { userId, analyses, draft, row } = await ensureUserGapAnalysisStore(actorId);
+        const storeOwnerId = await resolveAssessmentStoreOwnerId(actorId, req.query.ownerUserId);
+        const { userId, analyses, draft, row } = await ensureUserGapAnalysisStore(storeOwnerId);
         res.json({
             userId,
             orgRootUserId: userId,
+            storeOwnerId,
             analyses,
             draft,
             updatedAt: row.updatedAt,
             canWrite: await actorCanWriteOrgAssessmentStore(actorId),
         });
     } catch (error) {
+        if (error?.statusCode === 403) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
         console.error('Error loading gap analyses:', error);
         res.status(500).json({ error: 'Failed to load gap analyses' });
     }
@@ -5347,22 +6319,23 @@ app.put('/gap-analyses', authenticateToken, async (req, res) => {
         if (!(await actorCanWriteOrgAssessmentStore(actorId))) {
             return res.status(403).json({ error: 'Forbidden', message: 'Read-only role cannot modify gap analyses.' });
         }
-        await ensureUserGapAnalysisStore(actorId);
+        const storeOwnerId = await resolveAssessmentStoreOwnerId(actorId, req.body?.ownerUserId);
+        await ensureUserGapAnalysisStore(storeOwnerId);
         const { analyses, draft } = req.body ?? {};
         const existing = await prisma.userGapAnalysisStore.findUnique({
-            where: { userId: actorId },
+            where: { userId: storeOwnerId },
         });
-        const ownedExisting = filterGapAnalysesForUser(existing?.analyses, actorId);
+        const ownedExisting = filterGapAnalysesForUser(existing?.analyses, storeOwnerId);
         const data = {
             analyses:
                 analyses !== undefined
-                    ? stampGapAnalysesForUser(filterGapAnalysesForUser(analyses, actorId), actorId)
+                    ? stampGapAnalysesForUser(filterGapAnalysesForUser(analyses, storeOwnerId), storeOwnerId)
                     : ownedExisting,
             draft:
                 draft !== undefined
                     ? draft === null
                         ? null
-                        : gapAnalysisDraftForUser({ ...draft, ownerUserId: actorId }, actorId)
+                        : gapAnalysisDraftForUser({ ...draft, ownerUserId: storeOwnerId }, storeOwnerId)
                     : (existing?.draft ?? null),
         };
         if (analyses !== undefined) {
@@ -5378,12 +6351,15 @@ app.put('/gap-analyses', authenticateToken, async (req, res) => {
             }
         }
         const row = await prisma.userGapAnalysisStore.upsert({
-            where: { userId: actorId },
-            create: { userId: actorId, ...data },
+            where: { userId: storeOwnerId },
+            create: { userId: storeOwnerId, ...data },
             update: data,
         });
-        res.json({ ok: true, userId: actorId, orgRootUserId: actorId, updatedAt: row.updatedAt });
+        res.json({ ok: true, userId: storeOwnerId, orgRootUserId: storeOwnerId, updatedAt: row.updatedAt });
     } catch (error) {
+        if (error?.statusCode === 403) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
         console.error('Error saving gap analyses:', error);
         res.status(500).json({ error: 'Failed to save gap analyses' });
     }
@@ -5395,18 +6371,22 @@ app.delete('/gap-analyses/:externalId', authenticateToken, async (req, res) => {
         if (!(await actorCanWriteOrgAssessmentStore(actorId))) {
             return res.status(403).json({ error: 'Forbidden' });
         }
-        const { analyses } = await ensureUserGapAnalysisStore(actorId);
+        const storeOwnerId = await resolveAssessmentStoreOwnerId(actorId, req.query.ownerUserId);
+        const { analyses } = await ensureUserGapAnalysisStore(storeOwnerId);
         const externalId = String(req.params.externalId || '');
         const next = analyses.filter((a) => String(a?.id) !== externalId);
         if (next.length === analyses.length) {
             return res.status(404).json({ error: 'Gap analysis not found' });
         }
         await prisma.userGapAnalysisStore.update({
-            where: { userId: actorId },
-            data: { analyses: stampGapAnalysesForUser(next, actorId) },
+            where: { userId: storeOwnerId },
+            data: { analyses: stampGapAnalysesForUser(next, storeOwnerId) },
         });
         res.status(204).send();
     } catch (error) {
+        if (error?.statusCode === 403) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
         console.error('Error deleting gap analysis:', error);
         res.status(500).json({ error: 'Failed to delete gap analysis' });
     }
@@ -5425,16 +6405,21 @@ app.get('/self-assessments', authenticateToken, async (req, res) => {
                 canWrite: false,
             });
         }
-        const { userId, assessments, draft, row } = await ensureUserSelfAssessmentStore(actorId);
+        const storeOwnerId = await resolveAssessmentStoreOwnerId(actorId, req.query.ownerUserId);
+        const { userId, assessments, draft, row } = await ensureUserSelfAssessmentStore(storeOwnerId);
         res.json({
             userId,
             orgRootUserId: userId,
+            storeOwnerId,
             assessments,
             draft,
             updatedAt: row.updatedAt,
             canWrite: actorCanWriteSelfAssessmentStore(actorId),
         });
     } catch (error) {
+        if (error?.statusCode === 403) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
         console.error('Error loading self assessments:', error);
         res.status(500).json({ error: 'Failed to load self assessments' });
     }
@@ -5446,25 +6431,26 @@ app.put('/self-assessments', authenticateToken, async (req, res) => {
         if (!actorCanWriteSelfAssessmentStore(actorId)) {
             return res.status(403).json({ error: 'Forbidden', message: 'Cannot modify self assessments.' });
         }
-        await ensureUserSelfAssessmentStore(actorId);
+        const storeOwnerId = await resolveAssessmentStoreOwnerId(actorId, req.body?.ownerUserId);
+        await ensureUserSelfAssessmentStore(storeOwnerId);
         const { assessments, draft } = req.body ?? {};
         const existing = await prisma.userSelfAssessmentStore.findUnique({
-            where: { userId: actorId },
+            where: { userId: storeOwnerId },
         });
-        const ownedExisting = filterSelfAssessmentsForUser(existing?.assessments, actorId);
+        const ownedExisting = filterSelfAssessmentsForUser(existing?.assessments, storeOwnerId);
         const data = {
             assessments:
                 assessments !== undefined
                     ? stampSelfAssessmentsForUser(
-                          filterSelfAssessmentsForUser(assessments, actorId),
-                          actorId,
+                          filterSelfAssessmentsForUser(assessments, storeOwnerId),
+                          storeOwnerId,
                       )
                     : ownedExisting,
             draft:
                 draft !== undefined
                     ? draft === null
                         ? null
-                        : selfAssessmentDraftForUser({ ...draft, ownerUserId: actorId }, actorId)
+                        : selfAssessmentDraftForUser({ ...draft, ownerUserId: storeOwnerId }, storeOwnerId)
                     : (existing?.draft ?? null),
         };
         if (assessments !== undefined) {
@@ -5480,12 +6466,15 @@ app.put('/self-assessments', authenticateToken, async (req, res) => {
             }
         }
         const row = await prisma.userSelfAssessmentStore.upsert({
-            where: { userId: actorId },
-            create: { userId: actorId, ...data },
+            where: { userId: storeOwnerId },
+            create: { userId: storeOwnerId, ...data },
             update: data,
         });
-        res.json({ ok: true, userId: actorId, orgRootUserId: actorId, updatedAt: row.updatedAt });
+        res.json({ ok: true, userId: storeOwnerId, orgRootUserId: storeOwnerId, updatedAt: row.updatedAt });
     } catch (error) {
+        if (error?.statusCode === 403) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
         console.error('Error saving self assessments:', error);
         res.status(500).json({ error: 'Failed to save self assessments' });
     }
@@ -5497,18 +6486,22 @@ app.delete('/self-assessments/:externalId', authenticateToken, async (req, res) 
         if (!actorCanWriteSelfAssessmentStore(actorId)) {
             return res.status(403).json({ error: 'Forbidden' });
         }
-        const { assessments } = await ensureUserSelfAssessmentStore(actorId);
+        const storeOwnerId = await resolveAssessmentStoreOwnerId(actorId, req.query.ownerUserId);
+        const { assessments } = await ensureUserSelfAssessmentStore(storeOwnerId);
         const externalId = String(req.params.externalId || '');
         const next = assessments.filter((a) => String(a?.id) !== externalId);
         if (next.length === assessments.length) {
             return res.status(404).json({ error: 'Self assessment not found' });
         }
         await prisma.userSelfAssessmentStore.update({
-            where: { userId: actorId },
-            data: { assessments: stampSelfAssessmentsForUser(next, actorId) },
+            where: { userId: storeOwnerId },
+            data: { assessments: stampSelfAssessmentsForUser(next, storeOwnerId) },
         });
         res.status(204).send();
     } catch (error) {
+        if (error?.statusCode === 403) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
         console.error('Error deleting self assessment:', error);
         res.status(500).json({ error: 'Failed to delete self assessment' });
     }
@@ -5635,23 +6628,28 @@ app.delete('/audit-plans/:id', authenticateToken, checkTrialExpiration, async (r
 });
 
 
-// Send Self Assessment Report by email
+// Send Self Assessment Report by email (PSZL-015: server PDF + account email only)
 app.post('/send-assessment-report', authenticateToken, async (req, res) => {
     const raw = req.body || {};
-    const to = sanitizePlainText(raw.to, 254)?.toLowerCase().replace(/[^\w.@+-]/g, '') || '';
     const companyName = sanitizePersonName(raw.companyName, 200) || '';
     const auditorName = sanitizePersonName(raw.auditorName, 200) || '';
     const auditCompany = raw.auditCompany ? sanitizePersonName(raw.auditCompany, 200) : '';
     const standard = sanitizeShortLabel(raw.standard, 80) || '';
     const score = Number(raw.score);
     const date = raw.date;
-    const questions = Array.isArray(raw.questions) ? raw.questions : [];
+    const questions = Array.isArray(raw.questions) ? raw.questions.slice(0, 500) : [];
 
-    if (!to || !companyName || !standard) {
-        return res.status(400).json({ error: 'Missing required fields' });
+    const recipientEmail = String(req.user.email || '').toLowerCase().trim();
+    if (!recipientEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recipientEmail)) {
+        return res.status(400).json({ error: 'Your account does not have a valid email for report delivery.' });
     }
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) {
-        return res.status(400).json({ error: 'Invalid email address' });
+
+    if (raw.pdfBase64) {
+        console.warn(`[assessment-report] Ignored client pdfBase64 from user ${req.user.id} (PSZL-015)`);
+    }
+
+    if (!companyName || !standard) {
+        return res.status(400).json({ error: 'Missing required fields' });
     }
 
     const uid = req.user.id;
@@ -5705,7 +6703,7 @@ app.post('/send-assessment-report', authenticateToken, async (req, res) => {
 
         const mailOptions = {
             from: { name: 'iAudit Global', address: getSmtpFromAddress() },
-            to,
+            to: recipientEmail,
             subject: `Your ${escapeHtml(standard)} Self Assessment Report — ${escapeHtml(companyName)}`,
             html: `
             <div style="font-family:Arial,sans-serif;max-width:680px;margin:0 auto;background:#f8fafc;">
@@ -5753,18 +6751,24 @@ app.post('/send-assessment-report', authenticateToken, async (req, res) => {
             </div>`
         };
 
-        // Attach PDF if provided
-        if (req.body.pdfBase64) {
-            mailOptions.attachments = [{
-                filename: `Self_Assessment_${companyName.replace(/\s+/g, '_')}_Report.pdf`,
-                content: Buffer.from(req.body.pdfBase64, 'base64'),
-                contentType: 'application/pdf'
-            }];
-        }
+        const pdfBuffer = await buildSelfAssessmentReportPdf({
+            companyName,
+            auditorName,
+            auditCompany,
+            standard,
+            score,
+            date,
+            questions,
+        });
+        mailOptions.attachments = [{
+            filename: `Self_Assessment_${companyName.replace(/\s+/g, '_')}_Report.pdf`,
+            content: pdfBuffer,
+            contentType: 'application/pdf',
+        }];
 
         // Fire-and-forget: report is already saved client-side; do not block on SMTP latency.
         transporter.sendMail(mailOptions)
-            .then(() => console.log(`Assessment report sent to ${to}`))
+            .then(() => console.log(`Assessment report sent to ${recipientEmail}`))
             .catch((err) => console.error('Failed to send assessment report email:', err));
 
         res.json({ success: true });

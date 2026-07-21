@@ -26,6 +26,50 @@ export function getStoredUserId(): number | null {
 
 
 
+export type PersistedDataOwnerOptions = {
+
+    /** Whose assessment store to read/write (org admins may target teammates). */
+
+    ownerUserId?: number;
+
+};
+
+
+
+function resolvePersistOwnerUserId(options?: PersistedDataOwnerOptions): number | null {
+
+    const actorId = getStoredUserId();
+
+    if (!actorId) return null;
+
+    const requested = options?.ownerUserId;
+
+    if (requested != null && Number.isFinite(requested) && requested > 0) {
+
+        return requested;
+
+    }
+
+    return actorId;
+
+}
+
+
+
+function ownerQueryParam(options?: PersistedDataOwnerOptions): string {
+
+    const actorId = getStoredUserId();
+
+    const ownerUserId = resolvePersistOwnerUserId(options);
+
+    if (!actorId || !ownerUserId || ownerUserId === actorId) return "";
+
+    return `?ownerUserId=${ownerUserId}`;
+
+}
+
+
+
 function gapLocalKey(userId: number) {
 
     return `gapAnalyses_${userId}`;
@@ -376,7 +420,11 @@ function collectLegacySelfLocal(userId: number): unknown[] {
 
 
 
-export async function fetchGapAnalysesPersisted<T>(): Promise<{
+export async function fetchGapAnalysesPersisted<T>(
+
+    options?: PersistedDataOwnerOptions,
+
+): Promise<{
 
     analyses: T[];
 
@@ -386,9 +434,13 @@ export async function fetchGapAnalysesPersisted<T>(): Promise<{
 
 }> {
 
-    const userId = getStoredUserId();
+    const actorId = getStoredUserId();
+
+    const userId = resolvePersistOwnerUserId(options);
 
     if (!userId) return { analyses: [], draft: null, canWrite: false };
+
+    const useLocalBackup = userId === actorId;
 
 
 
@@ -402,7 +454,7 @@ export async function fetchGapAnalysesPersisted<T>(): Promise<{
 
     try {
 
-        const res = await apiFetch("/gap-analyses");
+        const res = await apiFetch(`/gap-analyses${ownerQueryParam(options)}`);
 
         if (res.ok) {
 
@@ -432,13 +484,27 @@ export async function fetchGapAnalysesPersisted<T>(): Promise<{
 
             canWrite = data.canWrite !== false;
 
-            localStorage.setItem(gapLocalKey(userId), JSON.stringify(analyses));
+            if (useLocalBackup) {
 
-            const merged = await migrateLocalGapAnalysesToServer(analyses);
+                localStorage.setItem(gapLocalKey(userId), JSON.stringify(analyses));
+
+                const merged = await migrateLocalGapAnalysesToServer(analyses);
+
+                return {
+
+                    analyses: filterGapAnalysesForUser(merged, userId),
+
+                    draft,
+
+                    canWrite,
+
+                };
+
+            }
 
             return {
 
-                analyses: filterGapAnalysesForUser(merged, userId),
+                analyses: filterGapAnalysesForUser(analyses, userId),
 
                 draft,
 
@@ -451,6 +517,14 @@ export async function fetchGapAnalysesPersisted<T>(): Promise<{
     } catch (e) {
 
         console.warn("Gap analyses API load failed, using local backup", e);
+
+    }
+
+
+
+    if (!useLocalBackup) {
+
+        return { analyses: [], draft: null, canWrite: false };
 
     }
 
@@ -490,9 +564,17 @@ export async function fetchGapAnalysesPersisted<T>(): Promise<{
 
 
 
-export async function persistGapAnalysesList<T>(analyses: T[]): Promise<boolean> {
+export async function persistGapAnalysesList<T>(
 
-    const userId = getStoredUserId();
+    analyses: T[],
+
+    options?: PersistedDataOwnerOptions,
+
+): Promise<boolean> {
+
+    const actorId = getStoredUserId();
+
+    const userId = resolvePersistOwnerUserId(options);
 
     if (!userId) return false;
 
@@ -502,17 +584,25 @@ export async function persistGapAnalysesList<T>(analyses: T[]): Promise<boolean>
 
     const stamped = stampGapAnalysesForUser(owned, userId);
 
-    localStorage.setItem(gapLocalKey(userId), JSON.stringify(stamped));
+    if (userId === actorId) {
+
+        localStorage.setItem(gapLocalKey(userId), JSON.stringify(stamped));
+
+    }
 
 
 
     try {
 
+        const body: { analyses: T[]; ownerUserId?: number } = { analyses: stamped };
+
+        if (actorId && userId !== actorId) body.ownerUserId = userId;
+
         const res = await apiFetch("/gap-analyses", {
 
             method: "PUT",
 
-            body: JSON.stringify({ analyses: stamped }),
+            body: JSON.stringify(body),
 
         });
 
@@ -546,9 +636,13 @@ export async function persistGapAnalysisDraft(
 
     draft: Record<string, unknown> | null,
 
+    options?: PersistedDataOwnerOptions,
+
 ): Promise<void> {
 
-    const userId = getStoredUserId();
+    const actorId = getStoredUserId();
+
+    const userId = resolvePersistOwnerUserId(options);
 
     if (!userId) return;
 
@@ -556,21 +650,25 @@ export async function persistGapAnalysisDraft(
 
     try {
 
+        const body: { draft: Record<string, unknown> | null; ownerUserId?: number } = {
+
+            draft:
+
+                draft === null
+
+                    ? null
+
+                    : { ...draft, ownerUserId: userId },
+
+        };
+
+        if (actorId && userId !== actorId) body.ownerUserId = userId;
+
         await apiFetch("/gap-analyses", {
 
             method: "PUT",
 
-            body: JSON.stringify({
-
-                draft:
-
-                    draft === null
-
-                        ? null
-
-                        : { ...draft, ownerUserId: userId },
-
-            }),
+            body: JSON.stringify(body),
 
         });
 
@@ -584,21 +682,31 @@ export async function persistGapAnalysisDraft(
 
 
 
-export async function deleteGapAnalysisPersisted(externalId: string): Promise<void> {
+export async function deleteGapAnalysisPersisted(
 
-    const userId = getStoredUserId();
+    externalId: string,
 
-    if (!userId) return;
+    options?: PersistedDataOwnerOptions,
+
+): Promise<void> {
+
+    if (!getStoredUserId()) return;
 
 
 
     try {
 
-        const res = await apiFetch(`/gap-analyses/${encodeURIComponent(externalId)}`, {
+        const res = await apiFetch(
+
+            `/gap-analyses/${encodeURIComponent(externalId)}${ownerQueryParam(options)}`,
+
+            {
 
             method: "DELETE",
 
-        });
+        },
+
+        );
 
         if (!res.ok && res.status !== 404) {
 
@@ -616,7 +724,11 @@ export async function deleteGapAnalysisPersisted(externalId: string): Promise<vo
 
 
 
-export async function fetchSelfAssessmentsPersisted<T>(): Promise<{
+export async function fetchSelfAssessmentsPersisted<T>(
+
+    options?: PersistedDataOwnerOptions,
+
+): Promise<{
 
     assessments: T[];
 
@@ -626,9 +738,13 @@ export async function fetchSelfAssessmentsPersisted<T>(): Promise<{
 
 }> {
 
-    const userId = getStoredUserId();
+    const actorId = getStoredUserId();
+
+    const userId = resolvePersistOwnerUserId(options);
 
     if (!userId) return { assessments: [], draft: null, canWrite: false };
+
+    const useLocalBackup = userId === actorId;
 
 
 
@@ -642,7 +758,7 @@ export async function fetchSelfAssessmentsPersisted<T>(): Promise<{
 
     try {
 
-        const res = await apiFetch("/self-assessments");
+        const res = await apiFetch(`/self-assessments${ownerQueryParam(options)}`);
 
         if (res.ok) {
 
@@ -656,29 +772,37 @@ export async function fetchSelfAssessmentsPersisted<T>(): Promise<{
 
             let localBackup: T[] = [];
 
-            const saved = localStorage.getItem(selfLocalKey(userId));
+            if (useLocalBackup) {
 
-            if (saved) {
+                const saved = localStorage.getItem(selfLocalKey(userId));
 
-                try {
+                if (saved) {
 
-                    localBackup = filterSelfAssessmentsForUser(
+                    try {
 
-                        JSON.parse(saved) as T[],
+                        localBackup = filterSelfAssessmentsForUser(
 
-                        userId,
+                            JSON.parse(saved) as T[],
 
-                    );
+                            userId,
 
-                } catch {
+                        );
 
-                    localBackup = [];
+                    } catch {
+
+                        localBackup = [];
+
+                    }
 
                 }
 
             }
 
-            assessments = mergeSelfAssessmentsById(serverList, localBackup);
+            assessments = useLocalBackup
+
+                ? mergeSelfAssessmentsById(serverList, localBackup)
+
+                : serverList;
 
             if (data.draft && typeof data.draft === "object") {
 
@@ -698,19 +822,33 @@ export async function fetchSelfAssessmentsPersisted<T>(): Promise<{
 
             canWrite = data.canWrite !== false;
 
-            localStorage.setItem(
+            if (useLocalBackup) {
 
-                selfLocalKey(userId),
+                localStorage.setItem(
 
-                JSON.stringify(assessments),
+                    selfLocalKey(userId),
 
-            );
+                    JSON.stringify(assessments),
 
-            const merged = await migrateLocalSelfAssessmentsToServer(assessments);
+                );
+
+                const merged = await migrateLocalSelfAssessmentsToServer(assessments);
+
+                return {
+
+                    assessments: filterSelfAssessmentsForUser(merged, userId),
+
+                    draft,
+
+                    canWrite,
+
+                };
+
+            }
 
             return {
 
-                assessments: filterSelfAssessmentsForUser(merged, userId),
+                assessments: filterSelfAssessmentsForUser(assessments, userId),
 
                 draft,
 
@@ -723,6 +861,14 @@ export async function fetchSelfAssessmentsPersisted<T>(): Promise<{
     } catch (e) {
 
         console.warn("Self assessments API load failed, using local backup", e);
+
+    }
+
+
+
+    if (!useLocalBackup) {
+
+        return { assessments: [], draft: null, canWrite: false };
 
     }
 
@@ -768,9 +914,17 @@ export async function fetchSelfAssessmentsPersisted<T>(): Promise<{
 
 
 
-export async function persistSelfAssessmentsList<T>(assessments: T[]): Promise<boolean> {
+export async function persistSelfAssessmentsList<T>(
 
-    const userId = getStoredUserId();
+    assessments: T[],
+
+    options?: PersistedDataOwnerOptions,
+
+): Promise<boolean> {
+
+    const actorId = getStoredUserId();
+
+    const userId = resolvePersistOwnerUserId(options);
 
     if (!userId) return false;
 
@@ -780,17 +934,25 @@ export async function persistSelfAssessmentsList<T>(assessments: T[]): Promise<b
 
     const stamped = stampSelfAssessmentsForUser(owned, userId);
 
-    localStorage.setItem(selfLocalKey(userId), JSON.stringify(stamped));
+    if (userId === actorId) {
+
+        localStorage.setItem(selfLocalKey(userId), JSON.stringify(stamped));
+
+    }
 
 
 
     try {
 
+        const body: { assessments: T[]; ownerUserId?: number } = { assessments: stamped };
+
+        if (actorId && userId !== actorId) body.ownerUserId = userId;
+
         const res = await apiFetch("/self-assessments", {
 
             method: "PUT",
 
-            body: JSON.stringify({ assessments: stamped }),
+            body: JSON.stringify(body),
 
         });
 
@@ -830,9 +992,13 @@ export async function persistSelfAssessmentDraft(
 
     draft: Record<string, unknown> | null,
 
+    options?: PersistedDataOwnerOptions,
+
 ): Promise<void> {
 
-    const userId = getStoredUserId();
+    const actorId = getStoredUserId();
+
+    const userId = resolvePersistOwnerUserId(options);
 
     if (!userId) return;
 
@@ -840,21 +1006,25 @@ export async function persistSelfAssessmentDraft(
 
     try {
 
+        const body: { draft: Record<string, unknown> | null; ownerUserId?: number } = {
+
+            draft:
+
+                draft === null
+
+                    ? null
+
+                    : { ...draft, ownerUserId: userId },
+
+        };
+
+        if (actorId && userId !== actorId) body.ownerUserId = userId;
+
         await apiFetch("/self-assessments", {
 
             method: "PUT",
 
-            body: JSON.stringify({
-
-                draft:
-
-                    draft === null
-
-                        ? null
-
-                        : { ...draft, ownerUserId: userId },
-
-            }),
+            body: JSON.stringify(body),
 
         });
 
@@ -872,6 +1042,8 @@ export async function deleteSelfAssessmentPersisted(
 
     externalId: string,
 
+    options?: PersistedDataOwnerOptions,
+
 ): Promise<void> {
 
     if (!getStoredUserId()) return;
@@ -882,7 +1054,7 @@ export async function deleteSelfAssessmentPersisted(
 
         const res = await apiFetch(
 
-            `/self-assessments/${encodeURIComponent(externalId)}`,
+            `/self-assessments/${encodeURIComponent(externalId)}${ownerQueryParam(options)}`,
 
             { method: "DELETE" },
 

@@ -71,46 +71,26 @@ export function getTrialRemainingDays(trialEndDate?: string | Date | null): numb
   return Math.max(0, diffDays);
 }
 
-export function isTrialExpired(user: TrialUserLike | null | undefined): boolean {
-  if (!user) return false;
-  if (user.role === "superadmin") return false;
-  if (user.subscriptionStatus === "active") return false;
-  if (user.subscriptionStatus === "expired") return true;
-  if (user.trialEndDate && getTrialRemainingDays(user.trialEndDate) <= 0) return true;
+export function isTrialExpired(_user: TrialUserLike | null | undefined): boolean {
   return false;
 }
 
-export function isOnActiveTrial(user: TrialUserLike | null | undefined): boolean {
-  if (!user?.trialEndDate) return false;
-  if (user.role === "superadmin") return false;
-  if (user.subscriptionStatus === "active") return false;
-  if (isTrialExpired(user)) return false;
-  return user.subscriptionStatus === "trial" && getTrialRemainingDays(user.trialEndDate) > 0;
+export function isOnActiveTrial(_user: TrialUserLike | null | undefined): boolean {
+  return false;
 }
 
-export function isTrialUrgent(user: TrialUserLike | null | undefined): boolean {
-  if (!isOnActiveTrial(user)) return false;
-  return getTrialRemainingDays(user!.trialEndDate) <= TRIAL_URGENT_DAYS;
+export function isTrialUrgent(_user: TrialUserLike | null | undefined): boolean {
+  return false;
 }
 
-export function getTrialUiState(user: TrialUserLike | null | undefined): TrialUiState {
-  const remainingDays = getTrialRemainingDays(user?.trialEndDate);
-  const isExpired = isTrialExpired(user);
-  const isActive = isOnActiveTrial(user);
-  const isUrgent = isActive && remainingDays <= TRIAL_URGENT_DAYS;
-  return { remainingDays, isActive, isUrgent, isExpired };
+export function getTrialUiState(_user: TrialUserLike | null | undefined): TrialUiState {
+  return { remainingDays: 0, isActive: false, isUrgent: false, isExpired: false };
 }
 
 export function shouldAwaitTrialWelcome(
-  user: TrialUserLike | null | undefined
+  _user: TrialUserLike | null | undefined
 ): boolean {
-  if (!user?.id) return false;
-  if (user.role === "superadmin") return false;
-  if (user.subscriptionStatus === "active") return false;
-  if (isTrialExpired(user)) return false;
-  if (isTrialWelcomeDismissedForUser(user.id)) return false;
-  if (user.trialEndDate && !isOnActiveTrial(user)) return false;
-  return true;
+  return false;
 }
 
 export const TRIAL_EXPIRED_ALLOWED_PATHS = ["/", "/getting-started", "/feedback", "/subscription"] as const;
