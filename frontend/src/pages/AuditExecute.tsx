@@ -94,6 +94,13 @@ import { EditableTableColumnHeader } from "@/components/EditableTableColumnHeade
 import {
   resolveDepartmentsFromProgram,
 } from "@/lib/auditProgramDepartments";
+import { RaiseNonconformanceCard, type AuditeeOption } from "@/components/RaiseNonconformanceCard";
+import {
+  isNcEligibleSeverity,
+  listNonconformancesForPlan,
+  type NonconformanceSummary,
+} from "@/lib/nonconformanceApi";
+import { formatUserDisplayName, isAuditeeRole } from "@/lib/userRoles";
 
 import { CLAUSE_MATRIX, ClauseMatrixRow } from "@/data/clauseMapping";
 
@@ -420,6 +427,14 @@ const AuditExecute = () => {
   const [findingsReportForm, setFindingsReportForm] = useState<FindingsReportForm>(
     defaultFindingsReportForm(),
   );
+  const [auditeeOptions, setAuditeeOptions] = useState<AuditeeOption[]>([]);
+  const [ncByFindingId, setNcByFindingId] = useState<Record<string, NonconformanceSummary>>(
+    {},
+  );
+
+  const handleNcRaised = useCallback((nc: NonconformanceSummary) => {
+    setNcByFindingId((prev) => ({ ...prev, [nc.findingId]: nc }));
+  }, []);
 
   // Load saved progress
   useEffect(() => {
@@ -470,6 +485,17 @@ const AuditExecute = () => {
               setEditableChecklist(currentTemplate.content);
             }
           }
+
+          try {
+            const ncs = await listNonconformancesForPlan(Number(found.id));
+            const map: Record<string, NonconformanceSummary> = {};
+            for (const nc of ncs) {
+              if (nc?.findingId) map[nc.findingId] = nc;
+            }
+            setNcByFindingId(map);
+          } catch {
+            setNcByFindingId({});
+          }
         }
       } catch (error) {
         console.error("Failed to fetch plan details:", error);
@@ -494,6 +520,44 @@ const AuditExecute = () => {
     };
     fetchCompanies();
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await apiFetch("/users");
+        if (!res.ok || cancelled) return;
+        const data = await res.json();
+        const users = Array.isArray(data) ? data : [];
+        const siteId = plan?.auditProgram?.siteId != null
+          ? Number(plan.auditProgram.siteId)
+          : null;
+        const options: AuditeeOption[] = users
+          .filter((u: { role?: string }) => isAuditeeRole(u.role))
+          .filter((u: { siteIds?: Array<number | string>; siteId?: number | string | null }) => {
+            if (siteId == null || !Number.isFinite(siteId)) return true;
+            const ids = Array.isArray(u.siteIds)
+              ? u.siteIds.map((x) => Number(x))
+              : u.siteId != null
+                ? [Number(u.siteId)]
+                : [];
+            if (ids.length === 0) return true;
+            return ids.includes(siteId);
+          })
+          .map((u: { id: number; firstName?: string; lastName?: string; email?: string }) => ({
+            id: Number(u.id),
+            label: formatUserDisplayName(u) || u.email || `User #${u.id}`,
+          }))
+          .filter((o: AuditeeOption) => Number.isFinite(o.id) && o.id >= 1);
+        if (!cancelled) setAuditeeOptions(options);
+      } catch {
+        if (!cancelled) setAuditeeOptions([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [plan?.auditProgram?.siteId]);
 
   useEffect(() => {
     if (!focusFindingId || !plan) return;
@@ -2726,6 +2790,19 @@ const AuditExecute = () => {
                             }
                           />
                         </div>
+
+                        {plan?.id && isNcEligibleSeverity(type) && (
+                          <RaiseNonconformanceCard
+                            auditPlanId={Number(plan.id)}
+                            findingId={`clause-${plan.id}-${clause.id}`}
+                            findingTitle={`Clause ${clause.id}`}
+                            findingDescription={currentData.description || ""}
+                            existing={ncByFindingId[`clause-${plan.id}-${clause.id}`] ?? null}
+                            auditees={auditeeOptions}
+                            readOnly={isAuditeeReadOnly}
+                            onRaised={handleNcRaised}
+                          />
+                        )}
                       </div>
                     )}
 
@@ -3365,6 +3442,26 @@ const AuditExecute = () => {
                               }
                             />
                           </div>
+
+                          {plan?.id && isNcEligibleSeverity(type) && (
+                            <RaiseNonconformanceCard
+                              auditPlanId={Number(plan.id)}
+                              findingId={`process-${plan.id}-${index}`}
+                              findingTitle={
+                                String(audit.refNo || audit.clauseNo || `Process #${index + 1}`)
+                              }
+                              findingDescription={
+                                audit.description || audit.processArea || ""
+                              }
+                              existing={
+                                ncByFindingId[`process-${plan.id}-${index}`] ?? null
+                              }
+                              auditees={auditeeOptions}
+                              readOnly={isAuditeeReadOnly}
+                              onRaised={handleNcRaised}
+                              className="mt-2"
+                            />
+                          )}
                         </div>
                       )}
 
@@ -3704,6 +3801,28 @@ const AuditExecute = () => {
                                       />
                                     </div>
                                   </div>
+                                  {plan?.id && isNcEligibleSeverity(type) && (
+                                    <RaiseNonconformanceCard
+                                      auditPlanId={Number(plan.id)}
+                                      findingId={`checklist-${plan.id}-${dataIndex}`}
+                                      findingTitle={
+                                        checklistData[dataIndex]?.clause
+                                          ? `Clause ${checklistData[dataIndex]?.clause}`
+                                          : `Item ${dataIndex + 1}`
+                                      }
+                                      findingDescription={
+                                        checklistData[dataIndex]?.description || ""
+                                      }
+                                      existing={
+                                        ncByFindingId[`checklist-${plan.id}-${dataIndex}`] ??
+                                        null
+                                      }
+                                      auditees={auditeeOptions}
+                                      readOnly={isAuditeeReadOnly}
+                                      onRaised={handleNcRaised}
+                                      className="mt-4"
+                                    />
+                                  )}
                                 </div>
                               </TableCell>
                             </TableRow>
@@ -4070,6 +4189,27 @@ const AuditExecute = () => {
                                       }
                                     />
                                   </div>
+                                  {plan?.id && isNcEligibleSeverity(checklistData[index]?.findings) && (
+                                    <RaiseNonconformanceCard
+                                      auditPlanId={Number(plan.id)}
+                                      findingId={`checklist-${plan.id}-${index}`}
+                                      findingTitle={
+                                        checklistData[index]?.clause
+                                          ? `Clause ${checklistData[index]?.clause}`
+                                          : `Item ${index + 1}`
+                                      }
+                                      findingDescription={
+                                        checklistData[index]?.description || ""
+                                      }
+                                      existing={
+                                        ncByFindingId[`checklist-${plan.id}-${index}`] ?? null
+                                      }
+                                      auditees={auditeeOptions}
+                                      readOnly={isAuditeeReadOnly}
+                                      onRaised={handleNcRaised}
+                                      className="mt-4"
+                                    />
+                                  )}
                                 </div>
                               </TableCell>
                             </TableRow>
@@ -4135,6 +4275,26 @@ const AuditExecute = () => {
                                               <label className="text-xs font-bold text-slate-600">Corrective Action</label>
                                               <textarea className="w-full min-h-[70px] text-sm border border-slate-200 rounded bg-slate-50 p-2 resize-y" placeholder="Corrective action..." value={eq.correctiveAction || ''} onChange={(e) => handleExtraChecklistChange(item.clause, eqIdx, 'correctiveAction', e.target.value)} />
                                             </div>
+                                            {plan?.id && isNcEligibleSeverity(eqType) && (
+                                              <div className="col-span-2">
+                                                <RaiseNonconformanceCard
+                                                  auditPlanId={Number(plan.id)}
+                                                  findingId={`extra-${plan.id}-${item.clause}-${eqIdx}`}
+                                                  findingTitle={`Clause ${item.clause} (Custom)`}
+                                                  findingDescription={
+                                                    eq.description || eq.question || ""
+                                                  }
+                                                  existing={
+                                                    ncByFindingId[
+                                                      `extra-${plan.id}-${item.clause}-${eqIdx}`
+                                                    ] ?? null
+                                                  }
+                                                  auditees={auditeeOptions}
+                                                  readOnly={isAuditeeReadOnly}
+                                                  onRaised={handleNcRaised}
+                                                />
+                                              </div>
+                                            )}
                                           </div>
                                         </TableCell>
                                       </TableRow>

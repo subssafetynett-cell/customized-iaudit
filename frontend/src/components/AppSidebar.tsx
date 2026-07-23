@@ -1,7 +1,5 @@
-import { useEffect, useState } from "react";
-import { Building2, LayoutDashboard, FileText, ClipboardCheck, BookOpen, FileCheck, BarChart3, CreditCard, ChevronRight, Users, ClipboardList, AlertTriangle, ShieldCheck, MessageSquare, Rocket, UserPlus } from "lucide-react";
+import { Building2, LayoutDashboard, FileText, ClipboardCheck, BookOpen, FileCheck, BarChart3, CreditCard, ChevronRight, Users, ClipboardList, AlertTriangle, ShieldCheck, MessageSquare, Rocket } from "lucide-react";
 import { useLocation } from "react-router-dom";
-import { apiFetch } from "@/lib/api";
 import { NavLink } from "@/components/NavLink";
 import { cn } from "@/lib/utils";
 import { isAuditeeUser, AUDITEE_SIDEBAR_URLS } from "@/lib/auditeeAccess";
@@ -35,7 +33,7 @@ const managementNav = [
   { title: "Audit Plan", url: "/audit-program", icon: ClipboardCheck },
   { title: "Audit", url: "/audit", icon: ClipboardList },
   { title: "Findings", url: "/audit-findings", icon: AlertTriangle },
-  { title: "Invite Auditee", url: "/invite-auditee", icon: UserPlus },
+  { title: "Nonconformances", url: "/nonconformances", icon: ClipboardList },
   { title: "Audit Templates", url: "/audit-templates", icon: FileText },
 ];
 
@@ -47,34 +45,12 @@ const billingNav = [
 export function AppSidebar() {
   const location = useLocation();
   const currentPath = location.pathname;
-  const [canInviteAuditee, setCanInviteAuditee] = useState(false);
   const { user } = useStoredUser();
   const isAuditee = isAuditeeUser(user as { role?: string } | null);
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const res = await apiFetch("/users/invite-auditee/access");
-        if (cancelled) return;
-        if (!res.ok) return;
-        const data = await res.json();
-        if (!cancelled) setCanInviteAuditee(data.allowed === true);
-      } catch {
-        if (!cancelled) setCanInviteAuditee(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   const visibleManagementNav = managementNav.filter((item) => {
     const path = item.url.split("?")[0];
     if (isAuditee && !AUDITEE_SIDEBAR_URLS.has(path)) {
-      return false;
-    }
-    if (item.title === "Invite Auditee" && !canInviteAuditee) {
       return false;
     }
     return true;
@@ -100,6 +76,9 @@ export function AppSidebar() {
     if (path === "/companies") return currentPath === "/companies" || currentPath.startsWith("/company/");
     if (path === "/getting-started") return currentPath === "/getting-started";
     if (path === "/audit-findings") return currentPath === "/audit-findings";
+    if (path === "/nonconformances") {
+      return currentPath === "/nonconformances" || currentPath.startsWith("/nonconformances/");
+    }
     const pathOnly = path.split("?")[0];
     return currentPath === pathOnly;
   };
@@ -202,9 +181,9 @@ export function AppSidebar() {
                                             ? "tour-step-audit-nav"
                                             : item.title === "Findings"
                                               ? "tour-step-findings-nav"
-                                              : item.title === "Invite Auditee"
-                                                ? "tour-step-invite-auditee-nav"
-                                                : item.title === "Audit Templates"
+                                              : item.title === "Nonconformances"
+                                                ? "tour-step-nonconformances-nav"
+                                              : item.title === "Audit Templates"
                                                 ? "tour-step-audit-templates-nav"
                                                 : undefined
                             }

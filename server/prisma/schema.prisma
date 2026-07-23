@@ -125,6 +125,15 @@ model User {
   auditPrograms     AuditProgram[] @relation("AuditorPrograms")
   auditPlans        AuditPlan[]    @relation("PlanAuditors")
 
+  // Nonconformance relations
+  assignedNonconformances  Nonconformance[] @relation("NcAssignee")
+  reviewedNonconformances  Nonconformance[] @relation("NcReviewer")
+  createdNonconformances   Nonconformance[] @relation("NcCreatedBy")
+  nonconformanceResponses  NonconformanceResponse[] @relation("NcResponseSubmittedBy")
+  nonconformanceReviews    NonconformanceReview[] @relation("NcReviewDecidedBy")
+  nonconformanceActivities NonconformanceActivity[] @relation("NcActivityActor")
+  notifications            Notification[] @relation("NotificationRecipient")
+
   // Payment relations
   subscriptions     Subscription[]
   payments          Payment[]
@@ -270,10 +279,131 @@ model AuditPlan {
   leadAuditor    User?        @relation("PlanLeadAuditor", fields: [leadAuditorId], references: [id])
   user           User?        @relation("UserAuditPlans", fields: [userId], references: [id])
   auditors       User[]       @relation("PlanAuditors")
+  nonconformances Nonconformance[]
 
   @@unique([auditProgramId, executionId])
   @@index([userId])
   @@index([auditProgramId])
+}
+
+/// Formal nonconformance raised from a Minor/Major audit finding (finding lives in AuditPlan JSON).
+model Nonconformance {
+  id                 Int       @id @default(autoincrement())
+  ncNumber           String    @unique
+  auditPlanId        Int
+  /// Client finding id from auditData (e.g. clause-{planId}-{clauseId}).
+  findingId          String
+  findingTitle       String
+  findingDescription String
+  /// Minor | Major
+  severity           String
+  assigneeId         Int
+  reviewerId         Int
+  dueDate            DateTime?
+  /// ASSIGNED | RESPONSE_SUBMITTED | CHANGES_REQUESTED | CLOSED
+  status             String    @default("ASSIGNED")
+  closedAt           DateTime?
+  createdById        Int
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  auditPlan          AuditPlan @relation(fields: [auditPlanId], references: [id], onDelete: Cascade)
+  assignee           User      @relation("NcAssignee", fields: [assigneeId], references: [id])
+  reviewer           User      @relation("NcReviewer", fields: [reviewerId], references: [id])
+  createdBy          User      @relation("NcCreatedBy", fields: [createdById], references: [id])
+  responses          NonconformanceResponse[]
+  reviews            NonconformanceReview[]
+  activities         NonconformanceActivity[]
+  notifications      Notification[]
+
+  @@unique([auditPlanId, findingId])
+  @@index([auditPlanId])
+  @@index([assigneeId])
+  @@index([reviewerId])
+  @@index([status])
+  @@index([createdById])
+}
+
+/// Append-only auditee response against a Nonconformance.
+model NonconformanceResponse {
+  id                      Int       @id @default(autoincrement())
+  nonconformanceId        Int
+  version                 Int
+  rootCause               String
+  immediateCorrection     String?
+  correctiveAction        String
+  preventiveAction        String?
+  proposedCompletionDate  DateTime?
+  additionalComments      String?
+  /// Filenames only (JSON string array).
+  evidenceFilenames       Json      @default("[]")
+  submittedById           Int
+  submittedAt             DateTime  @default(now())
+
+  nonconformance          Nonconformance @relation(fields: [nonconformanceId], references: [id], onDelete: Cascade)
+  submittedBy             User           @relation("NcResponseSubmittedBy", fields: [submittedById], references: [id])
+
+  @@unique([nonconformanceId, version])
+  @@index([nonconformanceId])
+  @@index([submittedById])
+  @@index([submittedAt])
+}
+
+/// Append-only auditor/reviewer decision against a Nonconformance.
+model NonconformanceReview {
+  id               Int       @id @default(autoincrement())
+  nonconformanceId Int
+  /// APPROVE | REQUEST_CHANGES
+  decision         String
+  comment          String?
+  reviewedById     Int
+  reviewedAt       DateTime  @default(now())
+
+  nonconformance   Nonconformance @relation(fields: [nonconformanceId], references: [id], onDelete: Cascade)
+  reviewedBy       User           @relation("NcReviewDecidedBy", fields: [reviewedById], references: [id])
+
+  @@index([nonconformanceId])
+  @@index([reviewedById])
+  @@index([reviewedAt])
+}
+
+/// Append-only activity timeline for a Nonconformance.
+model NonconformanceActivity {
+  id               Int       @id @default(autoincrement())
+  nonconformanceId Int
+  /// RAISED | RESPONSE_SUBMITTED | CHANGES_REQUESTED | APPROVED | CLOSED
+  type             String
+  message          String
+  comment          String?
+  actorId          Int?
+  createdAt        DateTime  @default(now())
+
+  nonconformance   Nonconformance @relation(fields: [nonconformanceId], references: [id], onDelete: Cascade)
+  actor            User?          @relation("NcActivityActor", fields: [actorId], references: [id])
+
+  @@index([nonconformanceId])
+  @@index([actorId])
+  @@index([createdAt])
+}
+
+/// In-app notification for Nonconformance workflow events.
+model Notification {
+  id                 Int       @id @default(autoincrement())
+  recipientUserId    Int
+  nonconformanceId   Int
+  /// NC_ASSIGNED | NC_RESPONSE_SUBMITTED | NC_CHANGES_REQUESTED | NC_CLOSED
+  type               String
+  title              String
+  message            String
+  isRead             Boolean   @default(false)
+  createdAt          DateTime  @default(now())
+
+  recipient          User           @relation("NotificationRecipient", fields: [recipientUserId], references: [id], onDelete: Cascade)
+  nonconformance     Nonconformance @relation(fields: [nonconformanceId], references: [id], onDelete: Cascade)
+
+  @@index([recipientUserId, createdAt])
+  @@index([recipientUserId, isRead])
+  @@index([nonconformanceId])
 }
 
 model Otp {

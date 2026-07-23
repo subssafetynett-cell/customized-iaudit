@@ -11,6 +11,8 @@ import { STRIPE_CONFIG } from './stripe-config.js';
 import { ensureSuperAdminUser } from './ensureSuperAdmin.js';
 import { deleteUserCompletely } from './deleteUser.js';
 import { buildSelfAssessmentReportPdf } from './buildSelfAssessmentReportPdf.js';
+import { createNonconformanceRouter } from './nonconformance/index.js';
+import { createNotificationsRouter } from './notifications/index.js';
 import {
     COMPANY_TEXT_LIMITS,
     DEPT_TEXT_LIMITS,
@@ -1726,6 +1728,24 @@ async function actorCanAccessAuditPlan(actorId, plan) {
     return false;
 }
 
+// Nonconformance APIs (modular) — mounted after access helpers are defined.
+app.use(
+    '/nonconformances',
+    createNonconformanceRouter({
+        authenticateToken,
+        checkTrialExpiration,
+        actorCanAccessAuditPlan,
+    }),
+);
+
+app.use(
+    '/notifications',
+    createNotificationsRouter({
+        authenticateToken,
+        checkTrialExpiration,
+    }),
+);
+
 async function findUserByEmail(rawEmail) {
     const email = String(rawEmail || '').toLowerCase().trim();
     if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
@@ -1827,7 +1847,7 @@ async function actorCanReadOrgAssessmentStore(actorId, orgRootUserId) {
     return actorIsInOrgSubtree(actorId, orgRootUserId);
 }
 
-const USER_ASSIGNABLE_ROLES = new Set(['admin', 'auditor', 'lead_auditor', 'other']);
+const USER_ASSIGNABLE_ROLES = new Set(['admin', 'auditor', 'lead_auditor', 'other', 'auditee']);
 
 function normalizeUserRole(role) {
     return String(role ?? '').trim().toLowerCase();
@@ -4530,7 +4550,6 @@ app.get('/users', authenticateToken, async (req, res) => {
 
         const whereBase = {
             id: { in: allowedIds },
-            role: { not: 'auditee' },
         };
         const where =
             filterCreatorId != null ? { ...whereBase, creatorId: filterCreatorId } : whereBase;
@@ -4552,7 +4571,47 @@ app.get('/users', authenticateToken, async (req, res) => {
             },
             orderBy: [{ createdAt: 'desc' }, { id: 'desc' }]
         });
-        res.json(users);
+
+        const auditeeIds = users
+            .filter((u) => normalizeUserRole(u.role) === 'auditee')
+            .map((u) => u.id);
+        const sitesByAuditeeId = new Map();
+        if (auditeeIds.length > 0) {
+            const sites = await prisma.site.findMany({
+                where: { userId: { in: auditeeIds } },
+                select: {
+                    id: true,
+                    name: true,
+                    userId: true,
+                    company: { select: { name: true } },
+                },
+                orderBy: { name: 'asc' },
+            });
+            for (const site of sites) {
+                if (site.userId == null) continue;
+                const uid = Number(site.userId);
+                if (!sitesByAuditeeId.has(uid)) sitesByAuditeeId.set(uid, []);
+                sitesByAuditeeId.get(uid).push(site);
+            }
+        }
+
+        res.json(
+            users.map((u) => {
+                if (normalizeUserRole(u.role) !== 'auditee') return u;
+                const assigned = sitesByAuditeeId.get(u.id) ?? [];
+                const siteIds = assigned.map((s) => s.id);
+                const siteLabels = assigned.map(
+                    (s) => `${s.name} (${s.company?.name ?? 'Company'})`,
+                );
+                return {
+                    ...u,
+                    siteIds,
+                    siteLabels,
+                    siteId: siteIds[0] ?? null,
+                    siteLabel: siteLabels.length > 0 ? siteLabels.join(', ') : null,
+                };
+            }),
+        );
     } catch (error) {
         console.error('Failed to fetch users:', error);
         res.status(500).json({ error: 'Failed to fetch users' });
@@ -4579,14 +4638,16 @@ app.get('/users/lookup-by-email', authenticateToken, async (req, res) => {
 app.get('/users/manage-access', authenticateToken, async (req, res) => {
     const actorId = Number(req.user.id);
     try {
-        const [canManageUsers, canInviteUsers] = await Promise.all([
+        const [canManageUsers, canInviteUsers, canInviteAuditee] = await Promise.all([
             actorCanManageOrgUsers(actorId),
             actorCanInviteOrgUser(actorId),
+            actorCanInviteAuditee(actorId),
         ]);
         res.json({
             allowed: canInviteUsers,
             canInviteUsers,
             canManageUsers,
+            canInviteAuditee,
         });
     } catch (error) {
         console.error('Error checking user management access:', error);
@@ -5019,7 +5080,7 @@ app.patch('/users/:id/auditee-site', authenticateToken, async (req, res) => {
 });
 
 app.post('/users', authenticateToken, async (req, res) => {
-    const { firstName, lastName, email, mobile, role, customRoleName, password, sendWelcomeEmail } = req.body;
+    const { firstName, lastName, email, mobile, role, customRoleName, password, sendWelcomeEmail, siteId, siteIds: rawSiteIds } = req.body;
     const creatorId = req.user.id;
     const canManageUsers = await actorCanManageOrgUsers(creatorId);
     if (!(await actorCanInviteOrgUser(creatorId))) {
@@ -5058,24 +5119,93 @@ app.post('/users', authenticateToken, async (req, res) => {
     try {
         let roleNorm = normalizeUserRole(sanitizeShortLabel(role, 80) || 'auditor');
         if (!canManageUsers) {
-            roleNorm = 'auditor';
+            // Non-admins default to auditor, but lead auditors / invite-capable actors may create auditees.
+            if (roleNorm === 'auditee') {
+                if (!(await actorCanInviteAuditee(creatorId))) {
+                    return res.status(403).json({
+                        error: 'Forbidden',
+                        message: 'Only company administrators and lead auditors can invite auditees.',
+                    });
+                }
+            } else {
+                roleNorm = 'auditor';
+            }
         }
         if (!USER_ASSIGNABLE_ROLES.has(roleNorm)) {
             return res.status(400).json({ error: 'Invalid role' });
         }
-        const user = await prisma.user.create({
-            data: {
-                firstName: fn,
-                lastName: ln,
-                email: emailNorm,
-                mobile: userMobile,
-                role: roleNorm,
-                customRoleName: canManageUsers ? sanitizeShortLabel(customRoleName, 120) : null,
-                isActive: false,
-                emailVerifiedAt: null,
-                password: await bcrypt.hash(password, 10),
-                creatorId: creatorId ? Number.parseInt(creatorId) : null
+
+        let parsedSiteIds = null;
+        if (roleNorm === 'auditee') {
+            if (!(await actorCanInviteAuditee(creatorId))) {
+                return res.status(403).json({
+                    error: 'Forbidden',
+                    message: 'Only company administrators and lead auditors can invite auditees.',
+                });
             }
+            parsedSiteIds = parseAuditeeSiteIds({ siteIds: rawSiteIds, siteId });
+            if (!parsedSiteIds) {
+                return res.status(400).json({ error: 'At least one valid site is required' });
+            }
+            for (const sid of parsedSiteIds) {
+                if (!(await actorCanAssignAuditeeToSite(creatorId, sid))) {
+                    return res.status(403).json({ error: 'You cannot assign an auditee to one or more selected sites' });
+                }
+            }
+        }
+
+        const hashedPassword = await bcrypt.hash(password, 10);
+        const user = await prisma.$transaction(async (tx) => {
+            if (roleNorm === 'auditee' && parsedSiteIds) {
+                const sites = await tx.site.findMany({
+                    where: { id: { in: parsedSiteIds } },
+                    select: { id: true, userId: true, user: { select: { role: true } } },
+                });
+                if (sites.length !== parsedSiteIds.length) {
+                    const err = new Error('Site not found');
+                    err.code = 'SITE_NOT_FOUND';
+                    throw err;
+                }
+                for (const site of sites) {
+                    if (siteUserIsAuditee(site)) {
+                        const err = new Error('Site already assigned');
+                        err.code = 'SITE_ALREADY_ASSIGNED';
+                        throw err;
+                    }
+                }
+                for (const site of sites) {
+                    if (site.userId != null) {
+                        await tx.site.update({
+                            where: { id: site.id },
+                            data: { userId: null },
+                        });
+                    }
+                }
+            }
+
+            const created = await tx.user.create({
+                data: {
+                    firstName: fn,
+                    lastName: ln,
+                    email: emailNorm,
+                    mobile: userMobile,
+                    role: roleNorm,
+                    customRoleName:
+                        canManageUsers && roleNorm === 'other'
+                            ? sanitizeShortLabel(customRoleName, 120)
+                            : null,
+                    isActive: false,
+                    emailVerifiedAt: null,
+                    password: hashedPassword,
+                    creatorId: creatorId ? Number.parseInt(creatorId) : null
+                }
+            });
+
+            if (roleNorm === 'auditee' && parsedSiteIds) {
+                await assignAuditeeToSites(tx, created.id, parsedSiteIds);
+            }
+
+            return created;
         });
 
         let verificationEmailSent = false;
@@ -5096,14 +5226,32 @@ app.post('/users', authenticateToken, async (req, res) => {
         }
 
         const { password: _, ...userWithoutPassword } = user;
-        res.status(201).json({
+        const responseBody = {
             ...userWithoutPassword,
             emailVerificationPending: true,
             verificationEmailSent,
             welcomeEmailSent
-        });
+        };
+        if (roleNorm === 'auditee' && parsedSiteIds) {
+            const siteLabels = await formatAuditeeSiteLabels(parsedSiteIds);
+            responseBody.siteIds = parsedSiteIds;
+            responseBody.siteLabels = siteLabels;
+            responseBody.siteId = parsedSiteIds[0] ?? null;
+            responseBody.siteLabel = siteLabels.length > 0 ? siteLabels.join(', ') : null;
+        }
+        res.status(201).json(responseBody);
     } catch (error) {
         console.error('Error creating user:', error);
+        if (error.code === 'SITE_NOT_FOUND') {
+            return res.status(404).json({ error: 'Site not found' });
+        }
+        if (error.code === 'SITE_ALREADY_ASSIGNED') {
+            return res.status(409).json({
+                error: 'Site already assigned',
+                message:
+                    'One or more selected sites are already assigned to another auditee. Unassign them or choose different sites.',
+            });
+        }
         if (error.code === 'P2002') {
             return res.status(400).json({ error: 'Email already exists' });
         }
@@ -5196,7 +5344,7 @@ app.put('/users/:id', authenticateToken, async (req, res) => {
     if (Number.isNaN(targetId)) {
         return res.status(400).json({ error: 'Invalid user id' });
     }
-    const { firstName, lastName, email, mobile, role, customRoleName, isActive, password, onboardingCompleted, emailChangeOtp } = req.body;
+    const { firstName, lastName, email, mobile, role, customRoleName, isActive, password, onboardingCompleted, emailChangeOtp, siteId, siteIds: rawSiteIds } = req.body;
     const actorId = Number(req.user.id);
     try {
         if (!(await actorCanAccessTargetUser(actorId, targetId))) {
@@ -5362,6 +5510,36 @@ app.put('/users/:id', authenticateToken, async (req, res) => {
                 customRoleName === null ? null : sanitizeShortLabel(customRoleName, 120);
         }
 
+        const nextRoleNorm = updateData.role != null ? normalizeUserRole(updateData.role) : targetRoleNorm;
+        const siteIdsProvided = rawSiteIds !== undefined || siteId !== undefined;
+        let parsedSiteIds = null;
+        if (siteIdsProvided || (nextRoleNorm === 'auditee' && targetRoleNorm !== 'auditee')) {
+            parsedSiteIds = parseAuditeeSiteIds({ siteIds: rawSiteIds, siteId });
+            if (nextRoleNorm === 'auditee' && !parsedSiteIds) {
+                return res.status(400).json({ error: 'At least one valid site is required' });
+            }
+        }
+        if (parsedSiteIds) {
+            if (nextRoleNorm !== 'auditee') {
+                return res.status(400).json({ error: 'Sites can only be assigned to auditee users' });
+            }
+            if (targetRoleNorm === 'auditee') {
+                if (!canManageAuditee) {
+                    return res.status(403).json({ error: 'Forbidden' });
+                }
+            } else if (!(await actorCanInviteAuditee(actorId))) {
+                return res.status(403).json({
+                    error: 'Forbidden',
+                    message: 'Only company administrators and lead auditors can assign the auditee role.',
+                });
+            }
+            for (const sid of parsedSiteIds) {
+                if (!(await actorCanAssignAuditeeToSite(actorId, sid))) {
+                    return res.status(403).json({ error: 'You cannot assign an auditee to one or more selected sites' });
+                }
+            }
+        }
+
         if (password) {
             if (!PASSWORD_REGEX.test(password)) {
                 return res.status(400).json({ error: 'Password must be at least 8 characters long and include at least one uppercase letter, one number, and one special character.' });
@@ -5382,9 +5560,22 @@ app.put('/users/:id', authenticateToken, async (req, res) => {
 
         const passwordWillChange = Boolean(password);
 
-        const user = await prisma.user.update({
-            where: { id: targetId },
-            data: updateData
+        const user = await prisma.$transaction(async (tx) => {
+            const updated = await tx.user.update({
+                where: { id: targetId },
+                data: updateData
+            });
+
+            if (targetRoleNorm === 'auditee' && nextRoleNorm !== 'auditee') {
+                await tx.site.updateMany({
+                    where: { userId: targetId },
+                    data: { userId: null },
+                });
+            } else if (nextRoleNorm === 'auditee' && parsedSiteIds) {
+                await assignAuditeeToSites(tx, targetId, parsedSiteIds);
+            }
+
+            return updated;
         });
 
         if (passwordWillChange) {
@@ -5408,9 +5599,34 @@ app.put('/users/:id', authenticateToken, async (req, res) => {
                 responseBody.targetSessionsRevoked = true;
             }
         }
+        if (normalizeUserRole(user.role) === 'auditee') {
+            const assignedSites = await prisma.site.findMany({
+                where: { userId: targetId },
+                select: { id: true, name: true, company: { select: { name: true } } },
+                orderBy: { name: 'asc' },
+            });
+            const siteIds = assignedSites.map((s) => s.id);
+            const siteLabels = assignedSites.map(
+                (s) => `${s.name} (${s.company?.name ?? 'Company'})`,
+            );
+            responseBody.siteIds = siteIds;
+            responseBody.siteLabels = siteLabels;
+            responseBody.siteId = siteIds[0] ?? null;
+            responseBody.siteLabel = siteLabels.length > 0 ? siteLabels.join(', ') : null;
+        }
         res.json(responseBody);
     } catch (error) {
         console.error('Error updating user:', error);
+        if (error.code === 'SITE_NOT_FOUND') {
+            return res.status(404).json({ error: 'Site not found' });
+        }
+        if (error.code === 'SITE_ALREADY_ASSIGNED') {
+            return res.status(409).json({
+                error: 'Site already assigned',
+                message:
+                    'One or more selected sites are already assigned to another auditee. Unassign them or choose different sites.',
+            });
+        }
         if (error.code === 'P2002') {
             return res.status(400).json({ error: 'Email already exists' });
         }
