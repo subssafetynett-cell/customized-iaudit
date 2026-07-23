@@ -41,3 +41,10 @@ export function siteAvailableForAuditeeInvite(
 ): boolean {
     return !siteHasAssignedAuditee(site, auditeeUserIds);
 }
+
+/** Site option shape for auditee invite / assign UI. */
+export type AuditeeSiteOption = {
+    id: string;
+    name: string;
+    companyName: string;
+};

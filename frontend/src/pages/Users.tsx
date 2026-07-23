@@ -1,7 +1,6 @@
-import { useState, useEffect } from "react";
-import { useSearchParams, useNavigate, Navigate } from "react-router-dom";
+import { useState, useEffect, useMemo } from "react";
+import { useSearchParams, useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import {
     UserPlus,
@@ -9,22 +8,28 @@ import {
     MoreHorizontal,
     Mail,
     Shield,
-    Smartphone,
     Trash2,
     Edit2,
     Eye,
-    ArrowUpRight,
     UserCheck,
     UserMinus,
     AlertTriangle,
-    ArrowRight,
-    Users as UsersIcon
+    Users as UsersIcon,
+    MapPin,
 } from "lucide-react";
 import { TourStepPopover } from "@/components/TourStepPopover";
 import { ONBOARDING_TOTAL_STEPS } from "@/lib/onboardingTour";
 import UserModal from "@/components/UserModal";
+import { AssignAuditeeSiteModal } from "@/components/AssignAuditeeSiteModal";
 import { canManageOrgUsers, formatUserRoleLabel, isAuditeeRole, USERS_PAGE_ROLE_OPTIONS } from "@/lib/userRoles";
 import { useStoredUser } from "@/hooks/useStoredUser";
+import { useCompanyStore } from "@/hooks/useCompanyStore";
+import {
+    siteAvailableForAuditeeInvite,
+    siteHasAssignedAuditee,
+    sitesFromCompanies,
+    type AuditeeSiteOption,
+} from "@/lib/orgSites";
 import ReusablePagination from "@/components/ReusablePagination";
 import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
@@ -68,13 +73,10 @@ type UsersAccessResponse = {
     allowed?: boolean;
     canInviteUsers?: boolean;
     canManageUsers?: boolean;
+    canInviteAuditee?: boolean;
 };
 
 export default function Users() {
-    const [searchParams] = useSearchParams();
-    if (searchParams.get("inviteAuditee") === "true") {
-        return <Navigate to="/invite-auditee" replace />;
-    }
     return <UsersPage />;
 }
 
@@ -86,6 +88,7 @@ function UsersPage() {
     const [isLoading, setIsLoading] = useState(true);
     const [showOnboardingGuide, setShowOnboardingGuide] = useState(searchParams.get("onboarding") === "true");
     const [onboardingStep, setOnboardingStep] = useState<number | null>(null);
+    const { companies, refetchCompanies } = useCompanyStore();
 
     /** Keep onboarding step in the URL so Next/Back survives re-renders and matches UI state. */
     const setTourStep = (step: number) => {
@@ -119,6 +122,8 @@ function UsersPage() {
     // Edit/View States
     const [selectedUser, setSelectedUser] = useState<any>(null);
     const [modalMode, setModalMode] = useState<"create" | "edit" | "view">("create");
+    const [assignSiteUser, setAssignSiteUser] = useState<any>(null);
+    const [defaultCreateRole, setDefaultCreateRole] = useState<string | undefined>(undefined);
 
     // Deletion States
     const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
@@ -131,15 +136,14 @@ function UsersPage() {
     const clientCanInviteUsers = !isAuditeeRole((storedUser as { role?: string } | null)?.role);
     const [canManageUsers, setCanManageUsers] = useState(clientCanManageUsers);
     const [canInviteUsers, setCanInviteUsers] = useState(clientCanInviteUsers);
+    const [canInviteAuditee, setCanInviteAuditee] = useState(false);
 
     useEffect(() => {
         const nextCanManageUsers = canManageOrgUsers(
             storedUser as { role?: string; creatorId?: number | null } | null,
         );
         const nextCanInviteUsers = !isAuditeeRole((storedUser as { role?: string } | null)?.role);
-        setCanManageUsers(
-            nextCanManageUsers,
-        );
+        setCanManageUsers(nextCanManageUsers);
         setCanInviteUsers(nextCanInviteUsers);
     }, [storedUser]);
 
@@ -153,11 +157,13 @@ function UsersPage() {
                 if (!cancelled) {
                     setCanManageUsers(data.canManageUsers === true);
                     setCanInviteUsers(data.canInviteUsers === true || data.allowed === true);
+                    setCanInviteAuditee(data.canInviteAuditee === true);
                 }
             } catch {
                 if (!cancelled) {
                     setCanManageUsers(clientCanManageUsers);
                     setCanInviteUsers(clientCanInviteUsers);
+                    setCanInviteAuditee(false);
                 }
             }
         })();
@@ -166,9 +172,31 @@ function UsersPage() {
         };
     }, [clientCanManageUsers, clientCanInviteUsers]);
 
+    // Legacy deep-link: open create modal with Auditee preselected.
+    useEffect(() => {
+        if (searchParams.get("inviteAuditee") !== "true") return;
+        setDefaultCreateRole("auditee");
+        setModalMode("create");
+        setSelectedUser(null);
+        setShowCreate(true);
+        setSearchParams(
+            (prev) => {
+                const next = new URLSearchParams(prev);
+                next.delete("inviteAuditee");
+                return next;
+            },
+            { replace: true },
+        );
+    }, [searchParams, setSearchParams]);
+
     const isSignedInUser = (rowUser: { id?: number | string }) => {
         if (loggedInUserId == null || rowUser?.id == null) return false;
         return String(rowUser.id) === String(loggedInUserId);
+    };
+
+    const canEditUserRow = (rowUser: { id?: number | string; role?: string }) => {
+        if (canManageUsers || isSignedInUser(rowUser)) return true;
+        return canInviteAuditee && isAuditeeRole(rowUser.role);
     };
 
     useEffect(() => {
@@ -179,7 +207,69 @@ function UsersPage() {
             setLoggedInUserId(null);
         }
         fetchUsers();
+        void refetchCompanies();
     }, []);
+
+    const auditeeUserIds = useMemo(() => {
+        const ids = new Set<number>();
+        for (const user of users) {
+            if (!isAuditeeRole(user.role)) continue;
+            const id = Number(user.id);
+            if (Number.isFinite(id) && id >= 1) ids.add(id);
+        }
+        return ids;
+    }, [users]);
+
+    const validatedSites = useMemo(() => sitesFromCompanies(companies), [companies]);
+
+    const createAuditeeSites = useMemo<AuditeeSiteOption[]>(
+        () =>
+            validatedSites
+                .filter((site) => siteAvailableForAuditeeInvite(site, auditeeUserIds))
+                .map((site) => ({
+                    id: String(site.id),
+                    name: site.name,
+                    companyName: site.company.name,
+                })),
+        [validatedSites, auditeeUserIds],
+    );
+
+    const allAuditeeSites = useMemo<AuditeeSiteOption[]>(
+        () =>
+            validatedSites.map((site) => ({
+                id: String(site.id),
+                name: site.name,
+                companyName: site.company.name,
+            })),
+        [validatedSites],
+    );
+
+    const disabledSiteIdsForSelectedUser = useMemo(() => {
+        const selectedId = selectedUser?.id != null ? Number(selectedUser.id) : null;
+        const blocked = new Set<string>();
+        for (const site of validatedSites) {
+            const uid = Number.parseInt(String(site.userId ?? ""), 10);
+            if (siteHasAssignedAuditee(site, auditeeUserIds) && uid !== selectedId) {
+                blocked.add(String(site.id));
+            }
+        }
+        return blocked;
+    }, [selectedUser, validatedSites, auditeeUserIds]);
+
+    const disabledSiteIdsForAssign = useMemo(() => {
+        const assignId = assignSiteUser?.id != null ? Number(assignSiteUser.id) : null;
+        const blocked = new Set<string>();
+        for (const site of validatedSites) {
+            const uid = Number.parseInt(String(site.userId ?? ""), 10);
+            if (siteHasAssignedAuditee(site, auditeeUserIds) && uid !== assignId) {
+                blocked.add(String(site.id));
+            }
+        }
+        return blocked;
+    }, [assignSiteUser, validatedSites, auditeeUserIds]);
+
+    const modalAuditeeSites =
+        modalMode === "create" ? createAuditeeSites : allAuditeeSites;
 
     // Sync onboarding guide state with URL parameter
     useEffect(() => {
@@ -258,6 +348,7 @@ function UsersPage() {
                 const updatedUser = await response.json();
                 if (modalMode === "create") {
                     setUsers([...users, updatedUser]);
+                    void refetchCompanies();
                     if (updatedUser.emailVerificationPending) {
                         toast.success(
                             updatedUser.verificationEmailSent
@@ -271,7 +362,8 @@ function UsersPage() {
                         toast.success("User created successfully!");
                     }
                 } else {
-                    setUsers(users.map(u => u.id === updatedUser.id ? updatedUser : u));
+                    setUsers(users.map(u => u.id === updatedUser.id ? { ...u, ...updatedUser } : u));
+                    void refetchCompanies();
                     if (updatedUser.id === user.id) {
                         localStorage.setItem('user', JSON.stringify(updatedUser));
                     }
@@ -296,7 +388,9 @@ function UsersPage() {
     };
 
     const handleToggleStatus = async (user: any) => {
-        if (!canManageUsers) {
+        const mayToggle =
+            canManageUsers || (canInviteAuditee && isAuditeeRole(user.role));
+        if (!mayToggle) {
             toast.error("Only administrators can change user status.");
             return;
         }
@@ -308,7 +402,7 @@ function UsersPage() {
 
             if (response.ok) {
                 const updatedUser = await response.json();
-                setUsers(users.map(u => u.id === updatedUser.id ? updatedUser : u));
+                setUsers(users.map(u => u.id === updatedUser.id ? { ...u, ...updatedUser } : u));
 
                 // Also update local storage if it's the current user
                 const loggedInUser = JSON.parse(localStorage.getItem('user') || '{}');
@@ -318,7 +412,8 @@ function UsersPage() {
 
                 toast.success(`User set to ${updatedUser.isActive ? 'Active' : 'Inactive'}`);
             } else {
-                toast.error("Failed to update status");
+                const errorData = await response.json().catch(() => ({}));
+                toast.error(errorData.error || "Failed to update status");
             }
         } catch (error) {
             console.error("Error toggling status:", error);
@@ -376,12 +471,11 @@ function UsersPage() {
     const openModal = (mode: "create" | "edit" | "view", user: any = null) => {
         setModalMode(mode);
         setSelectedUser(user);
+        if (mode === "create") setDefaultCreateRole(undefined);
         setShowCreate(true);
     };
 
     const filteredUsers = users.filter(user => {
-        if (isAuditeeRole(user.role)) return false;
-
         const matchesSearch = (user.firstName + " " + user.lastName + " " + user.email)
             .toLowerCase()
             .includes(searchQuery.toLowerCase());
@@ -475,6 +569,7 @@ function UsersPage() {
                                     <TableHead className="text-white">Name</TableHead>
                                     <TableHead className="text-white">Email</TableHead>
                                     <TableHead className="text-white">Role</TableHead>
+                                    <TableHead className="text-white">Sites</TableHead>
                                     <TableHead className="text-white">Status</TableHead>
                                     <TableHead className="text-white">Created At</TableHead>
                                     <TableHead className="text-right text-white">Action</TableHead>
@@ -483,13 +578,13 @@ function UsersPage() {
                             <TableBody>
                                 {isLoading ? (
                                     <TableRow>
-                                        <TableCell colSpan={7} className="h-24 text-center">
+                                        <TableCell colSpan={8} className="h-24 text-center">
                                             Loading users...
                                         </TableCell>
                                     </TableRow>
                                 ) : filteredUsers.length === 0 ? (
                                     <TableRow>
-                                        <TableCell colSpan={7} className="h-64 text-center">
+                                        <TableCell colSpan={8} className="h-64 text-center">
                                             <div className="flex flex-col items-center justify-center py-10">
                                                 <UsersIcon className="h-10 w-10 text-muted-foreground/40 mb-3" />
                                                 <p className="text-sm text-muted-foreground mb-4">No users found</p>
@@ -528,6 +623,22 @@ function UsersPage() {
                                                 </Badge>
                                             </TableCell>
                                             <TableCell>
+                                                {isAuditeeRole(user.role) ? (
+                                                    <span className="text-xs text-[#213847]/80 flex items-start gap-1 font-medium max-w-[220px]">
+                                                        <MapPin className="h-3 w-3 mt-0.5 shrink-0" />
+                                                        <span className="line-clamp-2">
+                                                            {user.siteLabel ||
+                                                                (Array.isArray(user.siteLabels)
+                                                                    ? user.siteLabels.join(", ")
+                                                                    : null) ||
+                                                                "—"}
+                                                        </span>
+                                                    </span>
+                                                ) : (
+                                                    <span className="text-xs text-muted-foreground">—</span>
+                                                )}
+                                            </TableCell>
+                                            <TableCell>
                                                 {!user.emailVerifiedAt ? (
                                                     <Badge variant="outline" className="text-amber-700 border-amber-300 bg-amber-50 px-3 py-1 rounded-full font-medium">
                                                         Pending verification
@@ -558,9 +669,17 @@ function UsersPage() {
                                                         <DropdownMenuItem onClick={() => openModal("view", user)} className="cursor-pointer">
                                                             <Eye className="h-4 w-4 mr-2" /> View Details
                                                         </DropdownMenuItem>
-                                                        {(canManageUsers || isSignedInUser(user)) && (
+                                                        {canEditUserRow(user) && (
                                                             <DropdownMenuItem onClick={() => openModal("edit", user)} className="cursor-pointer">
                                                                 <Edit2 className="h-4 w-4 mr-2" /> Edit User
+                                                            </DropdownMenuItem>
+                                                        )}
+                                                        {canInviteAuditee && isAuditeeRole(user.role) && (
+                                                            <DropdownMenuItem
+                                                                onClick={() => setAssignSiteUser(user)}
+                                                                className="cursor-pointer"
+                                                            >
+                                                                <MapPin className="h-4 w-4 mr-2" /> Assign Sites
                                                             </DropdownMenuItem>
                                                         )}
                                                         {canManageUsers && !user.emailVerifiedAt && (
@@ -571,7 +690,8 @@ function UsersPage() {
                                                                 <Mail className="h-4 w-4 mr-2" /> Resend verification
                                                             </DropdownMenuItem>
                                                         )}
-                                                        {canManageUsers && (
+                                                        {(canManageUsers ||
+                                                            (canInviteAuditee && isAuditeeRole(user.role))) && (
                                                             <DropdownMenuItem
                                                                 onClick={() => handleToggleStatus(user)}
                                                                 className="cursor-pointer font-medium"
@@ -629,6 +749,7 @@ function UsersPage() {
                     if (showOnboardingGuide && onboardingStep === 11) return;
                     setShowCreate(false);
                     setSelectedUser(null);
+                    setDefaultCreateRole(undefined);
                 }}
                 onSubmit={async (userData) => {
                     await handleAddUser(userData);
@@ -637,11 +758,43 @@ function UsersPage() {
                     } else {
                         setShowCreate(false);
                         setSelectedUser(null);
+                        setDefaultCreateRole(undefined);
                     }
                 }}
                 mode={modalMode}
                 initialData={selectedUser}
                 canManageRoles={canManageUsers}
+                canInviteAuditee={canInviteAuditee}
+                auditeeSites={modalAuditeeSites}
+                disabledAuditeeSiteIds={
+                    modalMode === "create" ? undefined : disabledSiteIdsForSelectedUser
+                }
+                defaultCreateRole={defaultCreateRole}
+            />
+
+            <AssignAuditeeSiteModal
+                open={assignSiteUser != null}
+                onClose={() => setAssignSiteUser(null)}
+                auditee={
+                    assignSiteUser
+                        ? {
+                              id: Number(assignSiteUser.id),
+                              firstName: assignSiteUser.firstName,
+                              lastName: assignSiteUser.lastName,
+                              siteIds: Array.isArray(assignSiteUser.siteIds)
+                                  ? assignSiteUser.siteIds.map((id: string | number) => String(id))
+                                  : assignSiteUser.siteId != null
+                                    ? [String(assignSiteUser.siteId)]
+                                    : [],
+                          }
+                        : null
+                }
+                sites={allAuditeeSites}
+                disabledSiteIds={disabledSiteIdsForAssign}
+                onSuccess={() => {
+                    void fetchUsers();
+                    void refetchCompanies();
+                }}
             />
 
             {/* Step 10: Invite User button */}

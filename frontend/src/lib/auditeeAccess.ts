@@ -20,6 +20,8 @@ const AUDITEE_EXACT_PATHS = new Set([
     "/audit-program",
     "/audit",
     "/audit-findings",
+    "/nonconformances",
+    "/notifications",
     "/profile-settings",
     "/account-settings",
     "/feedback",
@@ -28,7 +30,12 @@ const AUDITEE_EXACT_PATHS = new Set([
     "/subscription/success",
 ]);
 
-const AUDITEE_PREFIX_PATHS = ["/audit/execute/", "/audit-findings/", "/company/"];
+const AUDITEE_PREFIX_PATHS = [
+    "/audit/execute/",
+    "/audit-findings/",
+    "/nonconformances/",
+    "/company/",
+];
 
 export function isPathAllowedForAuditee(pathname: string): boolean {
     if (AUDITEE_EXACT_PATHS.has(pathname)) return true;
@@ -43,5 +50,6 @@ export const AUDITEE_SIDEBAR_URLS = new Set([
     "/audit-program",
     "/audit",
     "/audit-findings",
+    "/nonconformances",
     "/feedback",
 ]);

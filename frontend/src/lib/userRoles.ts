@@ -25,11 +25,12 @@ export function isAuditeeRole(role: string | undefined | null): boolean {
     return String(role ?? "").trim().toLowerCase() === "auditee";
 }
 
-/** Roles offered on the Users page (auditees are managed under Invite Auditee). */
+/** Roles offered on the Users page (includes Auditee as a first-class role). */
 export const USERS_PAGE_ROLE_OPTIONS = [
     { value: "admin", label: "Admin" },
     { value: "auditor", label: "Auditor" },
     { value: "lead_auditor", label: "Lead Auditor" },
+    { value: "auditee", label: "Auditee" },
     { value: "other", label: "Other" },
 ] as const;
 
