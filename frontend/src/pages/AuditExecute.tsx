@@ -101,6 +101,23 @@ import {
   type NonconformanceSummary,
 } from "@/lib/nonconformanceApi";
 import { formatUserDisplayName, isAuditeeRole } from "@/lib/userRoles";
+import {
+  EOSH_CHECKLIST_COLORS,
+  EoshCapabilityFormBanner,
+  EoshCapabilityScoreSummary,
+  eoshHeaderCellClass,
+  eoshHeaderStyle,
+  eoshScoreFromFindings,
+  eoshChecklistShowsIntentColumn,
+  getEoshCapabilityBannerCopy,
+  isEoshScoredCapabilityChecklist,
+  usesEoshScoredChecklistLayout,
+} from "@/lib/eoshChecklistUi";
+import {
+  EoshExceptionFollowUp,
+  needsEoshExceptionFollowUp,
+  useEoshOrgUsers,
+} from "@/components/EoshExceptionFollowUp";
 
 import { CLAUSE_MATRIX, ClauseMatrixRow } from "@/data/clauseMapping";
 
@@ -298,6 +315,14 @@ const AuditExecute = () => {
         assignToName?: string;
         assignToEmail?: string;
         clause?: string;
+        raisedBy?: string;
+        raisedByName?: string;
+        raisedByEmail?: string;
+        targetDate?: string;
+        escalationTo?: string;
+        escalationToName?: string;
+        escalationToEmail?: string;
+        escalationDate?: string;
       }
     >
   >({});
@@ -441,6 +466,7 @@ const AuditExecute = () => {
     defaultFindingsReportForm(),
   );
   const [auditeeOptions, setAuditeeOptions] = useState<AuditeeOption[]>([]);
+  const eoshOrgUsers = useEoshOrgUsers();
   const [ncByFindingId, setNcByFindingId] = useState<Record<string, NonconformanceSummary>>(
     {},
   );
@@ -3849,10 +3875,42 @@ const AuditExecute = () => {
             </div>
           </Card>
         ) : (
+          <>
           <Card className="overflow-hidden border border-slate-200 shadow-sm bg-white rounded-xl">
+            {usesEoshScoredChecklistLayout(template) && !isEditMode && (
+              <div className="p-4 border-b border-slate-200">
+                <EoshCapabilityFormBanner
+                  {...getEoshCapabilityBannerCopy(templateId)}
+                />
+              </div>
+            )}
             <div className="overflow-x-auto">
               <Table>
                 <TableHeader>
+                  {usesEoshScoredChecklistLayout(template) && !isEditMode ? (
+                    (() => {
+                      const showIntent = eoshChecklistShowsIntentColumn(templateId);
+                      return (
+                    <TableRow className="hover:bg-transparent border-b-0">
+                      <TableHead className={cn(eoshHeaderCellClass, "w-[48px]")} style={eoshHeaderStyle(EOSH_CHECKLIST_COLORS.no)}>#</TableHead>
+                      <TableHead className={cn(eoshHeaderCellClass, "min-w-[200px]")} style={eoshHeaderStyle(EOSH_CHECKLIST_COLORS.question)}>
+                        {showIntent ? "Question" : "Requirement"}
+                      </TableHead>
+                      {showIntent && (
+                      <TableHead className={cn(eoshHeaderCellClass, "min-w-[220px]")} style={eoshHeaderStyle(EOSH_CHECKLIST_COLORS.intent)}>
+                        <div>Intent of the Question</div>
+                        <div className="font-normal italic text-[10px] mt-0.5">What do we want to assess with this question?</div>
+                      </TableHead>
+                      )}
+                      <TableHead className={cn(eoshHeaderCellClass, "w-[88px]")} style={eoshHeaderStyle(EOSH_CHECKLIST_COLORS.compliance)}>Compliance (2)</TableHead>
+                      <TableHead className={cn(eoshHeaderCellClass, "w-[100px]")} style={eoshHeaderStyle(EOSH_CHECKLIST_COLORS.meetExceptions)}>Meet with Exceptions (1)</TableHead>
+                      <TableHead className={cn(eoshHeaderCellClass, "w-[100px]")} style={eoshHeaderStyle(EOSH_CHECKLIST_COLORS.nonCompliance)}>Non Compliance (0)</TableHead>
+                      <TableHead className={cn(eoshHeaderCellClass, "min-w-[140px]")} style={eoshHeaderStyle(EOSH_CHECKLIST_COLORS.evidence)}>Evidence Reviewed</TableHead>
+                      <TableHead className={cn(eoshHeaderCellClass, "min-w-[140px]")} style={eoshHeaderStyle(EOSH_CHECKLIST_COLORS.comment)}>Comment</TableHead>
+                    </TableRow>
+                      );
+                    })()
+                  ) : (
                   <TableRow className="bg-slate-800 hover:bg-slate-800 border-none">
                     <TableHead className="w-[80px] font-bold text-white border-r border-slate-700">
                       Clause
@@ -3867,6 +3925,7 @@ const AuditExecute = () => {
                       Audit Evidence
                     </TableHead>
                   </TableRow>
+                  )}
                 </TableHeader>
                 <TableBody>
                   {(editableChecklist as ChecklistContent[]).map(
@@ -3889,12 +3948,85 @@ const AuditExecute = () => {
 
                       const type = checklistData[index]?.findings;
 
-                      if (focusFindings && !['OFI', 'Min', 'Maj', 'C'].includes(type as string)) {
+                      if (
+                        focusFindings &&
+                        !["OFI", "Min", "Maj", "C", "2", "1", "0"].includes(type as string)
+                      ) {
                         return null;
                       }
 
                       const showClause = index === 0 || array[index - 1].clause !== item.clause;
                       const isLastInGroup = index === array.length - 1 || array[index + 1].clause !== item.clause;
+                      const eoshLayout = usesEoshScoredChecklistLayout(template) && !isEditMode;
+                      const showIntent = eoshChecklistShowsIntentColumn(templateId);
+                      const eoshColSpan = showIntent ? 8 : 7;
+                      const score = eoshScoreFromFindings(type);
+                      const rowNo = String(item.clause || "").replace(/^(CM|RTM|CP|CG|CS)-?/i, "") || String(index + 1);
+
+                      if (eoshLayout) {
+                        return (
+                          <React.Fragment key={index}>
+                          <TableRow className="border-slate-300 bg-white">
+                            <TableCell className="border border-slate-300 align-top text-center font-semibold text-sm bg-slate-50/40">{rowNo}</TableCell>
+                            <TableCell className="border border-slate-300 align-top text-sm leading-relaxed whitespace-pre-wrap">{item.question}</TableCell>
+                            {showIntent && (
+                            <TableCell className="border border-slate-300 align-top text-[11px] leading-relaxed whitespace-pre-wrap text-slate-700 bg-sky-50/30">{item.intent || "—"}</TableCell>
+                            )}
+                            {([{ val: "2" as const, label: "Compliance (2)" }, { val: "1" as const, label: "Meet with Exceptions (1)" }, { val: "0" as const, label: "Non Compliance (0)" }]).map((opt) => (
+                              <TableCell key={opt.val} className="border border-slate-300 align-middle text-center p-2">
+                                <button
+                                  type="button"
+                                  title={opt.label}
+                                  disabled={isAuditeeReadOnly}
+                                  onClick={() =>
+                                    handleChecklistChange(index, "findings", score === opt.val ? "" : opt.val)
+                                  }
+                                  className={cn(
+                                    "mx-auto flex h-8 w-8 items-center justify-center rounded border-2 text-sm font-bold transition-all",
+                                    score === opt.val
+                                      ? "border-slate-800 bg-slate-800 text-white"
+                                      : "border-slate-300 bg-white text-transparent hover:border-slate-500",
+                                    isAuditeeReadOnly && "pointer-events-none opacity-70",
+                                  )}
+                                >
+                                  {score === opt.val ? "✓" : "·"}
+                                </button>
+                              </TableCell>
+                            ))}
+                            <TableCell className="border border-slate-300 align-top p-2">
+                              <Textarea
+                                className="min-h-[72px] text-xs resize-y border-slate-300"
+                                placeholder="Evidence reviewed…"
+                                value={checklistData[index]?.evidence || ""}
+                                onChange={(e) => handleChecklistChange(index, "evidence", e.target.value)}
+                                readOnly={isAuditeeReadOnly}
+                              />
+                            </TableCell>
+                            <TableCell className="border border-slate-300 align-top p-2">
+                              <Textarea
+                                className="min-h-[72px] text-xs resize-y border-slate-300"
+                                placeholder="Comment…"
+                                value={checklistData[index]?.ofi || ""}
+                                onChange={(e) => handleChecklistChange(index, "ofi", e.target.value)}
+                                readOnly={isAuditeeReadOnly}
+                              />
+                            </TableCell>
+                          </TableRow>
+                          {needsEoshExceptionFollowUp(score) && (
+                            <TableRow className="border-slate-300 bg-amber-50/20">
+                              <TableCell colSpan={eoshColSpan} className="border border-slate-300 p-3">
+                                <EoshExceptionFollowUp
+                                  values={checklistData[index] || {}}
+                                  users={eoshOrgUsers}
+                                  disabled={isAuditeeReadOnly}
+                                  onChange={(field, value) => handleChecklistChange(index, field, value)}
+                                />
+                              </TableCell>
+                            </TableRow>
+                          )}
+                          </React.Fragment>
+                        );
+                      }
 
                       return (
                         <React.Fragment key={index}>
@@ -4372,6 +4504,13 @@ const AuditExecute = () => {
               </Table>
             </div>
           </Card>
+          {isEoshScoredCapabilityChecklist(templateId) && !isEditMode && (
+            <EoshCapabilityScoreSummary
+              findingsByIndex={checklistData}
+              questionCount={(editableChecklist as ChecklistContent[]).length}
+            />
+          )}
+          </>
         )}
 
         {!focusFindings && (
