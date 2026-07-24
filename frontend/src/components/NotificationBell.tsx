@@ -15,6 +15,7 @@ import {
     DropdownMenuContent,
     DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { hasClientAuthSession } from "@/lib/api";
 import {
     formatNotificationTimeAgo,
     listNotifications,
@@ -52,6 +53,10 @@ export function NotificationBell({ className }: Props) {
     const [items, setItems] = useState<AppNotification[]>([]);
 
     const load = useCallback(async () => {
+        if (!hasClientAuthSession()) {
+            setItems([]);
+            return;
+        }
         try {
             setLoading(true);
             const data = await listNotifications();

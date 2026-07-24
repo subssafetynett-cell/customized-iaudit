@@ -1322,8 +1322,10 @@ async function rejectIfTrialLimitExceeded(_actorId, _resource, _projectedCount) 
 const authenticateToken = async (req, res, next) => {
     const token = getSessionTokenFromRequest(req);
 
-    if (!token) {
-        console.warn(`[SECURITY] Access denied to ${req.path}. No session token provided.`);
+        if (!token) {
+        console.warn(
+            `[SECURITY] Access denied to ${req.originalUrl || req.url || req.path}. No session token provided.`,
+        );
         return res.status(401).json({ error: 'Access denied. Please log in.' });
     }
 
@@ -4125,7 +4127,13 @@ app.post('/auth/resend-invite-verification', sendOtpIpRateLimit, handleResendInv
 mountedApiRouter.post('/auth/verify-invited-account', sendOtpIpRateLimit, handleVerifyInvitedAccount);
 mountedApiRouter.post('/auth/resend-invite-verification', sendOtpIpRateLimit, handleResendInviteVerification);
 
-app.post('/auth/login', loginIpRateLimit, async (req, res) => {
+// Also register under /api (mountedApiRouter) so Vite same-origin proxy always hits login
+// before the /api strip path — keeps Set-Cookie on the /api response the browser expects.
+mountedApiRouter.post('/auth/login', loginIpRateLimit, handleAuthLogin);
+app.post('/api/auth/login', express.json({ limit: '50mb' }), loginIpRateLimit, handleAuthLogin);
+app.post('/auth/login', loginIpRateLimit, handleAuthLogin);
+
+async function handleAuthLogin(req, res) {
     const badKeys = getDisallowedExtraKeysError(req.body, LOGIN_ALLOWED_BODY_KEYS);
     if (badKeys) {
         return res.status(400).json({ error: badKeys });
@@ -4247,7 +4255,7 @@ app.post('/auth/login', loginIpRateLimit, async (req, res) => {
         handlePrismaError(error, 'login');
         res.status(500).json({ error: 'An error occurred during login' });
     }
-});
+}
 
 async function handleForgotPassword(req, res) {
     const badKeys = getDisallowedExtraKeysError(req.body, FORGOT_PASSWORD_ALLOWED_BODY_KEYS);
@@ -4767,6 +4775,9 @@ app.get('/users/:id/status', authenticateToken, async (req, res) => {
                 where: { id: targetId },
                 select: {
                     id: true,
+                    email: true,
+                    firstName: true,
+                    lastName: true,
                     role: true,
                     isActive: true,
                     trialStartDate: true,
@@ -4810,7 +4821,8 @@ app.get('/users/:id/status', authenticateToken, async (req, res) => {
                 exists: true,
                 isActive: user.isActive,
                 subscriptionStatus: currentStatus,
-                onboardingCompleted: user.onboardingCompleted
+                onboardingCompleted: user.onboardingCompleted,
+                role: user.role,
             });
         }
 
@@ -4837,7 +4849,12 @@ app.get('/users/:id/status', authenticateToken, async (req, res) => {
             renewalType: user.renewalType,
             autopayConsent: user.autopayConsent,
             onboardingCompleted: user.onboardingCompleted,
-            duration: latestPayment?.duration || null
+            duration: latestPayment?.duration || null,
+            // Keep client sidebar/permissions in sync with DB role
+            role: user.role,
+            email: user.email,
+            firstName: user.firstName,
+            lastName: user.lastName,
         });
     } catch (error) {
         console.error('Failed to fetch user status:', error);

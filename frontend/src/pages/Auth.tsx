@@ -459,7 +459,24 @@ export default function Auth() {
             if ((profile as { role?: string }).role === "superadmin") {
                 localStorage.setItem("isSuperAdminAuthenticated", "true");
             }
-            navigate("/");
+            window.dispatchEvent(new Event("user-updated"));
+            // Confirm httpOnly session cookie is usable before entering the app.
+            // Prevents a race where the next page loads with localStorage but no cookie → instant logout.
+            try {
+                const sessionRes = await apiFetch("/auth/session", { skipSessionLogout: true });
+                if (!sessionRes.ok) {
+                    clearClientSession();
+                    throw new Error(
+                        "Signed in, but the browser did not keep the session cookie. Use http://localhost (not an IP address) and allow cookies.",
+                    );
+                }
+            } catch (sessionErr) {
+                if (sessionErr instanceof Error && sessionErr.message.includes("session cookie")) {
+                    throw sessionErr;
+                }
+                // Network blip after login — still proceed; later calls will re-check.
+            }
+            navigate("/", { replace: true });
 
         } catch (error: any) {
             console.error('Login error:', error);
