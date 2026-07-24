@@ -5,6 +5,8 @@ RUN npm ci
 COPY . .
 ARG VITE_API_BASE_URL=
 ENV VITE_API_BASE_URL=$VITE_API_BASE_URL
+# Coolify builders are often memory-constrained; raise heap for Vite.
+ENV NODE_OPTIONS=--max-old-space-size=4096
 RUN npm run build
 
 FROM public.ecr.aws/docker/library/nginx:1.25-alpine
