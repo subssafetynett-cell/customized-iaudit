@@ -237,7 +237,7 @@ const AuditTemplates = () => {
                                     EOSH module
                                 </h3>
                                 <p className="text-sm text-slate-500">
-                                    EOSH-specific internal audit checklists (Capability Manufacturing, Capability RTM, Climate Protection, Compressed Gases, Confined Space, and management system).
+                                    EOSH-specific internal audit checklists from HSHEQPF 03.08 (Capability, Climate Protection, Compressed Gases, Confined Space, and all other Excel modules).
                                 </p>
                             </div>
                             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">

@@ -1,7 +1,8 @@
 import type { CSSProperties } from "react";
 import { cn } from "@/lib/utils";
+import { EOSH_EXCEL_MODULE_META } from "@/data/eoshExcelModuleTemplates";
 
-/** HSHEQPF 03.08 — Capability Manufacturing spreadsheet header colours */
+/** HSHEQPF 03.08 — EOSH spreadsheet header colours */
 export const EOSH_CHECKLIST_COLORS = {
   goldBar: "#C9A227",
   no: "#A6A6A6",
@@ -13,6 +14,13 @@ export const EOSH_CHECKLIST_COLORS = {
   evidence: "#FFFFFF",
   comment: "#FFFFFF",
 } as const;
+
+const EOSH_META_BY_ID = Object.fromEntries(
+  EOSH_EXCEL_MODULE_META.map((m) => [m.id, m]),
+) as Record<
+  string,
+  (typeof EOSH_EXCEL_MODULE_META)[number]
+>;
 
 export const EOSH_CAPABILITY_TEMPLATE_ID = "eosh-capability-manufacturing-checklist";
 export const EOSH_CAPABILITY_RTM_TEMPLATE_ID = "eosh-capability-rtm-checklist";
@@ -40,32 +48,23 @@ export function isEoshConfinedSpaceChecklist(templateId?: string | null): boolea
   return templateId === EOSH_CONFINED_SPACE_TEMPLATE_ID;
 }
 
-/** EOSH scored forms (2 / 1 / 0). */
+/** Any EOSH scored checklist generated from the Excel workbook. */
 export function isEoshScoredCapabilityChecklist(templateId?: string | null): boolean {
-  return (
-    isEoshCapabilityChecklist(templateId) ||
-    isEoshCapabilityRtmChecklist(templateId) ||
-    isEoshClimateProtectionChecklist(templateId) ||
-    isEoshCompressedGasesChecklist(templateId) ||
-    isEoshConfinedSpaceChecklist(templateId)
-  );
+  return Boolean(templateId && templateId in EOSH_META_BY_ID);
 }
 
 /** Alias — same scored EOSH checklists. */
 export const isEoshScoredChecklist = isEoshScoredCapabilityChecklist;
 
-/** Requirement-only sheets (no Intent column). */
-export function isEoshRequirementOnlyChecklist(templateId?: string | null): boolean {
-  return (
-    isEoshClimateProtectionChecklist(templateId) ||
-    isEoshCompressedGasesChecklist(templateId) ||
-    isEoshConfinedSpaceChecklist(templateId)
-  );
+/** Intent column: Capability / CTA / LSR / SIFp / Leadership Manufacturing style sheets. */
+export function eoshChecklistShowsIntentColumn(templateId?: string | null): boolean {
+  if (!templateId) return false;
+  return EOSH_META_BY_ID[templateId]?.layout === "intent";
 }
 
-/** Capability Manufacturing/RTM show Intent; requirement-only modules do not. */
-export function eoshChecklistShowsIntentColumn(templateId?: string | null): boolean {
-  return isEoshScoredChecklist(templateId) && !isEoshRequirementOnlyChecklist(templateId);
+/** Requirement-only sheets (no Intent column). */
+export function isEoshRequirementOnlyChecklist(templateId?: string | null): boolean {
+  return isEoshScoredChecklist(templateId) && !eoshChecklistShowsIntentColumn(templateId);
 }
 
 export function getEoshCapabilityBannerCopy(templateId?: string | null): {
@@ -73,37 +72,17 @@ export function getEoshCapabilityBannerCopy(templateId?: string | null): {
   sectionTitle: string;
   formRef?: string;
 } {
-  if (isEoshConfinedSpaceChecklist(templateId)) {
+  const meta = templateId ? EOSH_META_BY_ID[templateId] : undefined;
+  if (meta) {
     return {
-      moduleLabel: "MODULE: CONFINED SPACE",
-      sectionTitle: "Confined Space",
-      formRef: "HSHEQPF 03.08",
-    };
-  }
-  if (isEoshCompressedGasesChecklist(templateId)) {
-    return {
-      moduleLabel: "MODULE: COMPRESSED GASES",
-      sectionTitle: "Compressed Gases",
-      formRef: "HSHEQPF 03.08",
-    };
-  }
-  if (isEoshClimateProtectionChecklist(templateId)) {
-    return {
-      moduleLabel: "MODULE: CLIMATE PROTECTION",
-      sectionTitle: "Climate Protection",
-      formRef: "HSHEQPF 03.08",
-    };
-  }
-  if (isEoshCapabilityRtmChecklist(templateId)) {
-    return {
-      moduleLabel: "Module: Capability RTM",
-      sectionTitle: "Capability — Route to Market",
+      moduleLabel: meta.moduleLabel,
+      sectionTitle: meta.sectionTitle,
       formRef: "HSHEQPF 03.08",
     };
   }
   return {
-    moduleLabel: "Module: Capability Manufacturing",
-    sectionTitle: "Capability — Manufacturing",
+    moduleLabel: "MODULE: EOSH",
+    sectionTitle: "EOSH Checklist",
     formRef: "HSHEQPF 03.08",
   };
 }
@@ -139,7 +118,7 @@ export function eoshHeaderStyle(bg: string): CSSProperties {
 
 const EOSH_MAX_POINTS_PER_QUESTION = 2;
 
-/** Score totals for Capability Manufacturing (2 / 1 / 0 per question). */
+/** Score totals for EOSH scored checklists (2 / 1 / 0 per question). */
 export function computeEoshCapabilityScores(
   findingsByIndex: Record<number, { findings?: string } | undefined>,
   questionCount: number,

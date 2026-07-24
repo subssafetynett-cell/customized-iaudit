@@ -3961,7 +3961,7 @@ const AuditExecute = () => {
                       const showIntent = eoshChecklistShowsIntentColumn(templateId);
                       const eoshColSpan = showIntent ? 8 : 7;
                       const score = eoshScoreFromFindings(type);
-                      const rowNo = String(item.clause || "").replace(/^(CM|RTM|CP|CG|CS)-?/i, "") || String(index + 1);
+                      const rowNo = String(item.clause || "").replace(/^[A-Za-z0-9]+-/i, "") || String(index + 1);
 
                       if (eoshLayout) {
                         return (
