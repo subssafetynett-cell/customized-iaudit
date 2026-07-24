@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { auditTemplates, AuditStandard, AuditTemplate } from "@/data/auditTemplates";
+import { getEoshCapabilityBannerCopy } from "@/lib/eoshChecklistUi";
 import { TourStepPopover } from "@/components/TourStepPopover";
 import {
     AUDIT_TEMPLATES_LIST_MAX_STEP,
@@ -116,6 +117,18 @@ const AuditTemplates = () => {
 
     const renderTemplateCard = (template: AuditTemplate) => {
         const isTourFeatured = tourFeaturedTemplate?.id === template.id;
+        const eoshModuleName =
+            template.module === "EOSH"
+                ? (() => {
+                      const { sectionTitle } = getEoshCapabilityBannerCopy(template.id);
+                      if (sectionTitle && sectionTitle !== "EOSH Checklist") return sectionTitle;
+                      const fromTitle = template.title
+                          .replace(/^EOSH Internal Audit Checklist\s*[—–-]\s*/i, "")
+                          .replace(/^Management System:\s*/i, "")
+                          .trim();
+                      return fromTitle || "Management System";
+                  })()
+                : null;
         return (
             <Card
                 key={template.id}
@@ -136,9 +149,20 @@ const AuditTemplates = () => {
                             {template.standard}
                         </Badge>
                     </div>
-                    <CardTitle className="text-xl text-slate-900 line-clamp-1" title={template.title}>
-                        {template.title}
-                    </CardTitle>
+                    {eoshModuleName ? (
+                        <>
+                            <p className="text-xs font-medium text-slate-500 mb-1">
+                                EOSH Internal Audit Checklist
+                            </p>
+                            <CardTitle className="text-xl font-bold text-slate-900 line-clamp-2" title={eoshModuleName}>
+                                {eoshModuleName}
+                            </CardTitle>
+                        </>
+                    ) : (
+                        <CardTitle className="text-xl text-slate-900 line-clamp-1" title={template.title}>
+                            {template.title}
+                        </CardTitle>
+                    )}
                     <CardDescription className="line-clamp-2 min-h-[40px]">
                         {template.description}
                     </CardDescription>
