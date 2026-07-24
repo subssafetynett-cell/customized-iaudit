@@ -1070,7 +1070,17 @@ const CreateAuditPlanPage = () => {
                                         {(previewTemplate?.content || []).map((item: any, idx: number) => (
                                             <TableRow key={idx}>
                                                 <TableCell className="font-medium align-top">{item.clause}</TableCell>
-                                                <TableCell className="align-top">{item.question}</TableCell>
+                                                <TableCell className="align-top">
+                                                    <div className="space-y-2">
+                                                        <p>{item.question}</p>
+                                                        {item.intent ? (
+                                                            <div className="rounded-md bg-sky-50 border border-sky-100 p-2 text-xs text-slate-600 whitespace-pre-wrap">
+                                                                <span className="font-semibold text-sky-700">Intent: </span>
+                                                                {item.intent}
+                                                            </div>
+                                                        ) : null}
+                                                    </div>
+                                                </TableCell>
                                                 <TableCell className="align-top">
                                                     <div className="h-8 w-20 bg-slate-100 rounded border border-slate-200" />
                                                 </TableCell>

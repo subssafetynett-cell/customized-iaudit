@@ -356,9 +356,13 @@ export function extractFindings(plan: {
         Object.entries(extraItems as Record<string, unknown[]>).forEach(([clause, items]) => {
             if (Array.isArray(items)) {
                 items.forEach((item, idx) => {
-                    const ft = getFT(item);
+                    const row =
+                        item && typeof item === "object"
+                            ? (item as Record<string, unknown>)
+                            : {};
+                    const ft = getFT(row);
                     if (ft) {
-                        const fields = buildStructuredFindingFields(item);
+                        const fields = buildStructuredFindingFields(row);
                         results.push({
                             id: `extra-${plan.id}-${clause}-${idx}`,
                             auditId: plan.id,
@@ -366,7 +370,10 @@ export function extractFindings(plan: {
                             clauseRef: `Clause ${clause} (Custom)`,
                             type: ft,
                             ...fields,
-                            description: fields.description || item.question || "",
+                            description:
+                                fields.description ||
+                                (typeof row.question === "string" ? row.question : "") ||
+                                "",
                             media: collectClauseMedia(data, clause, { checklistIndex: idx }),
                         });
                     }
@@ -382,7 +389,7 @@ export function extractFindings(plan: {
             if (ft) {
                 const fields = buildStructuredFindingFields({
                     ...audit,
-                    description: audit.description || audit.processArea,
+                    description: (audit.description || audit.processArea) as string | undefined,
                 });
                 results.push({
                     id: `process-${plan.id}-${idx}`,

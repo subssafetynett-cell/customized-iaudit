@@ -462,6 +462,7 @@ const CORS_ALLOWED_ORIGINS = new Set([
     'http://localhost:8080',
     'http://localhost:8081',
     'http://localhost:8082',
+    'http://localhost:8083',
 ]);
 
 app.use(cors({
@@ -477,12 +478,30 @@ app.use(cors({
         if (/^http:\/\/localhost:\d+$/.test(origin) || /^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
             return callback(null, true);
         }
-        return callback(new Error(`CORS blocked for origin: ${origin}`));
+        // Reject without throwing — throwing becomes a 500 and can surface as gateway errors.
+        return callback(null, false);
     },
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'Cache-Control', 'Pragma', 'Expires', 'x-user-id'],
     credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+    allowedHeaders: [
+        'Content-Type',
+        'Authorization',
+        'Cache-Control',
+        'Pragma',
+        'Expires',
+        'x-user-id',
+        'X-Super-Admin-Console',
+        'X-Session-Expires-At',
+    ],
+    exposedHeaders: ['X-Session-Expires-At'],
 }));
+
+// Fail hung requests before Cloudflare's ~100s gateway timeout.
+app.use((req, res, next) => {
+    req.setTimeout(60_000);
+    res.setTimeout(60_000);
+    next();
+});
 
 // Full `/api/auth/...` paths must be registered before `app.use('/api', mountedApiRouter)` so they are
 // not lost when the sub-router has no match (and so they work even if `/auth/...` aliases are missing).
@@ -2732,6 +2751,12 @@ app.get('/health', async (req, res) => {
         console.error('[health] Database check failed:', error.message);
         res.status(503).json({ status: 'degraded', database: 'unavailable', error: error.message });
     }
+});
+app.get('/api/health', (req, res) => {
+    res.status(200).json({ status: 'ok' });
+});
+mountedApiRouter.get('/health', (req, res) => {
+    res.status(200).json({ status: 'ok' });
 });
 
 // Root route to prevent 404
