@@ -39,6 +39,11 @@ export function clearClientSession() {
     localStorage.removeItem("user");
     localStorage.removeItem(SESSION_EXPIRES_AT_KEY);
     clearSuperAdminSession();
+    try {
+        window.dispatchEvent(new Event("user-updated"));
+    } catch {
+        /* ignore */
+    }
 }
 
 function redirectToLoginIfNeeded() {
@@ -95,16 +100,26 @@ export async function apiFetch(endpoint: string, options: ApiFetchOptions = {}) 
 
     const url = resolveApiUrl(endpoint);
 
-    const response = await fetch(url, {
-        ...fetchOptions,
-        headers,
-        credentials: "include",
-    });
+    let response: Response;
+    try {
+        response = await fetch(url, {
+            ...fetchOptions,
+            headers,
+            credentials: "include",
+        });
+    } catch {
+        // Proxy/backend blip (ECONNRESET during nodemon restart, etc.) — never treat as logout.
+        throw new Error("The API is temporarily unavailable. Please try again.");
+    }
 
     applySessionExpiryFromResponse(response);
 
+    // Never auto-logout from a single 401. Sidebar pages and optional polls must not
+    // destroy a valid UI session if the cookie briefly fails to attach. Explicit
+    // status/session hooks handle real expiry.
     if (response.status === 401 && hadSession && !skipSessionLogout) {
-        clearSessionAndRedirectToLogin();
+        // Soft signal only — leave localStorage intact so navigation keeps working.
+        console.warn(`[apiFetch] 401 for ${endpoint} (session left intact)`);
     }
 
     return response;

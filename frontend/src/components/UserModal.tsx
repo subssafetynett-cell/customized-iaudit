@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { toast } from "sonner";
 import { apiFetch } from "@/lib/api";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
@@ -7,12 +7,17 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { UserPlus, User, Mail, Lock, Shield, Eye, EyeOff, Edit2 } from "lucide-react";
+import { UserPlus, Mail, Lock, Shield, Eye, EyeOff, Edit2 } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { PhoneInputWithCountryCode } from "@/components/PhoneInputWithCountryCode";
 import { DEFAULT_PHONE_COUNTRY_CODE } from "@/lib/phoneCountries";
 import { PASSWORD_REGEX, PASSWORD_ERROR_MESSAGE, isTenDigitPhone, normalizePhone10Digits, PHONE_10_ERROR_MESSAGE } from "@/lib/validation";
-import { formatUserRoleLabel, USERS_PAGE_ROLE_OPTIONS } from "@/lib/userRoles";
+import { formatUserRoleLabel, isAuditeeRole, USERS_PAGE_ROLE_OPTIONS } from "@/lib/userRoles";
+import {
+    AuditeeSiteMultiSelect,
+    AuditeeSiteSelectionSummary,
+} from "@/components/AuditeeSiteMultiSelect";
+import type { AuditeeSiteOption } from "@/lib/orgSites";
 
 interface Props {
     open: boolean;
@@ -24,6 +29,12 @@ interface Props {
     hideCancel?: boolean;
     /** Only org admins may assign roles or toggle account status. */
     canManageRoles?: boolean;
+    /** Lead auditors / admins who may create or manage auditees. */
+    canInviteAuditee?: boolean;
+    /** Sites available for auditee assignment. */
+    auditeeSites?: AuditeeSiteOption[];
+    /** Site IDs already assigned to another auditee (disabled in the picker). */
+    disabledAuditeeSiteIds?: ReadonlySet<string>;
     /** Pre-select role when opening create mode (e.g. auditee invite flow). */
     defaultCreateRole?: string;
 }
@@ -37,6 +48,9 @@ export default function UserModal({
     hideOverlay = false,
     hideCancel = false,
     canManageRoles = false,
+    canInviteAuditee = false,
+    auditeeSites = [],
+    disabledAuditeeSiteIds,
     defaultCreateRole,
 }: Props) {
     const [firstName, setFirstName] = useState("");
@@ -46,6 +60,7 @@ export default function UserModal({
     const [mobileCountry, setMobileCountry] = useState(DEFAULT_PHONE_COUNTRY_CODE);
     const [role, setRole] = useState("auditor");
     const [customRoleName, setCustomRoleName] = useState("");
+    const [siteIds, setSiteIds] = useState<string[]>([]);
     const [isActive, setIsActive] = useState(true);
     const [sendWelcomeEmail, setSendWelcomeEmail] = useState(true);
     const [password, setPassword] = useState("");
@@ -79,6 +94,13 @@ export default function UserModal({
                 setMobile(initialData.mobile || "");
                 setRole(initialData.role || "auditor");
                 setCustomRoleName(initialData.customRoleName || "");
+                setSiteIds(
+                    Array.isArray(initialData.siteIds)
+                        ? initialData.siteIds.map((id: string | number) => String(id))
+                        : initialData.siteId != null
+                          ? [String(initialData.siteId)]
+                          : [],
+                );
                 setIsActive(initialData.isActive !== undefined ? initialData.isActive : true);
                 setSendWelcomeEmail(false);
                 setPassword("");
@@ -93,6 +115,7 @@ export default function UserModal({
                 setMobile("");
                 setRole(defaultCreateRole || "auditor");
                 setCustomRoleName("");
+                setSiteIds([]);
                 setIsActive(true);
                 setSendWelcomeEmail(true);
                 setPassword("");
@@ -106,6 +129,23 @@ export default function UserModal({
             setError("");
         }
     }, [open, mode, initialData, isEditMode, isViewMode, defaultCreateRole]);
+
+    const roleOptions = useMemo(() => {
+        if (canManageRoles) {
+            return canInviteAuditee
+                ? [...USERS_PAGE_ROLE_OPTIONS]
+                : USERS_PAGE_ROLE_OPTIONS.filter((option) => option.value !== "auditee");
+        }
+        if (mode === "create" && canInviteAuditee) {
+            return USERS_PAGE_ROLE_OPTIONS.filter(
+                (option) => option.value === "auditor" || option.value === "auditee",
+            );
+        }
+        return [];
+    }, [canManageRoles, canInviteAuditee, mode]);
+
+    const canSelectRole = roleOptions.length > 0 && !isViewMode;
+    const showAuditeeSites = isAuditeeRole(role);
 
     const emailChangedInEdit =
         isEditMode &&
@@ -183,6 +223,11 @@ export default function UserModal({
             return;
         }
 
+        if (isAuditeeRole(role) && siteIds.length === 0) {
+            setError("Please select at least one site for the auditee");
+            return;
+        }
+
         if (password) {
             if (password !== confirmPassword) {
                 setError("Passwords do not match");
@@ -231,6 +276,12 @@ export default function UserModal({
             payload.role = role;
             payload.customRoleName = role === "other" ? customRoleName : undefined;
             payload.isActive = isActive;
+        } else if (mode === "create" && canInviteAuditee && isAuditeeRole(role)) {
+            payload.role = "auditee";
+        }
+
+        if (isAuditeeRole(role)) {
+            payload.siteIds = siteIds.map((id) => Number(id));
         }
 
         if (password) {
@@ -254,13 +305,14 @@ export default function UserModal({
     };
 
     const isAuditeeUser =
-        String(initialData?.role ?? "").toLowerCase() === "auditee" ||
-        defaultCreateRole === "auditee";
+        isAuditeeRole(initialData?.role) ||
+        isAuditeeRole(defaultCreateRole) ||
+        isAuditeeRole(role);
 
     const getTitle = () => {
         if (isViewMode) return isAuditeeUser ? "Auditee Details" : "User Details";
         if (isEditMode) return isAuditeeUser ? "Edit Auditee" : "Edit User";
-        if (defaultCreateRole === "auditee") return "Invite Auditee";
+        if (isAuditeeRole(role) || defaultCreateRole === "auditee") return "Invite Auditee";
         return "Invite User";
     };
 
@@ -273,7 +325,7 @@ export default function UserModal({
     const getSubmitLabel = () => {
         if (isViewMode) return "Close";
         if (isEditMode) return isAuditeeUser ? "Save changes" : "Update User";
-        if (defaultCreateRole === "auditee") return "Send Invite";
+        if (isAuditeeRole(role) || defaultCreateRole === "auditee") return "Invite Auditee";
         return "Invite User";
     };
 
@@ -429,13 +481,13 @@ export default function UserModal({
                         </div>
                         <div className="space-y-2">
                             <Label htmlFor="role">Role *</Label>
-                            {canManageRoles ? (
+                            {canSelectRole ? (
                                 <Select value={role} onValueChange={setRole} disabled={isViewMode}>
                                     <SelectTrigger id="role">
                                         <SelectValue placeholder="Select role" />
                                     </SelectTrigger>
                                     <SelectContent>
-                                        {USERS_PAGE_ROLE_OPTIONS.map((option) => (
+                                        {roleOptions.map((option) => (
                                             <SelectItem key={option.value} value={option.value}>
                                                 {option.label}
                                             </SelectItem>
@@ -470,6 +522,27 @@ export default function UserModal({
                                     disabled={isViewMode}
                                 />
                             </div>
+                        </div>
+                    )}
+
+                    {showAuditeeSites && (
+                        <div className="space-y-2 animate-in fade-in slide-in-from-top-2">
+                            <Label>Sites *</Label>
+                            <AuditeeSiteMultiSelect
+                                sites={auditeeSites}
+                                selectedSiteIds={siteIds}
+                                onChange={setSiteIds}
+                                disabledSiteIds={
+                                    isViewMode
+                                        ? new Set(auditeeSites.map((site) => site.id))
+                                        : disabledAuditeeSiteIds
+                                }
+                                emptyMessage="No sites available — add a site under Companies first"
+                            />
+                            <AuditeeSiteSelectionSummary count={siteIds.length} />
+                            {isViewMode && siteIds.length === 0 ? (
+                                <p className="text-xs text-muted-foreground">No sites assigned.</p>
+                            ) : null}
                         </div>
                     )}
 

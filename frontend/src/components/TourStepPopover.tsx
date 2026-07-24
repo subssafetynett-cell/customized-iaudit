@@ -141,9 +141,12 @@ export const TourStepPopover: React.FC<TourStepPopoverProps> = ({
       if (targetId === 'viewport' || position === 'center') {
         setIsFallback(true);
         setTargetRect(null);
+        if (position === 'center') setResolvedPosition('center');
         setCoords({
-          top: window.innerHeight / 2,
-          left: window.innerWidth / 2 + (position === 'center' ? 80 : 0),
+          top: window.innerHeight / 2 + (position === 'center' ? offsetY : 0),
+          left:
+            window.innerWidth / 2 +
+            (position === 'center' ? 80 + offsetX : 0),
         });
         return;
       }
@@ -163,24 +166,19 @@ export const TourStepPopover: React.FC<TourStepPopoverProps> = ({
         setTargetRect(visibleRect);
         setIsFallback(false);
 
-        if (position === 'center') {
-          setResolvedPosition('center');
-          setCoords({
-            top: window.innerHeight / 2 + offsetY,
-            left: window.innerWidth / 2 + 80 + offsetX,
-          });
-          if (intervalId) clearInterval(intervalId);
-          return;
-        }
-
-        const preferred: PopoverPosition = position === 'center' ? 'right' : position;
-        const tryOrder: PopoverPosition[] = [
+        // `center` is handled above (early return); remaining positions are edge anchors.
+        const preferred: Exclude<PopoverPosition, 'center'> =
+          position === 'top' || position === 'bottom' || position === 'left' || position === 'right'
+            ? position
+            : 'right';
+        const candidates: Exclude<PopoverPosition, 'center'>[] = [
           preferred,
           'bottom',
           'left',
           'top',
           'right',
-        ].filter((p, i, arr) => arr.indexOf(p) === i);
+        ];
+        const tryOrder = candidates.filter((p, i) => candidates.indexOf(p) === i);
 
         let chosen = preferred;
         let anchor = getAnchorCoords(rect, preferred);

@@ -26,12 +26,10 @@ import {
     PHONE_10_ERROR_MESSAGE,
 } from "@/lib/validation";
 import { apiFetch } from "@/lib/api";
+import type { AuditeeSiteOption } from "@/lib/orgSites";
 
-export type InviteAuditeeSiteOption = {
-    id: string;
-    name: string;
-    companyName: string;
-};
+/** @deprecated Prefer AuditeeSiteOption from @/lib/orgSites */
+export type InviteAuditeeSiteOption = AuditeeSiteOption;
 
 interface InviteAuditeeModalProps {
     open: boolean;

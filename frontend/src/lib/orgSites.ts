@@ -1,22 +1,31 @@
 /** Flatten nested company → sites into API-shaped site rows (with company relation). */
+export type OrgSiteRow = {
+    id: number;
+    name: string;
+    userId?: string | number | null;
+    company: { id: string | number; name: string };
+};
+
 export function sitesFromCompanies(
     companies: Array<{
         id: string | number;
         name: string;
-        sites?: Array<Record<string, unknown> & { id: string | number; name: string }>;
+        sites?: Array<{
+            id: string | number;
+            name: string;
+            userId?: string | number | null;
+        }>;
     }>,
-): Array<Record<string, unknown> & { id: number; name: string; company: { id: unknown; name: string } }> {
-    const list: Array<
-        Record<string, unknown> & { id: number; name: string; company: { id: unknown; name: string } }
-    > = [];
+): OrgSiteRow[] {
+    const list: OrgSiteRow[] = [];
     for (const company of companies) {
         for (const site of company.sites ?? []) {
             const id = Number.parseInt(String(site.id), 10);
             if (!Number.isFinite(id) || id < 1) continue;
             list.push({
-                ...site,
                 id,
                 name: String(site.name ?? ""),
+                userId: site.userId ?? null,
                 company: { id: company.id, name: company.name },
             });
         }
@@ -41,3 +50,10 @@ export function siteAvailableForAuditeeInvite(
 ): boolean {
     return !siteHasAssignedAuditee(site, auditeeUserIds);
 }
+
+/** Site option shape for auditee invite / assign UI. */
+export type AuditeeSiteOption = {
+    id: string;
+    name: string;
+    companyName: string;
+};

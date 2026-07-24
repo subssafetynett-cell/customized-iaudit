@@ -16,7 +16,7 @@ import {
     AuditeeSiteSelectionSummary,
 } from "@/components/AuditeeSiteMultiSelect";
 import { apiFetch } from "@/lib/api";
-import type { InviteAuditeeSiteOption } from "@/components/InviteAuditeeModal";
+import type { AuditeeSiteOption } from "@/lib/orgSites";
 
 type AuditeeSummary = {
     id: number;
@@ -29,7 +29,7 @@ interface AssignAuditeeSiteModalProps {
     open: boolean;
     onClose: () => void;
     auditee: AuditeeSummary | null;
-    sites: InviteAuditeeSiteOption[];
+    sites: AuditeeSiteOption[];
     disabledSiteIds?: ReadonlySet<string>;
     onSuccess?: () => void;
 }

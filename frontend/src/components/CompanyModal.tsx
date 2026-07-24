@@ -43,7 +43,7 @@ interface Props {
     country?: string;
     postalCode?: string;
     standards: any[];
-  }) => void | Promise<void>;
+  }) => void | Promise<void | unknown>;
   initialData?: Partial<Company>;
   mode?: "create" | "edit";
   hideCancel?: boolean;

@@ -521,7 +521,7 @@ const AuditPrograms = () => {
             const originalLeadIsAuditee = (fullProgram.auditors ?? []).some(
                 (a) => a.id.toString() === leadId && isAuditeeRole(a.role),
             );
-            toast.warn(
+            toast.warning(
                 originalLeadIsAuditee
                     ? "The originally assigned lead auditor is an auditee and cannot be selected. A suitable auditor has been chosen instead."
                     : "The originally assigned lead auditor is no longer available. A suitable auditor has been chosen instead.",

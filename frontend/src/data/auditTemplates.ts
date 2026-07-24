@@ -9,6 +9,8 @@ export interface SectionContent {
 export interface ChecklistContent {
     clause: string;
     question: string;
+    /** Optional auditor guidance shown under the question (e.g. EOSH “Intent of the Question”). */
+    intent?: string;
     findings: string;
     evidence: string;
     ofi: string;
@@ -18,7 +20,9 @@ export interface ChecklistContent {
     assignToName?: string;
     assignToEmail?: string;
     findingType?: "C" | "OFI" | "Min" | "Maj";
-}export interface ClauseChecklistContent {
+}
+
+export interface ClauseChecklistContent {
     clauseId: string; // e.g., "5"
     title: string; // "Leadership and Commitment"
     subClauses: string[]; // List of sub-clause titles e.g. "5.1 Leadership...", "5.2 Policy..."
@@ -67,6 +71,8 @@ export interface AuditTemplate {
     description: string;
     isIntegrated?: boolean;
     isTripleMapping?: boolean;
+    /** Always listed in the audit-plan template dropdown (not filtered out by ISO standard). */
+    alwaysAvailableInPlan?: boolean;
     content: SectionContent[] | ChecklistContent[] | ClauseChecklistContent[] | ProcessAuditContent[];
 }
 
@@ -153,6 +159,7 @@ export function getAuditPlanTemplateOptions(
     const isMultiStandard = standards.length > 1;
 
     const filtered = auditTemplates.filter((template) => {
+        if (template.alwaysAvailableInPlan) return true;
         if (standards.length === 0) return true;
         return standards.some((s) => {
             const tStd = template.standard.toUpperCase();
@@ -169,6 +176,7 @@ export function getAuditPlanTemplateOptions(
         const integratedChecklist = filtered.find((t) => t.isIntegrated);
         const uniqueTypes = new Set<TemplateType>();
         return filtered.filter((t) => {
+            if (t.alwaysAvailableInPlan) return true;
             if (t.type === "checklist") {
                 if (integratedChecklist) return t.id === integratedChecklist.id;
                 if (uniqueTypes.has("checklist")) return false;
@@ -2750,5 +2758,106 @@ export const auditTemplates: AuditTemplate[] = [
         content: [
             { id: "1" }
         ]
-    }
+    },
+    {
+        id: "eosh-capability-manufacturing-checklist",
+        title: "EOSH Internal Audit Checklist — Capability Manufacturing",
+        standard: "ISO 45001",
+        type: "checklist",
+        alwaysAvailableInPlan: true,
+        description:
+            "EOSH internal audit checklist for Capability – Manufacturing (HSHEQPF 03.08, Revision 0). Assesses safety leadership roles, competency, onboarding, and contractor training. Score findings as Compliant (C) / OFI / Minor / Major; source form used Compliance (2) / Meet with Exceptions (1) / Non-Compliance (0).",
+        content: [
+            {
+                clause: "CM-1",
+                question:
+                    "Safety Manager position filled: Is there a person with formal ownership of plant safety? How much experience does this person have in Safety? Who do they report to?",
+                intent:
+                    "What do we want to assess with this question? Evaluate whether the Safety Manager role is filled by someone competent for the plant’s risk profile, with adequate experience and training, and whether reporting lines support independence (e.g. reporting to Plant Manager rather than Production, to avoid conflict between safety and output).",
+                findings: "",
+                evidence: "",
+                ofi: "",
+            },
+            {
+                clause: "CM-2",
+                question:
+                    "Key plant leadership positions filled: Are Plant, QSE, Operations / Production, Engineering / Maintenance, Warehouse / Logistics, and HR leadership roles filled with people who have the competence for their roles in the site Safety Management System (SMS)?",
+                intent:
+                    "What do we want to assess with this question? Confirm leadership competence in SMS programs that apply to their roles (e.g. Management of Change, Incident Reporting, RCA / CAPA), not only that the job titles exist.",
+                findings: "",
+                evidence: "",
+                ofi: "",
+            },
+            {
+                clause: "CM-3",
+                question:
+                    "Key roles affecting site Safety performance: Are roles responsible for high-risk work, contractor management, and risk assessments filled by people who are trained and capable of performing the necessary tasks?",
+                intent:
+                    "What do we want to assess with this question? Even if roles are combined or contracted out, there must be clear ownership and accountability for high-risk work control, contractor management, and risk assessment.",
+                findings: "",
+                evidence: "",
+                ofi: "",
+            },
+            {
+                clause: "CM-4",
+                question:
+                    "Competency, skill, and training documentation: Are competency, skill, and training requirements for each position defined and documented (e.g. in Job Descriptions or equivalent)?",
+                intent:
+                    "What do we want to assess with this question? Ensure the plant has identified position-related OH&S hazards and documented the certifications, skills, and training needed so workers can deal with them safely.",
+                findings: "",
+                evidence: "",
+                ofi: "",
+            },
+            {
+                clause: "CM-5",
+                question:
+                    "When a key associate in any of the roles identified in section 1 above leaves the company, does the plant have a process in place to ensure their primary responsibilities are covered and a back-up person is identified?",
+                intent:
+                    "What do we want to assess with this question? Assess whether there is adequate bench strength with trained backups available for key roles if anyone leaves.",
+                findings: "",
+                evidence: "",
+                ofi: "",
+            },
+            {
+                clause: "CM-6",
+                question:
+                    "Is there a formal and documented training and onboarding program as described in LSR 3.2 to ensure employees understand the job requirements and are competent to perform the functions and to ensure that only qualified people do the job?",
+                intent:
+                    "What do we want to assess with this question? Based on key Safety positions and competencies required for each role, check whether the plant has defined an onboarding program fit for purpose (LSR 3 / 3.2), covering areas such as risk assessment, high-risk work, safety orientation, KORE requirements, and Life Saving Rules.",
+                findings: "",
+                evidence: "",
+                ofi: "",
+            },
+            {
+                clause: "CM-7",
+                question:
+                    "Is there evidence that the initial training and onboarding process as described in LSR 3.2 is implemented and followed, including measurement of training effectiveness and actions when training is not accomplished?",
+                intent:
+                    "What do we want to assess with this question? Verify that onboarding records and training are tracked and supervised, with effectiveness checks (e.g. a coach observing a trainee) and follow-up when training is incomplete.",
+                findings: "",
+                evidence: "",
+                ofi: "",
+            },
+            {
+                clause: "CM-8",
+                question:
+                    "Is there an annual capability review in place to determine competency and identify further training needs?",
+                intent:
+                    "What do we want to assess with this question? Confirm there is an annual refresher or equivalent process at regular intervals to identify competency gaps and further training needs for existing employees.",
+                findings: "",
+                evidence: "",
+                ofi: "",
+            },
+            {
+                clause: "CM-9",
+                question:
+                    "Contractors and temporary workers: Does the plant have a procedure/process to ensure contractors and temporary employees are trained prior to beginning work on site, and is there evidence that it is followed?",
+                intent:
+                    "What do we want to assess with this question? Ensure a defined process for identifying competencies for contractors and verifying pre-start training (see PRP-RQ-110 Contractor and Visitor Management for guidance).",
+                findings: "",
+                evidence: "",
+                ofi: "",
+            },
+        ],
+    },
 ];

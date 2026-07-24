@@ -233,7 +233,7 @@ export async function readValidatedAuditEvidenceFile(
 > {
     if (isLikelyImageFile(file)) {
         const imageResult = await readValidatedEvidenceImageFile(file);
-        if (!imageResult.ok) {
+        if (imageResult.ok === false) {
             return { ok: false, error: imageResult.error };
         }
         const mime = imageResult.dataUrl.startsWith("data:image/png")
@@ -247,7 +247,7 @@ export async function readValidatedAuditEvidenceFile(
 
     if (isLikelyPdfFile(file)) {
         const pdfResult = await readValidatedPdfFile(file);
-        if (!pdfResult.ok) {
+        if (pdfResult.ok === false) {
             return { ok: false, error: pdfResult.error };
         }
         return {
@@ -280,10 +280,10 @@ export async function processAuditEvidenceFileList(
     for (let i = 0; i < files.length; i++) {
         const file = files[i];
         const result = await readValidatedAuditEvidenceFile(file);
-        if (result.ok) {
-            accepted.push(result.media);
-        } else {
+        if (result.ok === false) {
             rejected.push({ fileName: file.name, error: result.error });
+        } else {
+            accepted.push(result.media);
         }
     }
     return { accepted, rejected };

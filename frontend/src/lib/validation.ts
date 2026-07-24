@@ -31,6 +31,15 @@ export function isTenDigitPhone(value: string): boolean {
 
 export const PHONE_10_ERROR_MESSAGE = `Phone number must be exactly ${PHONE_DIGITS_LENGTH} digits.`;
 
+/** Person first/last name (matches server PERSON_NAME_MAX). */
+export const PERSON_NAME_MAX = 100;
+
+export const PERSON_NAME_ERROR_MESSAGE = `Name must be at most ${PERSON_NAME_MAX} characters.`;
+
+export function normalizePersonNameInput(value: string): string {
+    return String(value || "").slice(0, PERSON_NAME_MAX);
+}
+
 /** Department name (matches server DEPT_TEXT_LIMITS.name). */
 export const DEPT_NAME_MAX = 100;
 
@@ -63,6 +72,22 @@ export const STREET_ADDRESS_ERROR_MESSAGE = `Street address must be at most ${ST
 
 /** Max stored logo payload (base64 data URL, matches server COMPANY_TEXT_LIMITS.logo). */
 export const COMPANY_LOGO_MAX_CHARS = 500_000;
+
+/** Raw upload size before compression (10 MB). */
+export const COMPANY_LOGO_MAX_FILE_BYTES = 10 * 1024 * 1024;
+
+export const COMPANY_LOGO_TYPE_ERROR_MESSAGE =
+    "Invalid logo image. Use PNG, JPEG, or WebP.";
+
+export function getCompanyLogoFileSizeError(fileSizeBytes: number): string | null {
+    if (!Number.isFinite(fileSizeBytes) || fileSizeBytes <= 0) {
+        return "Logo file is empty or invalid.";
+    }
+    if (fileSizeBytes > COMPANY_LOGO_MAX_FILE_BYTES) {
+        return "Logo image is too large. Use a smaller file (under 10MB).";
+    }
+    return null;
+}
 
 export function isWithinMaxLength(value: string, max: number): boolean {
     return String(value || "").trim().length <= max;

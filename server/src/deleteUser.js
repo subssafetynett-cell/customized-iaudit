@@ -47,6 +47,29 @@ export async function deleteUserCompletely(userId) {
             data: { userId: null },
         });
 
+        // Nonconformances / responses / reviews reference users with RESTRICT FKs — remove before user delete.
+        await tx.notification.deleteMany({
+            where: { recipientUserId: targetId },
+        });
+        await tx.nonconformanceReview.deleteMany({
+            where: { reviewedById: targetId },
+        });
+        await tx.nonconformanceActivity.deleteMany({
+            where: { actorId: targetId },
+        });
+        await tx.nonconformanceResponse.deleteMany({
+            where: { submittedById: targetId },
+        });
+        await tx.nonconformance.deleteMany({
+            where: {
+                OR: [
+                    { assigneeId: targetId },
+                    { reviewerId: targetId },
+                    { createdById: targetId },
+                ],
+            },
+        });
+
         await tx.user.delete({ where: { id: targetId } });
     });
 

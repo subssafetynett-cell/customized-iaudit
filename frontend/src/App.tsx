@@ -22,6 +22,10 @@ const AuditTemplates = lazy(() => import("./pages/AuditTemplates"));
 const ExecuteAuditTemplate = lazy(() => import("./pages/ExecuteAuditTemplate"));
 const AuditExecute = lazy(() => import("./pages/AuditExecute"));
 const AuditFindings = lazy(() => import("./pages/AuditFindings"));
+const Nonconformances = lazy(() => import("./pages/Nonconformances"));
+const NonconformanceDetail = lazy(() => import("./pages/NonconformanceDetail"));
+const NcDashboard = lazy(() => import("./pages/NcDashboard"));
+const Notifications = lazy(() => import("./pages/Notifications"));
 const Subscription = lazy(() => import("./pages/Subscription"));
 const SubscriptionSuccess = lazy(() => import("./pages/SubscriptionSuccess"));
 const SubscriptionDetails = lazy(() => import("./pages/SubscriptionDetails"));
@@ -32,7 +36,6 @@ const ProfileSettings = lazy(() => import("./pages/ProfileSettings"));
 const AccountSettings = lazy(() => import("./pages/AccountSettings"));
 const SuperAdmin = lazy(() => import("./pages/SuperAdmin"));
 const GettingStarted = lazy(() => import("./pages/GettingStarted"));
-const InviteAuditee = lazy(() => import("./pages/InviteAuditee"));
 
 const queryClient = new QueryClient();
 
@@ -83,7 +86,7 @@ const App = () => (
               <Route path="/companies" element={<Companies />} />
               <Route path="/company/:id" element={<CompanyDetail />} />
               <Route path="/users" element={<Users />} />
-              <Route path="/invite-auditee" element={<InviteAuditee />} />
+              <Route path="/invite-auditee" element={<Navigate to="/users" replace />} />
               <Route path="/audits" element={<AuditPrograms />} />
               <Route path="/audit-program" element={<AuditProgramPage />} />
               <Route path="/audit-program/create-plan" element={<CreateAuditPlanPage />} />
@@ -95,6 +98,10 @@ const App = () => (
               <Route path="/audit/execute/:id" element={<AuditExecute />} />
               <Route path="/audit-findings/:auditId/:findingId" element={<FindingAuditRedirect />} />
               <Route path="/audit-findings" element={<AuditFindings />} />
+              <Route path="/nonconformances" element={<Nonconformances />} />
+              <Route path="/nonconformances/:id" element={<NonconformanceDetail />} />
+              <Route path="/nc-dashboard" element={<NcDashboard />} />
+              <Route path="/notifications" element={<Notifications />} />
               <Route path="/feedback" element={<Feedback />} />
               <Route path="/subscription" element={<Subscription />} />
               <Route path="/subscription-details" element={<SubscriptionDetails />} />

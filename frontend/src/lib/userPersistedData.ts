@@ -420,7 +420,7 @@ function collectLegacySelfLocal(userId: number): unknown[] {
 
 
 
-export async function fetchGapAnalysesPersisted<T>(
+export async function fetchGapAnalysesPersisted<T extends { id: string }>(
 
     options?: PersistedDataOwnerOptions,
 
@@ -724,7 +724,7 @@ export async function deleteGapAnalysisPersisted(
 
 
 
-export async function fetchSelfAssessmentsPersisted<T>(
+export async function fetchSelfAssessmentsPersisted<T extends { id: string }>(
 
     options?: PersistedDataOwnerOptions,
 

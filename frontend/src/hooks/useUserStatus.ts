@@ -1,6 +1,10 @@
 import { useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { apiFetch, clearClientSession, clearSessionAndRedirectToLogin } from "@/lib/api";
+import {
+    apiFetch,
+    clearClientSession,
+    clearSessionAndRedirectToLogin,
+} from "@/lib/api";
 import { dispatchUserUpdated } from "@/lib/trialUtils";
 
 const CHECK_INTERVAL_MS = 15000; // Check every 15 seconds
@@ -22,7 +26,7 @@ export function useUserStatus() {
         } catch {
             // Corrupt data — log them out
             clearClientSession();
-            window.location.href = '/login';
+            window.location.href = "/login";
             return;
         }
 
@@ -30,8 +34,9 @@ export function useUserStatus() {
 
         try {
             const res = await apiFetch(`/users/${userId}/status`, { skipSessionLogout: true });
-            if (res.status === 401) {
-                clearSessionAndRedirectToLogin();
+            // Never treat auth failures here as logout — cookie races / proxy blips / optional
+            // polls must not kick a logged-in user back to /auth while navigating.
+            if (res.status === 401 || res.status === 403) {
                 return;
             }
             if (!res.ok) return; // Server error: don't force logout (could be temporary)
@@ -44,17 +49,28 @@ export function useUserStatus() {
             } else {
                 // Update localStorage with latest status (trial expiration, etc.)
                 const storedUserData = JSON.parse(storedUser);
-                const updatedUser = { 
-                    ...storedUserData, 
+                const serverRole =
+                    typeof data.role === "string" && data.role.trim()
+                        ? data.role.trim()
+                        : null;
+                const updatedUser = {
+                    ...storedUserData,
                     ...data,
-                    // Preserve properties that might not be in data but are in storedUser
-                    onboardingCompleted: data.onboardingCompleted ?? storedUserData.onboardingCompleted
+                    // Never let status payload wipe identity fields
+                    id: storedUserData.id,
+                    email: storedUserData.email ?? data.email,
+                    // Prefer authoritative server role so sidebar permissions stay correct
+                    role: serverRole ?? storedUserData.role,
+                    onboardingCompleted:
+                        data.onboardingCompleted ?? storedUserData.onboardingCompleted,
                 };
+                // Drop status-only flags that are not part of the user profile
+                delete (updatedUser as { exists?: boolean }).exists;
                 localStorage.setItem("user", JSON.stringify(updatedUser));
                 dispatchUserUpdated();
             }
         } catch {
-            // Network error: do not force logout to avoid disruping offline usage
+            // Network error: do not force logout to avoid disrupting offline usage
         }
     }, [navigate]);
 

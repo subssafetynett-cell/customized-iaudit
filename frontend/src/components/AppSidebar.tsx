@@ -1,12 +1,11 @@
-import { useEffect, useState } from "react";
-import { Building2, LayoutDashboard, FileText, ClipboardCheck, BookOpen, FileCheck, BarChart3, CreditCard, ChevronRight, Users, ClipboardList, AlertTriangle, ShieldCheck, MessageSquare, Rocket, UserPlus } from "lucide-react";
+import { type ComponentType } from "react";
+import { Building2, LayoutDashboard, FileText, ClipboardCheck, FileCheck, CreditCard, Users, ClipboardList, AlertTriangle, ShieldCheck, MessageSquare, Rocket, LayoutGrid } from "lucide-react";
 import { useLocation } from "react-router-dom";
-import { apiFetch } from "@/lib/api";
 import { NavLink } from "@/components/NavLink";
 import { cn } from "@/lib/utils";
-import { isAuditeeUser, AUDITEE_SIDEBAR_URLS } from "@/lib/auditeeAccess";
+import { AUDITEE_SIDEBAR_URLS } from "@/lib/auditeeAccess";
 import { useStoredUser } from "@/hooks/useStoredUser";
-
+import { isAuditeeRole } from "@/lib/userRoles";
 
 import {
   Sidebar,
@@ -18,7 +17,6 @@ import {
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
-  SidebarSeparator,
 } from "@/components/ui/sidebar";
 
 const dashboardNav = [
@@ -35,7 +33,8 @@ const managementNav = [
   { title: "Audit Plan", url: "/audit-program", icon: ClipboardCheck },
   { title: "Audit", url: "/audit", icon: ClipboardList },
   { title: "Findings", url: "/audit-findings", icon: AlertTriangle },
-  { title: "Invite Auditee", url: "/invite-auditee", icon: UserPlus },
+  { title: "Nonconformances", url: "/nonconformances", icon: ClipboardList },
+  { title: "NC Dashboard", url: "/nc-dashboard", icon: LayoutGrid },
   { title: "Audit Templates", url: "/audit-templates", icon: FileText },
 ];
 
@@ -44,292 +43,207 @@ const billingNav = [
   { title: "Subscription", url: "/subscription", icon: CreditCard },
 ];
 
+function readRoleFromStorage(): string | undefined {
+  try {
+    const raw = localStorage.getItem("user");
+    if (!raw) return undefined;
+    const parsed = JSON.parse(raw) as { role?: unknown };
+    return typeof parsed.role === "string" ? parsed.role : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function AppSidebar() {
   const location = useLocation();
   const currentPath = location.pathname;
-  const [canInviteAuditee, setCanInviteAuditee] = useState(false);
   const { user } = useStoredUser();
-  const isAuditee = isAuditeeUser(user as { role?: string } | null);
 
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const res = await apiFetch("/users/invite-auditee/access");
-        if (cancelled) return;
-        if (!res.ok) return;
-        const data = await res.json();
-        if (!cancelled) setCanInviteAuditee(data.allowed === true);
-      } catch {
-        if (!cancelled) setCanInviteAuditee(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  // Prefer live stored role; fall back to localStorage so a stale React state
+  // cannot briefly (or persistently) apply the reduced auditee menu.
+  const role =
+    (typeof user?.role === "string" && user.role) || readRoleFromStorage();
+  const isAuditee = isAuditeeRole(role);
 
-  const visibleManagementNav = managementNav.filter((item) => {
-    const path = item.url.split("?")[0];
-    if (isAuditee && !AUDITEE_SIDEBAR_URLS.has(path)) {
-      return false;
-    }
-    if (item.title === "Invite Auditee" && !canInviteAuditee) {
-      return false;
-    }
-    return true;
-  });
+  const filterForRole = <T extends { url: string }>(items: T[]): T[] => {
+    if (!isAuditee) return items;
+    return items.filter((item) => AUDITEE_SIDEBAR_URLS.has(item.url.split("?")[0]));
+  };
 
-  const visibleDashboardNav = dashboardNav.filter((item) => {
-    const path = item.url.split("?")[0];
-    if (isAuditee && !AUDITEE_SIDEBAR_URLS.has(path)) {
-      return false;
-    }
-    return true;
-  });
-
-  const visibleBillingNav = billingNav.filter((item) => {
-    const path = item.url.split("?")[0];
-    if (isAuditee && !AUDITEE_SIDEBAR_URLS.has(path)) {
-      return false;
-    }
-    return true;
-  });
+  const visibleDashboardNav = filterForRole(dashboardNav);
+  const visibleManagementNav = filterForRole(managementNav);
+  const visibleBillingNav = filterForRole(billingNav);
 
   const isActive = (path: string) => {
     if (path === "/companies") return currentPath === "/companies" || currentPath.startsWith("/company/");
     if (path === "/getting-started") return currentPath === "/getting-started";
     if (path === "/audit-findings") return currentPath === "/audit-findings";
+    if (path === "/nonconformances") {
+      // Exact list + detail routes only — do not match /nc-dashboard
+      return (
+        currentPath === "/nonconformances" ||
+        /^\/nonconformances\/[^/]+$/.test(currentPath)
+      );
+    }
+    if (path === "/nc-dashboard") {
+      return currentPath === "/nc-dashboard";
+    }
     const pathOnly = path.split("?")[0];
     return currentPath === pathOnly;
   };
 
   const isSuperAdminPage = currentPath === "/super-admin";
+  const isSuperAdminUser = String(role ?? "").trim().toLowerCase() === "superadmin";
+
+  const navButtonClass = (active: boolean) =>
+    cn(
+      "h-auto py-1.5 px-3 transition-all duration-200 group",
+      active ? "bg-[#ecfdf5] rounded-[14px]" : "rounded-lg",
+    );
+
+  const renderNavItem = (
+    item: { title: string; url: string; icon: ComponentType<{ className?: string }> },
+    opts?: { id?: string; end?: boolean; emphasize?: boolean },
+  ) => {
+    const active = isActive(item.url);
+    return (
+      <SidebarMenuItem key={item.title}>
+        <SidebarMenuButton asChild isActive={active} className={navButtonClass(active)}>
+          <NavLink
+            id={opts?.id}
+            to={item.url}
+            end={opts?.end}
+            className="flex items-center gap-3"
+          >
+            <div
+              className={cn(
+                "flex items-center justify-center rounded-lg p-1.5 transition-all duration-200",
+                active ? "bg-[#1e855e] text-white" : "bg-transparent text-slate-400",
+              )}
+            >
+              <item.icon className="h-[18px] w-[18px]" />
+            </div>
+            <span
+              className={cn(
+                "text-sm tracking-tight transition-colors flex-1",
+                opts?.emphasize
+                  ? "text-[#166534] font-bold"
+                  : active
+                    ? "text-[#1e855e] font-bold"
+                    : "text-slate-400 font-normal",
+              )}
+            >
+              {item.title}
+            </span>
+          </NavLink>
+        </SidebarMenuButton>
+      </SidebarMenuItem>
+    );
+  };
+
+  const managementTourId = (title: string): string | undefined => {
+    switch (title) {
+      case "Companies":
+        return "tour-step-companies";
+      case "Users":
+        return "tour-step-users";
+      case "Self Assessment":
+        return "tour-step-self-assessment";
+      case "Gap Analysis":
+        return "tour-step-gap-analysis";
+      case "Audit Program":
+        return "tour-step-audit-program-nav";
+      case "Audit Plan":
+        return "tour-step-audit-plan-nav";
+      case "Audit":
+        return "tour-step-audit-nav";
+      case "Findings":
+        return "tour-step-findings-nav";
+      case "Nonconformances":
+        return "tour-step-nonconformances-nav";
+      case "NC Dashboard":
+        return "tour-step-nc-dashboard-nav";
+      case "Audit Templates":
+        return "tour-step-audit-templates-nav";
+      default:
+        return undefined;
+    }
+  };
 
   return (
-    <Sidebar className="border-r border-slate-200 [&_[data-sidebar=sidebar]]:overflow-hidden">
+    <Sidebar className="border-r border-slate-200">
       <SidebarHeader className="shrink-0 p-0 gap-0">
         <div className="flex items-center justify-start p-0 m-0 pl-4">
           <img src="/iAudit Global-01.png" alt="iAudit Global" className="h-20 w-auto object-contain block" />
         </div>
       </SidebarHeader>
 
-      <SidebarContent className="flex min-h-0 flex-1 flex-col gap-0 overflow-hidden px-0 pt-0 mt-0">
-        <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-2 pb-2">
+      <SidebarContent className="flex min-h-0 flex-1 flex-col gap-0 overflow-y-auto overflow-x-hidden px-0 pt-0 mt-0">
+        <div className="px-2 pb-4">
         {!isSuperAdminPage ? (
           <>
-            <SidebarGroup className="py-0 px-2 mt-2 first:mt-0">
-              <SidebarGroupLabel className="text-[11px] font-bold tracking-[0.1em] uppercase text-slate-400 px-4 mb-0.5">
-                OVERVIEW
-              </SidebarGroupLabel>
-              <SidebarGroupContent>
-                <SidebarMenu className="gap-0.5">
-                  {visibleDashboardNav.map((item) => {
-                    const active = isActive(item.url);
-                    return (
-                      <SidebarMenuItem key={item.title}>
-                        <SidebarMenuButton
-                          asChild
-                          isActive={active}
-                          className={cn(
-                            "h-auto py-1.5 px-3 transition-all duration-200 group",
-                            active
-                              ? "bg-[#ecfdf5] rounded-[14px]"
-                              : "rounded-lg"
-                          )}
-                        >
-                          <NavLink to={item.url} end={item.url === "/"} className="flex items-center gap-3">
-                            <div className={cn(
-                              "flex items-center justify-center rounded-lg p-1.5 transition-all duration-200",
-                              active
-                                ? "bg-[#1e855e] text-white"
-                                : "bg-transparent text-slate-400"
-                            )}>
-                              <item.icon className="h-[18px] w-[18px]" />
-                            </div>
-                            <span className={cn(
-                              "text-sm tracking-tight transition-colors",
-                              item.title === "Start Onboarding"
-                                ? "text-[#166534] font-bold"
-                                : active
-                                  ? "text-[#1e855e] font-bold"
-                                  : "text-slate-400 font-normal"
-                            )}>{item.title}</span>
-                          </NavLink>
-                        </SidebarMenuButton>
-                      </SidebarMenuItem>
-                    );
-                  })}
-                </SidebarMenu>
-              </SidebarGroupContent>
-            </SidebarGroup>
+            {visibleDashboardNav.length > 0 && (
+              <SidebarGroup className="py-0 px-2 mt-2 first:mt-0">
+                <SidebarGroupLabel className="text-[11px] font-bold tracking-[0.1em] uppercase text-slate-400 px-4 mb-0.5">
+                  OVERVIEW
+                </SidebarGroupLabel>
+                <SidebarGroupContent>
+                  <SidebarMenu className="gap-0.5">
+                    {visibleDashboardNav.map((item) =>
+                      renderNavItem(item, {
+                        end: item.url === "/",
+                        emphasize: item.title === "Start Onboarding",
+                      }),
+                    )}
+                  </SidebarMenu>
+                </SidebarGroupContent>
+              </SidebarGroup>
+            )}
 
-            <SidebarGroup className="py-0 px-2 mt-2">
-              <SidebarGroupLabel className="text-[11px] font-bold tracking-[0.1em] uppercase text-slate-400 px-4 mb-0.5">
-                MANAGEMENT
-              </SidebarGroupLabel>
-              <SidebarGroupContent>
-                <SidebarMenu className="gap-0.5">
-                  {visibleManagementNav.map((item) => {
-                    const active = isActive(item.url);
-                    return (
-                      <SidebarMenuItem key={item.title}>
-                        <SidebarMenuButton
-                          asChild
-                          isActive={active}
-                          className={cn(
-                            "h-auto py-1 px-3 transition-all duration-200 group",
-                            active
-                              ? "bg-[#ecfdf5] rounded-[14px]"
-                              : "rounded-lg"
-                          )}
-                        >
-                          <NavLink 
-                            id={
-                              item.title === "Companies"
-                                ? "tour-step-companies"
-                                : item.title === "Users"
-                                  ? "tour-step-users"
-                                  : item.title === "Self Assessment"
-                                    ? "tour-step-self-assessment"
-                                    : item.title === "Gap Analysis"
-                                      ? "tour-step-gap-analysis"
-                                      : item.title === "Audit Program"
-                                        ? "tour-step-audit-program-nav"
-                                        : item.title === "Audit Plan"
-                                          ? "tour-step-audit-plan-nav"
-                                          : item.title === "Audit"
-                                            ? "tour-step-audit-nav"
-                                            : item.title === "Findings"
-                                              ? "tour-step-findings-nav"
-                                              : item.title === "Invite Auditee"
-                                                ? "tour-step-invite-auditee-nav"
-                                                : item.title === "Audit Templates"
-                                                ? "tour-step-audit-templates-nav"
-                                                : undefined
-                            }
-                            to={item.url} 
-                            className="flex items-center gap-3"
-                          >
-                            <div className={cn(
-                              "flex items-center justify-center rounded-lg p-1.5 transition-all duration-200",
-                              active
-                                ? "bg-[#1e855e] text-white"
-                                : "bg-transparent text-slate-400"
-                            )}>
-                              <item.icon className="h-[18px] w-[18px]" />
-                            </div>
-                            <span className={cn(
-                              "text-sm tracking-tight transition-colors flex-1",
-                              active
-                                ? "text-[#1e855e] font-bold"
-                                : "text-slate-400 font-normal"
-                            )}>{item.title}</span>
-                          </NavLink>
-                        </SidebarMenuButton>
-                      </SidebarMenuItem>
-                    );
-                  })}
-                </SidebarMenu>
-              </SidebarGroupContent>
-            </SidebarGroup>
+            {visibleManagementNav.length > 0 && (
+              <SidebarGroup className="py-0 px-2 mt-2">
+                <SidebarGroupLabel className="text-[11px] font-bold tracking-[0.1em] uppercase text-slate-400 px-4 mb-0.5">
+                  MANAGEMENT
+                </SidebarGroupLabel>
+                <SidebarGroupContent>
+                  <SidebarMenu className="gap-0.5">
+                    {visibleManagementNav.map((item) =>
+                      renderNavItem(item, { id: managementTourId(item.title) }),
+                    )}
+                  </SidebarMenu>
+                </SidebarGroupContent>
+              </SidebarGroup>
+            )}
 
-            <SidebarGroup className="py-0 px-2 mt-2 mb-1">
-              <SidebarGroupLabel className="text-[11px] font-bold tracking-[0.1em] uppercase text-slate-400 px-4 mb-0.5">
-                BILLING
-              </SidebarGroupLabel>
-              <SidebarGroupContent>
-                <SidebarMenu className="gap-0.5">
-                  {visibleBillingNav.map((item) => {
-                    const active = isActive(item.url);
-                    return (
-                      <SidebarMenuItem key={item.title}>
-                        <SidebarMenuButton
-                          asChild
-                          isActive={active}
-                          className={cn(
-                            "h-auto py-1 px-3 transition-all duration-200 group",
-                            active
-                              ? "bg-[#ecfdf5] rounded-[14px]"
-                              : "rounded-lg"
-                          )}
-                        >
-                          <NavLink to={item.url} className="flex items-center gap-3">
-                            <div className={cn(
-                              "flex items-center justify-center rounded-lg p-1.5 transition-all duration-200",
-                              active
-                                ? "bg-[#1e855e] text-white"
-                                : "bg-transparent text-slate-400"
-                            )}>
-                              <item.icon className="h-[18px] w-[18px]" />
-                            </div>
-                            <span className={cn(
-                              "text-sm tracking-tight transition-colors",
-                              active
-                                ? "text-[#1e855e] font-bold"
-                                : "text-slate-400 font-normal"
-                            )}>{item.title}</span>
-                          </NavLink>
-                        </SidebarMenuButton>
-                      </SidebarMenuItem>
-                    );
-                  })}
-                </SidebarMenu>
-              </SidebarGroupContent>
-            </SidebarGroup>
+            {visibleBillingNav.length > 0 && (
+              <SidebarGroup className="py-0 px-2 mt-2 mb-1">
+                <SidebarGroupLabel className="text-[11px] font-bold tracking-[0.1em] uppercase text-slate-400 px-4 mb-0.5">
+                  {visibleBillingNav.some((i) => i.url === "/subscription")
+                    ? "BILLING"
+                    : "SUPPORT"}
+                </SidebarGroupLabel>
+                <SidebarGroupContent>
+                  <SidebarMenu className="gap-0.5">
+                    {visibleBillingNav.map((item) => renderNavItem(item))}
+                  </SidebarMenu>
+                </SidebarGroupContent>
+              </SidebarGroup>
+            )}
 
-            {/* Super Admin Section - only shown to superadmin users */}
-            {(() => {
-              const userString = localStorage.getItem('user');
-              if (!userString) return null;
-              try {
-                const user = JSON.parse(userString);
-                if (user.role !== 'superadmin') return null;
-              } catch (e) {
-                return null;
-              }
-
-              return (
-                <SidebarGroup className="py-0 px-2 mt-2">
-                  <SidebarGroupLabel className="text-[11px] font-bold tracking-[0.1em] uppercase text-slate-400 px-4 mb-0.5">
-                    SUPER ADMIN
-                  </SidebarGroupLabel>
-                  <SidebarGroupContent>
-                    <SidebarMenu className="gap-0.5">
-                      <SidebarMenuItem>
-                        <SidebarMenuButton
-                          asChild
-                          isActive={isActive("/super-admin")}
-                          className={cn(
-                            "h-auto py-1 px-3 transition-all duration-200 group",
-                            isActive("/super-admin")
-                              ? "bg-[#ecfdf5] rounded-[14px]"
-                              : "rounded-lg"
-                          )}
-                        >
-                          <NavLink to="/super-admin" className="flex items-center gap-3">
-                            <div className={cn(
-                              "flex items-center justify-center rounded-lg p-1.5 transition-all duration-200",
-                              isActive("/super-admin")
-                                ? "bg-[#1e855e] text-white"
-                                : "bg-transparent text-slate-400"
-                            )}>
-                              <ShieldCheck className="h-[18px] w-[18px]" />
-                            </div>
-                            <span className={cn(
-                              "text-sm tracking-tight transition-colors",
-                              isActive("/super-admin")
-                                ? "text-[#1e855e] font-bold"
-                                : "text-slate-400 font-normal"
-                            )}>Super Admin</span>
-                          </NavLink>
-                        </SidebarMenuButton>
-                      </SidebarMenuItem>
-                    </SidebarMenu>
-                  </SidebarGroupContent>
-                </SidebarGroup>
-              );
-            })()}
+            {isSuperAdminUser && (
+              <SidebarGroup className="py-0 px-2 mt-2">
+                <SidebarGroupLabel className="text-[11px] font-bold tracking-[0.1em] uppercase text-slate-400 px-4 mb-0.5">
+                  SUPER ADMIN
+                </SidebarGroupLabel>
+                <SidebarGroupContent>
+                  <SidebarMenu className="gap-0.5">
+                    {renderNavItem(
+                      { title: "Super Admin", url: "/super-admin", icon: ShieldCheck },
+                    )}
+                  </SidebarMenu>
+                </SidebarGroupContent>
+              </SidebarGroup>
+            )}
           </>
         ) : (
           <SidebarGroup className="py-0 px-2 mt-2">
@@ -338,20 +252,7 @@ export function AppSidebar() {
             </SidebarGroupLabel>
             <SidebarGroupContent>
               <SidebarMenu className="gap-0.5">
-                <SidebarMenuItem>
-                  <SidebarMenuButton
-                    asChild
-                    isActive={true}
-                    className="h-auto py-1.5 px-3 bg-[#ecfdf5] rounded-[14px] group"
-                  >
-                    <NavLink to="/super-admin" className="flex items-center gap-3">
-                      <div className="flex items-center justify-center rounded-lg p-1.5 bg-[#1e855e] text-white transition-all duration-200">
-                        <Users className="h-[18px] w-[18px]" />
-                      </div>
-                      <span className="text-sm tracking-tight text-[#1e855e] font-bold transition-colors">Users</span>
-                    </NavLink>
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
+                {renderNavItem({ title: "Users", url: "/super-admin", icon: Users })}
               </SidebarMenu>
             </SidebarGroupContent>
           </SidebarGroup>

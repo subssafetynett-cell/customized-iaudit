@@ -10,13 +10,31 @@ export default defineConfig(({ mode }) => ({
   server: {
     host: "::",
     port: 8080,
+    strictPort: true,
+    headers: {
+      "X-Frame-Options": "SAMEORIGIN",
+      "Content-Security-Policy": "frame-ancestors 'self';",
+    },
     // When VITE_API_BASE_URL is empty, the app uses same-origin `/api/...` (Docker nginx).
     // This proxy lets `npm run dev` reach the backend without changing `.env`.
     proxy: {
       "/api": {
-        target: "http://localhost:3001",
+        target: "http://127.0.0.1:3001",
         changeOrigin: true,
-        cookieDomainRewrite: "localhost",
+        // Keep session cookies usable on http://localhost:8080 (never require Secure in local).
+        cookieDomainRewrite: "",
+        configure: (proxy) => {
+          proxy.on("proxyRes", (proxyRes) => {
+            const raw = proxyRes.headers["set-cookie"];
+            if (!raw) return;
+            const list = Array.isArray(raw) ? raw : [raw];
+            proxyRes.headers["set-cookie"] = list.map((cookie) =>
+              String(cookie)
+                .replace(/;\s*Secure/gi, "")
+                .replace(/;\s*Domain=[^;]*/gi, ""),
+            );
+          });
+        },
       },
     },
     hmr: {

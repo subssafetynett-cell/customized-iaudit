@@ -1,9 +1,9 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { Bell, Search, User, LogOut, Settings, UserCircle, ChevronRight, GraduationCap, X, Info, HelpCircle, GraduationCap as GraduationCapIcon } from "lucide-react";
+import { LogOut, Settings, UserCircle, ChevronRight, GraduationCap, X, HelpCircle, GraduationCap as GraduationCapIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { SidebarTrigger } from "@/components/ui/sidebar";
-import { Separator } from "@/components/ui/separator";
+import { NotificationBell } from "@/components/NotificationBell";
 import {
   Dialog,
   DialogContent,
@@ -97,6 +97,8 @@ export function TopNav() {
         <SidebarTrigger className="lg:hidden h-10 w-10 text-muted-foreground mr-2" />
       </div>
       <div className="flex items-center gap-4">
+        <NotificationBell />
+
         {/* Tour Button */}
         <Button
           variant="outline"

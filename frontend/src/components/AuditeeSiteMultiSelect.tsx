@@ -1,10 +1,10 @@
 import { MapPin } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
 import { cn } from "@/lib/utils";
-import type { InviteAuditeeSiteOption } from "@/components/InviteAuditeeModal";
+import type { AuditeeSiteOption } from "@/lib/orgSites";
 
 interface AuditeeSiteMultiSelectProps {
-    sites: InviteAuditeeSiteOption[];
+    sites: AuditeeSiteOption[];
     selectedSiteIds: string[];
     onChange: (siteIds: string[]) => void;
     disabledSiteIds?: ReadonlySet<string>;

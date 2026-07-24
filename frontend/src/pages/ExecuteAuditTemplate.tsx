@@ -238,11 +238,22 @@ const ExecuteAuditTemplate = () => {
         setEditableChecklist(newList);
     };
 
+    const handleEditChecklistField = (
+        index: number,
+        field: "question" | "intent" | "clause",
+        newValue: string,
+    ) => {
+        const newList = [...editableChecklist];
+        newList[index] = { ...newList[index], [field]: newValue };
+        setEditableChecklist(newList);
+    };
+
     const handleAddQuestion = (clause: string, insertAfterIndex: number) => {
         const newList = [...editableChecklist];
         const newQuestion: ChecklistContent = {
             clause,
             question: "",
+            intent: "",
             findings: "",
             evidence: "",
             ofi: ""
@@ -1486,12 +1497,20 @@ const ExecuteAuditTemplate = () => {
                                                     <TableCell className="align-top">
                                                         {showEditMode ? (
                                                             <div className="flex items-start gap-2">
-                                                                <Textarea 
-                                                                    value={item.question}
-                                                                    onChange={(e) => handleEditQuestion(index, e.target.value)}
-                                                                    className="min-h-[80px] resize-y"
-                                                                    placeholder="Enter question text..."
-                                                                />
+                                                                <div className="flex-1 space-y-2">
+                                                                    <Textarea 
+                                                                        value={item.question}
+                                                                        onChange={(e) => handleEditChecklistField(index, "question", e.target.value)}
+                                                                        className="min-h-[80px] resize-y"
+                                                                        placeholder="Enter question text..."
+                                                                    />
+                                                                    <Textarea
+                                                                        value={item.intent || ""}
+                                                                        onChange={(e) => handleEditChecklistField(index, "intent", e.target.value)}
+                                                                        className="min-h-[70px] resize-y border-sky-200 bg-sky-50/40"
+                                                                        placeholder="Intent of the question…"
+                                                                    />
+                                                                </div>
                                                                 <Button 
                                                                     variant="ghost" 
                                                                     size="icon" 
@@ -1503,8 +1522,16 @@ const ExecuteAuditTemplate = () => {
                                                                 </Button>
                                                             </div>
                                                         ) : (
-                                                            <>
-                                                                {item.question}
+                                                            <div className="space-y-2">
+                                                                <div className="text-sm leading-relaxed whitespace-pre-wrap">{item.question}</div>
+                                                                {item.intent ? (
+                                                                    <div className="rounded-lg bg-sky-50/80 border border-sky-100 p-3 text-[11px] text-slate-600 leading-relaxed whitespace-pre-wrap">
+                                                                        <p className="text-[10px] font-bold uppercase tracking-wide text-sky-700 mb-1">
+                                                                            Intent of the Question
+                                                                        </p>
+                                                                        {item.intent}
+                                                                    </div>
+                                                                ) : null}
                                                                 {!templateViewOnly && (
                                                                     <QuestionEvidenceUploadPreview
                                                                         uploadId={
@@ -1531,7 +1558,7 @@ const ExecuteAuditTemplate = () => {
                                                                         }
                                                                     />
                                                                 )}
-                                                            </>
+                                                            </div>
                                                         )}
                                                     </TableCell>
 

@@ -946,7 +946,6 @@ const SelfAssessment = () => {
         setIsSendingReport(true);
         try {
             const reportPayload = {
-                to: safeEmail,
                 companyName: newAssessment.companyName,
                 auditorName: newAssessment.auditorName,
                 auditCompany: newAssessment.auditCompany,
@@ -956,62 +955,18 @@ const SelfAssessment = () => {
                 questions: newAssessment.questions,
             };
 
-            let pdfBase64: string | undefined;
-            try {
-                const blob = await generatePDF(newAssessment, true);
-                if (blob) {
-                    pdfBase64 = await new Promise<string>((resolve, reject) => {
-                        const reader = new FileReader();
-                        reader.onloadend = () => {
-                            const result = reader.result;
-                            if (typeof result !== "string") {
-                                reject(new Error("Failed to encode PDF"));
-                                return;
-                            }
-                            resolve(result.split(",")[1] ?? "");
-                        };
-                        reader.onerror = () => reject(reader.error ?? new Error("Failed to read PDF"));
-                        reader.readAsDataURL(blob);
-                    });
-                }
-            } catch (err) {
-                console.warn("PDF generation failed; sending HTML-only report email", err);
-            }
-
-            const sendReportEmail = async (includePdf: boolean) =>
-                apiFetch("/send-assessment-report", {
-                    method: "POST",
-                    body: JSON.stringify({
-                        ...reportPayload,
-                        ...(includePdf && pdfBase64 ? { pdfBase64 } : {}),
-                    }),
-                });
-
-            let res = await sendReportEmail(Boolean(pdfBase64));
-            let sentWithPdf = Boolean(pdfBase64);
-
-            if (!res.ok && res.status === 413 && pdfBase64) {
-                console.warn("Report email payload too large with PDF; retrying HTML-only");
-                res = await sendReportEmail(false);
-                sentWithPdf = false;
-            }
+            const res = await apiFetch("/send-assessment-report", {
+                method: "POST",
+                body: JSON.stringify(reportPayload),
+            });
 
             if (!res.ok) {
                 const data = await res.json().catch(() => ({}));
-                if (res.status === 413) {
-                    throw new Error(
-                        "The report is too large to email. Your results are saved — download the PDF from the results page.",
-                    );
-                }
                 throw new Error(
                     typeof data?.error === "string" ? data.error : "Failed to send report email",
                 );
             }
-            toast.success(
-                sentWithPdf
-                    ? "Report PDF sent to your email!"
-                    : "Assessment report sent to your email!",
-            );
+            toast.success("Assessment report sent to your account email!");
         } catch (err) {
             console.error("Assessment report email failed", err);
             const message =

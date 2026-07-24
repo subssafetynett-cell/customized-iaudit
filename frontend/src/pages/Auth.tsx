@@ -10,6 +10,9 @@ import gsap from "gsap";
 import { PhoneInputWithCountryCode } from "@/components/PhoneInputWithCountryCode";
 import { DEFAULT_PHONE_COUNTRY_CODE } from "@/lib/phoneCountries";
 import { PASSWORD_REGEX, PASSWORD_ERROR_MESSAGE, isTenDigitPhone, normalizePhone10Digits, PHONE_10_ERROR_MESSAGE } from "@/lib/validation";
+
+/** Must match server PASSWORD_RESET_CODE_MIN_LENGTH (high-entropy reset token). */
+const PASSWORD_RESET_CODE_MIN_LENGTH = 20;
 import {
     clearSuperAdminSession,
     hasValidSuperAdminSession,
@@ -276,8 +279,8 @@ export default function Auth() {
     const handleResetPasswordSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
         setErrorMessage("");
-        if (forgotOtp.trim().length < 6) {
-            setErrorMessage("Enter the 6-digit code from your email.");
+        if (forgotOtp.trim().length < PASSWORD_RESET_CODE_MIN_LENGTH) {
+            setErrorMessage("Paste the full reset code from your email.");
             return;
         }
         if (!PASSWORD_REGEX.test(forgotNewPassword)) {
@@ -456,7 +459,24 @@ export default function Auth() {
             if ((profile as { role?: string }).role === "superadmin") {
                 localStorage.setItem("isSuperAdminAuthenticated", "true");
             }
-            navigate("/");
+            window.dispatchEvent(new Event("user-updated"));
+            // Confirm httpOnly session cookie is usable before entering the app.
+            // Prevents a race where the next page loads with localStorage but no cookie → instant logout.
+            try {
+                const sessionRes = await apiFetch("/auth/session", { skipSessionLogout: true });
+                if (!sessionRes.ok) {
+                    clearClientSession();
+                    throw new Error(
+                        "Signed in, but the browser did not keep the session cookie. Use http://localhost (not an IP address) and allow cookies.",
+                    );
+                }
+            } catch (sessionErr) {
+                if (sessionErr instanceof Error && sessionErr.message.includes("session cookie")) {
+                    throw sessionErr;
+                }
+                // Network blip after login — still proceed; later calls will re-check.
+            }
+            navigate("/", { replace: true });
 
         } catch (error: any) {
             console.error('Login error:', error);
@@ -895,8 +915,8 @@ export default function Auth() {
                                         <h2 className="text-xl font-bold text-[#111827] tracking-tight">Reset password</h2>
                                         <p className="text-sm text-[#6B7280] mt-1">
                                             {forgotStep === "email"
-                                                ? "Enter your account email and we will send you a verification code."
-                                                : `Enter the code sent to ${resetEmail} and choose a new password.`}
+                                                ? "Enter your account email and we will send you a secure reset code."
+                                                : `Paste the reset code sent to ${resetEmail} and choose a new password. Codes expire in 5 minutes.`}
                                         </p>
                                     </div>
 
@@ -934,17 +954,15 @@ export default function Auth() {
                                     ) : (
                                         <form onSubmit={handleResetPasswordSubmit} className="space-y-4">
                                             <div className="space-y-2">
-                                                <Label className="text-xs font-semibold text-[#4B5563] uppercase tracking-wider">Verification code</Label>
+                                                <Label className="text-xs font-semibold text-[#4B5563] uppercase tracking-wider">Reset code</Label>
                                                 <Input
                                                     type="text"
-                                                    inputMode="numeric"
-                                                    maxLength={6}
-                                                    placeholder="123456"
+                                                    placeholder="Paste reset code from email"
                                                     value={forgotOtp}
-                                                    onChange={(e) => setForgotOtp(e.target.value.replace(/\D/g, ""))}
+                                                    onChange={(e) => setForgotOtp(e.target.value.trim())}
                                                     disabled={isSubmitting}
                                                     autoComplete="one-time-code"
-                                                    className="h-14 text-center text-2xl tracking-[0.35em] font-mono bg-[#F9FAFB] border-[#E5E7EB] rounded-xl text-[#111827] placeholder:text-[#9CA3AF] focus:ring-1 focus:ring-[#00875B]"
+                                                    className="h-12 text-sm font-mono bg-[#F9FAFB] border-[#E5E7EB] rounded-xl text-[#111827] placeholder:text-[#9CA3AF] focus:ring-1 focus:ring-[#00875B]"
                                                 />
                                             </div>
                                             <div className="space-y-2">
@@ -993,7 +1011,7 @@ export default function Auth() {
                                             </div>
                                             <p className="text-[11px] text-[#6B7280]">{PASSWORD_ERROR_MESSAGE}</p>
                                             <Button
-                                                disabled={isSubmitting || forgotOtp.length !== 6}
+                                                disabled={isSubmitting || forgotOtp.trim().length < PASSWORD_RESET_CODE_MIN_LENGTH}
                                                 type="submit"
                                                 className="w-full h-12 text-base font-bold bg-[#00875B] text-white hover:bg-[#006E4A] rounded-xl shadow-lg shadow-[#00875B]/10 transition-all duration-200 active:scale-[0.98]"
                                             >
