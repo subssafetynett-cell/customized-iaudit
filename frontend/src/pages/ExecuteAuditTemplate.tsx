@@ -1539,7 +1539,7 @@ const ExecuteAuditTemplate = () => {
                                         const showIntent = eoshChecklistShowsIntentColumn(template.id);
                                         const eoshColSpan = showIntent ? 8 : 7;
                                         const score = eoshScoreFromFindings(checklistData[index]?.findings);
-                                        const rowNo = String(item.clause || "").replace(/^(CM|RTM|CP|CG|CS)-?/i, "") || String(index + 1);
+                                        const rowNo = String(item.clause || "").replace(/^[A-Za-z0-9]+-/i, "") || String(index + 1);
 
                                         if (eoshLayout) {
                                             return (
