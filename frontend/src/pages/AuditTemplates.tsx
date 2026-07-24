@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { auditTemplates, AuditStandard } from "@/data/auditTemplates";
+import { auditTemplates, AuditStandard, AuditTemplate } from "@/data/auditTemplates";
 import { TourStepPopover } from "@/components/TourStepPopover";
 import {
     AUDIT_TEMPLATES_LIST_MAX_STEP,
@@ -97,12 +97,78 @@ const AuditTemplates = () => {
         return matchesSearch && matchesStandard;
     });
 
+    const standardTemplates = filteredTemplates.filter((t) => !t.module);
+    const eoshTemplates = filteredTemplates.filter((t) => t.module === "EOSH");
+
     const tourFeaturedTemplate =
         auditTemplates.find((t) => t.id === AUDIT_TEMPLATES_TOUR_TEMPLATE_ID) ??
         auditTemplates.find((t) => t.id === AUDIT_TEMPLATES_TOUR_TEMPLATE_FALLBACK_ID) ??
         filteredTemplates[0] ??
         auditTemplates[0] ??
         null;
+
+    const openTemplatePreview = (template: AuditTemplate) => {
+        const path = auditTemplatesTourActive
+            ? `/audit-templates/${template.id}/execute?auditTemplatesTour=true&auditTemplatesStep=6&preview=true`
+            : `/audit-templates/${template.id}/execute?preview=true`;
+        navigate(path);
+    };
+
+    const renderTemplateCard = (template: AuditTemplate) => {
+        const isTourFeatured = tourFeaturedTemplate?.id === template.id;
+        return (
+            <Card
+                key={template.id}
+                className={cn(
+                    "hover:shadow-lg transition-shadow border-slate-200 flex flex-col rounded-2xl",
+                    auditTemplatesTourActive &&
+                        auditTemplatesTourStep === 4 &&
+                        isTourFeatured &&
+                        "ring-[4px] ring-emerald-500/80 ring-offset-2 z-[60] relative",
+                )}
+            >
+                <CardHeader>
+                    <div className="flex justify-between items-start mb-2">
+                        <div className="p-2 bg-emerald-100 rounded-lg">
+                            <FileText className="w-6 h-6 text-emerald-600" />
+                        </div>
+                        <Badge variant="outline" className="bg-slate-100 text-slate-600 border-slate-200">
+                            {template.standard}
+                        </Badge>
+                    </div>
+                    <CardTitle className="text-xl text-slate-900 line-clamp-1" title={template.title}>
+                        {template.title}
+                    </CardTitle>
+                    <CardDescription className="line-clamp-2 min-h-[40px]">
+                        {template.description}
+                    </CardDescription>
+                </CardHeader>
+                <CardContent className="flex-1">
+                    <div className="flex gap-2">
+                        <Badge variant="secondary" className="text-xs font-normal">
+                            {template.type === "checklist" ? "Checklist Based" : "Section Based"}
+                        </Badge>
+                        <Badge variant="secondary" className="text-xs font-normal">
+                            {template.content.length}{" "}
+                            {template.type === "checklist" ? "Questions" : "Sections"}
+                        </Badge>
+                    </div>
+                </CardContent>
+                <CardFooter className="pt-4 border-t border-slate-100">
+                    <Button
+                        id={isTourFeatured ? "tour-step-audit-templates-view" : undefined}
+                        className={cn(
+                            "w-full bg-slate-900 hover:bg-slate-800 text-white gap-2",
+                            isTourFeatured && tourTemplatesHighlight(5),
+                        )}
+                        onClick={() => openTemplatePreview(template)}
+                    >
+                        <Eye className="w-4 h-4" /> View
+                    </Button>
+                </CardFooter>
+            </Card>
+        );
+    };
 
     return (
         <div className="flex-1 p-8 pt-6 bg-white min-h-screen relative">
@@ -158,71 +224,27 @@ const AuditTemplates = () => {
 
                 <div
                     id="tour-step-audit-templates-grid"
-                    className={cn(
-                        "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6",
-                        tourTemplatesHighlight(4),
-                    )}
+                    className={cn("space-y-10", tourTemplatesHighlight(4))}
                 >
-                    {filteredTemplates.map((template) => {
-                        const isTourFeatured =
-                            tourFeaturedTemplate?.id === template.id;
-                        return (
-                            <Card
-                                key={template.id}
-                                className={cn(
-                                    "hover:shadow-lg transition-shadow border-slate-200 flex flex-col rounded-2xl",
-                                    auditTemplatesTourActive &&
-                                        auditTemplatesTourStep === 4 &&
-                                        isTourFeatured &&
-                                        "ring-[4px] ring-emerald-500/80 ring-offset-2 z-[60] relative",
-                                )}
-                            >
-                                <CardHeader>
-                                    <div className="flex justify-between items-start mb-2">
-                                        <div className="p-2 bg-emerald-100 rounded-lg">
-                                            <FileText className="w-6 h-6 text-emerald-600" />
-                                        </div>
-                                        <Badge variant="outline" className="bg-slate-100 text-slate-600 border-slate-200">
-                                            {template.standard}
-                                        </Badge>
-                                    </div>
-                                    <CardTitle className="text-xl text-slate-900 line-clamp-1" title={template.title}>{template.title}</CardTitle>
-                                    <CardDescription className="line-clamp-2 min-h-[40px]">{template.description}</CardDescription>
-                                </CardHeader>
-                                <CardContent className="flex-1">
-                                    <div className="flex gap-2">
-                                        <Badge variant="secondary" className="text-xs font-normal">
-                                            {template.type === 'checklist' ? 'Checklist Based' : 'Section Based'}
-                                        </Badge>
-                                        <Badge variant="secondary" className="text-xs font-normal">
-                                            {template.content.length} {template.type === 'checklist' ? 'Questions' : 'Sections'}
-                                        </Badge>
-                                    </div>
-                                </CardContent>
-                                <CardFooter className="pt-4 border-t border-slate-100">
-                                    <Button
-                                        id={
-                                            isTourFeatured
-                                                ? "tour-step-audit-templates-view"
-                                                : undefined
-                                        }
-                                        className={cn(
-                                            "w-full bg-slate-900 hover:bg-slate-800 text-white gap-2",
-                                            isTourFeatured && tourTemplatesHighlight(5),
-                                        )}
-                                        onClick={() => {
-                                            const path = auditTemplatesTourActive
-                                                ? `/audit-templates/${template.id}/execute?auditTemplatesTour=true&auditTemplatesStep=6&preview=true`
-                                                : `/audit-templates/${template.id}/execute?preview=true`;
-                                            navigate(path);
-                                        }}
-                                    >
-                                        <Eye className="w-4 h-4" /> View
-                                    </Button>
-                                </CardFooter>
-                            </Card>
-                        );
-                    })}
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                        {standardTemplates.map(renderTemplateCard)}
+                    </div>
+
+                    {eoshTemplates.length > 0 && (
+                        <section className="space-y-4">
+                            <div className="space-y-1 border-b border-slate-200 pb-3">
+                                <h3 className="text-xl font-semibold tracking-tight text-slate-900">
+                                    EOSH module
+                                </h3>
+                                <p className="text-sm text-slate-500">
+                                    EOSH-specific internal audit checklists (Capability Manufacturing, Capability RTM, Climate Protection, Compressed Gases, Confined Space, and management system).
+                                </p>
+                            </div>
+                            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                                {eoshTemplates.map(renderTemplateCard)}
+                            </div>
+                        </section>
+                    )}
 
                     {filteredTemplates.length === 0 && (
                         <div className="col-span-full py-12 text-center">
