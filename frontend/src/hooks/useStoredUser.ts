@@ -17,9 +17,13 @@ export function useStoredUser() {
     const refresh = () => setUserState(readStoredUser());
     window.addEventListener("user-updated", refresh);
     window.addEventListener("storage", refresh);
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refresh);
     return () => {
       window.removeEventListener("user-updated", refresh);
       window.removeEventListener("storage", refresh);
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", refresh);
     };
   }, []);
 

@@ -47,10 +47,21 @@ async function logoutIfExpired() {
     if (!hasClientAuthSession()) return;
     if (!isSessionExpired()) return;
 
+    // Client clock said expired — only logout when the server also rejects the session.
+    // Network errors / temporary 5xx must not bounce sidebar navigation to /auth.
     const stillValid = await confirmSessionWithServer();
-    if (!stillValid) {
-        clearSessionAndRedirectToLogin();
+    if (stillValid) return;
+
+    // Double-check: if the cookie is missing but local profile remains, keep the UI
+    // session and let an explicit logout or next successful auth call reconcile.
+    try {
+        const res = await fetch(resolveApiUrl("/auth/session"), { credentials: "include" });
+        if (res.status >= 500 || res.status === 0) return;
+        if (res.ok) return;
+    } catch {
+        return;
     }
+    clearSessionAndRedirectToLogin();
 }
 
 /**

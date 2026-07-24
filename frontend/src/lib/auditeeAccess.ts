@@ -21,6 +21,7 @@ const AUDITEE_EXACT_PATHS = new Set([
     "/audit",
     "/audit-findings",
     "/nonconformances",
+    "/nc-dashboard",
     "/notifications",
     "/profile-settings",
     "/account-settings",
@@ -51,5 +52,7 @@ export const AUDITEE_SIDEBAR_URLS = new Set([
     "/audit",
     "/audit-findings",
     "/nonconformances",
+    "/nc-dashboard",
     "/feedback",
+    "/subscription",
 ]);

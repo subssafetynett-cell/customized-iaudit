@@ -23,7 +23,7 @@ export type AppNotification = {
 };
 
 export async function listNotifications(): Promise<AppNotification[]> {
-    const res = await apiFetch("/notifications");
+    const res = await apiFetch("/notifications", { skipSessionLogout: true });
     const data = await res.json().catch(() => []);
     if (!res.ok) {
         throw new Error(
@@ -37,7 +37,10 @@ export async function listNotifications(): Promise<AppNotification[]> {
 export async function markNotificationRead(
     id: number | string,
 ): Promise<AppNotification> {
-    const res = await apiFetch(`/notifications/${id}/read`, { method: "PATCH" });
+    const res = await apiFetch(`/notifications/${id}/read`, {
+        method: "PATCH",
+        skipSessionLogout: true,
+    });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
         throw new Error(
@@ -49,7 +52,10 @@ export async function markNotificationRead(
 }
 
 export async function markAllNotificationsRead(): Promise<{ updated: number }> {
-    const res = await apiFetch("/notifications/read-all", { method: "PATCH" });
+    const res = await apiFetch("/notifications/read-all", {
+        method: "PATCH",
+        skipSessionLogout: true,
+    });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
         throw new Error(
