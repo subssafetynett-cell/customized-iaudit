@@ -51,6 +51,7 @@ import {
     resolveDepartmentsFromProgram,
 } from "@/lib/auditProgramDepartments";
 import { CLAUSE_MATRIX, ClauseMatrixRow } from "@/data/clauseMapping";
+import { EOSH_EXCEL_MODULE_META } from "@/data/eoshExcelModuleTemplates";
 import { TourStepPopover } from "@/components/TourStepPopover";
 import {
     AUDIT_PLAN_TOUR_TOTAL_STEPS,
@@ -64,7 +65,14 @@ interface Clause {
     standard?: string;
 }
 
-// CLAUSES array removed in favor of imported CLAUSE_MATRIX
+const EOSH_MODULE_PREFIX = "EOSH Module: ";
+
+function isEoshModuleProgram(program: any): boolean {
+    const scheduleData = program?.scheduleData;
+    if (scheduleData?.criteriaType === "module") return true;
+    const iso = String(program?.isoStandard || "");
+    return iso.includes(EOSH_MODULE_PREFIX);
+}
 
 const AuditProgramPage = () => {
     const [sites, setSites] = useState<any[]>([]);
@@ -226,64 +234,75 @@ const AuditProgramPage = () => {
         const programPeriods = calculatePeriods(program.frequency, program.duration, loadData.startDate || program.createdAt);
         const executions: any[] = [];
         const isoStandard = program.isoStandard || "";
-        const is9001 = isoStandard.includes("9001");
-        const is14001 = isoStandard.includes("14001");
-        const is45001 = isoStandard.includes("45001");
+        const moduleProgram = isEoshModuleProgram(program);
+        const is9001 = !moduleProgram && isoStandard.includes("9001");
+        const is14001 = !moduleProgram && isoStandard.includes("14001");
+        const is45001 = !moduleProgram && isoStandard.includes("45001");
+        const customRows = (loadData.customRows || []) as { id: string; text: string }[];
 
         programPeriods.forEach((periodLabel, colIndex) => {
             const selectedClauses: Clause[] = [];
-            CLAUSE_MATRIX.forEach((matrixRow, rowIndex) => {
-                if (program.scheduleData?.[`${rowIndex}-${colIndex}`]) {
-                    // Check each potential standard column
-                    const stds = [
-                        { key: 'iso9001', label: '9001', active: is9001 },
-                        { key: 'iso14001', label: '14001', active: is14001 },
-                        { key: 'iso45001', label: '45001', active: is45001 }
-                    ];
 
-                    stds.forEach(std => {
-                        if (std.active) {
-                            const clauseName = (matrixRow as any)[std.key];
-                            if (clauseName && clauseName !== "Corresponding Clause does not exist") {
-                                selectedClauses.push({
-                                    id: `${matrixRow.id}-${std.label}`,
-                                    name: clauseName,
-                                    isHeading: matrixRow.isHeading,
-                                    standard: std.label
-                                });
-                            }
-                        }
-                    });
-                }
-            });
-
-            // If clauses were selected, add them
-            if (selectedClauses.length > 0) {
-                const executionId = `${program.name} - ${periodLabel}`;
-                executions.push({
-                    id: executionId,
-                    programId: program.id,
-                    title: executionId,
-                    period: periodLabel,
-                    clauseCount: selectedClauses.length,
-                    clauses: selectedClauses,
-                    site: sites.find(s => s.id === program.siteId)
+            if (moduleProgram) {
+                EOSH_EXCEL_MODULE_META.forEach((mod, rowIndex) => {
+                    if (loadData?.[`${rowIndex}-${colIndex}`]) {
+                        selectedClauses.push({
+                            id: mod.id,
+                            name: mod.sectionTitle,
+                            standard: "EOSH",
+                        });
+                    }
                 });
             } else {
-                // FALLBACK: If no clauses selected for this SPECIFIC period but it exists in the cycle,
-                // we still create a card for it so the user sees every month.
-                // We leave the clauses empty instead of populating it with all clauses.
-                const executionId = `${program.name} - ${periodLabel}`;
-                executions.push({
-                    id: executionId,
-                    programId: program.id,
-                    title: executionId,
-                    period: periodLabel,
-                    clauseCount: 0,
-                    clauses: [],
-                    site: sites.find(s => s.id === program.siteId)
+                CLAUSE_MATRIX.forEach((matrixRow, rowIndex) => {
+                    if (loadData?.[`${rowIndex}-${colIndex}`]) {
+                        const stds = [
+                            { key: "iso9001", label: "9001", active: is9001 },
+                            { key: "iso14001", label: "14001", active: is14001 },
+                            { key: "iso45001", label: "45001", active: is45001 },
+                        ];
+
+                        stds.forEach((std) => {
+                            if (std.active) {
+                                const clauseName = (matrixRow as any)[std.key];
+                                if (clauseName && clauseName !== "Corresponding Clause does not exist") {
+                                    selectedClauses.push({
+                                        id: `${matrixRow.id}-${std.label}`,
+                                        name: clauseName,
+                                        isHeading: matrixRow.isHeading,
+                                        standard: std.label,
+                                    });
+                                }
+                            }
+                        });
+                    }
                 });
             }
+
+            const customSelected = customRows.filter(
+                (row) => loadData?.[`custom_${row.id}-${colIndex}`],
+            );
+            customSelected.forEach((row) => {
+                selectedClauses.push({
+                    id: `custom_${row.id}`,
+                    name: row.text?.trim() || "Custom Requirement",
+                    standard: moduleProgram ? "EOSH" : "Custom",
+                });
+            });
+
+            // Only show a card when something is scheduled for this month
+            if (selectedClauses.length === 0) return;
+
+            const executionId = `${program.name} - ${periodLabel}`;
+            executions.push({
+                id: executionId,
+                programId: program.id,
+                title: executionId,
+                period: periodLabel,
+                clauseCount: selectedClauses.length,
+                clauses: selectedClauses,
+                site: sites.find((s) => s.id === program.siteId),
+            });
         });
 
         return executions;
