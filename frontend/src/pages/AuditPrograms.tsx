@@ -58,6 +58,8 @@ import {
     IAUDIT_FOOTER_RESERVE_MM,
     imageAssetToBuffer,
 } from "@/utils/pdfBranding";
+import { EOSH_EXCEL_MODULE_META } from "@/data/eoshExcelModuleTemplates";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 
 const ISO_STANDARDS = [
     "ISO 9001:2015 - Quality Management System",
@@ -66,7 +68,47 @@ const ISO_STANDARDS = [
     "ISO 22000:2018 - Food Safety Management System",
 ];
 
+const EOSH_MODULE_PREFIX = "EOSH Module: ";
+
+const AUDIT_MODULES = EOSH_EXCEL_MODULE_META.map((m) => ({
+    id: m.id,
+    label: m.sectionTitle,
+    value: `${EOSH_MODULE_PREFIX}${m.sectionTitle}`,
+}));
+
+type CriteriaType = "iso" | "module";
+type ModuleFamily = "eosh" | "qfs-kore";
+
+function isEoshModuleValue(value: string): boolean {
+    return value.startsWith(EOSH_MODULE_PREFIX);
+}
+
+function detectCriteriaType(
+    isoStandard: string | null | undefined,
+    scheduleData: Record<string, unknown> | null | undefined,
+): CriteriaType {
+    if (scheduleData?.criteriaType === "module" || scheduleData?.criteriaType === "iso") {
+        return scheduleData.criteriaType as CriteriaType;
+    }
+    const parts = (isoStandard || "").split(", ").map((s) => s.trim()).filter(Boolean);
+    if (parts.length > 0 && parts.every(isEoshModuleValue)) return "module";
+    return "iso";
+}
+
+function detectModuleFamily(
+    scheduleData: Record<string, unknown> | null | undefined,
+    isoStandard: string | null | undefined,
+): ModuleFamily | null {
+    if (scheduleData?.moduleFamily === "eosh" || scheduleData?.moduleFamily === "qfs-kore") {
+        return scheduleData.moduleFamily as ModuleFamily;
+    }
+    const parts = (isoStandard || "").split(", ").map((s) => s.trim()).filter(Boolean);
+    if (parts.length > 0 && parts.every(isEoshModuleValue)) return "eosh";
+    return null;
+}
+
 function standardDisplayLabel(std: string): string {
+    if (isEoshModuleValue(std)) return std.replace(EOSH_MODULE_PREFIX, "");
     if (std.includes("22000")) return "ISO 22000:2018";
     if (std.includes("9001")) return "ISO 9001:2015";
     if (std.includes("14001")) return "ISO 14001:2015";
@@ -75,6 +117,7 @@ function standardDisplayLabel(std: string): string {
 }
 
 function standardBadgeLabel(std: string): string {
+    if (isEoshModuleValue(std)) return std.replace(EOSH_MODULE_PREFIX, "");
     if (std.includes("22000")) return "22000";
     if (std.includes("9001")) return "9001";
     if (std.includes("14001")) return "14001";
@@ -155,13 +198,21 @@ const YEARS = Array.from({ length: 10 }, (_, i) => (new Date().getFullYear() + i
 
 function splitScheduleData(loadData: Record<string, unknown> | null | undefined) {
     const data = loadData ?? {};
-    const { customRows, startDate, departmentIds, departmentNames, ...rest } = data;
+    const { customRows, startDate, departmentIds, departmentNames, criteriaType, moduleFamily, ...rest } = data;
     return {
         customRows: (Array.isArray(customRows) ? customRows : []) as { id: string; text: string }[],
         startDate: typeof startDate === "string" ? startDate : undefined,
         departmentIds: Array.isArray(departmentIds)
             ? departmentIds.map((id) => String(id))
             : [],
+        criteriaType:
+            criteriaType === "module" || criteriaType === "iso"
+                ? (criteriaType as CriteriaType)
+                : undefined,
+        moduleFamily:
+            moduleFamily === "eosh" || moduleFamily === "qfs-kore"
+                ? (moduleFamily as ModuleFamily)
+                : undefined,
         selectedCells: rest as Record<string, boolean>,
     };
 }
@@ -216,6 +267,7 @@ const AuditPrograms = () => {
     const [scrollToScheduleOnShow, setScrollToScheduleOnShow] = useState(false);
     const scheduleMatrixRef = useRef<HTMLDivElement>(null);
     const [loading, setLoading] = useState(false);
+    const [listLoading, setListLoading] = useState(true);
     const [sites, setSites] = useState<any[]>([]);
     const [companies, setCompanies] = useState<any[]>([]);
     const [auditors, setAuditors] = useState<any[]>([]);
@@ -251,6 +303,8 @@ const AuditPrograms = () => {
     const [currentId, setCurrentId] = useState<number | null>(null);
     const [auditName, setAuditName] = useState("");
     const [selectedStandards, setSelectedStandards] = useState<string[]>([]);
+    const [criteriaType, setCriteriaType] = useState<CriteriaType>("iso");
+    const [moduleFamily, setModuleFamily] = useState<ModuleFamily | null>(null);
     const [frequency, setFrequency] = useState("Bi-annually");
     const [duration, setDuration] = useState(3);
     const [selectedSite, setSelectedSite] = useState("");
@@ -266,19 +320,40 @@ const AuditPrograms = () => {
     const itemsPerPage = 8;
 
     useEffect(() => {
-        const fetchData = async () => {
+        let cancelled = false;
+
+        const loadPrograms = async () => {
+            try {
+                const programsRes = await apiFetch(`/audit-programs?scope=org`);
+                const programsData = programsRes.ok ? await programsRes.json() : [];
+                if (cancelled) return;
+                setAuditPrograms(Array.isArray(programsData) ? programsData : []);
+                if (!programsRes.ok) {
+                    toast.error("Failed to load audit programs");
+                }
+            } catch (error) {
+                console.error("Failed to fetch audit programs:", error);
+                if (!cancelled) {
+                    toast.error("Failed to load audit programs");
+                }
+            } finally {
+                if (!cancelled) setListLoading(false);
+            }
+        };
+
+        const loadFormBootstrap = async () => {
             try {
                 const user = JSON.parse(localStorage.getItem('user') || '{}');
-                const [sitesRes, companiesRes, usersRes, programsRes] = await Promise.all([
+                const [sitesRes, companiesRes, usersRes] = await Promise.all([
                     apiFetch("/sites"),
                     apiFetch("/companies"),
                     apiFetch("/users"),
-                    apiFetch(`/audit-programs?scope=org&full=true`),
                 ]);
+                if (cancelled) return;
+
                 const sitesData = sitesRes.ok ? await sitesRes.json() : [];
                 const companiesData = companiesRes.ok ? await companiesRes.json() : [];
                 let usersData = usersRes.ok ? await usersRes.json() : [];
-                const programsData = programsRes.ok ? await programsRes.json() : [];
 
                 if (user && user.id) {
                     if (Array.isArray(usersData)) {
@@ -297,23 +372,26 @@ const AuditPrograms = () => {
                 setSites(sitesList);
                 setCompanies(Array.isArray(companiesData) ? companiesData : []);
                 setAuditors(usersEligibleAsAuditors(Array.isArray(usersData) ? usersData : []));
-                setAuditPrograms(Array.isArray(programsData) ? programsData : []);
 
-                if (!sitesRes.ok || !usersRes.ok || !programsRes.ok) {
-                    toast.error("Some data failed to load from server");
+                if (!sitesRes.ok || !usersRes.ok) {
+                    toast.error("Some form data failed to load from server");
                 }
             } catch (error) {
-                console.error("Failed to fetch data:", error);
-                toast.error("Failed to load data from server");
+                console.error("Failed to fetch form bootstrap data:", error);
             }
         };
-        fetchData();
+
+        loadPrograms();
+        loadFormBootstrap();
+
+        return () => {
+            cancelled = true;
+        };
     }, []);
 
     const fetchPrograms = async () => {
         try {
-            const user = JSON.parse(localStorage.getItem('user') || '{}');
-            const res = await apiFetch(`/audit-programs?scope=org&full=true`);
+            const res = await apiFetch(`/audit-programs?scope=org`);
             if (res.ok) {
                 const data = await res.json();
                 setAuditPrograms(Array.isArray(data) ? data : []);
@@ -405,9 +483,25 @@ const AuditPrograms = () => {
     }, [showSchedule, scrollToScheduleOnShow]);
 
     const handleGenerateSchedule = () => {
-        if (!auditName || selectedStandards.length === 0 || !selectedSite) {
-            toast.error("Please fill in Audit Name, Standard(s) and Site");
+        if (!auditName || !selectedSite) {
+            toast.error("Please fill in Audit Name and Site");
             return;
+        }
+        if (criteriaType === "iso" && selectedStandards.length === 0) {
+            toast.error("Please fill in Audit Name, ISO Standard(s) and Site");
+            return;
+        }
+        if (criteriaType === "module") {
+            if (moduleFamily === "qfs-kore") {
+                toast.error(
+                    "QFS KORE modules are not available yet. Select EOSH Audit Checklist.",
+                );
+                return;
+            }
+            if (moduleFamily !== "eosh") {
+                toast.error("Please select EOSH Audit Checklist or QFS KORE Audit Checklist");
+                return;
+            }
         }
         if (showSchedule) {
             scrollToScheduleMatrix();
@@ -415,7 +509,11 @@ const AuditPrograms = () => {
             setScrollToScheduleOnShow(true);
             setShowSchedule(true);
         }
-        toast.success("Schedule updated!");
+        toast.success(
+            criteriaType === "module" && moduleFamily === "eosh"
+                ? "Select EOSH modules below to build the schedule"
+                : "Schedule updated!",
+        );
     };
 
     const toggleCell = (row: number | string, col: number) => {
@@ -435,6 +533,18 @@ const AuditPrograms = () => {
 
     const handleSaveProgram = async () => {
         if (view !== "edit" && !guardTrialCreate("auditProgram", auditPrograms.length)) {
+            return;
+        }
+        if (!auditName || !selectedSite) {
+            toast.error("Please fill in Audit Name and Site");
+            return;
+        }
+        if (selectedStandards.length === 0) {
+            toast.error(
+                criteriaType === "module"
+                    ? "Please select at least one EOSH module in the schedule section"
+                    : "Please select at least one ISO Standard",
+            );
             return;
         }
 
@@ -460,6 +570,8 @@ const AuditPrograms = () => {
                         startDate: programStartDate.toISOString(),
                         departmentIds: selectedDepartmentIds,
                         departmentNames: selectedDepartments.map((dept) => dept.name),
+                        criteriaType,
+                        moduleFamily: criteriaType === "module" ? moduleFamily : null,
                     },
                     userId: user.id
                 })
@@ -548,8 +660,19 @@ const AuditPrograms = () => {
                 customRows: loadedCustomRows,
                 startDate: loadedStartDate,
                 departmentIds: loadedDepartmentIds,
+                criteriaType: loadedCriteriaType,
+                moduleFamily: loadedModuleFamily,
                 selectedCells: loadedCells,
             } = splitScheduleData(fullProgram.scheduleData);
+            const nextCriteria =
+                loadedCriteriaType ||
+                detectCriteriaType(fullProgram.isoStandard, fullProgram.scheduleData);
+            setCriteriaType(nextCriteria);
+            setModuleFamily(
+                loadedModuleFamily ||
+                    detectModuleFamily(fullProgram.scheduleData, fullProgram.isoStandard) ||
+                    (nextCriteria === "module" ? "eosh" : null),
+            );
             setSelectedCells(loadedCells);
             setCustomRows(loadedCustomRows);
             setSelectedDepartmentIds(loadedDepartmentIds);
@@ -582,8 +705,19 @@ const AuditPrograms = () => {
                 customRows: loadedCustomRows,
                 startDate: loadedStartDate,
                 departmentIds: loadedDepartmentIds,
+                criteriaType: loadedCriteriaType,
+                moduleFamily: loadedModuleFamily,
                 selectedCells: loadedCells,
             } = splitScheduleData(fullProgram.scheduleData);
+            const nextCriteria =
+                loadedCriteriaType ||
+                detectCriteriaType(fullProgram.isoStandard, fullProgram.scheduleData);
+            setCriteriaType(nextCriteria);
+            setModuleFamily(
+                loadedModuleFamily ||
+                    detectModuleFamily(fullProgram.scheduleData, fullProgram.isoStandard) ||
+                    (nextCriteria === "module" ? "eosh" : null),
+            );
             setSelectedCells(loadedCells);
             setCustomRows(loadedCustomRows);
             setSelectedDepartmentIds(loadedDepartmentIds);
@@ -602,6 +736,8 @@ const AuditPrograms = () => {
         setCurrentId(null);
         setAuditName("");
         setSelectedStandards([]);
+        setCriteriaType("iso");
+        setModuleFamily(null);
         setFrequency("Bi-annually");
         setDuration(3);
         setSelectedSite("");
@@ -623,13 +759,29 @@ const AuditPrograms = () => {
             return;
         }
         if (auditTourStep === 4) {
-            if (!auditName || selectedStandards.length === 0 || !selectedSite) {
-                toast.error("Please fill in Audit Name, Standard(s) and Site");
+            if (!auditName || !selectedSite) {
+                toast.error("Please fill in Audit Name and Site");
+                return;
+            }
+            if (criteriaType === "iso" && selectedStandards.length === 0) {
+                toast.error("Please fill in Audit Name, ISO Standard(s) and Site");
+                return;
+            }
+            if (criteriaType === "module" && moduleFamily !== "eosh") {
+                toast.error(
+                    moduleFamily === "qfs-kore"
+                        ? "QFS KORE modules are not available yet. Select EOSH Audit Checklist."
+                        : "Please select EOSH Audit Checklist",
+                );
                 return;
             }
             setScrollToScheduleOnShow(true);
             setShowSchedule(true);
-            toast.success("Schedule generated!");
+            toast.success(
+                criteriaType === "module"
+                    ? "Select EOSH modules below to build the schedule"
+                    : "Schedule generated!",
+            );
             setAuditTourStep(5);
             return;
         }
@@ -662,17 +814,42 @@ const AuditPrograms = () => {
 
     const getSelectedClausesList = () => {
         const result: { clause: ClauseMatrixRow; periods: string[] }[] = [];
-        CLAUSE_MATRIX.forEach((clause, rowIndex) => {
-            const activePeriods: string[] = [];
-            periods.forEach((period, colIndex) => {
-                if (selectedCells[`${rowIndex}-${colIndex}`]) {
-                    activePeriods.push(period.label);
+
+        if (criteriaType === "module") {
+            AUDIT_MODULES.forEach((mod, rowIndex) => {
+                if (!selectedStandards.includes(mod.value)) return;
+                const activePeriods: string[] = [];
+                periods.forEach((period, colIndex) => {
+                    if (selectedCells[`${rowIndex}-${colIndex}`]) {
+                        activePeriods.push(period.label);
+                    }
+                });
+                if (activePeriods.length > 0) {
+                    result.push({
+                        clause: {
+                            id: mod.value,
+                            iso9001: mod.label,
+                            iso14001: mod.label,
+                            iso45001: mod.label,
+                            isHeading: false,
+                        },
+                        periods: activePeriods,
+                    });
                 }
             });
-            if (activePeriods.length > 0) {
-                result.push({ clause, periods: activePeriods });
-            }
-        });
+        } else {
+            CLAUSE_MATRIX.forEach((clause, rowIndex) => {
+                const activePeriods: string[] = [];
+                periods.forEach((period, colIndex) => {
+                    if (selectedCells[`${rowIndex}-${colIndex}`]) {
+                        activePeriods.push(period.label);
+                    }
+                });
+                if (activePeriods.length > 0) {
+                    result.push({ clause, periods: activePeriods });
+                }
+            });
+        }
 
         // Find selected periods for custom rows
         customRows.forEach((cRow) => {
@@ -1289,15 +1466,23 @@ const AuditPrograms = () => {
                                         <TableHead className="font-bold text-xs uppercase tracking-wider text-white">Program Name</TableHead>
                                         <TableHead className="font-bold text-xs uppercase tracking-wider text-white">ISO Standard</TableHead>
                                         <TableHead className="font-bold text-xs uppercase tracking-wider text-white">Site</TableHead>
-                                        <TableHead className="font-bold text-xs uppercase tracking-wider text-white">Departments</TableHead>
                                         <TableHead className="font-bold text-xs uppercase tracking-wider text-white text-center">Periods</TableHead>
                                         <TableHead className="w-[100px] font-bold text-xs uppercase tracking-wider text-white text-right pr-6">Actions</TableHead>
                                     </TableRow>
                                 </TableHeader>
                                 <TableBody>
-                                    {filteredAuditPrograms.length === 0 ? (
+                                    {listLoading ? (
                                         <TableRow>
-                                            <TableCell colSpan={7} className="h-64 text-center">
+                                            <TableCell colSpan={6} className="h-64 text-center">
+                                                <div className="flex flex-col items-center justify-center space-y-3">
+                                                    <div className="w-10 h-10 border-2 border-slate-300 border-t-[#213847] rounded-full animate-spin" />
+                                                    <p className="text-sm font-medium text-slate-600">Loading audit programs…</p>
+                                                </div>
+                                            </TableCell>
+                                        </TableRow>
+                                    ) : filteredAuditPrograms.length === 0 ? (
+                                        <TableRow>
+                                            <TableCell colSpan={6} className="h-64 text-center">
                                                 <div className="flex flex-col items-center justify-center space-y-3">
                                                     <div className="w-16 h-16 bg-slate-100 rounded-[2rem] flex items-center justify-center text-slate-400 mb-2">
                                                         <FileText className="w-8 h-8" />
@@ -1322,36 +1507,12 @@ const AuditPrograms = () => {
                                                     <div className="flex flex-wrap gap-1">
                                                         {(program.isoStandard || "").split(", ").map((std: string, sIdx: number) => (
                                                             <Badge key={sIdx} variant="outline" className="text-[10px] font-medium py-0 h-4 bg-blue-50 border-blue-200 text-blue-700 lowercase">
-                                                                {std.split(" - ")[0]}
+                                                                {isEoshModuleValue(std) ? standardDisplayLabel(std) : std.split(" - ")[0]}
                                                             </Badge>
                                                         ))}
                                                     </div>
                                                 </TableCell>
                                                 <TableCell className="text-sm text-foreground font-medium">{program.site?.name || "N/A"}</TableCell>
-                                                <TableCell className="text-sm text-muted-foreground max-w-[220px]">
-                                                    {(() => {
-                                                        const programDepts = resolveDepartmentsByIds(
-                                                            getDepartmentIdsFromScheduleData(program.scheduleData),
-                                                            companies,
-                                                        );
-                                                        if (!programDepts.length) {
-                                                            return <span className="text-slate-400">—</span>;
-                                                        }
-                                                        return (
-                                                            <div className="flex flex-wrap gap-1">
-                                                                {programDepts.map((dept) => (
-                                                                    <Badge
-                                                                        key={dept.id}
-                                                                        variant="outline"
-                                                                        className="text-[10px] font-medium bg-slate-50 border-slate-200 text-slate-700"
-                                                                    >
-                                                                        {dept.name}
-                                                                    </Badge>
-                                                                ))}
-                                                            </div>
-                                                        );
-                                                    })()}
-                                                </TableCell>
                                                 <TableCell className="text-center font-bold text-emerald-600">
                                                     <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-muted text-muted-foreground">
                                                         {program.isConfigured ? "Configured" : "Not Set"}
@@ -1456,38 +1617,151 @@ const AuditPrograms = () => {
                                 />
                             </div>
 
-                            <div className="space-y-3">
-                                <Label>ISO Standards</Label>
-                                <div className="flex flex-col gap-3 p-4 border border-slate-200 rounded-xl bg-slate-50/50">
-                                    {ISO_STANDARDS.map((std) => (
-                                        <div key={std} className="flex items-start space-x-3">
-                                            <Checkbox
-                                                id={`std-${std}`}
-                                                checked={selectedStandards.includes(std)}
-                                                onCheckedChange={(checked) => {
-                                                    if (checked) {
-                                                        setSelectedStandards(prev => [...prev, std]);
-                                                    } else {
-                                                        setSelectedStandards(prev => prev.filter(s => s !== std));
+                            <div className="space-y-3 lg:col-span-1">
+                                <Label>Audit criteria</Label>
+                                <RadioGroup
+                                    value={criteriaType}
+                                    onValueChange={(val) => {
+                                        if (view === "view") return;
+                                        const next = val as CriteriaType;
+                                        if (next === criteriaType) return;
+                                        setCriteriaType(next);
+                                        setModuleFamily(null);
+                                        setSelectedStandards([]);
+                                        setSelectedCells({});
+                                        setCustomRows([]);
+                                        setShowSchedule(false);
+                                    }}
+                                    disabled={view === "view"}
+                                    className="flex flex-col gap-2 sm:flex-row sm:gap-4"
+                                >
+                                    <label
+                                        htmlFor="criteria-iso"
+                                        className={cn(
+                                            "flex items-center gap-2 rounded-xl border px-3 py-2.5 cursor-pointer transition-colors",
+                                            criteriaType === "iso"
+                                                ? "border-emerald-300 bg-emerald-50/60"
+                                                : "border-slate-200 bg-white",
+                                            view === "view" && "cursor-default opacity-80",
+                                        )}
+                                    >
+                                        <RadioGroupItem value="iso" id="criteria-iso" />
+                                        <span className="text-sm font-medium text-slate-800">ISO Standards</span>
+                                    </label>
+                                    <label
+                                        htmlFor="criteria-module"
+                                        className={cn(
+                                            "flex items-center gap-2 rounded-xl border px-3 py-2.5 cursor-pointer transition-colors",
+                                            criteriaType === "module"
+                                                ? "border-emerald-300 bg-emerald-50/60"
+                                                : "border-slate-200 bg-white",
+                                            view === "view" && "cursor-default opacity-80",
+                                        )}
+                                    >
+                                        <RadioGroupItem value="module" id="criteria-module" />
+                                        <span className="text-sm font-medium text-slate-800">Audit Modules</span>
+                                    </label>
+                                </RadioGroup>
+
+                                {criteriaType === "iso" ? (
+                                    <div className="flex flex-col gap-3 p-4 border border-slate-200 rounded-xl bg-slate-50/50 max-h-64 overflow-y-auto">
+                                        {ISO_STANDARDS.map((std) => (
+                                            <div key={std} className="flex items-start space-x-3">
+                                                <Checkbox
+                                                    id={`std-${std}`}
+                                                    checked={selectedStandards.includes(std)}
+                                                    onCheckedChange={(checked) => {
+                                                        if (checked) {
+                                                            setSelectedStandards((prev) => [...prev, std]);
+                                                        } else {
+                                                            setSelectedStandards((prev) =>
+                                                                prev.filter((s) => s !== std),
+                                                            );
+                                                        }
+                                                    }}
+                                                    disabled={view === "view"}
+                                                    className="mt-0.5 data-[state=checked]:bg-emerald-600 data-[state=checked]:border-emerald-600"
+                                                />
+                                                <div className="grid gap-1.5 leading-none">
+                                                    <label
+                                                        htmlFor={`std-${std}`}
+                                                        className="text-sm font-medium leading-none cursor-pointer peer-disabled:cursor-not-allowed peer-disabled:opacity-70 text-slate-700"
+                                                    >
+                                                        {std.split(" - ")[0]}
+                                                    </label>
+                                                    <p className="text-xs text-slate-500">{std.split(" - ")[1]}</p>
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                ) : (
+                                    <div className="space-y-3">
+                                        <div className="grid grid-cols-1 gap-2">
+                                            <button
+                                                type="button"
+                                                disabled={view === "view"}
+                                                onClick={() => {
+                                                    if (view === "view") return;
+                                                    if (moduleFamily !== "eosh") {
+                                                        setModuleFamily("eosh");
+                                                        setSelectedStandards([]);
+                                                        setSelectedCells({});
+                                                        setCustomRows([]);
+                                                        setShowSchedule(false);
                                                     }
                                                 }}
-                                                disabled={view === "view"}
-                                                className="mt-0.5 data-[state=checked]:bg-emerald-600 data-[state=checked]:border-emerald-600"
-                                            />
-                                            <div className="grid gap-1.5 leading-none">
-                                                <label
-                                                    htmlFor={`std-${std}`}
-                                                    className="text-sm font-medium leading-none cursor-pointer peer-disabled:cursor-not-allowed peer-disabled:opacity-70 text-slate-700"
-                                                >
-                                                    {std.split(" - ")[0]}
-                                                </label>
-                                                <p className="text-xs text-slate-500">
-                                                    {std.split(" - ")[1]}
+                                                className={cn(
+                                                    "text-left rounded-xl border px-4 py-3 transition-colors",
+                                                    moduleFamily === "eosh"
+                                                        ? "border-emerald-400 bg-emerald-50/70 shadow-sm"
+                                                        : "border-slate-200 bg-white hover:border-slate-300",
+                                                    view === "view" && "cursor-default",
+                                                )}
+                                            >
+                                                <p className="text-sm font-semibold text-slate-900">EOSH Audit Checklist</p>
+                                                <p className="text-xs text-slate-500 mt-0.5">
+                                                    Modules appear after Generate Schedule
                                                 </p>
-                                            </div>
+                                            </button>
+                                            <button
+                                                type="button"
+                                                disabled={view === "view"}
+                                                onClick={() => {
+                                                    if (view === "view") return;
+                                                    if (moduleFamily !== "qfs-kore") {
+                                                        setModuleFamily("qfs-kore");
+                                                        setSelectedStandards([]);
+                                                        setSelectedCells({});
+                                                        setCustomRows([]);
+                                                        setShowSchedule(false);
+                                                    }
+                                                }}
+                                                className={cn(
+                                                    "text-left rounded-xl border px-4 py-3 transition-colors",
+                                                    moduleFamily === "qfs-kore"
+                                                        ? "border-emerald-400 bg-emerald-50/70 shadow-sm"
+                                                        : "border-slate-200 bg-white hover:border-slate-300",
+                                                    view === "view" && "cursor-default",
+                                                )}
+                                            >
+                                                <p className="text-sm font-semibold text-slate-900">QFS KORE Audit Checklist</p>
+                                                <p className="text-xs text-slate-500 mt-0.5">
+                                                    QFS KORE audit modules
+                                                </p>
+                                            </button>
                                         </div>
-                                    ))}
-                                </div>
+                                        {moduleFamily === "eosh" && (
+                                            <p className="text-xs text-slate-500">
+                                                Click <span className="font-semibold text-slate-700">Generate Schedule</span> to choose from all 39 EOSH modules.
+                                            </p>
+                                        )}
+                                        {moduleFamily === "qfs-kore" && (
+                                            <p className="text-xs text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2">
+                                                QFS KORE modules are coming soon.
+                                            </p>
+                                        )}
+                                    </div>
+                                )}
                             </div>
 
                             <div className="space-y-2">
@@ -1802,7 +2076,15 @@ const AuditPrograms = () => {
                                     )}
                                     onClick={() => {
                                         handleGenerateSchedule();
-                                        if (auditTourActive && auditTourStep === 4 && auditName && selectedStandards.length > 0 && selectedSite) {
+                                        if (
+                                            auditTourActive &&
+                                            auditTourStep === 4 &&
+                                            auditName &&
+                                            selectedSite &&
+                                            (criteriaType === "iso"
+                                                ? selectedStandards.length > 0
+                                                : moduleFamily === "eosh")
+                                        ) {
                                             setAuditTourStep(5);
                                         }
                                     }}
@@ -1814,7 +2096,10 @@ const AuditPrograms = () => {
                     </Card>
 
                     {showSchedule && (
-                        <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
+                        <div
+                            ref={scheduleMatrixRef}
+                            className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500 scroll-mt-6"
+                        >
                             {selectedDepartments.length > 0 && (
                                 <Card className="border border-emerald-100 bg-emerald-50/30 shadow-sm">
                                     <CardContent className="p-4">
@@ -1835,7 +2120,7 @@ const AuditPrograms = () => {
                                     </CardContent>
                                 </Card>
                             )}
-                            {/* Program Timeline */}
+
                             <Card
                                 id="tour-step-program-timeline"
                                 className={cn(
@@ -1889,12 +2174,53 @@ const AuditPrograms = () => {
                             </Card>
 
                             <div className="space-y-4">
-                                <Badge variant="outline" className="px-4 py-1.5 rounded-full border-emerald-200 text-emerald-700 bg-white font-bold text-[10px] tracking-wide shadow-sm hover:bg-white transition-none uppercase">
-                                    {selectedStandards.length > 0 ? selectedStandards.join(', ') : "ISO 9001:2015 - Quality Management System"}
-                                </Badge>
+                                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                                    <Badge variant="outline" className="px-4 py-1.5 rounded-full border-emerald-200 text-emerald-700 bg-white font-bold text-[10px] tracking-wide shadow-sm hover:bg-white transition-none uppercase w-fit">
+                                        {criteriaType === "module" && moduleFamily === "eosh"
+                                            ? `EOSH modules · ${selectedStandards.length}/${AUDIT_MODULES.length} selected`
+                                            : selectedStandards.length > 0
+                                              ? selectedStandards.map(standardDisplayLabel).join(", ")
+                                              : "ISO 9001:2015 - Quality Management System"}
+                                    </Badge>
+                                    {criteriaType === "module" && moduleFamily === "eosh" && view !== "view" && (
+                                        <Button
+                                            type="button"
+                                            variant="outline"
+                                            className="rounded-xl border-emerald-200 text-emerald-800 hover:bg-emerald-50"
+                                            onClick={() => {
+                                                const allSelected = AUDIT_MODULES.every((m) =>
+                                                    selectedStandards.includes(m.value),
+                                                );
+                                                if (allSelected) {
+                                                    setSelectedStandards([]);
+                                                    setSelectedCells((prev) => {
+                                                        const next: Record<string, boolean> = {};
+                                                        Object.keys(prev).forEach((key) => {
+                                                            if (key.startsWith("custom_")) next[key] = prev[key];
+                                                        });
+                                                        return next;
+                                                    });
+                                                } else {
+                                                    setSelectedStandards(AUDIT_MODULES.map((m) => m.value));
+                                                    setSelectedCells((prev) => {
+                                                        const next = { ...prev };
+                                                        AUDIT_MODULES.forEach((_, rowIndex) => {
+                                                            // Mark the first period/month for every module
+                                                            next[`${rowIndex}-0`] = true;
+                                                        });
+                                                        return next;
+                                                    });
+                                                }
+                                            }}
+                                        >
+                                            {AUDIT_MODULES.every((m) => selectedStandards.includes(m.value))
+                                                ? "Clear all modules"
+                                                : "Select all modules"}
+                                        </Button>
+                                    )}
+                                </div>
 
                                 <div
-                                    ref={scheduleMatrixRef}
                                     id="tour-step-schedule-matrix"
                                     className={cn(
                                         "overflow-x-auto scrollbar-thin border rounded-xl bg-white shadow-sm p-1 scroll-mt-6",
@@ -1904,27 +2230,37 @@ const AuditPrograms = () => {
                                     <table className="w-full text-left border-collapse min-w-max">
                                         <thead>
                                             <tr>
-                                                {/* Dynamic Headers for Standards */}
-                                                {selectedStandards.map((std, colIdx) => {
-                                                    const baseWidth = selectedStandards.length === 1 ? 350 : 180;
-                                                    const colWidth = isMobile ? `${Math.min(baseWidth, 140)}px` : `${baseWidth}px`;
-                                                    const leftOffset = colIdx * parseInt(colWidth);
+                                                {criteriaType === "module" ? (
+                                                    <th
+                                                        className={cn(
+                                                            "bg-slate-100 h-10 px-3 sm:px-4 text-[10px] sm:text-[11px] font-black tracking-widest text-[#213847] border-b border-r border-slate-200 uppercase align-middle",
+                                                            !isMobile && "sticky left-0 z-20",
+                                                        )}
+                                                        style={{ width: isMobile ? "180px" : "340px", minWidth: isMobile ? "180px" : "340px" }}
+                                                    >
+                                                        Audit Module
+                                                    </th>
+                                                ) : (
+                                                    selectedStandards.map((std, colIdx) => {
+                                                        const baseWidth = selectedStandards.length === 1 ? 350 : 180;
+                                                        const colWidth = isMobile ? `${Math.min(baseWidth, 140)}px` : `${baseWidth}px`;
+                                                        const leftOffset = colIdx * parseInt(colWidth);
+                                                        const label = standardDisplayLabel(std);
+                                                        return (
+                                                            <th
+                                                                key={std}
+                                                                className={cn(
+                                                                    "bg-slate-100 h-10 px-3 sm:px-4 text-[10px] sm:text-[11px] font-black tracking-widest text-[#213847] border-b border-r border-slate-200 uppercase align-middle",
+                                                                    !isMobile && "sticky z-20",
+                                                                )}
+                                                                style={{ left: !isMobile ? `${leftOffset}px` : undefined, width: colWidth, minWidth: colWidth, maxWidth: colWidth }}
+                                                            >
+                                                                {label}
+                                                            </th>
+                                                        );
+                                                    })
+                                                )}
 
-                                                    const label = standardDisplayLabel(std);
-                                                    return (
-                                                        <th key={std}
-                                                            className={cn(
-                                                                "bg-slate-100 h-10 px-3 sm:px-4 text-[10px] sm:text-[11px] font-black tracking-widest text-[#213847] border-b border-r border-slate-200 uppercase align-middle",
-                                                                !isMobile && "sticky z-20"
-                                                            )}
-                                                            style={{ left: !isMobile ? `${leftOffset}px` : undefined, width: colWidth, minWidth: colWidth, maxWidth: colWidth }}
-                                                        >
-                                                            {label}
-                                                        </th>
-                                                    );
-                                                })}
-
-                                                {/* Timeline Headers */}
                                                 {periods.map((p, i) => (
                                                     <th key={i} className="bg-white h-10 px-2 text-center text-[10px] uppercase font-black tracking-widest text-slate-400 border-b border-slate-100 align-middle min-w-[60px]">
                                                         {p.label}
@@ -1933,8 +2269,84 @@ const AuditPrograms = () => {
                                             </tr>
                                         </thead>
                                         <tbody>
-                                            {/* Matrix Body */}
-                                            {CLAUSE_MATRIX.map((clause, rowIndex) => {
+                                            {criteriaType === "module"
+                                                ? AUDIT_MODULES.map((mod, rowIndex) => {
+                                                      const included = selectedStandards.includes(mod.value);
+                                                      return (
+                                                      <tr
+                                                          key={mod.id}
+                                                          className={cn(
+                                                              "group transition-colors",
+                                                              included ? "hover:bg-slate-50" : "hover:bg-slate-50/80",
+                                                          )}
+                                                      >
+                                                          <td
+                                                              className={cn(
+                                                                  "text-[11px] py-2.5 px-4 border-r border-b border-slate-200 align-middle font-semibold text-slate-800 bg-white group-hover:bg-slate-50 leading-snug",
+                                                                  !isMobile && "sticky left-0 z-10",
+                                                              )}
+                                                              style={{ width: isMobile ? "180px" : "340px", minWidth: isMobile ? "180px" : "340px" }}
+                                                          >
+                                                              {mod.label}
+                                                          </td>
+                                                          {periods.map((_, colIndex) => {
+                                                              const cellKey = `${rowIndex}-${colIndex}`;
+                                                              const isChecked = Boolean(selectedCells[cellKey]);
+                                                              return (
+                                                                  <td key={`mod-check-${rowIndex}-${colIndex}`} className="p-1 border-b border-slate-100 align-middle bg-white">
+                                                                      <button
+                                                                          type="button"
+                                                                          onClick={() => {
+                                                                              if (view === "view") return;
+                                                                              const nextChecked = !isChecked;
+                                                                              setSelectedCells((prev) => {
+                                                                                  const next = { ...prev };
+                                                                                  if (nextChecked) next[cellKey] = true;
+                                                                                  else delete next[cellKey];
+
+                                                                                  const stillHasMonth = periods.some(
+                                                                                      (__, i) => Boolean(next[`${rowIndex}-${i}`]),
+                                                                                  );
+                                                                                  setSelectedStandards((stdPrev) => {
+                                                                                      if (stillHasMonth) {
+                                                                                          return stdPrev.includes(mod.value)
+                                                                                              ? stdPrev
+                                                                                              : [...stdPrev, mod.value];
+                                                                                      }
+                                                                                      return stdPrev.filter((s) => s !== mod.value);
+                                                                                  });
+                                                                                  return next;
+                                                                              });
+                                                                          }}
+                                                                          disabled={view === "view"}
+                                                                          className={cn(
+                                                                              "w-full h-8 rounded-md border flex items-center justify-center transition-all duration-200",
+                                                                              isChecked
+                                                                                  ? "bg-emerald-100/80 border-emerald-400 border-2 text-emerald-600 shadow-sm shadow-emerald-500/10 hover:bg-emerald-200/80 cursor-pointer"
+                                                                                  : "bg-white border-slate-200 hover:border-emerald-400 hover:bg-emerald-50/50 cursor-pointer hover:shadow-inner",
+                                                                          )}
+                                                                      >
+                                                                          {isChecked && (
+                                                                              <div className="animate-in zoom-in-75 duration-200">
+                                                                                  <Check className="w-4 h-4 stroke-[4px]" />
+                                                                              </div>
+                                                                          )}
+                                                                      </button>
+                                                                  </td>
+                                                              );
+                                                          })}
+                                                      </tr>
+                                                      );
+                                                  })
+                                                : selectedStandards.length === 0
+                                                ? (
+                                                    <tr>
+                                                        <td colSpan={Math.max(periods.length + 1, 2)} className="py-10 text-center text-sm text-slate-500">
+                                                            Select ISO standard(s) above, then generate the schedule.
+                                                        </td>
+                                                    </tr>
+                                                )
+                                                : CLAUSE_MATRIX.map((clause, rowIndex) => {
                                                 if (selectedStandards.length === 1 && !isMainClauseHeading(clause)) {
                                                     const text = clauseTextForStandard(clause, selectedStandards[0]);
                                                     if (text === "Corresponding Clause does not exist") {
@@ -1944,7 +2356,6 @@ const AuditPrograms = () => {
 
                                                 return (
                                                     <tr key={clause.id} className="group hover:bg-slate-50 transition-colors">
-                                                        {/* Active Standard Columns */}
                                                         {selectedStandards.map((std, colIdx) => {
                                                             const baseWidth = selectedStandards.length === 1 ? 350 : 180;
                                                             const colWidth = isMobile ? `${Math.min(baseWidth, 140)}px` : `${baseWidth}px`;
@@ -1969,11 +2380,10 @@ const AuditPrograms = () => {
                                                             );
                                                         })}
 
-                                                        {/* Timeline Checkboxes */}
                                                         {periods.map((_, colIndex) => {
                                                             const isChecked = selectedCells[`${rowIndex}-${colIndex}`];
                                                             return (
-                                                                <td key={`check-${colIndex}`} 
+                                                                <td key={`check-${colIndex}`}
                                                                     className={cn(
                                                                         "p-1 border-b border-slate-100 align-middle",
                                                                         isMainClauseHeading(clause) ? "bg-[#213847] border-[#213847]" : "bg-white"
@@ -2004,11 +2414,10 @@ const AuditPrograms = () => {
                                                     </tr>
                                                 );
                                             })}
-                                            {/* Custom Rows Render */}
                                             {customRows.map((cRow) => (
                                                 <tr key={cRow.id} className="group transition-colors bg-slate-50/30 hover:bg-slate-50">
                                                     <td
-                                                        colSpan={selectedStandards.length}
+                                                        colSpan={criteriaType === "module" ? 1 : Math.max(selectedStandards.length, 1)}
                                                         className="text-[11px] py-1 border-b border-r border-slate-200 align-middle pl-6 pr-2 bg-white group-hover:bg-slate-50"
                                                     >
                                                         <div className="flex items-center gap-2 sticky left-0 w-max max-w-full z-10">
@@ -2076,7 +2485,7 @@ const AuditPrograms = () => {
                                 </div>
 
                                 {view !== "view" && (
-                                    <div className="mt-4 flex justify-end">
+                                    <div className="pt-2 flex justify-start">
                                         <Button
                                             type="button"
                                             variant="outline"
@@ -2090,7 +2499,6 @@ const AuditPrograms = () => {
                                 )}
                             </div>
 
-                            {/* Dynamic Clauses Selection Display */}
                             {selectedClausesList.length > 0 && (
                                 <div className="space-y-4 pt-10 border-t border-slate-200">
                                     <h3 className="text-xl font-bold text-slate-800 flex items-center gap-2">
@@ -2102,19 +2510,25 @@ const AuditPrograms = () => {
                                                 <div className="h-1 bg-emerald-500 w-0 group-hover:w-full transition-all duration-500" />
                                                 <CardContent className="p-4">
                                                     <div className="text-[12px] font-bold text-slate-800 leading-tight mb-3">
-                                                        {selectedStandards.map(std => {
-                                                            const cellText = clauseTextForStandard(item.clause, std);
-                                                            if (cellText === "Corresponding Clause does not exist") return null;
+                                                        {criteriaType === "module" ? (
+                                                            <span className="text-slate-700 font-semibold">
+                                                                {item.clause.iso9001}
+                                                            </span>
+                                                        ) : (
+                                                            selectedStandards.map(std => {
+                                                                const cellText = clauseTextForStandard(item.clause, std);
+                                                                if (cellText === "Corresponding Clause does not exist") return null;
 
-                                                            const label = standardBadgeLabel(std);
+                                                                const label = standardBadgeLabel(std);
 
-                                                            return (
-                                                                <div key={std} className="mb-1 pb-1 border-b border-slate-50 last:border-0">
-                                                                    <span className="text-[9px] uppercase font-black text-emerald-600 mr-2 bg-emerald-50 px-1 rounded">{label}</span>
-                                                                    <span className="text-slate-700 font-semibold">{cellText}</span>
-                                                                </div>
-                                                            )
-                                                        })}
+                                                                return (
+                                                                    <div key={std} className="mb-1 pb-1 border-b border-slate-50 last:border-0">
+                                                                        <span className="text-[9px] uppercase font-black text-emerald-600 mr-2 bg-emerald-50 px-1 rounded">{label}</span>
+                                                                        <span className="text-slate-700 font-semibold">{cellText}</span>
+                                                                    </div>
+                                                                )
+                                                            })
+                                                        )}
                                                     </div>
                                                     <div className="flex flex-wrap gap-2">
                                                         {item.periods.map(p => (

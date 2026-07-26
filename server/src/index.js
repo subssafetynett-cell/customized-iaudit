@@ -5770,6 +5770,7 @@ app.post('/users/:id/start-trial', authenticateToken, async (req, res) => {
 // Audit Program routes
 app.get('/audit-programs', authenticateToken, checkTrialExpiration, async (req, res) => {
     const { userId, full } = req.query;
+    const wantFull = full === 'true';
 
     try {
         const actorId = req.user.id;
@@ -5786,11 +5787,11 @@ app.get('/audit-programs', authenticateToken, checkTrialExpiration, async (req, 
             userId === 'null';
 
         if (useOrgScope && req.user.role !== 'superadmin') {
-            if (!(await actorCanReadOrgAssessmentStore(actorId, await resolveActorOrgRootId(actorId)))) {
+            const orgRootId = await resolveActorOrgRootId(actorId);
+            if (!(await actorCanReadOrgAssessmentStore(actorId, orgRootId))) {
                 return res.status(403).json({ error: 'Forbidden' });
             }
             if (await actorHasFullOrgAuditVisibility(actorId)) {
-                const orgRootId = await resolveActorOrgRootId(actorId);
                 const subtreeIds = await collectOrgSubtreeUserIds(orgRootId);
                 programWhere = { OR: buildOrgSubtreeProgramVisibilityOr(subtreeIds) };
             } else {
@@ -5830,53 +5831,79 @@ app.get('/audit-programs', authenticateToken, checkTrialExpiration, async (req, 
         const programs = await prisma.auditProgram.findMany({
             where: programWhere,
             orderBy: { createdAt: 'desc' },
-            select: {
-                id: true,
-                name: true,
-                isoStandard: true,
-                frequency: true,
-                duration: true,
-                status: true,
-                createdAt: true,
-                updatedAt: true,
-                siteId: true,
-                site: {
-                    select: {
-                        id: true,
-                        name: true
-                    }
-                },
-                leadAuditor: {
-                    select: {
-                        id: true,
-                        firstName: true,
-                        lastName: true
-                    }
-                },
-                auditors: {
-                    select: {
-                        id: true,
-                        firstName: true,
-                        lastName: true
-                    }
-                },
-                scheduleData: true
-            }
+            select: wantFull
+                ? {
+                    id: true,
+                    name: true,
+                    isoStandard: true,
+                    frequency: true,
+                    duration: true,
+                    status: true,
+                    createdAt: true,
+                    updatedAt: true,
+                    siteId: true,
+                    site: {
+                        select: {
+                            id: true,
+                            name: true
+                        }
+                    },
+                    leadAuditor: {
+                        select: {
+                            id: true,
+                            firstName: true,
+                            lastName: true
+                        }
+                    },
+                    auditors: {
+                        select: {
+                            id: true,
+                            firstName: true,
+                            lastName: true
+                        }
+                    },
+                    scheduleData: true
+                }
+                : {
+                    id: true,
+                    name: true,
+                    isoStandard: true,
+                    frequency: true,
+                    duration: true,
+                    status: true,
+                    createdAt: true,
+                    updatedAt: true,
+                    siteId: true,
+                    site: {
+                        select: {
+                            id: true,
+                            name: true
+                        }
+                    },
+                    scheduleData: true
+                }
         });
-        if (programs.length > 0) {
-            console.log(`[DEBUG] First program owners: userId=${programs[0].userId}, leadAuditorId=${programs[0].leadAuditorId}`);
-            console.log(`[DEBUG] First program auditors:`, JSON.stringify(programs[0].auditors.map(a => a.id)));
-        }
-        // Map to include a simple boolean for UI and optionally strip full data to save bandwidth
+
         const optimizedPrograms = programs.map(p => {
-            const isConfigured = p.scheduleData && typeof p.scheduleData === 'object' && Object.keys(p.scheduleData).length > 0;
-            if (full === 'true') {
-                return { ...p, isConfigured };
+            const sd = p.scheduleData && typeof p.scheduleData === 'object' ? p.scheduleData : null;
+            const isConfigured = Boolean(sd && Object.keys(sd).length > 0);
+            const departmentIds = Array.isArray(sd?.departmentIds)
+                ? sd.departmentIds.map((id) => String(id))
+                : [];
+            const departmentNames = Array.isArray(sd?.departmentNames)
+                ? sd.departmentNames.map((name) => String(name))
+                : [];
+
+            if (wantFull) {
+                return { ...p, isConfigured, departmentIds, departmentNames };
             }
+
             const { scheduleData: _, ...programWithoutData } = p;
             return {
                 ...programWithoutData,
-                isConfigured
+                isConfigured,
+                departmentIds,
+                departmentNames,
             };
         });
         res.json(optimizedPrograms);
