@@ -19,6 +19,7 @@ import {
   ArrowDown,
   Download,
   RefreshCw,
+  Loader2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -42,6 +43,8 @@ import {
   ClauseChecklistContent,
   ProcessAuditContent,
   getAuditExecuteSectionLabels,
+  findAuditTemplate,
+  resolveAuditTemplateId,
 } from "@/data/auditTemplates";
 import { toast } from "sonner";
 import { format } from "date-fns";
@@ -113,6 +116,18 @@ import {
   isEoshScoredCapabilityChecklist,
   usesEoshScoredChecklistLayout,
 } from "@/lib/eoshChecklistUi";
+import {
+  QFS_KORE_CHECKLIST_COLORS,
+  QfsKoreFormBanner,
+  getQfsKoreBannerCopy,
+  getQfsScoreMode,
+  needsQfsExceptionFollowUp,
+  qfsHeaderCellClass,
+  qfsHeaderStyle,
+  qfsScoreFromFindings,
+  qfsScoreOptions,
+  usesQfsKoreScoredChecklistLayout,
+} from "@/lib/qfsKoreChecklistUi";
 import {
   EoshExceptionFollowUp,
   needsEoshExceptionFollowUp,
@@ -227,6 +242,11 @@ const AuditExecute = () => {
   // State for the loaded plan
   const [currentPlan, setCurrentPlan] = useState<any>(location.state?.plan);
   const [companies, setCompanies] = useState<any[]>([]);
+  // Avoid flashing "not found" before /audit-plans/:id returns (direct URL / refresh).
+  const [isLoadingPlan, setIsLoadingPlan] = useState(
+    () => Boolean(id) && !location.state?.plan,
+  );
+  const [planLoadError, setPlanLoadError] = useState<string | null>(null);
   const plan = currentPlan;
   const programDepartments = useMemo(
     () => resolveDepartmentsFromProgram(plan?.auditProgram, companies),
@@ -242,9 +262,9 @@ const AuditExecute = () => {
       ? location.state.focusFindingId
       : undefined;
 
-  // Use the template attached to the plan, or fallback
-  const templateId = plan?.templateId;
-  const template = (auditTemplates || []).find((t) => t.id === templateId);
+  // Use the template attached to the plan (resolve legacy/alias ids)
+  const templateId = resolveAuditTemplateId(plan?.templateId) ?? plan?.templateId;
+  const template = findAuditTemplate(plan?.templateId);
   const templateSectionLabels = template
     ? getAuditExecuteSectionLabels(template)
     : { divider: "Audit Execution", detailsTitle: null as string | null };
@@ -478,8 +498,14 @@ const AuditExecute = () => {
   // Load saved progress
   useEffect(() => {
     const fetchPlanDetails = async () => {
-      if (!id) return;
+      if (!id) {
+        setIsLoadingPlan(false);
+        setPlanLoadError("Missing audit plan id");
+        return;
+      }
       setIsRefreshing(true);
+      setIsLoadingPlan(true);
+      setPlanLoadError(null);
       try {
         const res = await apiFetch(`/audit-plans/${id}`);
         if (!res.ok) throw new Error("Plan not found");
@@ -510,7 +536,9 @@ const AuditExecute = () => {
             if (data.clauseFiles) setClauseFiles(sanitizeAuditEvidenceMediaMap(data.clauseFiles));
             if (data.genericFiles) setGenericFiles(sanitizeAuditEvidenceMediaMap(data.genericFiles));
             setFindingsReportForm(buildFindingsReportDefaults(found, data));
-            const currentTemplate = found.templateId ? auditTemplates.find(t => t.id === found.templateId) : null;
+            const currentTemplate = found.templateId
+              ? findAuditTemplate(found.templateId)
+              : null;
 
             if (data.editableChecklist && data.editableChecklist.length > 0) {
               setEditableChecklist(data.editableChecklist);
@@ -519,7 +547,9 @@ const AuditExecute = () => {
             }
           } else {
             setFindingsReportForm(buildFindingsReportDefaults(found));
-            const currentTemplate = found.templateId ? auditTemplates.find(t => t.id === found.templateId) : null;
+            const currentTemplate = found.templateId
+              ? findAuditTemplate(found.templateId)
+              : null;
             if (currentTemplate?.content) {
               setEditableChecklist(currentTemplate.content);
             }
@@ -535,11 +565,15 @@ const AuditExecute = () => {
           } catch {
             setNcByFindingId({});
           }
+        } else {
+          setPlanLoadError("Plan not found");
         }
       } catch (error) {
         console.error("Failed to fetch plan details:", error);
+        setPlanLoadError(error instanceof Error ? error.message : "Failed to load plan");
       } finally {
         setIsRefreshing(false);
+        setIsLoadingPlan(false);
       }
     };
     fetchPlanDetails();
@@ -1020,13 +1054,49 @@ const AuditExecute = () => {
     focusFindings,
   ]);
 
-  if (!plan || !template) {
+  if (isLoadingPlan) {
+    return (
+      <div className="flex-1 p-8 pt-6 min-h-screen flex items-center justify-center">
+        <div className="text-center space-y-3">
+          <Loader2 className="w-8 h-8 animate-spin text-emerald-600 mx-auto" />
+          <p className="text-sm text-slate-500">Loading audit plan…</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!plan) {
     return (
       <div className="flex-1 p-8 pt-6 min-h-screen flex items-center justify-center">
         <div className="text-center">
           <h2 className="text-xl font-bold text-slate-800">
-            Plan or Template not found
+            Plan not found
           </h2>
+          {planLoadError && (
+            <p className="mt-2 text-sm text-slate-500">{planLoadError}</p>
+          )}
+          <Button className="mt-4" onClick={() => navigate("/audit")}>
+            Return to Audit List
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  if (!template) {
+    return (
+      <div className="flex-1 p-8 pt-6 min-h-screen flex items-center justify-center">
+        <div className="text-center max-w-md">
+          <h2 className="text-xl font-bold text-slate-800">
+            Template not found
+          </h2>
+          <p className="mt-2 text-sm text-slate-500">
+            This audit plan references template{" "}
+            <span className="font-mono text-slate-700">
+              {templateId || "(none)"}
+            </span>
+            , which is not available in the app.
+          </p>
           <Button className="mt-4" onClick={() => navigate("/audit")}>
             Return to Audit List
           </Button>
@@ -3884,10 +3954,33 @@ const AuditExecute = () => {
                 />
               </div>
             )}
+            {usesQfsKoreScoredChecklistLayout(template) && !isEditMode && (
+              <div className="p-4 border-b border-slate-200">
+                <QfsKoreFormBanner
+                  {...getQfsKoreBannerCopy(templateId)}
+                />
+              </div>
+            )}
             <div className="overflow-x-auto">
               <Table>
                 <TableHeader>
-                  {usesEoshScoredChecklistLayout(template) && !isEditMode ? (
+                  {usesQfsKoreScoredChecklistLayout(template) && !isEditMode ? (
+                    (() => {
+                      const qfsMode = getQfsScoreMode(templateId);
+                      const scoreOpts = qfsScoreOptions(qfsMode);
+                      return (
+                    <TableRow className="hover:bg-transparent border-b-0">
+                      <TableHead className={cn(qfsHeaderCellClass, "w-[48px]")} style={qfsHeaderStyle(QFS_KORE_CHECKLIST_COLORS.no)}>#</TableHead>
+                      <TableHead className={cn(qfsHeaderCellClass, "min-w-[240px]")} style={qfsHeaderStyle(QFS_KORE_CHECKLIST_COLORS.requirement)}>Requirement</TableHead>
+                      {scoreOpts.map((opt) => (
+                        <TableHead key={opt.val} className={cn(qfsHeaderCellClass, "w-[100px]")} style={qfsHeaderStyle(opt.headerBg)}>{opt.label}</TableHead>
+                      ))}
+                      <TableHead className={cn(qfsHeaderCellClass, "min-w-[140px]")} style={qfsHeaderStyle(QFS_KORE_CHECKLIST_COLORS.finding)}>Finding</TableHead>
+                      <TableHead className={cn(qfsHeaderCellClass, "min-w-[140px]")} style={qfsHeaderStyle(QFS_KORE_CHECKLIST_COLORS.evidence)}>Evidence</TableHead>
+                    </TableRow>
+                      );
+                    })()
+                  ) : usesEoshScoredChecklistLayout(template) && !isEditMode ? (
                     (() => {
                       const showIntent = eoshChecklistShowsIntentColumn(templateId);
                       return (
@@ -3957,11 +4050,84 @@ const AuditExecute = () => {
 
                       const showClause = index === 0 || array[index - 1].clause !== item.clause;
                       const isLastInGroup = index === array.length - 1 || array[index + 1].clause !== item.clause;
+                      const qfsLayout = usesQfsKoreScoredChecklistLayout(template) && !isEditMode;
                       const eoshLayout = usesEoshScoredChecklistLayout(template) && !isEditMode;
                       const showIntent = eoshChecklistShowsIntentColumn(templateId);
                       const eoshColSpan = showIntent ? 8 : 7;
-                      const score = eoshScoreFromFindings(type);
-                      const rowNo = String(item.clause || "").replace(/^[A-Za-z0-9]+-/i, "") || String(index + 1);
+                      const eoshScore = eoshScoreFromFindings(type);
+                      const qfsMode = getQfsScoreMode(templateId);
+                      const qfsOpts = qfsScoreOptions(qfsMode);
+                      const qfsScore = qfsScoreFromFindings(type, qfsMode);
+                      const qfsColSpan = 4 + qfsOpts.length;
+                      // Execute/preview: show Excel # only. Section headers / unnumbered placeholders show as —.
+                      const rowNo = (() => {
+                        const raw = String(item.clause || "").trim();
+                        if (/^[A-Za-z0-9]+-SEC-\d+$/i.test(raw)) return "—";
+                        if (/^[A-Za-z0-9]+-U\d+$/i.test(raw)) return "—";
+                        return raw.replace(/^[A-Za-z0-9]+-/i, "") || String(index + 1);
+                      })();
+
+                      if (qfsLayout) {
+                        return (
+                          <React.Fragment key={index}>
+                          <TableRow className="border-slate-300 bg-white">
+                            <TableCell className="border border-slate-300 align-top text-center font-semibold text-sm bg-slate-50/40">{rowNo}</TableCell>
+                            <TableCell className="border border-slate-300 align-top text-sm leading-relaxed whitespace-pre-wrap">{item.question}</TableCell>
+                            {qfsOpts.map((opt) => (
+                              <TableCell key={opt.val} className="border border-slate-300 align-middle text-center p-2">
+                                <button
+                                  type="button"
+                                  title={opt.label}
+                                  disabled={isAuditeeReadOnly}
+                                  onClick={() =>
+                                    handleChecklistChange(index, "findings", qfsScore === opt.val ? "" : opt.val)
+                                  }
+                                  className={cn(
+                                    "mx-auto flex h-8 w-8 items-center justify-center rounded border-2 text-sm font-bold transition-all",
+                                    qfsScore === opt.val
+                                      ? "border-slate-800 bg-slate-800 text-white"
+                                      : "border-slate-300 bg-white text-transparent hover:border-slate-500",
+                                    isAuditeeReadOnly && "pointer-events-none opacity-70",
+                                  )}
+                                >
+                                  {qfsScore === opt.val ? "✓" : "·"}
+                                </button>
+                              </TableCell>
+                            ))}
+                            <TableCell className="border border-slate-300 align-top p-2">
+                              <Textarea
+                                className="min-h-[72px] text-xs resize-y border-slate-300"
+                                placeholder="Finding…"
+                                value={checklistData[index]?.ofi || ""}
+                                onChange={(e) => handleChecklistChange(index, "ofi", e.target.value)}
+                                readOnly={isAuditeeReadOnly}
+                              />
+                            </TableCell>
+                            <TableCell className="border border-slate-300 align-top p-2">
+                              <Textarea
+                                className="min-h-[72px] text-xs resize-y border-slate-300"
+                                placeholder="Evidence…"
+                                value={checklistData[index]?.evidence || ""}
+                                onChange={(e) => handleChecklistChange(index, "evidence", e.target.value)}
+                                readOnly={isAuditeeReadOnly}
+                              />
+                            </TableCell>
+                          </TableRow>
+                          {needsQfsExceptionFollowUp(qfsScore, qfsMode) && (
+                            <TableRow className="border-slate-300 bg-amber-50/20">
+                              <TableCell colSpan={qfsColSpan} className="border border-slate-300 p-3">
+                                <EoshExceptionFollowUp
+                                  values={checklistData[index] || {}}
+                                  users={eoshOrgUsers}
+                                  disabled={isAuditeeReadOnly}
+                                  onChange={(field, value) => handleChecklistChange(index, field, value)}
+                                />
+                              </TableCell>
+                            </TableRow>
+                          )}
+                          </React.Fragment>
+                        );
+                      }
 
                       if (eoshLayout) {
                         return (
@@ -3979,17 +4145,17 @@ const AuditExecute = () => {
                                   title={opt.label}
                                   disabled={isAuditeeReadOnly}
                                   onClick={() =>
-                                    handleChecklistChange(index, "findings", score === opt.val ? "" : opt.val)
+                                    handleChecklistChange(index, "findings", eoshScore === opt.val ? "" : opt.val)
                                   }
                                   className={cn(
                                     "mx-auto flex h-8 w-8 items-center justify-center rounded border-2 text-sm font-bold transition-all",
-                                    score === opt.val
+                                    eoshScore === opt.val
                                       ? "border-slate-800 bg-slate-800 text-white"
                                       : "border-slate-300 bg-white text-transparent hover:border-slate-500",
                                     isAuditeeReadOnly && "pointer-events-none opacity-70",
                                   )}
                                 >
-                                  {score === opt.val ? "✓" : "·"}
+                                  {eoshScore === opt.val ? "✓" : "·"}
                                 </button>
                               </TableCell>
                             ))}
@@ -4012,7 +4178,7 @@ const AuditExecute = () => {
                               />
                             </TableCell>
                           </TableRow>
-                          {needsEoshExceptionFollowUp(score) && (
+                          {needsEoshExceptionFollowUp(eoshScore) && (
                             <TableRow className="border-slate-300 bg-amber-50/20">
                               <TableCell colSpan={eoshColSpan} className="border border-slate-300 p-3">
                                 <EoshExceptionFollowUp

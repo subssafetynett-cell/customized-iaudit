@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { auditTemplates, AuditStandard, AuditTemplate } from "@/data/auditTemplates";
 import { getEoshCapabilityBannerCopy } from "@/lib/eoshChecklistUi";
+import { getQfsKoreBannerCopy } from "@/lib/qfsKoreChecklistUi";
 import { TourStepPopover } from "@/components/TourStepPopover";
 import {
     AUDIT_TEMPLATES_LIST_MAX_STEP,
@@ -100,6 +101,7 @@ const AuditTemplates = () => {
 
     const standardTemplates = filteredTemplates.filter((t) => !t.module);
     const eoshTemplates = filteredTemplates.filter((t) => t.module === "EOSH");
+    const qfsKoreTemplates = filteredTemplates.filter((t) => t.module === "QFS KORE");
 
     const tourFeaturedTemplate =
         auditTemplates.find((t) => t.id === AUDIT_TEMPLATES_TOUR_TEMPLATE_ID) ??
@@ -129,6 +131,18 @@ const AuditTemplates = () => {
                       return fromTitle || "Management System";
                   })()
                 : null;
+        const qfsModuleName =
+            template.module === "QFS KORE"
+                ? (() => {
+                      const { sectionTitle } = getQfsKoreBannerCopy(template.id);
+                      if (sectionTitle && sectionTitle !== "QFS KORE Checklist") return sectionTitle;
+                      return (
+                          template.title
+                              .replace(/^KORE QFS Internal Audit Checklist\s*[—–-]\s*/i, "")
+                              .trim() || "QFS KORE"
+                      );
+                  })()
+                : null;
         return (
             <Card
                 key={template.id}
@@ -156,6 +170,15 @@ const AuditTemplates = () => {
                             </p>
                             <CardTitle className="text-xl font-bold text-slate-900 line-clamp-2" title={eoshModuleName}>
                                 {eoshModuleName}
+                            </CardTitle>
+                        </>
+                    ) : qfsModuleName ? (
+                        <>
+                            <p className="text-xs font-medium text-slate-500 mb-1">
+                                KORE QFS Internal Audit Checklist
+                            </p>
+                            <CardTitle className="text-xl font-bold text-slate-900 line-clamp-2" title={qfsModuleName}>
+                                {qfsModuleName}
                             </CardTitle>
                         </>
                     ) : (
@@ -266,6 +289,22 @@ const AuditTemplates = () => {
                             </div>
                             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                                 {eoshTemplates.map(renderTemplateCard)}
+                            </div>
+                        </section>
+                    )}
+
+                    {qfsKoreTemplates.length > 0 && (
+                        <section className="space-y-4">
+                            <div className="space-y-1 border-b border-slate-200 pb-3">
+                                <h3 className="text-xl font-semibold tracking-tight text-slate-900">
+                                    QFS KORE module
+                                </h3>
+                                <p className="text-sm text-slate-500">
+                                    KORE QFS internal audit checklists (General Operating Requirements and other Excel modules).
+                                </p>
+                            </div>
+                            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                                {qfsKoreTemplates.map(renderTemplateCard)}
                             </div>
                         </section>
                     )}

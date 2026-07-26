@@ -1,4 +1,5 @@
 import { EOSH_EXCEL_MODULE_TEMPLATES } from "./eoshExcelModuleTemplates";
+import { QFS_KORE_EXCEL_MODULE_TEMPLATES } from "./qfsKoreExcelModuleTemplates";
 
 export type {
     AuditStandard,
@@ -12,11 +13,49 @@ export type {
 
 import type { AuditTemplate, TemplateType } from "./auditTemplateTypes";
 
-/** Short label for audit plan template picker (type-based, not full ISO title). */
+/**
+ * Legacy / shorthand template ids saved on audit plans → canonical template ids.
+ * Plan #4 references `qfs-kore-audit-checklist` for the first QFS module.
+ */
+export const AUDIT_TEMPLATE_ID_ALIASES: Record<string, string> = {
+    "qfs-kore-audit-checklist": "qfs-kore-general-operating-requirements-checklist",
+};
+
+export function resolveAuditTemplateId(
+    templateId?: string | null,
+): string | undefined {
+    if (!templateId) return undefined;
+    return AUDIT_TEMPLATE_ID_ALIASES[templateId] ?? templateId;
+}
+
+export function findAuditTemplate(
+    templateId?: string | null,
+): AuditTemplate | undefined {
+    const id = resolveAuditTemplateId(templateId);
+    if (!id) return undefined;
+    return auditTemplates.find((t) => t.id === id);
+}
+
+/** Short label for audit plan template picker. */
 export function getAuditPlanTemplateLabel(
-    template: Pick<AuditTemplate, "type" | "isIntegrated">,
+    template: Pick<AuditTemplate, "type" | "isIntegrated" | "title" | "module">,
     isMultiStandard = false,
 ): string {
+    // Named Excel modules (EOSH / QFS) — show the module name, not a generic IMS label.
+    if (template.module === "QFS KORE") {
+        const name = template.title
+            .replace(/^KORE QFS Internal Audit Checklist\s*[—–-]\s*/i, "")
+            .trim();
+        return name ? `QFS KORE — ${name}` : template.title;
+    }
+    if (template.module === "EOSH") {
+        const name = template.title
+            .replace(/^EOSH Internal Audit Checklist\s*[—–-]\s*/i, "")
+            .replace(/^Management System:\s*/i, "")
+            .trim();
+        return name ? `EOSH — ${name}` : template.title;
+    }
+
     if (isMultiStandard) {
         if (template.isIntegrated || template.type === "checklist") {
             return "IMS Checklist";
@@ -54,10 +93,13 @@ export function isAuditPlanMultiStandard(
 }
 
 export function getAuditPlanTemplateSubtitle(
-    template: Pick<AuditTemplate, "standard" | "type" | "content" | "isIntegrated">,
+    template: Pick<AuditTemplate, "standard" | "type" | "content" | "isIntegrated" | "module" | "title">,
     isMultiStandard: boolean,
 ): string {
     const countLabel = template.type === "checklist" ? "questions" : "clauses";
+    if (template.module === "QFS KORE" || template.module === "EOSH") {
+        return `${template.module} · ${template.content.length} ${countLabel}`;
+    }
     if (isMultiStandard) {
         return `${getAuditPlanTemplateLabel(template, true)} · ${template.content.length} ${countLabel}`;
     }
@@ -2696,6 +2738,7 @@ export const auditTemplates: AuditTemplate[] = [
         ]
     },
     ...EOSH_EXCEL_MODULE_TEMPLATES,
+    ...QFS_KORE_EXCEL_MODULE_TEMPLATES,
     {
         id: "iso-45001-management-system-checklist",
         title: "Management System: ISO 45001:2018 Audit Checklist",

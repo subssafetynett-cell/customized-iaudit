@@ -24,7 +24,6 @@ const AuditExecute = lazy(() => import("./pages/AuditExecute"));
 const AuditFindings = lazy(() => import("./pages/AuditFindings"));
 const Nonconformances = lazy(() => import("./pages/Nonconformances"));
 const NonconformanceDetail = lazy(() => import("./pages/NonconformanceDetail"));
-const NcDashboard = lazy(() => import("./pages/NcDashboard"));
 const Notifications = lazy(() => import("./pages/Notifications"));
 const Subscription = lazy(() => import("./pages/Subscription"));
 const SubscriptionSuccess = lazy(() => import("./pages/SubscriptionSuccess"));
@@ -100,7 +99,6 @@ const App = () => (
               <Route path="/audit-findings" element={<AuditFindings />} />
               <Route path="/nonconformances" element={<Nonconformances />} />
               <Route path="/nonconformances/:id" element={<NonconformanceDetail />} />
-              <Route path="/nc-dashboard" element={<NcDashboard />} />
               <Route path="/notifications" element={<Notifications />} />
               <Route path="/feedback" element={<Feedback />} />
               <Route path="/subscription" element={<Subscription />} />
