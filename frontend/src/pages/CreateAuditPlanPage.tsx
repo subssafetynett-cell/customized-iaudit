@@ -1060,10 +1060,14 @@ const CreateAuditPlanPage = () => {
                                     <TableHeader>
                                         <TableRow className="bg-slate-50">
                                             <TableHead className="w-[80px]">Clause</TableHead>
-                                            <TableHead>Question</TableHead>
+                                            <TableHead>
+                                                {previewTemplate.module === "QFS KORE" ? "Requirement" : "Question"}
+                                            </TableHead>
                                             <TableHead className="w-[100px]">Findings</TableHead>
                                             <TableHead className="w-[100px]">Evidence</TableHead>
-                                            <TableHead className="w-[100px]">OFI</TableHead>
+                                            <TableHead className="w-[100px]">
+                                                {previewTemplate.module === "QFS KORE" ? "Finding" : "OFI"}
+                                            </TableHead>
                                         </TableRow>
                                     </TableHeader>
                                     <TableBody>
@@ -1072,7 +1076,7 @@ const CreateAuditPlanPage = () => {
                                                 <TableCell className="font-medium align-top">{item.clause}</TableCell>
                                                 <TableCell className="align-top">
                                                     <div className="space-y-2">
-                                                        <p>{item.question}</p>
+                                                        <p className="whitespace-pre-wrap">{item.question}</p>
                                                         {item.intent ? (
                                                             <div className="rounded-md bg-sky-50 border border-sky-100 p-2 text-xs text-slate-600 whitespace-pre-wrap">
                                                                 <span className="font-semibold text-sky-700">Intent: </span>

@@ -1,5 +1,5 @@
 import { type ComponentType } from "react";
-import { Building2, LayoutDashboard, FileText, ClipboardCheck, FileCheck, CreditCard, Users, ClipboardList, AlertTriangle, ShieldCheck, MessageSquare, Rocket, LayoutGrid } from "lucide-react";
+import { Building2, LayoutDashboard, FileText, ClipboardCheck, FileCheck, CreditCard, Users, ClipboardList, AlertTriangle, ShieldCheck, MessageSquare, Rocket } from "lucide-react";
 import { useLocation } from "react-router-dom";
 import { NavLink } from "@/components/NavLink";
 import { cn } from "@/lib/utils";
@@ -34,7 +34,6 @@ const managementNav = [
   { title: "Audit", url: "/audit", icon: ClipboardList },
   { title: "Findings", url: "/audit-findings", icon: AlertTriangle },
   { title: "Nonconformances", url: "/nonconformances", icon: ClipboardList },
-  { title: "NC Dashboard", url: "/nc-dashboard", icon: LayoutGrid },
   { title: "Audit Templates", url: "/audit-templates", icon: FileText },
 ];
 
@@ -79,14 +78,10 @@ export function AppSidebar() {
     if (path === "/getting-started") return currentPath === "/getting-started";
     if (path === "/audit-findings") return currentPath === "/audit-findings";
     if (path === "/nonconformances") {
-      // Exact list + detail routes only — do not match /nc-dashboard
       return (
         currentPath === "/nonconformances" ||
         /^\/nonconformances\/[^/]+$/.test(currentPath)
       );
-    }
-    if (path === "/nc-dashboard") {
-      return currentPath === "/nc-dashboard";
     }
     const pathOnly = path.split("?")[0];
     return currentPath === pathOnly;
@@ -161,8 +156,6 @@ export function AppSidebar() {
         return "tour-step-findings-nav";
       case "Nonconformances":
         return "tour-step-nonconformances-nav";
-      case "NC Dashboard":
-        return "tour-step-nc-dashboard-nav";
       case "Audit Templates":
         return "tour-step-audit-templates-nav";
       default:

@@ -36,6 +36,18 @@ import {
     usesEoshScoredChecklistLayout,
 } from "@/lib/eoshChecklistUi";
 import {
+    QFS_KORE_CHECKLIST_COLORS,
+    QfsKoreFormBanner,
+    getQfsKoreBannerCopy,
+    getQfsScoreMode,
+    needsQfsExceptionFollowUp,
+    qfsHeaderCellClass,
+    qfsHeaderStyle,
+    qfsScoreFromFindings,
+    qfsScoreOptions,
+    usesQfsKoreScoredChecklistLayout,
+} from "@/lib/qfsKoreChecklistUi";
+import {
     EoshExceptionFollowUp,
     needsEoshExceptionFollowUp,
     useEoshOrgUsers,
@@ -1491,11 +1503,32 @@ const ExecuteAuditTemplate = () => {
                                 {...getEoshCapabilityBannerCopy(template.id)}
                             />
                         )}
+                        {usesQfsKoreScoredChecklistLayout(template) && (
+                            <QfsKoreFormBanner
+                                {...getQfsKoreBannerCopy(template.id)}
+                            />
+                        )}
                         <Card className="overflow-hidden border border-slate-200 shadow-sm">
                             <div className="overflow-x-auto">
                                 <Table>
                                     <TableHeader>
-                                        {usesEoshScoredChecklistLayout(template) && !showEditMode ? (
+                                        {usesQfsKoreScoredChecklistLayout(template) && !showEditMode ? (
+                                            (() => {
+                                                const qfsMode = getQfsScoreMode(template.id);
+                                                const scoreOpts = qfsScoreOptions(qfsMode);
+                                                return (
+                                            <TableRow className="hover:bg-transparent border-b-0">
+                                                <TableHead className={cn(qfsHeaderCellClass, "w-[48px]")} style={qfsHeaderStyle(QFS_KORE_CHECKLIST_COLORS.no)}>#</TableHead>
+                                                <TableHead className={cn(qfsHeaderCellClass, "min-w-[240px]")} style={qfsHeaderStyle(QFS_KORE_CHECKLIST_COLORS.requirement)}>Requirement</TableHead>
+                                                {scoreOpts.map((opt) => (
+                                                    <TableHead key={opt.val} className={cn(qfsHeaderCellClass, "w-[100px]")} style={qfsHeaderStyle(opt.headerBg)}>{opt.label}</TableHead>
+                                                ))}
+                                                <TableHead className={cn(qfsHeaderCellClass, "min-w-[140px]")} style={qfsHeaderStyle(QFS_KORE_CHECKLIST_COLORS.finding)}>Finding</TableHead>
+                                                <TableHead className={cn(qfsHeaderCellClass, "min-w-[140px]")} style={qfsHeaderStyle(QFS_KORE_CHECKLIST_COLORS.evidence)}>Evidence</TableHead>
+                                            </TableRow>
+                                                );
+                                            })()
+                                        ) : usesEoshScoredChecklistLayout(template) && !showEditMode ? (
                                             (() => {
                                                 const showIntent = eoshChecklistShowsIntentColumn(template.id);
                                                 return (
@@ -1535,11 +1568,76 @@ const ExecuteAuditTemplate = () => {
                                     {editableChecklist.map((item, index, array) => {
                                         const showClause = index === 0 || array[index - 1].clause !== item.clause;
                                         const isLastInGroup = index === array.length - 1 || array[index + 1].clause !== item.clause;
+                                        const qfsLayout = usesQfsKoreScoredChecklistLayout(template) && !showEditMode;
                                         const eoshLayout = usesEoshScoredChecklistLayout(template) && !showEditMode;
                                         const showIntent = eoshChecklistShowsIntentColumn(template.id);
                                         const eoshColSpan = showIntent ? 8 : 7;
-                                        const score = eoshScoreFromFindings(checklistData[index]?.findings);
-                                        const rowNo = String(item.clause || "").replace(/^[A-Za-z0-9]+-/i, "") || String(index + 1);
+                                        const eoshScore = eoshScoreFromFindings(checklistData[index]?.findings);
+                                        const qfsMode = getQfsScoreMode(template.id);
+                                        const qfsOpts = qfsScoreOptions(qfsMode);
+                                        const qfsScore = qfsScoreFromFindings(checklistData[index]?.findings, qfsMode);
+                                        const qfsColSpan = 4 + qfsOpts.length;
+                                        // Execute/preview: show Excel # only. Section headers / unnumbered placeholders show as —.
+                                        const rowNo = (() => {
+                                            const raw = String(item.clause || "").trim();
+                                            if (/^[A-Za-z0-9]+-SEC-\d+$/i.test(raw)) return "—";
+                                            if (/^[A-Za-z0-9]+-U\d+$/i.test(raw)) return "—";
+                                            return raw.replace(/^[A-Za-z0-9]+-/i, "") || String(index + 1);
+                                        })();
+
+                                        if (qfsLayout) {
+                                            return (
+                                                <React.Fragment key={`${index}-${item.clause}`}>
+                                                <TableRow className="border-slate-300">
+                                                    <TableCell className="border border-slate-300 align-top text-center font-semibold text-sm bg-slate-50/40">{rowNo}</TableCell>
+                                                    <TableCell className="border border-slate-300 align-top text-sm leading-relaxed whitespace-pre-wrap">{item.question}</TableCell>
+                                                    {qfsOpts.map((opt) => (
+                                                        <TableCell key={opt.val} className="border border-slate-300 align-middle text-center p-2">
+                                                            <button
+                                                                type="button"
+                                                                title={opt.label}
+                                                                disabled={templateViewOnly}
+                                                                onClick={() => handleChecklistChange(index, "findings", qfsScore === opt.val ? "" : opt.val)}
+                                                                className={cn(
+                                                                    "mx-auto flex h-8 w-8 items-center justify-center rounded border-2 text-sm font-bold transition-all",
+                                                                    qfsScore === opt.val ? "border-slate-800 bg-slate-800 text-white" : "border-slate-300 bg-white text-transparent hover:border-slate-500",
+                                                                    templateViewOnly && "pointer-events-none opacity-70",
+                                                                )}
+                                                            >
+                                                                {qfsScore === opt.val ? "✓" : "·"}
+                                                            </button>
+                                                        </TableCell>
+                                                    ))}
+                                                    <TableCell className="border border-slate-300 align-top p-2">
+                                                        {!templateViewOnly ? (
+                                                            <Textarea className="min-h-[72px] text-xs resize-y border-slate-300" placeholder="Finding…" value={checklistData[index]?.ofi || ""} onChange={(e) => handleChecklistChange(index, "ofi", e.target.value)} />
+                                                        ) : (
+                                                            <span className="text-xs text-slate-500 whitespace-pre-wrap">{checklistData[index]?.ofi || "—"}</span>
+                                                        )}
+                                                    </TableCell>
+                                                    <TableCell className="border border-slate-300 align-top p-2">
+                                                        {!templateViewOnly ? (
+                                                            <Textarea className="min-h-[72px] text-xs resize-y border-slate-300" placeholder="Evidence…" value={checklistData[index]?.evidence || ""} onChange={(e) => handleChecklistChange(index, "evidence", e.target.value)} />
+                                                        ) : (
+                                                            <span className="text-xs text-slate-500 whitespace-pre-wrap">{checklistData[index]?.evidence || "—"}</span>
+                                                        )}
+                                                    </TableCell>
+                                                </TableRow>
+                                                {needsQfsExceptionFollowUp(qfsScore, qfsMode) && (
+                                                    <TableRow className="border-slate-300 bg-amber-50/20">
+                                                        <TableCell colSpan={qfsColSpan} className="border border-slate-300 p-3">
+                                                            <EoshExceptionFollowUp
+                                                                values={checklistData[index] || {}}
+                                                                users={eoshOrgUsers}
+                                                                disabled={templateViewOnly}
+                                                                onChange={(field, value) => handleChecklistChange(index, field, value)}
+                                                            />
+                                                        </TableCell>
+                                                    </TableRow>
+                                                )}
+                                                </React.Fragment>
+                                            );
+                                        }
 
                                         if (eoshLayout) {
                                             return (
@@ -1556,14 +1654,14 @@ const ExecuteAuditTemplate = () => {
                                                                 type="button"
                                                                 title={opt.label}
                                                                 disabled={templateViewOnly}
-                                                                onClick={() => handleChecklistChange(index, "findings", score === opt.val ? "" : opt.val)}
+                                                                onClick={() => handleChecklistChange(index, "findings", eoshScore === opt.val ? "" : opt.val)}
                                                                 className={cn(
                                                                     "mx-auto flex h-8 w-8 items-center justify-center rounded border-2 text-sm font-bold transition-all",
-                                                                    score === opt.val ? "border-slate-800 bg-slate-800 text-white" : "border-slate-300 bg-white text-transparent hover:border-slate-500",
+                                                                    eoshScore === opt.val ? "border-slate-800 bg-slate-800 text-white" : "border-slate-300 bg-white text-transparent hover:border-slate-500",
                                                                     templateViewOnly && "pointer-events-none opacity-70",
                                                                 )}
                                                             >
-                                                                {score === opt.val ? "✓" : "·"}
+                                                                {eoshScore === opt.val ? "✓" : "·"}
                                                             </button>
                                                         </TableCell>
                                                     ))}
@@ -1582,7 +1680,7 @@ const ExecuteAuditTemplate = () => {
                                                         )}
                                                     </TableCell>
                                                 </TableRow>
-                                                {needsEoshExceptionFollowUp(score) && (
+                                                {needsEoshExceptionFollowUp(eoshScore) && (
                                                     <TableRow className="border-slate-300 bg-amber-50/20">
                                                         <TableCell colSpan={eoshColSpan} className="border border-slate-300 p-3">
                                                             <EoshExceptionFollowUp
