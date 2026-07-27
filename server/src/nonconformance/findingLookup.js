@@ -125,13 +125,47 @@ export function findFindingOnPlan(plan, findingId) {
         });
     }
 
-    // checklist-{planId}-{idx}
-    const checklistMatch = targetId.match(new RegExp(`^checklist-${planId}-(.+)$`));
-    if (checklistMatch) {
-        const idx = checklistMatch[1];
-        const checklistData = safeParse(data.checklistData);
-        const entry =
-            checklistData && typeof checklistData === 'object' ? checklistData[idx] : null;
+    // checklist-{planId}-{idx} OR checklist-{planId}-{templateId}-{idx}
+    const checklistLegacy = targetId.match(new RegExp(`^checklist-${planId}-(\\d+)$`));
+    const checklistModular = targetId.match(
+        new RegExp(`^checklist-${planId}-(.+)-(\\d+)$`),
+    );
+    if (checklistLegacy || checklistModular) {
+        const idx = checklistLegacy ? checklistLegacy[1] : checklistModular[2];
+        const templateId = checklistModular ? checklistModular[1] : null;
+
+        const pickChecklistEntry = () => {
+            if (templateId) {
+                const moduleStore = safeParse(data.moduleDataByTemplateId);
+                const mod =
+                    moduleStore && typeof moduleStore === 'object'
+                        ? moduleStore[templateId]
+                        : null;
+                const modChecklist = safeParse(mod?.checklistData);
+                if (modChecklist && typeof modChecklist === 'object') {
+                    const row = modChecklist[idx] ?? modChecklist[Number(idx)];
+                    if (row) return row;
+                }
+            }
+            const checklistData = safeParse(data.checklistData);
+            if (checklistData && typeof checklistData === 'object') {
+                const row = checklistData[idx] ?? checklistData[Number(idx)];
+                if (row) return row;
+            }
+            // Legacy raise id against module-only storage: search all modules.
+            const moduleStore = safeParse(data.moduleDataByTemplateId);
+            if (moduleStore && typeof moduleStore === 'object') {
+                for (const tid of Object.keys(moduleStore)) {
+                    const modChecklist = safeParse(moduleStore[tid]?.checklistData);
+                    if (!modChecklist || typeof modChecklist !== 'object') continue;
+                    const row = modChecklist[idx] ?? modChecklist[Number(idx)];
+                    if (row && getFindingType(row)) return row;
+                }
+            }
+            return null;
+        };
+
+        const entry = pickChecklistEntry();
         const severity = getFindingType(entry);
         if (!severity) return null;
         const clauseRef = entry?.clause

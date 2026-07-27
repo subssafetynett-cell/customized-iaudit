@@ -39,14 +39,32 @@ export type EoshExceptionFollowUpField =
   | "raisedBy"
   | "assignTo"
   | "targetDate"
-  | "details";
+  | "details"
+  | "escalationDate";
 
 const REQUIRED_FIELD_LABELS: Record<EoshExceptionFollowUpField, string> = {
   raisedBy: "Raised by",
   assignTo: "Assign to",
   targetDate: "Target date",
   details: "Enter details",
+  escalationDate: "Escalation date",
 };
+
+/** Local calendar date as `YYYY-MM-DD` (for `<input type="date" min>`). */
+export function localTodayIsoDate(): string {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+/** True when a `YYYY-MM-DD` value is strictly before today (local). */
+export function isIsoDateBeforeToday(value: string | null | undefined): boolean {
+  const v = String(value || "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return false;
+  return v < localTodayIsoDate();
+}
 
 export function getEoshExceptionFollowUpMissing(
   values: EoshExceptionFollowUpValues | null | undefined,
@@ -55,8 +73,13 @@ export function getEoshExceptionFollowUpMissing(
   const missing: EoshExceptionFollowUpField[] = [];
   if (!String(v.raisedByEmail || "").trim()) missing.push("raisedBy");
   if (!String(v.assignToEmail || "").trim()) missing.push("assignTo");
-  if (!String(v.targetDate || "").trim()) missing.push("targetDate");
+  const targetDate = String(v.targetDate || "").trim();
+  if (!targetDate || isIsoDateBeforeToday(targetDate)) missing.push("targetDate");
   if (!String(v.details || "").trim()) missing.push("details");
+  const escalationDate = String(v.escalationDate || "").trim();
+  if (escalationDate && isIsoDateBeforeToday(escalationDate)) {
+    missing.push("escalationDate");
+  }
   return missing;
 }
 
@@ -69,8 +92,17 @@ export function isEoshExceptionFollowUpComplete(
 export function formatEoshExceptionFollowUpMissing(
   values: EoshExceptionFollowUpValues | null | undefined,
 ): string {
+  const v = values || {};
   return getEoshExceptionFollowUpMissing(values)
-    .map((key) => REQUIRED_FIELD_LABELS[key])
+    .map((key) => {
+      if (key === "targetDate" && isIsoDateBeforeToday(v.targetDate)) {
+        return "Target date (cannot be in the past)";
+      }
+      if (key === "escalationDate") {
+        return "Escalation date (cannot be in the past)";
+      }
+      return REQUIRED_FIELD_LABELS[key];
+    })
     .join(", ");
 }
 
@@ -213,6 +245,19 @@ export function EoshExceptionFollowUp({
   showErrors?: boolean;
 }) {
   const missing = new Set(getEoshExceptionFollowUpMissing(values));
+  const minDate = localTodayIsoDate();
+  const targetDatePast = isIsoDateBeforeToday(values.targetDate);
+  const escalationDatePast = isIsoDateBeforeToday(values.escalationDate);
+  const targetDateInvalid =
+    targetDatePast || (showErrors && missing.has("targetDate"));
+  const escalationDateInvalid = escalationDatePast;
+
+  const setDateField = (field: "targetDate" | "escalationDate", raw: string) => {
+    const next = String(raw || "").trim();
+    // Block past dates from being stored (picker min + typed values).
+    if (next && isIsoDateBeforeToday(next)) return;
+    onChange(field, next);
+  };
 
   return (
     <div
@@ -259,16 +304,24 @@ export function EoshExceptionFollowUp({
             type="date"
             disabled={disabled}
             required
+            min={minDate}
             aria-required
-            aria-invalid={showErrors && missing.has("targetDate") ? true : undefined}
+            aria-invalid={targetDateInvalid ? true : undefined}
             className={cn(
               "h-9 bg-white border-slate-300",
-              showErrors && missing.has("targetDate") && "border-red-500 focus-visible:ring-red-500",
+              targetDateInvalid && "border-red-500 focus-visible:ring-red-500",
             )}
             value={values.targetDate || ""}
-            onChange={(e) => onChange("targetDate", e.target.value)}
+            onChange={(e) => setDateField("targetDate", e.target.value)}
           />
-          <FieldError show={showErrors && missing.has("targetDate")} />
+          <FieldError
+            show={Boolean(targetDateInvalid)}
+            message={
+              targetDatePast
+                ? "Cannot be earlier than today"
+                : "Required"
+            }
+          />
         </div>
       </div>
 
@@ -316,9 +369,18 @@ export function EoshExceptionFollowUp({
             <Input
               type="date"
               disabled={disabled}
-              className="h-9 bg-white border-slate-300"
+              min={minDate}
+              aria-invalid={escalationDateInvalid ? true : undefined}
+              className={cn(
+                "h-9 bg-white border-slate-300",
+                escalationDateInvalid && "border-red-500 focus-visible:ring-red-500",
+              )}
               value={values.escalationDate || ""}
-              onChange={(e) => onChange("escalationDate", e.target.value)}
+              onChange={(e) => setDateField("escalationDate", e.target.value)}
+            />
+            <FieldError
+              show={Boolean(escalationDateInvalid)}
+              message="Cannot be earlier than today"
             />
           </div>
         </div>

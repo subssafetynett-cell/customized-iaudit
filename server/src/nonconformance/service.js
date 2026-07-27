@@ -406,10 +406,12 @@ export async function raiseNonconformance({
         });
 
         const assignedTpl = NcNotificationTemplates.assigned(ncNumber, raisedByName);
+        const findingLink = `/audit-findings/${planId}/${encodeURIComponent(String(findingId).trim())}?respond=1`;
         await notifyUsers(tx, {
             recipientUserIds: [assignee],
             excludeUserId: actor,
             nonconformanceId: updated.id,
+            linkPath: findingLink,
             ...assignedTpl,
         });
 
@@ -453,6 +455,7 @@ export async function raiseNonconformance({
                 ncNumber: created?.ncNumber,
                 auditPlanId: planId,
                 nonconformanceId: created?.id,
+                findingId: String(findingId).trim(),
             });
         }
     } catch (mailErr) {

@@ -195,9 +195,27 @@ export async function findNonconformanceForFinding(
     auditPlanId: number,
     findingId: string,
 ): Promise<NonconformanceSummary | null> {
-    const rows = await listNonconformancesForPlan(auditPlanId);
     const target = String(findingId || "").trim();
-    return rows.find((row) => String(row.findingId || "").trim() === target) ?? null;
+    try {
+        const rows = await listNonconformancesForPlan(auditPlanId);
+        const hit =
+            rows.find((row) => String(row.findingId || "").trim() === target) ?? null;
+        if (hit) return hit;
+    } catch {
+        // Auditees may not list by plan in some access edge cases; fall through.
+    }
+    try {
+        const mine = await listNonconformances();
+        return (
+            mine.find(
+                (row) =>
+                    Number(row.auditPlanId) === Number(auditPlanId) &&
+                    String(row.findingId || "").trim() === target,
+            ) ?? null
+        );
+    } catch {
+        return null;
+    }
 }
 
 export function canUserRespondToNc(
@@ -281,11 +299,23 @@ export async function submitNonconformanceResponse(
 }
 
 export function canAuditeeSubmitNcResponse(
-    nc: Pick<NonconformanceSummary, "assigneeId" | "status"> | null | undefined,
-    userId: number | string | null | undefined,
+    nc:
+        | Pick<NonconformanceSummary, "assigneeId" | "status" | "assignee">
+        | null
+        | undefined,
+    user:
+        | number
+        | string
+        | { id?: number | string; email?: string | null }
+        | null
+        | undefined,
 ): boolean {
-    if (!nc || userId == null) return false;
-    if (Number(nc.assigneeId) !== Number(userId)) return false;
+    // Prefer full user object (id + email). Numeric args remain supported.
+    if (user != null && typeof user === "object") {
+        return canUserRespondToNc(nc, user);
+    }
+    if (!nc || user == null) return false;
+    if (Number(nc.assigneeId) !== Number(user)) return false;
     const status = String(nc.status ?? "").trim().toUpperCase();
     return (
         status === "ASSIGNED" ||

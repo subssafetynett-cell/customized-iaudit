@@ -17,6 +17,10 @@ import {
     raiseNonconformance,
     type NonconformanceSummary,
 } from "@/lib/nonconformanceApi";
+import {
+    isIsoDateBeforeToday,
+    localTodayIsoDate,
+} from "@/components/EoshExceptionFollowUp";
 
 export type AuditeeOption = {
     id: number;
@@ -229,8 +233,13 @@ export function RaiseNonconformanceCard({
                     <Input
                         type="date"
                         className="h-9 bg-slate-50 border-slate-200"
+                        min={localTodayIsoDate()}
                         value={dueDate}
-                        onChange={(e) => setDueDate(e.target.value)}
+                        onChange={(e) => {
+                            const next = e.target.value;
+                            if (next && isIsoDateBeforeToday(next)) return;
+                            setDueDate(next);
+                        }}
                         disabled={readOnly || submitting}
                     />
                 </div>

@@ -33,7 +33,7 @@ const managementNav = [
   { title: "Audit Plan", url: "/audit-program", icon: ClipboardCheck },
   { title: "Audit", url: "/audit", icon: ClipboardList },
   { title: "Findings", url: "/audit-findings", icon: AlertTriangle },
-  { title: "Nonconformances", url: "/nonconformances", icon: ClipboardList },
+  { title: "Findings Dashboard", url: "/nonconformances", icon: ClipboardList },
   { title: "Audit Templates", url: "/audit-templates", icon: FileText },
 ];
 
@@ -154,7 +154,7 @@ export function AppSidebar() {
         return "tour-step-audit-nav";
       case "Findings":
         return "tour-step-findings-nav";
-      case "Nonconformances":
+      case "Findings Dashboard":
         return "tour-step-nonconformances-nav";
       case "Audit Templates":
         return "tour-step-audit-templates-nav";

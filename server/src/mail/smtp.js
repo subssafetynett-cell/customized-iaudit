@@ -63,6 +63,7 @@ export async function sendNcAssignmentEmail({
     ncNumber,
     auditPlanId,
     nonconformanceId,
+    findingId,
 }) {
     if (!isSmtpConfigured()) {
         console.warn('[NC-ASSIGN] SMTP not configured; skipping assignment email.');
@@ -76,10 +77,18 @@ export async function sendNcAssignmentEmail({
     const safeNc = escapeHtml(ncNumber || '');
     const base = getFrontendBaseUrl();
     const loginUrl = `${base}/login`;
-    const ctaUrl = nonconformanceId
-        ? `${base}/nonconformances/${Number(nonconformanceId)}`
-        : `${base}/audit-findings`;
-    const ctaLabel = nonconformanceId ? 'View nonconformance' : 'View my findings';
+    const ctaUrl =
+        auditPlanId && findingId
+            ? `${base}/audit-findings/${Number(auditPlanId)}/${encodeURIComponent(String(findingId))}?respond=1`
+            : nonconformanceId
+              ? `${base}/nonconformances/${Number(nonconformanceId)}`
+              : `${base}/audit-findings`;
+    const ctaLabel =
+        auditPlanId && findingId
+            ? "Respond to finding"
+            : nonconformanceId
+              ? "View nonconformance"
+              : "View my findings";
 
     const subject = safeNc
         ? `${safeRaisedBy} raised nonconformance ${safeNc}`

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { ArrowLeft, CheckCircle2, Clock3, FileText, Image as ImageIcon, Loader2 } from "lucide-react";
+import { ArrowLeft, CheckCircle2, Clock3, FileText, Image as ImageIcon, Loader2, MessageSquareReply } from "lucide-react";
 import { toast } from "sonner";
 import { apiFetch } from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -256,8 +256,13 @@ export default function NonconformanceDetail() {
     const isClosed = String(nc?.status ?? "").trim().toUpperCase() === "CLOSED";
 
     // Auditee response form only for assigned auditee; closed hides all actions.
+    // Match by user id or email (same rules as finding detail "Respond to finding").
     const showAuditeeForm =
-        !isClosed && canAuditeeSubmitNcResponse(nc, user?.id as number | string | undefined);
+        !isClosed &&
+        canAuditeeSubmitNcResponse(nc, {
+            id: user?.id as number | string | undefined,
+            email: typeof user?.email === "string" ? user.email : null,
+        });
 
     const showReviewSection =
         !isClosed &&
@@ -311,7 +316,7 @@ export default function NonconformanceDetail() {
                             onClick={() => navigate("/nonconformances")}
                         >
                             <ArrowLeft className="h-4 w-4" />
-                            Nonconformances
+                            Findings Dashboard
                         </Button>
                         <div>
                             <h1 className="text-2xl font-semibold tracking-tight text-[#213847]">
@@ -341,6 +346,32 @@ export default function NonconformanceDetail() {
                                 {nc.closedAt ? ` on ${formatNcDate(nc.closedAt)}` : ""}.
                             </p>
                         </div>
+                    </div>
+                ) : null}
+
+                {showAuditeeForm && nc.findingId ? (
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white px-4 py-4 shadow-sm">
+                        <div>
+                            <p className="text-sm font-semibold text-[#213847]">
+                                Ready to respond?
+                            </p>
+                            <p className="text-sm text-muted-foreground mt-0.5">
+                                Submit your root cause analysis and corrective actions for this
+                                nonconformance.
+                            </p>
+                        </div>
+                        <Button
+                            type="button"
+                            className="bg-[#213847] hover:bg-[#213847]/90 text-white gap-2 shrink-0"
+                            onClick={() =>
+                                navigate(
+                                    `/audit-findings/${nc.auditPlanId}/${encodeURIComponent(nc.findingId)}?respond=1`,
+                                )
+                            }
+                        >
+                            <MessageSquareReply className="h-4 w-4" />
+                            Respond to finding
+                        </Button>
                     </div>
                 ) : null}
 

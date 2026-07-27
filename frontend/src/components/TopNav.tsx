@@ -97,8 +97,6 @@ export function TopNav() {
         <SidebarTrigger className="lg:hidden h-10 w-10 text-muted-foreground mr-2" />
       </div>
       <div className="flex items-center gap-4">
-        <NotificationBell />
-
         {/* Tour Button */}
         <Button
           variant="outline"
@@ -690,6 +688,8 @@ export function TopNav() {
             </div>
           </DialogContent>
         </Dialog>
+
+        <NotificationBell />
 
   <Sheet open={isOpen} onOpenChange={setIsOpen}>
     <SheetTrigger asChild>

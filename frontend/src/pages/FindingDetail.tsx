@@ -150,13 +150,43 @@ export default function FindingDetail() {
     const viewerEmail = String(user?.email ?? "").toLowerCase().trim();
     const viewerId = user?.id != null ? Number(user.id) : null;
     const isNc = finding ? isNcFindingType(finding.type) : false;
-    const isAssignee = finding ? isFindingAssignedToViewer(finding, viewerEmail) : false;
+    const isFindingAssignee = finding
+        ? isFindingAssignedToViewer(finding, viewerEmail)
+        : false;
+    const isNcAssigneeIdentity = Boolean(
+        nc &&
+            user &&
+            ((user.id != null && Number(nc.assigneeId) === Number(user.id)) ||
+                (viewerEmail &&
+                    String(nc.assignee?.email ?? "")
+                        .toLowerCase()
+                        .trim() === viewerEmail)),
+    );
+    /** Finding assignee and/or formal NC assignee — either may open the respond CTA. */
+    const isAssignee = isFindingAssignee || isNcAssigneeIdentity;
     const isRaisedByMe = finding
         ? isFindingRaisedByViewer(finding, viewerEmail, viewerId)
         : false;
-    const canRespondViaNc = canUserRespondToNc(nc, user);
+    const ncStatusAllowsResponse = (() => {
+        const status = String(nc?.status ?? "").trim().toUpperCase();
+        return (
+            status === "ASSIGNED" ||
+            status === "CHANGES_REQUESTED" ||
+            status === "RESPONSE_SUBMITTED"
+        );
+    })();
+    const canRespondViaNc =
+        canUserRespondToNc(nc, user) ||
+        // Finding assignee with a linked open NC can respond even if NC assignee
+        // email was omitted from a partial list payload.
+        Boolean(
+            nc &&
+                isFindingAssignee &&
+                ncStatusAllowsResponse &&
+                finding?.status !== "Closed",
+        );
     const canRespondViaFinding =
-        isAssignee && isNc && !nc && finding?.status !== "Closed";
+        isFindingAssignee && isNc && !nc && finding?.status !== "Closed";
     const canRespond = canRespondViaNc || canRespondViaFinding;
     const isEditingExistingResponse =
         Boolean(finding) &&

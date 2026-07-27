@@ -12,6 +12,7 @@ import {
 import {
     getQfsScoreMode,
     isQfsKoreScoredChecklist,
+    needsQfsExceptionFollowUp,
     qfsScoreFromFindings,
     qfsScoreOptions,
     QFS_KORE_CHECKLIST_COLORS,
@@ -255,6 +256,40 @@ function extractIsoDetailFields(record: Record<string, unknown>): ChecklistRowVa
     };
 }
 
+function detailFieldsHaveValues(details: ChecklistRowValues): boolean {
+    return Object.values(details).some((value) => Boolean(value?.trim()));
+}
+
+/**
+ * True when a checklist/clause/process row should include NC / CAPA / exception extras
+ * (same gate as the execute UI — not for compliant-only questions).
+ */
+export function checklistRowHasFindingExtras(
+    record: Record<string, unknown> | null | undefined,
+    options?: {
+        isModule?: boolean;
+        isEosh?: boolean;
+        qfsScoreMode?: QfsScoreMode | null;
+    },
+): boolean {
+    if (!record) return false;
+    const findingType = cellValue(record.findingType);
+    if (["Minor", "Major", "OFI", "Min", "Maj"].includes(findingType)) return true;
+
+    const findings = cellValue(record.findings);
+    const score = eoshScoreFromFindings(findings);
+    if (options?.isEosh && (score === "0" || score === "1")) return true;
+    if (options?.qfsScoreMode) {
+        const qfs = qfsScoreFromFindings(findings, options.qfsScoreMode);
+        if (needsQfsExceptionFollowUp(qfs, options.qfsScoreMode)) return true;
+    }
+
+    const details = options?.isModule
+        ? extractModuleNcFields(record)
+        : extractIsoDetailFields(record);
+    return detailFieldsHaveValues(details);
+}
+
 const MODULE_DETAIL_COLUMNS: ChecklistReportColumn[] = [
     { key: "details", header: "Details" },
     { key: "raisedBy", header: "Raised by" },
@@ -293,7 +328,8 @@ function qfsScoreColumnsForMode(mode: QfsScoreMode): ChecklistReportColumn[] {
  * Build checklist table for audit reports:
  * - includes every question
  * - optional columns only appear when at least one row has a value
- * - module audits use exception/NC fields (not ISO CAPA columns)
+ * - NC / CAPA / exception detail columns are NOT inlined on every question
+ *   (see buildChecklistFindingExtrasReportTable)
  * - EOSH uses Compliance(2) / Exceptions(1) / Non-Compliance(0) with point values
  * - QFS uses green / amber / red filled cells for the selected score (no ticks)
  */
@@ -344,8 +380,6 @@ export function buildChecklistReportTable(options: {
         { key: "comment", header: "Comment" },
     ];
 
-    const detailColumns = isModule ? MODULE_DETAIL_COLUMNS : ISO_DETAIL_COLUMNS;
-
     type RowState = {
         values: ChecklistRowValues;
         qfsSelectedKey?: string;
@@ -361,9 +395,6 @@ export function buildChecklistReportTable(options: {
             cellValue(raw.evidence),
         );
         const findingRaw = cellValue(raw.findings);
-        const details = isModule
-            ? extractModuleNcFields(raw)
-            : extractIsoDetailFields(raw);
         const eoshScores = isEosh ? eoshScoreColumnValues(findingRaw) : null;
 
         const values: ChecklistRowValues = {
@@ -381,7 +412,6 @@ export function buildChecklistReportTable(options: {
             score0: eoshScores?.score0 || "",
             evidence: evidenceText,
             comment: cellValue(raw.ofi),
-            ...details,
         };
 
         let qfsSelectedKey: string | undefined;
@@ -406,7 +436,6 @@ export function buildChecklistReportTable(options: {
     const optionalPresent = [
         ...(fixedScoreLayout ? [] : scoreColumns),
         ...optionalExtra,
-        ...detailColumns,
     ].filter((col) =>
         rowStates.some((row) => Boolean(row.values[col.key]?.trim())),
     );
@@ -453,7 +482,84 @@ export function buildChecklistReportTable(options: {
     return { headers, rows, headerCells, bodyCells, columns };
 }
 
-/** NC summary table — module shows module NC columns; omit empty columns. */
+/**
+ * NC / exception / CAPA extras — only rows where a finding was raised
+ * (not repeated across every checklist question).
+ */
+export function buildChecklistFindingExtrasReportTable(options: {
+    content: ChecklistContent[];
+    checklistData: Record<string, Record<string, unknown>> | Record<string, any>;
+    isModule: boolean;
+    isEosh?: boolean;
+    qfsScoreMode?: QfsScoreMode | null;
+}): { headers: string[]; body: string[][] } | null {
+    const {
+        content,
+        checklistData,
+        isModule,
+        isEosh = false,
+        qfsScoreMode = null,
+    } = options;
+
+    const detailColumns = isModule ? MODULE_DETAIL_COLUMNS : ISO_DETAIL_COLUMNS;
+    const extraRows: ChecklistRowValues[] = [];
+
+    content.forEach((item, itemIndex) => {
+        const raw = (checklistData?.[itemIndex] || {}) as Record<string, unknown>;
+        if (
+            !checklistRowHasFindingExtras(raw, {
+                isModule,
+                isEosh,
+                qfsScoreMode,
+            })
+        ) {
+            return;
+        }
+        const findingRaw = cellValue(raw.findings);
+        const details = isModule
+            ? extractModuleNcFields(raw)
+            : extractIsoDetailFields(raw);
+        if (!detailFieldsHaveValues(details) && !findingRaw && !cellValue(raw.findingType)) {
+            return;
+        }
+        extraRows.push({
+            clause: cellValue(raw.clause) || item.clause || String(itemIndex + 1),
+            question: item.question || "",
+            finding: isModule
+                ? formatChecklistFindingLabel(findingRaw) ||
+                  cellValue(raw.findingType) ||
+                  findingRaw
+                : cellValue(raw.findingType) || findingRaw,
+            ...details,
+        });
+    });
+
+    if (extraRows.length === 0) return null;
+
+    const presentDetails = detailColumns.filter((col) =>
+        extraRows.some((row) => Boolean(row[col.key]?.trim())),
+    );
+    const columns: ChecklistReportColumn[] = [
+        { key: "clause", header: "Clause" },
+        { key: "question", header: "Question" },
+        { key: "finding", header: "Finding" },
+        ...presentDetails,
+    ].filter((col) =>
+        col.key === "clause" ||
+        col.key === "question" ||
+        col.key === "finding" ||
+        extraRows.some((row) => Boolean(row[col.key]?.trim())),
+    );
+
+    return {
+        headers: columns.map((c) => c.header),
+        body: extraRows.map((row) => columns.map((c) => row[c.key] || "")),
+    };
+}
+
+/** NC summary table — module shows module NC columns; omit empty columns.
+ * Returns an empty body when no nonconformances were raised (callers should skip the section).
+ */
 export function buildNonConformanceReportTable(
     rows: ReportNonConformance[],
     isModule: boolean,
@@ -467,13 +573,19 @@ export function buildNonConformanceReportTable(
             r.actionBy?.trim(),
     );
 
+    if (filled.length === 0) {
+        return {
+            headers: isModule
+                ? ["Number", "Statement of Non-conformance"]
+                : ["Number", "Statement of nonconformity"],
+            body: [],
+        };
+    }
+
     if (!isModule) {
         return {
             headers: ["Number", "Statement of nonconformity"],
-            body:
-                filled.length > 0
-                    ? filled.map((nc, idx) => [String(idx + 1), nc.statement || ""])
-                    : Array.from({ length: 6 }, () => ["", ""]),
+            body: filled.map((nc, idx) => [String(idx + 1), nc.statement || ""]),
         };
     }
 
@@ -488,19 +600,15 @@ export function buildNonConformanceReportTable(
     const present = candidates.filter((c) =>
         filled.some((row) => Boolean(String(row[c.key] || "").trim())),
     );
-    // Always keep statement column for module NC layout when any NC exists.
     if (present.length === 0) {
         present.push({ key: "statement", header: "Statement of Non-conformance" });
     }
 
     const headers = ["Number", ...present.map((c) => c.header)];
-    const body =
-        filled.length > 0
-            ? filled.map((nc, idx) => [
-                  String(idx + 1),
-                  ...present.map((c) => String(nc[c.key] || "").trim()),
-              ])
-            : Array.from({ length: 6 }, () => ["", ...present.map(() => "")]);
+    const body = filled.map((nc, idx) => [
+        String(idx + 1),
+        ...present.map((c) => String(nc[c.key] || "").trim()),
+    ]);
 
     return { headers, body };
 }
