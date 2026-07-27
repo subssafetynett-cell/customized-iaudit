@@ -13,7 +13,14 @@ export const QFS_KORE_CHECKLIST_COLORS = {
   finding: "#FFFFFF",
   evidence: "#FFFFFF",
   goldBar: "#C9A227",
+  /** Excel grey subheading / section title rows */
+  subheading: "#D9D9D9",
 } as const;
+
+/** Clause ids like GOR-SEC-1 / GMP-SEC-6 — Excel grey subheadings, not scoreable questions. */
+export function isQfsKoreSectionHeader(clause?: string | null): boolean {
+  return /^[A-Za-z0-9]+-SEC-\d+$/i.test(String(clause || "").trim());
+}
 
 export type QfsScoreMode =
   | "compliance-noncompliance"
@@ -26,6 +33,9 @@ const QFS_META_BY_ID = Object.fromEntries(
 /** Plans may store a shorthand id before per-module templates existed. */
 const QFS_TEMPLATE_ID_ALIASES: Record<string, string> = {
   "qfs-kore-audit-checklist": "qfs-kore-general-operating-requirements-checklist",
+  // Programme checklist kept the old id before programme suffix was added.
+  "qfs-kore-environmental-monitoring-checklist":
+    "qfs-kore-environmental-monitoring-programme-checklist",
 };
 
 function resolveQfsTemplateId(templateId?: string | null): string | undefined {

@@ -19,6 +19,8 @@ import type { AuditTemplate, TemplateType } from "./auditTemplateTypes";
  */
 export const AUDIT_TEMPLATE_ID_ALIASES: Record<string, string> = {
     "qfs-kore-audit-checklist": "qfs-kore-general-operating-requirements-checklist",
+    "qfs-kore-environmental-monitoring-checklist":
+        "qfs-kore-environmental-monitoring-programme-checklist",
 };
 
 export function resolveAuditTemplateId(
