@@ -196,11 +196,26 @@ export function EoshCapabilityFormBanner({
   className,
   moduleLabel = "Module: Capability Manufacturing",
   sectionTitle = "Capability — Manufacturing",
+  auditeeName = "",
+  auditDate = "",
+  auditDoneBy = "",
+  onAuditeeNameChange,
+  onAuditDateChange,
+  onAuditDoneByChange,
 }: {
   className?: string;
   moduleLabel?: string;
   sectionTitle?: string;
+  auditeeName?: string;
+  auditDate?: string;
+  auditDoneBy?: string;
+  onAuditeeNameChange?: (value: string) => void;
+  onAuditDateChange?: (value: string) => void;
+  onAuditDoneByChange?: (value: string) => void;
 }) {
+  const fieldClass =
+    "mt-1 h-8 w-full rounded-md border border-slate-300 bg-white px-2 text-sm text-slate-800 shadow-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400";
+
   return (
     <div
       className={cn(
@@ -223,18 +238,38 @@ export function EoshCapabilityFormBanner({
         </div>
       </div>
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3 px-4 py-3 border-b border-slate-200 bg-slate-50/60">
-        <p>
-          <span className="font-bold">AUDITEE :</span>{" "}
-          <span className="text-slate-500">—</span>
-        </p>
-        <p>
-          <span className="font-bold">DATE :</span>{" "}
-          <span className="text-slate-500">—</span>
-        </p>
-        <p>
-          <span className="font-bold">AUDIT DONE BY:</span>{" "}
-          <span className="text-slate-500">—</span>
-        </p>
+        <label className="block min-w-0">
+          <span className="font-bold uppercase tracking-wide">Auditee:</span>
+          <input
+            type="text"
+            className={fieldClass}
+            value={auditeeName}
+            onChange={(e) => onAuditeeNameChange?.(e.target.value)}
+            placeholder="Enter auditee name"
+            readOnly={!onAuditeeNameChange}
+          />
+        </label>
+        <label className="block min-w-0">
+          <span className="font-bold uppercase tracking-wide">Date:</span>
+          <input
+            type="date"
+            className={fieldClass}
+            value={auditDate}
+            onChange={(e) => onAuditDateChange?.(e.target.value)}
+            readOnly={!onAuditDateChange}
+          />
+        </label>
+        <label className="block min-w-0">
+          <span className="font-bold uppercase tracking-wide">Audit done by:</span>
+          <input
+            type="text"
+            className={fieldClass}
+            value={auditDoneBy}
+            onChange={(e) => onAuditDoneByChange?.(e.target.value)}
+            placeholder="Enter auditor name"
+            readOnly={!onAuditDoneByChange}
+          />
+        </label>
       </div>
       <div className="px-4 py-3 text-center">
         <p className="font-bold underline uppercase tracking-wide text-slate-900">

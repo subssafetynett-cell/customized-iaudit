@@ -26,19 +26,29 @@ import { cn } from "@/lib/utils";
 
 function notificationIcon(type: string) {
     const t = String(type || "").toUpperCase();
-    if (t === "NC_CLOSED") return CheckCircle2;
-    if (t === "NC_CHANGES_REQUESTED") return AlertTriangle;
-    if (t === "NC_RESPONSE_SUBMITTED") return ClipboardList;
-    if (t === "NC_ASSIGNED") return FileWarning;
+    if (t === "NC_CLOSED" || t === "FINDING_REVIEW_ACCEPTED") return CheckCircle2;
+    if (t === "NC_CHANGES_REQUESTED" || t === "FINDING_REVIEW_REJECTED") {
+        return AlertTriangle;
+    }
+    if (t === "NC_RESPONSE_SUBMITTED" || t === "FINDING_RESPONSE_SUBMITTED") {
+        return ClipboardList;
+    }
+    if (t === "NC_ASSIGNED" || t === "FINDING_ASSIGNED") return FileWarning;
     return Bell;
 }
 
 function notificationIconClass(type: string) {
     const t = String(type || "").toUpperCase();
-    if (t === "NC_CLOSED") return "bg-emerald-50 text-emerald-700";
-    if (t === "NC_CHANGES_REQUESTED") return "bg-orange-50 text-orange-700";
-    if (t === "NC_RESPONSE_SUBMITTED") return "bg-amber-50 text-amber-700";
-    if (t === "NC_ASSIGNED") return "bg-sky-50 text-sky-700";
+    if (t === "NC_CLOSED" || t === "FINDING_REVIEW_ACCEPTED") {
+        return "bg-emerald-50 text-emerald-700";
+    }
+    if (t === "NC_CHANGES_REQUESTED" || t === "FINDING_REVIEW_REJECTED") {
+        return "bg-orange-50 text-orange-700";
+    }
+    if (t === "NC_RESPONSE_SUBMITTED" || t === "FINDING_RESPONSE_SUBMITTED") {
+        return "bg-amber-50 text-amber-700";
+    }
+    if (t === "NC_ASSIGNED" || t === "FINDING_ASSIGNED") return "bg-sky-50 text-sky-700";
     return "bg-slate-100 text-slate-600";
 }
 
@@ -98,8 +108,17 @@ export function NotificationBell({ className }: Props) {
         } catch (err) {
             toast.error(err instanceof Error ? err.message : "Failed to update notification");
         }
-        if (item.nonconformanceId) {
+        if (item.linkPath) {
+            navigate(item.linkPath);
+        } else if (item.nonconformanceId) {
             navigate(`/nonconformances/${item.nonconformanceId}`);
+        } else if (
+            String(item.type || "").toUpperCase() === "FINDING_RESPONSE_SUBMITTED" ||
+            String(item.type || "").toUpperCase() === "NC_RESPONSE_SUBMITTED"
+        ) {
+            navigate("/audit-findings?tab=raised");
+        } else {
+            navigate("/audit-findings");
         }
     };
 

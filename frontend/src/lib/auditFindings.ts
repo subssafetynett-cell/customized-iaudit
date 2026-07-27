@@ -1,9 +1,46 @@
-import { auditTemplates, ChecklistContent } from "@/data/auditTemplates";
+import {
+    auditTemplates,
+    ChecklistContent,
+    parseAuditPlanTemplateIds,
+} from "@/data/auditTemplates";
 import { collectAuditEvidenceFromData } from "@/lib/auditEvidenceCollection";
 import { apiFetch } from "@/lib/api";
+import {
+    getEoshCapabilityBannerCopy,
+    isEoshScoredCapabilityChecklist,
+} from "@/lib/eoshChecklistUi";
+import {
+    getQfsKoreBannerCopy,
+    isQfsKoreScoredChecklist,
+} from "@/lib/qfsKoreChecklistUi";
 
 export type FindingType = "OFI" | "Minor" | "Major";
-export type FindingStatus = "Opened" | "Closed";
+export type FindingStatus =
+    | "Opened"
+    | "Closed"
+    | "Accepted"
+    | "Responded"
+    | "New Response";
+
+export type FindingCapaReview = {
+    decision: "ACCEPT" | "REJECT";
+    reason?: string;
+    reviewedAt: string;
+    reviewedByName?: string;
+};
+
+export type FindingCapaHistoryEntry = {
+    submittedAt: string;
+    capaForm?: Record<string, unknown>;
+    rootCause?: string;
+    correction?: string;
+    correctiveAction?: string;
+    findingDetails?: string;
+};
+
+export function isNcFindingType(type: FindingType): boolean {
+    return type === "Minor" || type === "Major";
+}
 
 export interface Finding {
     id: string;
@@ -24,9 +61,90 @@ export interface Finding {
     assignTo: string;
     assignToName?: string;
     assignToEmail?: string;
+    raisedBy?: string;
+    raisedByName?: string;
+    raisedByEmail?: string;
+    escalationTo?: string;
+    escalationToName?: string;
+    escalationToEmail?: string;
+    escalationDate?: string;
+    moduleName?: string;
     createdByUserId?: number;
     isOverridden?: boolean;
     media?: { name: string; data: string; type: string }[];
+    /** Structured CAPA / RCA response (Sections A–E) from assignee. */
+    capaForm?: Record<string, unknown>;
+    /** Prior submitted CAPA versions (newest last). */
+    capaResponseHistory?: FindingCapaHistoryEntry[];
+    /** Reporter accept / reject decisions. */
+    capaReviews?: FindingCapaReview[];
+    /** Latest reject reason when reopened. */
+    rejectReason?: string;
+}
+
+/** Split CAPA history into current (latest) vs previous submissions. */
+export function splitFindingCapaHistory(finding: Finding): {
+    current: FindingCapaHistoryEntry | null;
+    previous: FindingCapaHistoryEntry[];
+} {
+    const history = Array.isArray(finding.capaResponseHistory)
+        ? [...finding.capaResponseHistory]
+        : [];
+
+    if (history.length > 0) {
+        return {
+            current: history[history.length - 1] ?? null,
+            previous: history.slice(0, -1),
+        };
+    }
+
+    if (
+        finding.capaForm ||
+        finding.rootCause?.trim() ||
+        finding.correction?.trim() ||
+        finding.correctiveAction?.trim()
+    ) {
+        return {
+            current: {
+                submittedAt: "",
+                capaForm: finding.capaForm,
+                rootCause: finding.rootCause,
+                correction: finding.correction,
+                correctiveAction: finding.correctiveAction,
+                findingDetails: finding.findingDetails,
+            },
+            previous: [],
+        };
+    }
+
+    return { current: null, previous: [] };
+}
+
+/** Human-readable module name for EOSH / QFS KORE checklists; null for ISO/other. */
+export function resolveAuditModuleDisplayName(
+    templateId?: string | null,
+): string | null {
+    if (!templateId) return null;
+    if (isEoshScoredCapabilityChecklist(templateId)) {
+        return getEoshCapabilityBannerCopy(templateId).sectionTitle;
+    }
+    if (isQfsKoreScoredChecklist(templateId)) {
+        return getQfsKoreBannerCopy(templateId).sectionTitle;
+    }
+    return null;
+}
+
+function formatChecklistClauseRef(options: {
+    moduleName: string | null;
+    clauseCode?: string;
+    itemIndex: number;
+}): string {
+    const code = String(options.clauseCode || "").trim();
+    if (options.moduleName) {
+        return code ? `${options.moduleName} · ${code}` : options.moduleName;
+    }
+    if (code) return `Clause ${code}`;
+    return `Item ${options.itemIndex + 1}`;
 }
 
 export const TYPE_CONFIG: Record<
@@ -55,11 +173,30 @@ export const TYPE_CONFIG: Record<
 
 export const STATUS_CONFIG: Record<FindingStatus, { className: string }> = {
     Opened: {
-        className: "bg-sky-50 text-sky-700 ring-sky-200",
+        className: "bg-red-50 text-red-600 ring-red-200",
     },
     Closed: {
         className: "bg-emerald-50 text-emerald-700 ring-emerald-200",
     },
+    Accepted: {
+        className: "bg-blue-50 text-blue-700 ring-blue-200",
+    },
+    Responded: {
+        className: "bg-amber-50 text-amber-700 ring-amber-200",
+    },
+    "New Response": {
+        className: "bg-violet-50 text-violet-700 ring-violet-200",
+    },
+};
+
+/** Select trigger colors for finding status on the Findings listing. */
+export const STATUS_SELECT_CLASS: Record<FindingStatus, string> = {
+    Opened: "border-red-200 bg-red-50 text-red-600 hover:bg-red-50 focus:ring-red-200",
+    Closed: "border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-50 focus:ring-emerald-200",
+    Accepted: "border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-50 focus:ring-blue-200",
+    Responded: "border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-50 focus:ring-amber-200",
+    "New Response":
+        "border-violet-200 bg-violet-50 text-violet-700 hover:bg-violet-50 focus:ring-violet-200",
 };
 
 function assignToLabel(entry: { assignTo?: string; assignToName?: string; assignToEmail?: string }) {
@@ -71,13 +208,58 @@ function assignToLabel(entry: { assignTo?: string; assignToName?: string; assign
     return entry.assignTo?.trim() || "";
 }
 
+function raisedByLabel(entry: {
+    raisedBy?: string;
+    raisedByName?: string;
+    raisedByEmail?: string;
+}) {
+    const name = entry.raisedByName?.trim() || entry.raisedBy?.trim();
+    const email = entry.raisedByEmail?.trim();
+    if (name && email && !name.includes(email)) return `${name} (${email})`;
+    if (name) return name;
+    if (email) return email;
+    return "";
+}
+
+/** Display name for the Action By column — prefers Raised by from exception follow-up. */
+export function findingActionByDisplay(finding: {
+    raisedBy?: string;
+    raisedByName?: string;
+    raisedByEmail?: string;
+    actionBy?: string;
+    assignTo?: string;
+    assignToName?: string;
+}): string {
+    return (
+        raisedByLabel(finding) ||
+        finding.actionBy?.trim() ||
+        finding.assignToName?.trim() ||
+        finding.assignTo?.trim() ||
+        ""
+    );
+}
+
 export function normalizeFindingStatus(raw: unknown): FindingStatus | null {
     if (raw === true) return "Closed";
     if (raw === false) return "Opened";
     const s = String(raw ?? "").trim().toLowerCase();
     if (!s) return null;
     if (["closed", "close", "resolved", "complete", "completed"].includes(s)) return "Closed";
-    if (["opened", "open", "active", "pending"].includes(s)) return "Opened";
+    if (["accepted", "accept", "acknowledge", "acknowledged"].includes(s)) return "Accepted";
+    if (
+        [
+            "new response",
+            "new_response",
+            "newresponse",
+            "responded",
+            "response",
+            "response_submitted",
+            "responsesubmitted",
+        ].includes(s)
+    ) {
+        return "New Response";
+    }
+    if (["opened", "open", "active", "pending", "reopened"].includes(s)) return "Opened";
     return null;
 }
 
@@ -94,6 +276,19 @@ export function resolveFindingStatus(entry: {
     );
 }
 
+function escalationToLabel(entry: {
+    escalationTo?: string;
+    escalationToName?: string;
+    escalationToEmail?: string;
+}) {
+    const name = entry.escalationToName?.trim() || entry.escalationTo?.trim();
+    const email = entry.escalationToEmail?.trim();
+    if (name && email && !name.includes("@")) return `${name} (${email})`;
+    if (name) return name;
+    if (email) return email;
+    return "";
+}
+
 function buildStructuredFindingFields(entry: {
     evidence?: string;
     findingDetails?: string;
@@ -102,11 +297,20 @@ function buildStructuredFindingFields(entry: {
     correctiveAction?: string;
     description?: string;
     descriptionText?: string;
+    details?: string;
     actionBy?: string;
     closeDate?: string;
+    targetDate?: string;
     assignTo?: string;
     assignToName?: string;
     assignToEmail?: string;
+    raisedBy?: string;
+    raisedByName?: string;
+    raisedByEmail?: string;
+    escalationTo?: string;
+    escalationToName?: string;
+    escalationToEmail?: string;
+    escalationDate?: string;
     status?: string;
     findingStatus?: string;
     isClosed?: boolean | string;
@@ -117,8 +321,14 @@ function buildStructuredFindingFields(entry: {
     const correction = entry.correction?.trim() || "";
     const rootCause = entry.rootCause?.trim() || "";
     const correctiveAction = entry.correctiveAction?.trim() || "";
-    const description = entry.description?.trim() || entry.descriptionText?.trim() || "";
+    const ncDetails = entry.details?.trim() || "";
+    const description =
+        entry.description?.trim() ||
+        entry.descriptionText?.trim() ||
+        ncDetails ||
+        "";
     const details = [
+        ncDetails || null,
         evidence || null,
         findingDetails || null,
         correction ? `Correction: ${correction}` : null,
@@ -128,19 +338,30 @@ function buildStructuredFindingFields(entry: {
         .filter(Boolean)
         .join("\n");
 
+    const raisedBy = raisedByLabel(entry);
+    const escalationTo = escalationToLabel(entry);
+
     return {
         evidence,
-        findingDetails,
+        findingDetails: findingDetails || ncDetails,
         correction,
         rootCause,
         correctiveAction,
         description,
         details,
-        actionBy: entry.actionBy?.trim() || "",
-        closeDate: entry.closeDate?.trim() || "",
+        actionBy: entry.actionBy?.trim() || raisedBy || "",
+        closeDate: entry.closeDate?.trim() || entry.targetDate?.trim() || "",
         assignTo: assignToLabel(entry),
         assignToName: entry.assignToName?.trim() || "",
         assignToEmail: entry.assignToEmail?.trim() || "",
+        raisedBy,
+        raisedByName: entry.raisedByName?.trim() || entry.raisedBy?.trim() || "",
+        raisedByEmail: entry.raisedByEmail?.trim() || "",
+        escalationTo,
+        escalationToName:
+            entry.escalationToName?.trim() || entry.escalationTo?.trim() || "",
+        escalationToEmail: entry.escalationToEmail?.trim() || "",
+        escalationDate: entry.escalationDate?.trim() || "",
         createdByUserId:
             typeof entry.createdByUserId === "number"
                 ? entry.createdByUserId
@@ -149,6 +370,48 @@ function buildStructuredFindingFields(entry: {
                   : undefined,
         status: resolveFindingStatus(entry),
     };
+}
+
+function mediaFromFindingEntry(entry: {
+    evidenceMedia?: { name: string; data: string; type: string; description?: string }[];
+    media?: { name: string; data: string; type: string; description?: string }[];
+}) {
+    const fromEntry = Array.isArray(entry.evidenceMedia)
+        ? entry.evidenceMedia
+        : Array.isArray(entry.media)
+          ? entry.media
+          : [];
+    return fromEntry
+        .filter((m) => m && typeof m.data === "string" && m.data.trim())
+        .map((m) => ({
+            name: m.name || "file",
+            data: m.data,
+            type: m.type || "",
+            description: m.description,
+        }));
+}
+
+function mergeFindingMedia(
+    ...lists: Array<{ name: string; data: string; type: string; description?: string }[] | undefined>
+) {
+    const media: { name: string; data: string; type: string; description?: string }[] = [];
+    const seen = new Set<string>();
+    for (const list of lists) {
+        if (!Array.isArray(list)) continue;
+        for (const m of list) {
+            if (!m?.data || typeof m.data !== "string") continue;
+            const sig = `${m.name}::${m.data.slice(0, 40)}`;
+            if (seen.has(sig)) continue;
+            seen.add(sig);
+            media.push({
+                name: m.name || "file",
+                data: m.data,
+                type: m.type || "",
+                description: m.description,
+            });
+        }
+    }
+    return media;
 }
 
 
@@ -170,6 +433,26 @@ export function mergeFindingWithOverrides(
         ...override,
         isOverridden: true,
     };
+    // Prefer non-empty media so assignee responses don't wipe auditor evidence
+    // and empty override media doesn't hide uploaded attachments.
+    const overrideMedia = Array.isArray(override.media) ? override.media : null;
+    const baseMedia = Array.isArray(finding.media) ? finding.media : [];
+    if (!overrideMedia || overrideMedia.length === 0) {
+        merged.media = baseMedia.length > 0 ? baseMedia : overrideMedia || [];
+    } else if (baseMedia.length > 0) {
+        const seen = new Set(
+            overrideMedia.map((m) => `${m.name}::${String(m.data || "").slice(0, 40)}`),
+        );
+        merged.media = [
+            ...overrideMedia,
+            ...baseMedia.filter((m) => {
+                const sig = `${m.name}::${String(m.data || "").slice(0, 40)}`;
+                if (seen.has(sig)) return false;
+                seen.add(sig);
+                return true;
+            }),
+        ];
+    }
     merged.status =
         normalizeFindingStatus(override.status) ?? resolveFindingStatus(merged);
     return merged;
@@ -223,17 +506,23 @@ export function extractFindings(plan: {
             normalized === "c" ||
             normalized === "compliant" ||
             normalized === "compliance" ||
+            normalized === "2" ||
             normalized === ""
         ) {
             return null;
         }
+        // EOSH / QFS scored checklists: 0 = Non Compliance, 1 = Meet with Exceptions
+        if (normalized === "0") return "Minor";
+        if (normalized === "1") return "OFI";
         if (normalized.includes("ofi") || normalized.includes("opportunity")) return "OFI";
         if (normalized === "min" || normalized.includes("minor")) return "Minor";
         if (normalized === "maj" || normalized.includes("major")) return "Major";
         if (
             normalized === "nc" ||
             normalized.includes("non-conformance") ||
-            normalized.includes("nonconformance")
+            normalized.includes("nonconformance") ||
+            normalized.includes("non compliance") ||
+            normalized.includes("non-compliance")
         ) {
             return "Minor";
         }
@@ -297,7 +586,10 @@ export function extractFindings(plan: {
                         ...fields,
                         description:
                             fields.description || requirementText || "No description provided",
-                        media: collectClauseMedia(data, clauseId),
+                        media: mergeFindingMedia(
+                            mediaFromFindingEntry(entry),
+                            collectClauseMedia(data, clauseId),
+                        ),
                     });
                 }
             },
@@ -305,50 +597,144 @@ export function extractFindings(plan: {
     }
 
     const checklistData = safeParse(data.checklistData);
-    if (checklistData && typeof checklistData === "object") {
+    const moduleStoreRaw = safeParse(data.moduleDataByTemplateId);
+    const planTemplateIds = parseAuditPlanTemplateIds(plan.templateId);
+    const activeModuleId =
+        typeof data.activeModuleId === "string" && data.activeModuleId.trim()
+            ? data.activeModuleId.trim()
+            : planTemplateIds[0] || String(plan.templateId || "").trim() || "";
+
+    type ChecklistSource = {
+        templateId: string;
+        checklistData: Record<string, Record<string, unknown>>;
+        editableChecklist?: unknown;
+        /** When true, finding ids stay `checklist-{planId}-{idx}` for backwards compatibility. */
+        useLegacyFindingIds: boolean;
+    };
+
+    const checklistSources: ChecklistSource[] = [];
+    const moduleStore =
+        moduleStoreRaw && typeof moduleStoreRaw === "object"
+            ? (moduleStoreRaw as Record<
+                  string,
+                  {
+                      checklistData?: Record<string, Record<string, unknown>>;
+                      editableChecklist?: unknown;
+                  }
+              >)
+            : {};
+
+    const moduleStoreKeys = Object.keys(moduleStore);
+    if (moduleStoreKeys.length > 0) {
+        const multiModule = moduleStoreKeys.length > 1 || planTemplateIds.length > 1;
+        for (const templateId of moduleStoreKeys) {
+            const mod = moduleStore[templateId];
+            const modChecklist = safeParse(mod?.checklistData);
+            if (!modChecklist || typeof modChecklist !== "object") continue;
+            checklistSources.push({
+                templateId,
+                checklistData: modChecklist as Record<string, Record<string, unknown>>,
+                editableChecklist: mod?.editableChecklist,
+                useLegacyFindingIds: !multiModule && templateId === activeModuleId,
+            });
+        }
+        // Top-level checklist may be ahead of the store for the active module.
+        if (
+            checklistData &&
+            typeof checklistData === "object" &&
+            activeModuleId &&
+            !moduleStoreKeys.includes(activeModuleId)
+        ) {
+            checklistSources.push({
+                templateId: activeModuleId,
+                checklistData: checklistData as Record<string, Record<string, unknown>>,
+                editableChecklist,
+                useLegacyFindingIds: planTemplateIds.length <= 1,
+            });
+        } else if (
+            checklistData &&
+            typeof checklistData === "object" &&
+            activeModuleId &&
+            moduleStoreKeys.includes(activeModuleId)
+        ) {
+            // Prefer freshest top-level answers for the active module.
+            const idx = checklistSources.findIndex((s) => s.templateId === activeModuleId);
+            if (idx >= 0) {
+                checklistSources[idx] = {
+                    ...checklistSources[idx],
+                    checklistData: checklistData as Record<string, Record<string, unknown>>,
+                    editableChecklist:
+                        Array.isArray(editableChecklist) && editableChecklist.length > 0
+                            ? editableChecklist
+                            : checklistSources[idx].editableChecklist,
+                };
+            }
+        }
+    } else if (checklistData && typeof checklistData === "object") {
+        checklistSources.push({
+            templateId: activeModuleId || String(plan.templateId || ""),
+            checklistData: checklistData as Record<string, Record<string, unknown>>,
+            editableChecklist,
+            useLegacyFindingIds: true,
+        });
+    }
+
+    for (const source of checklistSources) {
+        const moduleName = resolveAuditModuleDisplayName(source.templateId);
         const templateContent = (() => {
-            if (Array.isArray(editableChecklist)) return editableChecklist;
-            const tmplId = plan.templateId;
-            if (!tmplId) return null;
-            const tmpl = auditTemplates.find((t) => t.id === tmplId);
+            const fromMod = safeParse(source.editableChecklist);
+            if (Array.isArray(fromMod) && fromMod.length > 0) return fromMod;
+            if (Array.isArray(editableChecklist) && source.templateId === activeModuleId) {
+                return editableChecklist;
+            }
+            const tmpl = auditTemplates.find((t) => t.id === source.templateId);
             if (!tmpl) return null;
             return tmpl.content as ChecklistContent[];
         })();
 
-        Object.entries(checklistData as Record<string, Record<string, unknown>>).forEach(
-            ([idx, entry]) => {
-                const ft = getFT(entry);
-                if (ft) {
-                    const itemIndex = Number(idx);
-                    const templateItem = Array.isArray(templateContent)
-                        ? templateContent[itemIndex]
-                        : null;
-                    const clauseRef = entry.clause
-                        ? `Clause ${entry.clause}`
-                        : templateItem?.clause
-                          ? `Clause ${templateItem.clause}`
-                          : `Item ${itemIndex + 1}`;
-
-                    const clauseKey = entry.clause || templateItem?.clause || String(itemIndex);
-                    const fields = buildStructuredFindingFields(entry);
-                    results.push({
-                        id: `checklist-${plan.id}-${idx}`,
-                        auditId: plan.id,
-                        auditName,
-                        clauseRef,
-                        type: ft,
-                        ...fields,
-                        description:
-                            fields.description ||
-                            templateItem?.question ||
-                            "No description provided",
-                        media: collectClauseMedia(data, String(clauseKey), {
-                            checklistIndex: itemIndex,
-                        }),
-                    });
-                }
-            },
-        );
+        Object.entries(source.checklistData).forEach(([idx, entry]) => {
+            const ft = getFT(entry);
+            if (!ft) return;
+            const itemIndex = Number(idx);
+            const templateItem = Array.isArray(templateContent)
+                ? templateContent[itemIndex]
+                : null;
+            const clauseCode = String(
+                entry.clause || templateItem?.clause || "",
+            ).trim();
+            const clauseRef = formatChecklistClauseRef({
+                moduleName,
+                clauseCode,
+                itemIndex,
+            });
+            const findingId = source.useLegacyFindingIds
+                ? `checklist-${plan.id}-${idx}`
+                : `checklist-${plan.id}-${source.templateId}-${idx}`;
+            const clauseKey = clauseCode || String(itemIndex);
+            const fields = buildStructuredFindingFields(entry);
+            results.push({
+                id: findingId,
+                auditId: plan.id,
+                auditName,
+                clauseRef,
+                moduleName: moduleName || undefined,
+                type: ft,
+                ...fields,
+                description:
+                    fields.description ||
+                    templateItem?.question ||
+                    "No description provided",
+                media: mergeFindingMedia(
+                    mediaFromFindingEntry(entry),
+                    collectClauseMedia(data, String(clauseKey), {
+                        checklistIndex: itemIndex,
+                    }),
+                    collectClauseMedia(data, String(itemIndex), {
+                        checklistIndex: itemIndex,
+                    }),
+                ),
+            });
+        });
     }
 
     const extraItems = safeParse(data.extraChecklistItems);
@@ -374,7 +760,10 @@ export function extractFindings(plan: {
                                 fields.description ||
                                 (typeof row.question === "string" ? row.question : "") ||
                                 "",
-                            media: collectClauseMedia(data, clause, { checklistIndex: idx }),
+                            media: mergeFindingMedia(
+                                mediaFromFindingEntry(row),
+                                collectClauseMedia(data, clause, { checklistIndex: idx }),
+                            ),
                         });
                     }
                 });
@@ -533,6 +922,11 @@ export async function saveFindingOverride(updated: Finding): Promise<void> {
             description: updated.description,
             actionBy: updated.actionBy,
             details: updated.details,
+            evidence: updated.evidence,
+            findingDetails: updated.findingDetails,
+            correction: updated.correction,
+            rootCause: updated.rootCause,
+            correctiveAction: updated.correctiveAction,
             assignTo: updated.assignTo,
             assignToName: updated.assignToName,
             assignToEmail: updated.assignToEmail,
@@ -540,6 +934,10 @@ export async function saveFindingOverride(updated: Finding): Promise<void> {
             closeDate: updated.closeDate,
             status: updated.status,
             media: updated.media,
+            capaForm: updated.capaForm,
+            capaResponseHistory: updated.capaResponseHistory,
+            capaReviews: updated.capaReviews,
+            rejectReason: updated.rejectReason,
         },
     };
 
@@ -580,3 +978,113 @@ export async function saveFindingOverride(updated: Finding): Promise<void> {
 
     if (!resUpdate.ok) throw new Error("Failed to update");
 }
+
+/** Resolve raised-by email from a finding for reporter notifications. */
+export function getFindingRaisedByEmail(finding: Finding): string {
+    if (finding.raisedByEmail?.trim()) {
+        return finding.raisedByEmail.toLowerCase().trim();
+    }
+    const labeled = (finding.raisedBy || finding.raisedByName || "").match(
+        /\(([^\s@]+@[^\s@]+\.[^\s@]+)\)\s*$/,
+    );
+    if (labeled?.[1]) return labeled[1].toLowerCase().trim();
+    const raw = (finding.raisedBy || finding.raisedByName || "").trim();
+    if (raw.includes("@")) return raw.toLowerCase();
+    return "";
+}
+
+/**
+ * Email + in-app notification to the reporter after an assignee sends a response.
+ * Formal NC responses already notify on the server; this covers informal findings.
+ */
+export async function notifyFindingResponse(
+    finding: Finding,
+    options?: { nonconformanceId?: number | null; isUpdate?: boolean },
+): Promise<void> {
+    const raisedByEmail = getFindingRaisedByEmail(finding);
+    const raisedByUserId = finding.createdByUserId
+        ? Number(finding.createdByUserId)
+        : null;
+    if (!raisedByEmail && !(Number.isInteger(raisedByUserId) && raisedByUserId! > 0)) {
+        return;
+    }
+
+    const res = await apiFetch(
+        `/audit-plans/${finding.auditId}/notify-finding-response`,
+        {
+            method: "POST",
+            body: JSON.stringify({
+                findingId: finding.id,
+                findingRef: finding.clauseRef || finding.description || finding.id,
+                raisedByEmail: raisedByEmail || undefined,
+                raisedByUserId:
+                    Number.isInteger(raisedByUserId) && raisedByUserId! > 0
+                        ? raisedByUserId
+                        : undefined,
+                nonconformanceId: options?.nonconformanceId ?? null,
+                isUpdate: Boolean(options?.isUpdate),
+            }),
+        },
+    );
+    if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(
+            (typeof data.error === "string" && data.error) ||
+                "Failed to notify reporter",
+        );
+    }
+}
+
+export function getFindingAssigneeEmail(finding: Finding): string {
+    if (finding.assignToEmail?.trim()) {
+        return finding.assignToEmail.toLowerCase().trim();
+    }
+    const labeled = finding.assignTo?.match(/\(([^\s@]+@[^\s@]+\.[^\s@]+)\)\s*$/);
+    if (labeled?.[1]) return labeled[1].toLowerCase().trim();
+    if (finding.assignTo?.includes("@")) {
+        return finding.assignTo.toLowerCase().trim();
+    }
+    return "";
+}
+
+export function isFindingAwaitingReporterReview(finding: Finding): boolean {
+    return finding.status === "New Response" || finding.status === "Responded";
+}
+
+/**
+ * Notify the assignee after the reporter accepts/closes or rejects/reopens.
+ */
+export async function notifyFindingReview(
+    finding: Finding,
+    options: {
+        decision: "ACCEPT" | "REJECT";
+        reason?: string;
+        nonconformanceId?: number | null;
+    },
+): Promise<void> {
+    const assignToEmail = getFindingAssigneeEmail(finding);
+    if (!assignToEmail) return;
+
+    const res = await apiFetch(
+        `/audit-plans/${finding.auditId}/notify-finding-review`,
+        {
+            method: "POST",
+            body: JSON.stringify({
+                findingId: finding.id,
+                findingRef: finding.clauseRef || finding.description || finding.id,
+                assignToEmail,
+                decision: options.decision,
+                reason: options.reason || undefined,
+                nonconformanceId: options.nonconformanceId ?? null,
+            }),
+        },
+    );
+    if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(
+            (typeof data.error === "string" && data.error) ||
+                "Failed to notify assignee",
+        );
+    }
+}
+

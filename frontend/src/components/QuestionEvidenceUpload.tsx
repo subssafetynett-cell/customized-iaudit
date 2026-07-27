@@ -15,6 +15,8 @@ type Props = {
     readOnly?: boolean;
     className?: string;
     uploadId?: string;
+    /** Tighter layout for table evidence cells */
+    compact?: boolean;
 };
 
 const actionButtonClass =
@@ -29,6 +31,7 @@ export function QuestionEvidenceUpload({
     readOnly = false,
     className,
     uploadId,
+    compact = false,
 }: Props) {
     if (readOnly && files.length === 0) return null;
 
@@ -38,12 +41,18 @@ export function QuestionEvidenceUpload({
     };
 
     return (
-        <div className={cn("mt-3 flex flex-col gap-2 border-t border-slate-100 pt-3", className)}>
+        <div
+            className={cn(
+                "flex flex-col gap-2",
+                compact ? "mt-2 pt-2 border-t border-slate-200" : "mt-3 border-t border-slate-100 pt-3",
+                className,
+            )}
+        >
             {!readOnly && (
                 <div className="flex flex-wrap gap-2">
                     <label className={actionButtonClass}>
                         <Upload className="h-3.5 w-3.5 shrink-0" />
-                        Upload evidence
+                        {compact ? "Upload image" : "Upload evidence"}
                         <input
                             id={uploadId}
                             type="file"
@@ -72,7 +81,7 @@ export function QuestionEvidenceUpload({
                 onDescriptionChange={onDescriptionChange}
                 onDescriptionBlur={onDescriptionBlur}
                 readOnly={readOnly}
-                label="Attached evidence"
+                label={compact ? "Images" : "Attached evidence"}
                 chipClassName="text-[10px]"
             />
         </div>

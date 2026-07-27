@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useParams, useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { apiFetch } from "@/lib/api";
 import {
@@ -43,7 +43,10 @@ import {
   ClauseChecklistContent,
   ProcessAuditContent,
   getAuditExecuteSectionLabels,
+  getAuditPlanTemplateLabel,
   findAuditTemplate,
+  findAuditTemplates,
+  parseAuditPlanTemplateIds,
   resolveAuditTemplateId,
 } from "@/data/auditTemplates";
 import { toast } from "sonner";
@@ -132,6 +135,8 @@ import {
   EoshExceptionFollowUp,
   needsEoshExceptionFollowUp,
   useEoshOrgUsers,
+  formatEoshExceptionFollowUpMissing,
+  isEoshExceptionFollowUpComplete,
 } from "@/components/EoshExceptionFollowUp";
 
 import { CLAUSE_MATRIX, ClauseMatrixRow } from "@/data/clauseMapping";
@@ -262,9 +267,38 @@ const AuditExecute = () => {
       ? location.state.focusFindingId
       : undefined;
 
-  // Use the template attached to the plan (resolve legacy/alias ids)
-  const templateId = resolveAuditTemplateId(plan?.templateId) ?? plan?.templateId;
-  const template = findAuditTemplate(plan?.templateId);
+  // Use the template(s) attached to the plan (resolve legacy/alias ids)
+  const planTemplateIds = useMemo(
+    () => parseAuditPlanTemplateIds(plan?.templateId),
+    [plan?.templateId],
+  );
+  const planTemplates = useMemo(
+    () => findAuditTemplates(plan?.templateId),
+    [plan?.templateId],
+  );
+  const [activeModuleId, setActiveModuleId] = useState("");
+  const [moduleDataByTemplateId, setModuleDataByTemplateId] = useState<
+    Record<
+      string,
+      {
+        checklistData?: Record<number, any>;
+        editableChecklist?: any[];
+        extraChecklistItems?: Record<string, any[]>;
+      }
+    >
+  >({});
+
+  useEffect(() => {
+    if (planTemplateIds.length === 0) return;
+    if (!activeModuleId || !planTemplateIds.includes(activeModuleId)) {
+      setActiveModuleId(planTemplateIds[0]);
+    }
+  }, [planTemplateIds, activeModuleId]);
+
+  const templateId =
+    resolveAuditTemplateId(activeModuleId || planTemplateIds[0]) ??
+    (activeModuleId || planTemplateIds[0] || plan?.templateId);
+  const template = findAuditTemplate(templateId);
   const templateSectionLabels = template
     ? getAuditExecuteSectionLabels(template)
     : { divider: "Audit Execution", detailsTitle: null as string | null };
@@ -354,6 +388,33 @@ const AuditExecute = () => {
   // Editable checklist state for modifying original template questions
   const [isEditMode, setIsEditMode] = useState(false);
   const [editableChecklist, setEditableChecklist] = useState<any[]>([]);
+
+  const switchActiveModule = (nextId: string) => {
+    if (!nextId || nextId === activeModuleId) return;
+    const currentId = activeModuleId || planTemplateIds[0];
+    const snapshot = {
+      checklistData,
+      editableChecklist,
+      extraChecklistItems,
+    };
+    const updatedStore = currentId
+      ? { ...moduleDataByTemplateId, [currentId]: snapshot }
+      : { ...moduleDataByTemplateId };
+    setModuleDataByTemplateId(updatedStore);
+
+    const stored = updatedStore[nextId];
+    const nextTemplate = findAuditTemplate(nextId);
+    setChecklistData(stored?.checklistData || {});
+    setEditableChecklist(
+      stored?.editableChecklist && stored.editableChecklist.length > 0
+        ? stored.editableChecklist
+        : Array.isArray(nextTemplate?.content)
+          ? [...nextTemplate.content]
+          : [],
+    );
+    setExtraChecklistItems(stored?.extraChecklistItems || {});
+    setActiveModuleId(nextId);
+  };
 
   const activeStandards = {
     iso9001: plan?.criteria?.includes("9001") || plan?.standard?.includes("9001") || plan?.criteria?.toLowerCase().includes("quality") || plan?.criteria?.toLowerCase().includes("9001"),
@@ -487,6 +548,7 @@ const AuditExecute = () => {
   );
   const [auditeeOptions, setAuditeeOptions] = useState<AuditeeOption[]>([]);
   const eoshOrgUsers = useEoshOrgUsers();
+  const [showExceptionFollowUpErrors, setShowExceptionFollowUpErrors] = useState(false);
   const [ncByFindingId, setNcByFindingId] = useState<Record<string, NonconformanceSummary>>(
     {},
   );
@@ -514,8 +576,39 @@ const AuditExecute = () => {
           setCurrentPlan(found);
           if (found.auditData) {
             const data = typeof found.auditData === 'string' ? JSON.parse(found.auditData) : found.auditData;
-            if (data.checklistData) setChecklistData(data.checklistData);
-            if (data.sectionData) setSectionData(data.sectionData);
+            const ids = parseAuditPlanTemplateIds(found.templateId);
+            const preferredActive =
+              typeof data.activeModuleId === "string" && ids.includes(data.activeModuleId)
+                ? data.activeModuleId
+                : ids[0] || "";
+            if (preferredActive) setActiveModuleId(preferredActive);
+
+            if (data.moduleDataByTemplateId && typeof data.moduleDataByTemplateId === "object") {
+              setModuleDataByTemplateId(data.moduleDataByTemplateId);
+              const mod = preferredActive
+                ? data.moduleDataByTemplateId[preferredActive]
+                : null;
+              if (mod?.checklistData) setChecklistData(mod.checklistData);
+              else if (data.checklistData) setChecklistData(data.checklistData);
+              if (mod?.sectionData) setSectionData(mod.sectionData);
+              else if (data.sectionData) setSectionData(data.sectionData);
+              if (mod?.extraChecklistItems) setExtraChecklistItems(mod.extraChecklistItems);
+              else if (data.extraChecklistItems) setExtraChecklistItems(data.extraChecklistItems);
+            } else {
+              if (data.checklistData) setChecklistData(data.checklistData);
+              if (data.sectionData) setSectionData(data.sectionData);
+              if (data.extraChecklistItems) setExtraChecklistItems(data.extraChecklistItems);
+              if (preferredActive && (data.checklistData || data.editableChecklist)) {
+                setModuleDataByTemplateId({
+                  [preferredActive]: {
+                    checklistData: data.checklistData,
+                    editableChecklist: data.editableChecklist,
+                    extraChecklistItems: data.extraChecklistItems,
+                  },
+                });
+              }
+            }
+
             if (data.clauseData) setClauseData(data.clauseData);
             if (data.previousFindings) setPreviousFindings(data.previousFindings);
             if (data.detailsOfChanges) setDetailsOfChanges(data.detailsOfChanges);
@@ -528,28 +621,67 @@ const AuditExecute = () => {
             if (data.executiveSummary) setExecutiveSummary(data.executiveSummary);
             if (data.summaryCounts) setSummaryCounts(data.summaryCounts);
             if (data.auditFindings) setAuditFindings(data.auditFindings);
-            if (data.auditGlobalInfo) setAuditGlobalInfo(data.auditGlobalInfo);
+            if (data.auditGlobalInfo) {
+              setAuditGlobalInfo((prev) => ({ ...prev, ...data.auditGlobalInfo }));
+            }
             if (data.processAudits) setProcessAudits(data.processAudits);
-            if (data.extraChecklistItems) setExtraChecklistItems(data.extraChecklistItems);
             if (data.showExecutiveSummary !== undefined) setShowExecutiveSummary(data.showExecutiveSummary);
             if (data.showAuditFindings !== undefined) setShowAuditFindings(data.showAuditFindings);
             if (data.clauseFiles) setClauseFiles(sanitizeAuditEvidenceMediaMap(data.clauseFiles));
-            if (data.genericFiles) setGenericFiles(sanitizeAuditEvidenceMediaMap(data.genericFiles));
+            if (data.genericFiles) {
+              const sanitized = sanitizeAuditEvidenceMediaMap(data.genericFiles);
+              setGenericFiles(sanitized);
+              // Backfill evidenceMedia onto checklist rows so assignees always see NC evidence
+              setChecklistData((prev) => {
+                let next = prev;
+                let changed = false;
+                for (const [key, files] of Object.entries(sanitized)) {
+                  const m = /^clause_checklist_(\d+)$/.exec(key);
+                  if (!m || !Array.isArray(files) || files.length === 0) continue;
+                  const idx = Number(m[1]);
+                  if (!Number.isInteger(idx) || idx < 0) continue;
+                  const row = next[idx] || prev[idx] || {};
+                  const existing = Array.isArray((row as any).evidenceMedia)
+                    ? (row as any).evidenceMedia
+                    : [];
+                  if (existing.length >= files.length) continue;
+                  if (!changed) {
+                    next = { ...prev };
+                    changed = true;
+                  }
+                  next[idx] = {
+                    ...(next[idx] || row),
+                    evidenceMedia: files.map((f) => ({
+                      name: f.name,
+                      data: f.data,
+                      type: f.type,
+                      description: f.description,
+                    })),
+                  } as any;
+                }
+                return changed ? next : prev;
+              });
+            }
             setFindingsReportForm(buildFindingsReportDefaults(found, data));
-            const currentTemplate = found.templateId
-              ? findAuditTemplate(found.templateId)
-              : null;
+            const currentTemplate = preferredActive
+              ? findAuditTemplate(preferredActive)
+              : findAuditTemplate(found.templateId);
 
-            if (data.editableChecklist && data.editableChecklist.length > 0) {
+            const modEditable =
+              preferredActive &&
+              data.moduleDataByTemplateId?.[preferredActive]?.editableChecklist;
+            if (Array.isArray(modEditable) && modEditable.length > 0) {
+              setEditableChecklist(modEditable);
+            } else if (data.editableChecklist && data.editableChecklist.length > 0) {
               setEditableChecklist(data.editableChecklist);
             } else if (currentTemplate?.content) {
               setEditableChecklist(currentTemplate.content);
             }
           } else {
             setFindingsReportForm(buildFindingsReportDefaults(found));
-            const currentTemplate = found.templateId
-              ? findAuditTemplate(found.templateId)
-              : null;
+            const ids = parseAuditPlanTemplateIds(found.templateId);
+            if (ids[0]) setActiveModuleId(ids[0]);
+            const currentTemplate = findAuditTemplate(ids[0] || found.templateId);
             if (currentTemplate?.content) {
               setEditableChecklist(currentTemplate.content);
             }
@@ -647,6 +779,79 @@ const AuditExecute = () => {
     getFieldError,
   } = useAssigneeEmailLookup(id);
 
+  const exceptionAssignNotifiedRef = useRef<Set<string>>(new Set());
+
+  const notifyExceptionAssignment = useCallback(
+    async (
+      checklistIndex: number,
+      user: { label: string; email: string } | null,
+      row: {
+        raisedByName?: string;
+        raisedBy?: string;
+        raisedByEmail?: string;
+        findings?: string;
+        targetDate?: string;
+        details?: string;
+        question?: string;
+      } | null,
+      questionText?: string,
+    ) => {
+      if (!id || !user?.email) return;
+      const email = user.email.trim().toLowerCase();
+      if (!email) return;
+      const notifyKey = `checklist-${checklistIndex}::${email}`;
+      if (exceptionAssignNotifiedRef.current.has(notifyKey)) return;
+
+      const findingRef =
+        questionText?.trim() ||
+        `Checklist item ${checklistIndex + 1}`;
+      const raisedByName =
+        row?.raisedByName?.trim() ||
+        row?.raisedBy?.trim() ||
+        "";
+      const findingType =
+        row?.findings === "0"
+          ? "Minor"
+          : row?.findings === "1"
+            ? "OFI"
+            : undefined;
+
+      try {
+        const res = await apiFetch(`/audit-plans/${id}/notify-finding-assignment`, {
+          method: "POST",
+          body: JSON.stringify({
+            assignToEmail: email,
+            assignToName: user.label || "",
+            findingRef,
+            findingType,
+            raisedByName,
+            kind: "nonconformance",
+            assignment: {
+              source: "checklist",
+              key: String(checklistIndex),
+            },
+            rowPatch: {
+              findings: row?.findings || "",
+              raisedBy: row?.raisedBy || "",
+              raisedByName: row?.raisedByName || "",
+              raisedByEmail: row?.raisedByEmail || "",
+              targetDate: row?.targetDate || "",
+              details: row?.details || "",
+            },
+          }),
+        });
+        if (!res.ok) return;
+        exceptionAssignNotifiedRef.current.add(notifyKey);
+        toast.success(
+          `Assigned to ${user.label || email}. They will get an email and can see it in Findings.`,
+        );
+      } catch {
+        // Non-blocking — assignment still saved locally on save
+      }
+    },
+    [id],
+  );
+
   const applyAssigneeEmail = (
     fieldKey: string,
     email: string,
@@ -728,6 +933,10 @@ const AuditExecute = () => {
     refNo: "",
     clauseNo: "",
     department: "",
+    auditeeName: "",
+    auditDoneBy: "",
+    auditeeDept: "",
+    auditDate: "",
   });
 
   const [processAudits, setProcessAudits] = useState<ProcessAuditContent[]>([
@@ -842,6 +1051,17 @@ const AuditExecute = () => {
     () => {
       const syncedGeneralComment =
         findingsReportForm.generalComment || executiveSummary;
+      const currentModuleId = activeModuleId || planTemplateIds[0] || "";
+      const syncedModuleStore = currentModuleId
+        ? {
+            ...moduleDataByTemplateId,
+            [currentModuleId]: {
+              checklistData,
+              editableChecklist,
+              extraChecklistItems,
+            },
+          }
+        : moduleDataByTemplateId;
       const payload = {
         checklistData,
         sectionData,
@@ -869,6 +1089,8 @@ const AuditExecute = () => {
         editableChecklist,
         clauseFiles: sanitizeAuditEvidenceMediaMap(clauseFiles),
         genericFiles: sanitizeAuditEvidenceMediaMap(genericFiles),
+        activeModuleId: currentModuleId || undefined,
+        moduleDataByTemplateId: syncedModuleStore,
       };
 
       if (!plan?.id) {
@@ -916,6 +1138,9 @@ const AuditExecute = () => {
       plan?.auditName,
       plan?.templateId,
       plan?.findingsData,
+      activeModuleId,
+      planTemplateIds,
+      moduleDataByTemplateId,
     ],
   );
 
@@ -1298,17 +1523,37 @@ const AuditExecute = () => {
     reportRejectedEvidence(rejected, accepted.length);
     if (accepted.length === 0) return;
 
-    let nextGenericFiles: Record<string, AuditEvidenceMedia[]>;
-    setGenericFiles((prev) => {
-      nextGenericFiles = {
-        ...prev,
-        [key]: [...(prev[key] || []), ...accepted],
+    const nextList = [...(genericFiles[key] || []), ...accepted];
+    const nextGenericFiles = {
+      ...genericFiles,
+      [key]: nextList,
+    };
+    setGenericFiles(nextGenericFiles);
+
+    const checklistMatch = /^clause_checklist_(\d+)$/.exec(key);
+    const checklistIndex =
+      checklistMatch != null ? Number(checklistMatch[1]) : NaN;
+    let nextChecklistData = checklistData;
+    if (Number.isInteger(checklistIndex) && checklistIndex >= 0) {
+      nextChecklistData = {
+        ...checklistData,
+        [checklistIndex]: {
+          ...(checklistData[checklistIndex] || {}),
+          evidenceMedia: nextList.map((m) => ({
+            name: m.name,
+            data: m.data,
+            type: m.type,
+            description: m.description,
+          })),
+        } as any,
       };
-      return nextGenericFiles;
-    });
+      setChecklistData(nextChecklistData);
+    }
+
     toast.success(`${accepted.length} file(s) attached`);
     const saved = await saveNow({
-      genericFiles: sanitizeAuditEvidenceMediaMap(nextGenericFiles!),
+      genericFiles: sanitizeAuditEvidenceMediaMap(nextGenericFiles),
+      checklistData: nextChecklistData,
     });
     if (!saved) {
       toast.error("File attached locally but could not save to the server. Click Save Audit Progress.", {
@@ -1318,16 +1563,36 @@ const AuditExecute = () => {
   };
 
   const removeGenericFile = (key: string, indexToRemove: number) => {
-    let nextGenericFiles: Record<string, AuditEvidenceMedia[]>;
-    setGenericFiles((prev) => {
-      nextGenericFiles = {
-        ...prev,
-        [key]: prev[key].filter((_, index) => index !== indexToRemove),
+    const nextList = (genericFiles[key] || []).filter((_, index) => index !== indexToRemove);
+    const nextGenericFiles = {
+      ...genericFiles,
+      [key]: nextList,
+    };
+    setGenericFiles(nextGenericFiles);
+
+    const checklistMatch = /^clause_checklist_(\d+)$/.exec(key);
+    const checklistIndex =
+      checklistMatch != null ? Number(checklistMatch[1]) : NaN;
+    let nextChecklistData = checklistData;
+    if (Number.isInteger(checklistIndex) && checklistIndex >= 0) {
+      nextChecklistData = {
+        ...checklistData,
+        [checklistIndex]: {
+          ...(checklistData[checklistIndex] || {}),
+          evidenceMedia: nextList.map((m) => ({
+            name: m.name,
+            data: m.data,
+            type: m.type,
+            description: m.description,
+          })),
+        } as any,
       };
-      return nextGenericFiles;
-    });
+      setChecklistData(nextChecklistData);
+    }
+
     void saveNow({
-      genericFiles: sanitizeAuditEvidenceMediaMap(nextGenericFiles!),
+      genericFiles: sanitizeAuditEvidenceMediaMap(nextGenericFiles),
+      checklistData: nextChecklistData,
     });
   };
 
@@ -1443,6 +1708,42 @@ const AuditExecute = () => {
       toast.error("Auditees can view and download audits only.");
       return;
     }
+
+    const incompleteExceptionRows: number[] = [];
+    if (template && (usesEoshScoredChecklistLayout(template) || usesQfsKoreScoredChecklistLayout(template))) {
+      const items =
+        editableChecklist.length > 0
+          ? editableChecklist
+          : Array.isArray(template.content)
+            ? template.content
+            : [];
+      const qfsMode = getQfsScoreMode(templateId);
+      items.forEach((_item: unknown, index: number) => {
+        const row = checklistData[index] || {};
+        const score = eoshScoreFromFindings(row.findings);
+        const needsFollowUp = usesQfsKoreScoredChecklistLayout(template)
+          ? needsQfsExceptionFollowUp(score as "2" | "1" | "0" | "", qfsMode)
+          : needsEoshExceptionFollowUp(score as "2" | "1" | "0" | "");
+        if (needsFollowUp && !isEoshExceptionFollowUpComplete(row)) {
+          incompleteExceptionRows.push(index + 1);
+        }
+      });
+    }
+
+    if (incompleteExceptionRows.length > 0) {
+      setShowExceptionFollowUpErrors(true);
+      const first = incompleteExceptionRows[0];
+      const row = checklistData[first - 1] || {};
+      const missing = formatEoshExceptionFollowUpMissing(row);
+      toast.error(
+        incompleteExceptionRows.length === 1
+          ? `Item ${first}: fill required fields (${missing}).`
+          : `Fill all required exception fields on items ${incompleteExceptionRows.slice(0, 5).join(", ")}${incompleteExceptionRows.length > 5 ? "…" : ""}.`,
+      );
+      return;
+    }
+    setShowExceptionFollowUpErrors(false);
+
     const toastId = toast.loading("Saving audit…");
     try {
       const auditData = buildAuditDataPayload();
@@ -2532,6 +2833,34 @@ const AuditExecute = () => {
           </span>
           <div className="h-0.5 flex-1 bg-slate-200"></div>
         </div>
+
+        {planTemplates.length > 1 && (
+          <div className="rounded-xl border border-emerald-200 bg-emerald-50/40 p-3 space-y-2">
+            <p className="text-xs font-bold uppercase tracking-wide text-emerald-800">
+              Assigned modules ({planTemplates.length})
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {planTemplates.map((mod) => {
+                const isActive = (activeModuleId || planTemplateIds[0]) === mod.id;
+                return (
+                  <button
+                    key={mod.id}
+                    type="button"
+                    onClick={() => switchActiveModule(mod.id)}
+                    className={cn(
+                      "rounded-lg border px-3 py-2 text-left text-sm font-semibold transition-colors",
+                      isActive
+                        ? "border-emerald-500 bg-white text-emerald-900 shadow-sm"
+                        : "border-emerald-100 bg-white/70 text-slate-700 hover:border-emerald-300",
+                    )}
+                  >
+                    {getAuditPlanTemplateLabel(mod)}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         {/* --- TEMPLATE DYNAMIC CONTENT --- */}
         {template.type === "clause-checklist" ? (
@@ -3766,17 +4095,6 @@ const AuditExecute = () => {
                                 ) : (
                                   <>
                                     {item.question}
-                                    <QuestionEvidenceUpload
-                                      files={genericFiles[`clause_checklist_${dataIndex}`] ?? []}
-                                      onUpload={(files) =>
-                                        void handleGenericFileUpload(`clause_checklist_${dataIndex}`, files)
-                                      }
-                                      onRemove={(fileIdx) =>
-                                        removeGenericFile(`clause_checklist_${dataIndex}`, fileIdx)
-                                      }
-                                      {...genericEvidenceDescriptionHandlers(`clause_checklist_${dataIndex}`)}
-                                      readOnly={isAuditeeReadOnly}
-                                    />
                                   </>
                                 )}
                               </div>
@@ -3815,14 +4133,28 @@ const AuditExecute = () => {
 
                                 {/* Evidence */}
                                 <TableCell className="p-2 align-top">
-                                  {!["OFI", "Min", "Maj"].includes(type) && (
-                                    <Textarea
-                                      className="min-h-[80px] text-[11px] resize-y border-slate-200 bg-slate-50/50 focus:bg-white shadow-none p-2"
-                                      placeholder="Evidence..."
-                                      value={checklistData[dataIndex]?.evidence || ""}
-                                      onChange={(e) => handleChecklistChange(dataIndex, "evidence", e.target.value)}
+                                  <div className="flex flex-col gap-1">
+                                    {!["OFI", "Min", "Maj"].includes(type) && (
+                                      <Textarea
+                                        className="min-h-[80px] text-[11px] resize-y border-slate-200 bg-slate-50/50 focus:bg-white shadow-none p-2"
+                                        placeholder="Evidence..."
+                                        value={checklistData[dataIndex]?.evidence || ""}
+                                        onChange={(e) => handleChecklistChange(dataIndex, "evidence", e.target.value)}
+                                      />
+                                    )}
+                                    <QuestionEvidenceUpload
+                                      compact
+                                      files={genericFiles[`clause_checklist_${dataIndex}`] ?? []}
+                                      onUpload={(files) =>
+                                        void handleGenericFileUpload(`clause_checklist_${dataIndex}`, files)
+                                      }
+                                      onRemove={(fileIdx) =>
+                                        removeGenericFile(`clause_checklist_${dataIndex}`, fileIdx)
+                                      }
+                                      {...genericEvidenceDescriptionHandlers(`clause_checklist_${dataIndex}`)}
+                                      readOnly={isAuditeeReadOnly}
                                     />
-                                  )}
+                                  </div>
                                 </TableCell>
                               </>
                             )}
@@ -3951,6 +4283,18 @@ const AuditExecute = () => {
               <div className="p-4 border-b border-slate-200">
                 <EoshCapabilityFormBanner
                   {...getEoshCapabilityBannerCopy(templateId)}
+                  auditeeName={auditGlobalInfo.auditeeName}
+                  auditDate={auditGlobalInfo.auditDate}
+                  auditDoneBy={auditGlobalInfo.auditDoneBy}
+                  onAuditeeNameChange={(value) =>
+                    setAuditGlobalInfo({ ...auditGlobalInfo, auditeeName: value })
+                  }
+                  onAuditDateChange={(value) =>
+                    setAuditGlobalInfo({ ...auditGlobalInfo, auditDate: value })
+                  }
+                  onAuditDoneByChange={(value) =>
+                    setAuditGlobalInfo({ ...auditGlobalInfo, auditDoneBy: value })
+                  }
                 />
               </div>
             )}
@@ -3958,6 +4302,18 @@ const AuditExecute = () => {
               <div className="p-4 border-b border-slate-200">
                 <QfsKoreFormBanner
                   {...getQfsKoreBannerCopy(templateId)}
+                  auditeeName={auditGlobalInfo.auditeeName}
+                  auditDoneBy={auditGlobalInfo.auditDoneBy}
+                  auditeeDept={auditGlobalInfo.auditeeDept}
+                  onAuditeeNameChange={(value) =>
+                    setAuditGlobalInfo({ ...auditGlobalInfo, auditeeName: value })
+                  }
+                  onAuditDoneByChange={(value) =>
+                    setAuditGlobalInfo({ ...auditGlobalInfo, auditDoneBy: value })
+                  }
+                  onAuditeeDeptChange={(value) =>
+                    setAuditGlobalInfo({ ...auditGlobalInfo, auditeeDept: value })
+                  }
                 />
               </div>
             )}
@@ -4103,14 +4459,28 @@ const AuditExecute = () => {
                                 readOnly={isAuditeeReadOnly}
                               />
                             </TableCell>
-                            <TableCell className="border border-slate-300 align-top p-2">
-                              <Textarea
-                                className="min-h-[72px] text-xs resize-y border-slate-300"
-                                placeholder="Evidence…"
-                                value={checklistData[index]?.evidence || ""}
-                                onChange={(e) => handleChecklistChange(index, "evidence", e.target.value)}
-                                readOnly={isAuditeeReadOnly}
-                              />
+                            <TableCell className="border border-slate-300 align-top p-2 min-w-[180px]">
+                              <div className="flex flex-col gap-1">
+                                <Textarea
+                                  className="min-h-[72px] text-xs resize-y border-slate-300"
+                                  placeholder="Evidence…"
+                                  value={checklistData[index]?.evidence || ""}
+                                  onChange={(e) => handleChecklistChange(index, "evidence", e.target.value)}
+                                  readOnly={isAuditeeReadOnly}
+                                />
+                                <QuestionEvidenceUpload
+                                  compact
+                                  files={genericFiles[`clause_checklist_${index}`] ?? []}
+                                  onUpload={(files) =>
+                                    void handleGenericFileUpload(`clause_checklist_${index}`, files)
+                                  }
+                                  onRemove={(fileIdx) =>
+                                    removeGenericFile(`clause_checklist_${index}`, fileIdx)
+                                  }
+                                  {...genericEvidenceDescriptionHandlers(`clause_checklist_${index}`)}
+                                  readOnly={isAuditeeReadOnly}
+                                />
+                              </div>
                             </TableCell>
                           </TableRow>
                           {needsQfsExceptionFollowUp(qfsScore, qfsMode) && (
@@ -4120,7 +4490,16 @@ const AuditExecute = () => {
                                   values={checklistData[index] || {}}
                                   users={eoshOrgUsers}
                                   disabled={isAuditeeReadOnly}
+                                  showErrors={showExceptionFollowUpErrors}
                                   onChange={(field, value) => handleChecklistChange(index, field, value)}
+                                  onAssignToSelect={(user) => {
+                                    void notifyExceptionAssignment(
+                                      index,
+                                      user,
+                                      checklistData[index] || {},
+                                      item.question,
+                                    );
+                                  }}
                                 />
                               </TableCell>
                             </TableRow>
@@ -4159,14 +4538,28 @@ const AuditExecute = () => {
                                 </button>
                               </TableCell>
                             ))}
-                            <TableCell className="border border-slate-300 align-top p-2">
-                              <Textarea
-                                className="min-h-[72px] text-xs resize-y border-slate-300"
-                                placeholder="Evidence reviewed…"
-                                value={checklistData[index]?.evidence || ""}
-                                onChange={(e) => handleChecklistChange(index, "evidence", e.target.value)}
-                                readOnly={isAuditeeReadOnly}
-                              />
+                            <TableCell className="border border-slate-300 align-top p-2 min-w-[180px]">
+                              <div className="flex flex-col gap-1">
+                                <Textarea
+                                  className="min-h-[72px] text-xs resize-y border-slate-300"
+                                  placeholder="Evidence reviewed…"
+                                  value={checklistData[index]?.evidence || ""}
+                                  onChange={(e) => handleChecklistChange(index, "evidence", e.target.value)}
+                                  readOnly={isAuditeeReadOnly}
+                                />
+                                <QuestionEvidenceUpload
+                                  compact
+                                  files={genericFiles[`clause_checklist_${index}`] ?? []}
+                                  onUpload={(files) =>
+                                    void handleGenericFileUpload(`clause_checklist_${index}`, files)
+                                  }
+                                  onRemove={(fileIdx) =>
+                                    removeGenericFile(`clause_checklist_${index}`, fileIdx)
+                                  }
+                                  {...genericEvidenceDescriptionHandlers(`clause_checklist_${index}`)}
+                                  readOnly={isAuditeeReadOnly}
+                                />
+                              </div>
                             </TableCell>
                             <TableCell className="border border-slate-300 align-top p-2">
                               <Textarea
@@ -4185,7 +4578,16 @@ const AuditExecute = () => {
                                   values={checklistData[index] || {}}
                                   users={eoshOrgUsers}
                                   disabled={isAuditeeReadOnly}
+                                  showErrors={showExceptionFollowUpErrors}
                                   onChange={(field, value) => handleChecklistChange(index, field, value)}
+                                  onAssignToSelect={(user) => {
+                                    void notifyExceptionAssignment(
+                                      index,
+                                      user,
+                                      checklistData[index] || {},
+                                      item.question,
+                                    );
+                                  }}
                                 />
                               </TableCell>
                             </TableRow>
@@ -4289,17 +4691,6 @@ const AuditExecute = () => {
                                       {item.intent}
                                     </div>
                                   ) : null}
-                                  <QuestionEvidenceUpload
-                                    files={genericFiles[`clause_checklist_${index}`] ?? []}
-                                    onUpload={(files) =>
-                                      void handleGenericFileUpload(`clause_checklist_${index}`, files)
-                                    }
-                                    onRemove={(fileIdx) =>
-                                      removeGenericFile(`clause_checklist_${index}`, fileIdx)
-                                    }
-                                    {...genericEvidenceDescriptionHandlers(`clause_checklist_${index}`)}
-                                    readOnly={isAuditeeReadOnly}
-                                  />
                                 </div>
                               )}
                             </TableCell>
@@ -4340,7 +4731,7 @@ const AuditExecute = () => {
 
                                 {/* Evidence */}
                                 <TableCell className="p-3 align-top">
-                                  <div className="flex flex-col h-full">
+                                  <div className="flex flex-col h-full gap-1">
                                     {!["OFI", "Min", "Maj"].includes(type) && (
                                       <Textarea
                                         className="min-h-[100px] text-sm resize-y border-slate-200 bg-slate-50/50 focus:bg-white shadow-sm transition-colors placeholder:text-slate-400 p-3"
@@ -4355,6 +4746,18 @@ const AuditExecute = () => {
                                         }
                                       />
                                     )}
+                                    <QuestionEvidenceUpload
+                                      compact
+                                      files={genericFiles[`clause_checklist_${index}`] ?? []}
+                                      onUpload={(files) =>
+                                        void handleGenericFileUpload(`clause_checklist_${index}`, files)
+                                      }
+                                      onRemove={(fileIdx) =>
+                                        removeGenericFile(`clause_checklist_${index}`, fileIdx)
+                                      }
+                                      {...genericEvidenceDescriptionHandlers(`clause_checklist_${index}`)}
+                                      readOnly={isAuditeeReadOnly}
+                                    />
                                   </div>
                                 </TableCell>
                               </>

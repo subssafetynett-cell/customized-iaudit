@@ -135,12 +135,27 @@ export function QfsKoreFormBanner({
   moduleLabel,
   sectionTitle,
   className,
+  auditeeName = "",
+  auditDoneBy = "",
+  auditeeDept = "",
+  onAuditeeNameChange,
+  onAuditDoneByChange,
+  onAuditeeDeptChange,
 }: {
   formTitle: string;
   moduleLabel: string;
   sectionTitle: string;
   className?: string;
+  auditeeName?: string;
+  auditDoneBy?: string;
+  auditeeDept?: string;
+  onAuditeeNameChange?: (value: string) => void;
+  onAuditDoneByChange?: (value: string) => void;
+  onAuditeeDeptChange?: (value: string) => void;
 }) {
+  const fieldClass =
+    "mt-1 h-8 w-full rounded-md border border-slate-300 bg-white px-2 text-sm text-slate-800 shadow-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400";
+
   return (
     <div
       className={cn(
@@ -157,18 +172,39 @@ export function QfsKoreFormBanner({
         </p>
       </div>
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3 px-4 py-3 border-b border-slate-200 bg-slate-50/60">
-        <p>
-          <span className="font-bold">AUDITEE NAME:</span>{" "}
-          <span className="text-slate-500">—</span>
-        </p>
-        <p>
-          <span className="font-bold">AUDIT DONE BY:</span>{" "}
-          <span className="text-slate-500">—</span>
-        </p>
-        <p>
-          <span className="font-bold">AUDITEE DEPT:</span>{" "}
-          <span className="text-slate-500">—</span>
-        </p>
+        <label className="block min-w-0">
+          <span className="font-bold uppercase tracking-wide">Auditee name:</span>
+          <input
+            type="text"
+            className={fieldClass}
+            value={auditeeName}
+            onChange={(e) => onAuditeeNameChange?.(e.target.value)}
+            placeholder="Enter auditee name"
+            readOnly={!onAuditeeNameChange}
+          />
+        </label>
+        <label className="block min-w-0">
+          <span className="font-bold uppercase tracking-wide">Audit done by:</span>
+          <input
+            type="text"
+            className={fieldClass}
+            value={auditDoneBy}
+            onChange={(e) => onAuditDoneByChange?.(e.target.value)}
+            placeholder="Enter auditor name"
+            readOnly={!onAuditDoneByChange}
+          />
+        </label>
+        <label className="block min-w-0">
+          <span className="font-bold uppercase tracking-wide">Auditee dept:</span>
+          <input
+            type="text"
+            className={fieldClass}
+            value={auditeeDept}
+            onChange={(e) => onAuditeeDeptChange?.(e.target.value)}
+            placeholder="Enter department"
+            readOnly={!onAuditeeDeptChange}
+          />
+        </label>
       </div>
       <div className="px-4 py-3 text-center">
         <p className="font-bold underline uppercase tracking-wide text-slate-900">

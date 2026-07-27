@@ -34,7 +34,7 @@ export const AUDIT_TEMPLATES_TOUR_STEPS: AuditTemplatesTourStepConfig[] = [
         targetId: "tour-step-audit-templates-filters",
         title: "Search and filter",
         description:
-            "Search by name or description, or filter by ISO standard to find the right template for your next audit.",
+            "Search by name or description, or filter by standard (EOSH / QFS KORE) to find the right template.",
         position: "bottom",
     },
     {
@@ -149,8 +149,8 @@ export function getAuditTemplatesTourStepConfig(
     return AUDIT_TEMPLATES_TOUR_STEPS.find((s) => s.step === step);
 }
 
-/** Preferred template for the guided tour (full clause checklist with all sections). */
-export const AUDIT_TEMPLATES_TOUR_TEMPLATE_ID = "iso-14001-clause-audit";
+/** Preferred template for the guided tour (EOSH module checklist). */
+export const AUDIT_TEMPLATES_TOUR_TEMPLATE_ID = "eosh-capability-manufacturing-checklist";
 
 /** Fallback if the preferred template is unavailable. */
-export const AUDIT_TEMPLATES_TOUR_TEMPLATE_FALLBACK_ID = "iso-14001-checklist";
+export const AUDIT_TEMPLATES_TOUR_TEMPLATE_FALLBACK_ID = "iso-45001-management-system-checklist";

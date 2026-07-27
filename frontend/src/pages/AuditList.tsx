@@ -20,7 +20,7 @@ import {
     AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import {
-    MoreVertical, FileText, Trash2, Calendar, Clock, Search, Download, MapPin, Loader2
+    MoreVertical, FileText, Trash2, Calendar, Search, Download, MapPin, Loader2
 } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
@@ -38,10 +38,59 @@ import {
   isAuditPlanCompleted,
 } from "@/lib/auditCompletion";
 import { useAuditeeReadOnly } from "@/lib/auditeeAccess";
+import {
+    findAuditTemplates,
+    getAuditPlanTemplateLabel,
+    parseAuditPlanTemplateIds,
+} from "@/data/auditTemplates";
+import { resolveAuditModuleDisplayName } from "@/lib/auditFindings";
+
+/** Subtitle under Audit column: module name(s) or ISO Standards. */
+function resolveAuditListTypeLabel(plan: {
+    templateId?: string | null;
+    auditProgram?: {
+        scheduleData?: {
+            criteriaType?: string;
+            moduleFamily?: string | null;
+        } | null;
+    } | null;
+}): string {
+    const templates = findAuditTemplates(plan.templateId);
+    const moduleTemplates = templates.filter(
+        (t) => t.module === "EOSH" || t.module === "QFS KORE",
+    );
+    if (moduleTemplates.length > 0) {
+        const labels = moduleTemplates.map((t) => getAuditPlanTemplateLabel(t));
+        return [...new Set(labels)].join("; ");
+    }
+
+    const fromIds = parseAuditPlanTemplateIds(plan.templateId)
+        .map((id) => resolveAuditModuleDisplayName(id))
+        .filter((name): name is string => Boolean(name?.trim()));
+    if (fromIds.length > 0) {
+        return [...new Set(fromIds)].join("; ");
+    }
+
+    const schedule = plan.auditProgram?.scheduleData;
+    if (schedule?.criteriaType === "module") {
+        if (schedule.moduleFamily === "eosh") return "EOSH";
+        if (schedule.moduleFamily === "qfs-kore") return "QFS KORE";
+        return "Module";
+    }
+
+    return "ISO Standards";
+}
+
+function isModuleAuditListPlan(plan: Parameters<typeof resolveAuditListTypeLabel>[0]): boolean {
+    return resolveAuditListTypeLabel(plan) !== "ISO Standards";
+}
+
+type AuditTypeFilter = "all" | "module" | "iso";
 
 const AuditList = () => {
     const [auditPlans, setAuditPlans] = useState<any[]>([]);
     const [searchQuery, setSearchQuery] = useState("");
+    const [typeFilter, setTypeFilter] = useState<AuditTypeFilter>("all");
     const [selectedSite, setSelectedSite] = useState("all");
     const [loading, setLoading] = useState(true);
     /** e.g. "42-pdf" while generating a report for plan 42 */
@@ -167,12 +216,19 @@ const AuditList = () => {
         (plan.location && plan.location.toLowerCase().includes(searchQuery.toLowerCase()))
     );
 
+    const filteredPlansByType = filteredPlansBySearch.filter((plan) => {
+        if (typeFilter === "all") return true;
+        const isModule = isModuleAuditListPlan(plan);
+        if (typeFilter === "module") return isModule;
+        return !isModule;
+    });
+
     const uniqueSites = React.useMemo(() => {
         const sites = auditPlans.map(plan => plan.auditProgram?.site?.name || plan.location).filter(Boolean);
         return ["all", ...Array.from(new Set(sites))];
     }, [auditPlans]);
 
-    const filteredPlansBySite = filteredPlansBySearch.filter(plan => {
+    const filteredPlansBySite = filteredPlansByType.filter(plan => {
         if (selectedSite === "all") return true;
         const siteName = plan.auditProgram?.site?.name || plan.location;
         return siteName === selectedSite;
@@ -224,7 +280,7 @@ const AuditList = () => {
     // Reset page to 1 when filters change
     useEffect(() => {
         setCurrentPage(1);
-    }, [searchQuery, selectedSite]);
+    }, [searchQuery, selectedSite, typeFilter]);
 
     return (
         <div className="flex-1 space-y-8 p-8 pt-6 min-h-screen bg-white relative">
@@ -241,12 +297,39 @@ const AuditList = () => {
                             View and manage all your verified audit plans.
                         </p>
                     </div>
-                    <div className="flex items-center gap-4">
+                    <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+                        <div
+                            className="inline-flex h-12 items-center rounded-xl border border-slate-200 bg-slate-50 p-1 shadow-sm"
+                            role="group"
+                            aria-label="Filter by audit type"
+                        >
+                            {(
+                                [
+                                    { id: "all", label: "All" },
+                                    { id: "module", label: "Modules" },
+                                    { id: "iso", label: "ISO Standards" },
+                                ] as const
+                            ).map((opt) => (
+                                <button
+                                    key={opt.id}
+                                    type="button"
+                                    onClick={() => setTypeFilter(opt.id)}
+                                    className={cn(
+                                        "h-10 rounded-lg px-3.5 text-sm font-semibold transition-colors whitespace-nowrap",
+                                        typeFilter === opt.id
+                                            ? "bg-[#213847] text-white shadow-sm"
+                                            : "text-slate-600 hover:bg-white hover:text-slate-900",
+                                    )}
+                                >
+                                    {opt.label}
+                                </button>
+                            ))}
+                        </div>
                         <div className="relative">
                             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
                             <Input
                                 placeholder="Search audits..."
-                                className="pl-9 w-[250px] h-12 rounded-xl border-slate-200 bg-white shadow-sm focus-visible:ring-1 focus-visible:ring-[#213847]/40"
+                                className="pl-9 w-full sm:w-[250px] h-12 rounded-xl border-slate-200 bg-white shadow-sm focus-visible:ring-1 focus-visible:ring-[#213847]/40"
                                 value={searchQuery}
                                 onChange={(e) => setSearchQuery(e.target.value)}
                             />
@@ -291,7 +374,7 @@ const AuditList = () => {
                                     <TableHead className="font-medium text-white h-12 py-3">Plan Name</TableHead>
                                     <TableHead className="font-medium text-white h-12 py-3">Audit</TableHead>
                                     <TableHead className="font-medium text-white h-12 py-3">Site</TableHead>
-                                    <TableHead className="font-medium text-white h-12 py-3">Date & Time</TableHead>
+                                    <TableHead className="font-medium text-white h-12 py-3">Date</TableHead>
                                     <TableHead className="font-medium text-white h-12 py-3">Lead Auditor</TableHead>
                                     <TableHead className="font-medium text-white h-12 py-3">Status</TableHead>
                                     <TableHead className="text-right font-medium text-white h-12 py-3">Actions</TableHead>
@@ -315,18 +398,7 @@ const AuditList = () => {
                                     </TableRow>
                                 ) : (
                                     paginatedPlans.map((plan) => {
-                                        let timeString = "-";
-                                        try {
-                                            if (plan.itinerary) {
-                                                const parsedItin = typeof plan.itinerary === 'string' ? JSON.parse(plan.itinerary) : plan.itinerary;
-                                                if (Array.isArray(parsedItin) && parsedItin.length > 0) {
-                                                    timeString = `${parsedItin[0].startTime} - ${parsedItin[parsedItin.length - 1].endTime}`;
-                                                }
-                                            }
-                                        } catch (e) {
-                                            console.warn("Failed to parse itinerary", e);
-                                        }
-
+                                        const auditTypeLabel = resolveAuditListTypeLabel(plan);
                                         const isTourTargetRow =
                                             tourTargetPlan?.id === plan.id;
                                         return (
@@ -346,22 +418,21 @@ const AuditList = () => {
                                                 <TableCell className="py-5">
                                                     <div className="flex flex-col">
                                                         <span className="font-bold text-slate-700">{plan.executionId || "Standalone"}</span>
-                                                        <span className="text-xs text-slate-400 font-medium">ISO Standards</span>
+                                                        <span
+                                                            className="text-xs text-slate-400 font-medium max-w-[220px] truncate"
+                                                            title={auditTypeLabel}
+                                                        >
+                                                            {auditTypeLabel}
+                                                        </span>
                                                     </div>
                                                 </TableCell>
                                                 <TableCell className="text-slate-600 font-bold py-5">
                                                     {plan.auditProgram?.site?.name || plan.location?.split(',')[0] || "Head Office"}
                                                 </TableCell>
                                                 <TableCell className="py-5">
-                                                    <div className="flex flex-col gap-1">
-                                                        <div className="flex items-center text-slate-700 font-bold text-sm bg-slate-100 w-fit px-2 py-0.5 rounded-md gap-1.5">
-                                                            <Calendar className="w-3.5 h-3.5 text-slate-500" />
-                                                            {plan.date ? format(new Date(plan.date), "yyyy-MM-dd") : "TBD"}
-                                                        </div>
-                                                        <div className="flex items-center text-slate-500 text-xs font-semibold gap-1.5 px-2">
-                                                            <Clock className="w-3.5 h-3.5 opacity-70" />
-                                                            {timeString}
-                                                        </div>
+                                                    <div className="flex items-center text-slate-700 font-bold text-sm bg-slate-100 w-fit px-2 py-0.5 rounded-md gap-1.5">
+                                                        <Calendar className="w-3.5 h-3.5 text-slate-500" />
+                                                        {plan.date ? format(new Date(plan.date), "yyyy-MM-dd") : "TBD"}
                                                     </div>
                                                 </TableCell>
                                                 <TableCell className="font-bold text-slate-600 py-5">

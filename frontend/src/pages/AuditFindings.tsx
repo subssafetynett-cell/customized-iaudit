@@ -20,8 +20,9 @@ import {
 } from "@/components/ui/dropdown-menu";
 import {
     extractFindings,
+    findingActionByDisplay,
+    isNcFindingType,
     mergeFindingWithOverrides,
-    saveFindingOverride,
     TYPE_CONFIG,
     type Finding,
     type FindingStatus,
@@ -55,29 +56,7 @@ import {
     SelectTrigger,
     SelectValue,
 } from "@/components/ui/select";
-
-type PlanFindingMeta = {
-    leadAuditorId?: number;
-    userId?: number;
-};
-
-function canEditFindingStatus(
-    finding: Finding,
-    planMeta: PlanFindingMeta | undefined,
-    viewerId: number | null,
-): boolean {
-    if (!viewerId) return false;
-    if (finding.createdByUserId && Number(finding.createdByUserId) === viewerId) {
-        return true;
-    }
-    if (planMeta?.leadAuditorId && Number(planMeta.leadAuditorId) === viewerId) {
-        return true;
-    }
-    if (!finding.createdByUserId && planMeta?.userId && Number(planMeta.userId) === viewerId) {
-        return true;
-    }
-    return false;
-}
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 function canViewAllOrgFindings(role?: string) {
     const normalized = String(role ?? "").trim().toLowerCase();
@@ -96,11 +75,55 @@ function findingAssigneeEmail(finding: Finding) {
     return "";
 }
 
+function findingRaisedByEmail(finding: Finding) {
+    if (finding.raisedByEmail?.trim()) {
+        return finding.raisedByEmail.toLowerCase().trim();
+    }
+    const labeled = (finding.raisedBy || finding.raisedByName || "").match(
+        /\(([^\s@]+@[^\s@]+\.[^\s@]+)\)\s*$/,
+    );
+    if (labeled?.[1]) return labeled[1].toLowerCase().trim();
+    const raw = (finding.raisedBy || finding.raisedByName || "").trim();
+    if (raw.includes("@")) return raw.toLowerCase();
+    return "";
+}
+
+function isFindingAssignedToMe(finding: Finding, email: string) {
+    return Boolean(email && findingAssigneeEmail(finding) === email);
+}
+
+function isFindingRaisedByMe(
+    finding: Finding,
+    email: string,
+    viewerId: number | null,
+) {
+    if (email && findingRaisedByEmail(finding) === email) return true;
+    if (
+        viewerId &&
+        finding.createdByUserId &&
+        Number(finding.createdByUserId) === viewerId
+    ) {
+        return true;
+    }
+    return false;
+}
+
+type OwnershipTab = "assigned" | "raised";
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 type FilterType = "All" | FindingType;
+type StatusFilter = "All" | FindingStatus;
 
 const FILTERS: FilterType[] = ["All", "OFI", "Minor", "Major"];
+
+const STATUS_FILTERS: StatusFilter[] = [
+    "All",
+    "Opened",
+    "New Response",
+    "Accepted",
+    "Closed",
+];
 
 const FILTER_STYLE: Record<FilterType, string> = {
     All: "bg-slate-800 text-white hover:bg-slate-700",
@@ -110,6 +133,14 @@ const FILTER_STYLE: Record<FilterType, string> = {
 };
 
 const FILTER_INACTIVE = "bg-white text-slate-600 border border-slate-200 hover:bg-slate-50";
+
+function findingMatchesStatusFilter(finding: Finding, statusFilter: StatusFilter): boolean {
+    if (statusFilter === "All") return true;
+    if (statusFilter === "New Response") {
+        return finding.status === "New Response" || finding.status === "Responded";
+    }
+    return finding.status === statusFilter;
+}
 
 export default function AuditFindings() {
     const navigate = useNavigate();
@@ -176,14 +207,16 @@ export default function AuditFindings() {
     const [viewerId, setViewerId] = useState<number | null>(null);
     const [viewerSeesAll, setViewerSeesAll] = useState(true);
     const [isAuditeeViewer, setIsAuditeeViewer] = useState(false);
-    const [planMetaByAuditId, setPlanMetaByAuditId] = useState<Record<number, PlanFindingMeta>>({});
-    const [statusSavingKey, setStatusSavingKey] = useState<string | null>(null);
     const [activeFilter, setActiveFilter] = useState<FilterType>("All");
+    const [statusFilter, setStatusFilter] = useState<StatusFilter>("All");
+    const [ownershipTab, setOwnershipTab] = useState<OwnershipTab>(() =>
+        searchParams.get("tab") === "raised" ? "raised" : "assigned",
+    );
     const [searchQuery, setSearchQuery] = useState("");
 
     // Pagination
     const [currentPage, setCurrentPage] = useState(1);
-    const itemsPerPage = 8;
+    const [itemsPerPage, setItemsPerPage] = useState(10);
 
     const fetchFindings = async () => {
         setLoading(true);
@@ -243,14 +276,6 @@ export default function AuditFindings() {
             }
 
             const plans = Array.from(planById.values());
-            const nextPlanMeta: Record<number, PlanFindingMeta> = {};
-            plans.forEach((plan) => {
-                nextPlanMeta[Number(plan.id)] = {
-                    leadAuditorId: Number(plan.leadAuditorId ?? plan.leadAuditor?.id) || undefined,
-                    userId: Number(plan.userId) || undefined,
-                };
-            });
-            setPlanMetaByAuditId(nextPlanMeta);
             console.log("Retrieved plans count:", plans.length);
             if (plans.length > 0) {
                 console.log("SAMPLE PLAN 0 auditData:", plans[0].auditName, plans[0].auditData);
@@ -276,15 +301,20 @@ export default function AuditFindings() {
 
                     all.push(...merged);
                 });
-                const visible = seesAll || isSuperAdmin
-                    ? all
-                    : isAuditee
-                      ? all.filter(
-                            (f) => userEmail && findingAssigneeEmail(f) === userEmail,
-                        )
-                      : all.filter(
-                            (f) => userEmail && findingAssigneeEmail(f) === userEmail,
-                        );
+                const visible =
+                    seesAll || isSuperAdmin
+                        ? all
+                        : all.filter(
+                              (f) =>
+                                  isFindingAssignedToMe(f, userEmail) ||
+                                  isFindingRaisedByMe(
+                                      f,
+                                      userEmail,
+                                      Number.isInteger(parsedViewerId) && parsedViewerId > 0
+                                          ? parsedViewerId
+                                          : null,
+                                  ),
+                          );
                 setFindings(visible);
             }
         } catch (error) {
@@ -299,28 +329,20 @@ export default function AuditFindings() {
         fetchFindings();
     }, []);
 
-    const handleFindingStatusChange = async (finding: Finding, status: FindingStatus) => {
-        const rowKey = `${finding.auditId}-${finding.id}`;
-        const updated: Finding = { ...finding, status };
-        setFindings((prev) =>
-            prev.map((f) =>
-                f.auditId === finding.auditId && f.id === finding.id ? updated : f,
-            ),
-        );
-        setStatusSavingKey(rowKey);
-        try {
-            await saveFindingOverride(updated);
-            toast.success(`Finding marked as ${status}`);
-        } catch (error) {
-            console.error("Failed to update finding status:", error);
-            toast.error("Could not update finding status");
-            void fetchFindings();
-        } finally {
-            setStatusSavingKey(null);
-        }
-    };
+    const ownershipFindings = findings.filter((f) =>
+        ownershipTab === "assigned"
+            ? isFindingAssignedToMe(f, viewerEmail)
+            : isFindingRaisedByMe(f, viewerEmail, viewerId),
+    );
 
-    const searchedFindings = findings.filter(f => {
+    const assignedCount = findings.filter((f) =>
+        isFindingAssignedToMe(f, viewerEmail),
+    ).length;
+    const raisedCount = findings.filter((f) =>
+        isFindingRaisedByMe(f, viewerEmail, viewerId),
+    ).length;
+
+    const searchedFindings = ownershipFindings.filter((f) => {
         const query = searchQuery.toLowerCase();
         const haystack = [
             f.auditName,
@@ -336,6 +358,10 @@ export default function AuditFindings() {
             f.assignTo,
             f.assignToEmail,
             f.assignToName,
+            f.raisedBy,
+            f.raisedByName,
+            f.raisedByEmail,
+            f.moduleName,
             f.status,
         ]
             .filter(Boolean)
@@ -344,14 +370,18 @@ export default function AuditFindings() {
         return haystack.includes(query);
     });
 
-    const filtered = activeFilter === "All"
+    const filteredByType = activeFilter === "All"
         ? searchedFindings
         : searchedFindings.filter((f) => f.type === activeFilter);
+
+    const filtered = filteredByType.filter((f) =>
+        findingMatchesStatusFilter(f, statusFilter),
+    );
 
     const countOf = (type: FindingType) =>
         searchedFindings.filter((f) => f.type === type).length;
 
-    const totalPages = Math.ceil(filtered.length / itemsPerPage);
+    const totalPages = Math.max(1, Math.ceil(filtered.length / itemsPerPage));
     const paginatedFindings = filtered.slice(
         (currentPage - 1) * itemsPerPage,
         currentPage * itemsPerPage
@@ -359,7 +389,13 @@ export default function AuditFindings() {
 
     useEffect(() => {
         setCurrentPage(1);
-    }, [searchQuery, activeFilter]);
+    }, [searchQuery, activeFilter, statusFilter, ownershipTab, itemsPerPage]);
+
+    useEffect(() => {
+        if (currentPage > totalPages) {
+            setCurrentPage(totalPages);
+        }
+    }, [currentPage, totalPages]);
 
     const exportToPDF = async () => {
         const doc = new jsPDF();
@@ -377,7 +413,7 @@ export default function AuditFindings() {
             f.type,
             f.details,
             f.status,
-            f.actionBy
+            findingActionByDisplay(f)
         ]);
 
         autoTable(doc, {
@@ -415,7 +451,8 @@ export default function AuditFindings() {
             "Type": f.type,
             "Finding Details": f.details,
             "Status": f.status,
-            "Action By": f.actionBy,
+            "Action By": findingActionByDisplay(f),
+            "Raised By": f.raisedByName || f.raisedBy || "",
             "Target Date": f.closeDate,
             "Assigned To": f.assignTo
         })));
@@ -432,7 +469,7 @@ export default function AuditFindings() {
                 new DocxTableCell({ children: [new Paragraph(f.type)] }),
                 new DocxTableCell({ children: [new Paragraph(f.details)] }),
                 new DocxTableCell({ children: [new Paragraph(f.status)] }),
-                new DocxTableCell({ children: [new Paragraph(f.actionBy || "—")] }),
+                new DocxTableCell({ children: [new Paragraph(findingActionByDisplay(f) || "—")] }),
             ]
         }));
 
@@ -526,11 +563,9 @@ export default function AuditFindings() {
                             Audit Findings
                         </h1>
                         <p className="text-sm text-slate-500 mt-1">
-                            {viewerSeesAll
-                                ? "All OFI, Minor N/C and Major N/C findings across every audit."
-                                : isAuditeeViewer
-                                  ? "Findings on your assigned site audits. Download reports or open an audit to view details."
-                                  : "Findings assigned to you. Open a finding to complete corrective action."}
+                            {ownershipTab === "assigned"
+                                ? "Findings assigned to you for action."
+                                : "Findings you raised during audits."}
                         </p>
                     </div>
                     {filtered.length > 0 && (
@@ -603,16 +638,68 @@ export default function AuditFindings() {
                         ))}
                     </div>
 
-                    <div className="relative w-full sm:w-[320px]">
-                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
-                        <Input
-                            placeholder="Search findings, audits, clauses..."
-                            value={searchQuery}
-                            onChange={(e) => setSearchQuery(e.target.value)}
-                            className="pl-9 bg-white border-slate-200 h-10 rounded-xl focus-visible:ring-amber-500"
-                        />
+                    <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 w-full sm:w-auto">
+                        <Select
+                            value={statusFilter}
+                            onValueChange={(value) =>
+                                setStatusFilter(value as StatusFilter)
+                            }
+                        >
+                            <SelectTrigger
+                                className="h-10 w-full sm:w-[180px] rounded-xl border-slate-200 bg-white shadow-sm"
+                                aria-label="Filter by status"
+                            >
+                                <SelectValue placeholder="Status" />
+                            </SelectTrigger>
+                            <SelectContent>
+                                {STATUS_FILTERS.map((status) => (
+                                    <SelectItem key={status} value={status}>
+                                        {status === "All" ? "All statuses" : status}
+                                    </SelectItem>
+                                ))}
+                            </SelectContent>
+                        </Select>
+                        <div className="relative w-full sm:w-[280px]">
+                            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
+                            <Input
+                                placeholder="Search findings, audits, clauses..."
+                                value={searchQuery}
+                                onChange={(e) => setSearchQuery(e.target.value)}
+                                className="pl-9 bg-white border-slate-200 h-10 rounded-xl focus-visible:ring-amber-500"
+                            />
+                        </div>
                     </div>
                 </div>
+
+                <div className="space-y-3">
+                    <Tabs
+                        value={ownershipTab}
+                        onValueChange={(value) =>
+                            setOwnershipTab(value === "raised" ? "raised" : "assigned")
+                        }
+                        className="w-full"
+                    >
+                        <TabsList className="h-11 w-full sm:w-auto grid grid-cols-2 sm:inline-flex bg-slate-100 p-1 rounded-full">
+                            <TabsTrigger
+                                value="assigned"
+                                className="rounded-full px-5 data-[state=active]:bg-white data-[state=active]:text-[#213847] data-[state=active]:shadow-sm data-[state=active]:ring-1 data-[state=active]:ring-[#1e855e]"
+                            >
+                                Assign to me
+                                <span className="ml-1.5 text-xs font-bold text-slate-500">
+                                    ({assignedCount})
+                                </span>
+                            </TabsTrigger>
+                            <TabsTrigger
+                                value="raised"
+                                className="rounded-full px-5 data-[state=active]:bg-white data-[state=active]:text-[#213847] data-[state=active]:shadow-sm data-[state=active]:ring-1 data-[state=active]:ring-[#1e855e]"
+                            >
+                                Raised by me
+                                <span className="ml-1.5 text-xs font-bold text-slate-500">
+                                    ({raisedCount})
+                                </span>
+                            </TabsTrigger>
+                        </TabsList>
+                    </Tabs>
 
                 {loading ? (
                     <div
@@ -635,11 +722,11 @@ export default function AuditFindings() {
                         <SearchX className="w-12 h-12 opacity-40" />
                         <p className="text-base font-semibold">No findings found</p>
                         <p className="text-sm text-slate-400 max-w-md text-center">
-                            {viewerSeesAll
-                                ? "Findings from completed audits will appear here automatically."
-                                : viewerEmail
-                                  ? "When someone assigns a finding to your email, it will appear here."
-                                  : "Findings assigned to your account will appear here."}
+                            {ownershipTab === "assigned"
+                                ? viewerEmail
+                                    ? "When someone assigns a finding to your email, it will appear here."
+                                    : "Findings assigned to your account will appear here."
+                                : "Findings you raise (Raised by) during an audit will appear here."}
                         </p>
                     </div>
                 ) : (
@@ -666,14 +753,11 @@ export default function AuditFindings() {
                                 <TableBody>
                                     {paginatedFindings.map((finding, idx) => {
                                         const cfg = TYPE_CONFIG[finding.type];
-                                        const rowKey = `${finding.auditId}-${finding.id}`;
-                                        const canEditStatus =
-                                            !isAuditeeViewer &&
-                                            canEditFindingStatus(
-                                                finding,
-                                                planMetaByAuditId[finding.auditId],
-                                                viewerId,
-                                            );
+                                        const isNc = isNcFindingType(finding.type);
+                                        const assignedToMe = isFindingAssignedToMe(
+                                            finding,
+                                            viewerEmail,
+                                        );
                                         return (
                                             <TableRow
                                                 key={`${finding.auditId}-${finding.id}-${idx}`}
@@ -686,11 +770,48 @@ export default function AuditFindings() {
                                                     {finding.auditName}
                                                 </TableCell>
                                                 <TableCell className="text-slate-800 text-sm font-medium py-3">
-                                                    <div className="flex items-center gap-2">
-                                                        {finding.clauseRef}
+                                                    <div className="flex items-start gap-2 min-w-0">
+                                                        <div className="min-w-0">
+                                                            {finding.moduleName ? (
+                                                                <>
+                                                                    <p
+                                                                        className="font-semibold text-slate-900 truncate"
+                                                                        title={finding.moduleName}
+                                                                    >
+                                                                        {finding.moduleName}
+                                                                    </p>
+                                                                    {(() => {
+                                                                        const prefix = `${finding.moduleName} · `;
+                                                                        const itemPart =
+                                                                            finding.clauseRef.startsWith(
+                                                                                prefix,
+                                                                            )
+                                                                                ? finding.clauseRef.slice(
+                                                                                      prefix.length,
+                                                                                  )
+                                                                                : "";
+                                                                        return itemPart ? (
+                                                                            <p
+                                                                                className="text-xs text-slate-500 truncate mt-0.5"
+                                                                                title={itemPart}
+                                                                            >
+                                                                                {itemPart}
+                                                                            </p>
+                                                                        ) : null;
+                                                                    })()}
+                                                                </>
+                                                            ) : (
+                                                                <span className="truncate block">
+                                                                    {finding.clauseRef}
+                                                                </span>
+                                                            )}
+                                                        </div>
                                                         {finding.media && finding.media.length > 0 && (
-                                                            <span title={`${finding.media.length} attachments`}>
-                                                                <Upload className="w-3 h-3 text-amber-500 shrink-0" />
+                                                            <span
+                                                                title={`${finding.media.length} attachments`}
+                                                                className="shrink-0 mt-0.5"
+                                                            >
+                                                                <Upload className="w-3 h-3 text-amber-500" />
                                                             </span>
                                                         )}
                                                     </div>
@@ -703,46 +824,47 @@ export default function AuditFindings() {
                                                     </span>
                                                 </TableCell>
                                                 <TableCell className="py-3">
-                                                    {canEditStatus ? (
-                                                        <Select
-                                                            value={finding.status}
-                                                            disabled={statusSavingKey === rowKey}
-                                                            onValueChange={(value) =>
-                                                                void handleFindingStatusChange(
-                                                                    finding,
-                                                                    value as FindingStatus,
-                                                                )
-                                                            }
-                                                        >
-                                                            <SelectTrigger className="h-8 w-[118px] text-xs font-semibold border-slate-200">
-                                                                <SelectValue />
-                                                            </SelectTrigger>
-                                                            <SelectContent>
-                                                                <SelectItem value="Opened">Opened</SelectItem>
-                                                                <SelectItem value="Closed">Closed</SelectItem>
-                                                            </SelectContent>
-                                                        </Select>
-                                                    ) : (
-                                                        <FindingStatusBadge status={finding.status} />
-                                                    )}
+                                                    <FindingStatusBadge status={finding.status} />
                                                 </TableCell>
                                                 <TableCell className="text-slate-600 text-sm font-medium py-3">
-                                                    {finding.actionBy || "—"}
+                                                    {(() => {
+                                                        const raw =
+                                                            finding.raisedByName?.trim() ||
+                                                            finding.raisedBy?.trim() ||
+                                                            findingActionByDisplay(finding);
+                                                        const name = raw
+                                                            .replace(/\s*\([^)]*@[^)]*\)\s*$/, "")
+                                                            .trim();
+                                                        return name ? (
+                                                            <p className="truncate" title={name}>
+                                                                {name}
+                                                            </p>
+                                                        ) : (
+                                                            <span className="text-slate-400">—</span>
+                                                        );
+                                                    })()}
                                                 </TableCell>
                                                 <TableCell className="text-center py-3">
                                                     <Button
                                                         variant="ghost"
                                                         size="sm"
                                                         title={
-                                                            isAuditeeViewer
-                                                                ? "View audit (read-only)"
-                                                                : viewerSeesAll
-                                                                  ? "Open in audit"
-                                                                  : "Complete finding"
+                                                            isNc && assignedToMe
+                                                                ? "View finding details"
+                                                                : isAuditeeViewer
+                                                                  ? "View audit (read-only)"
+                                                                  : viewerSeesAll
+                                                                    ? "Open in audit"
+                                                                    : "Complete finding"
                                                         }
                                                         onClick={() =>
                                                             navigate(
                                                                 `/audit-findings/${finding.auditId}/${encodeURIComponent(finding.id)}`,
+                                                                {
+                                                                    state: {
+                                                                        returnTab: ownershipTab,
+                                                                    },
+                                                                },
                                                             )
                                                         }
                                                         className="h-8 w-8 p-0 text-slate-400 hover:text-[#213847]"
@@ -756,17 +878,39 @@ export default function AuditFindings() {
                                 </TableBody>
                             </Table>
                         </div>
-                        <ReusablePagination
-                            currentPage={currentPage}
-                            totalPages={totalPages}
-                            totalItems={filtered.length}
-                            itemsPerPage={itemsPerPage}
-                            onPageChange={setCurrentPage}
-                            className="mt-6"
-                        />
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mt-2 px-1">
+                            <div className="flex items-center gap-2 text-sm text-slate-600">
+                                <span className="font-medium">Rows per page</span>
+                                <Select
+                                    value={String(itemsPerPage)}
+                                    onValueChange={(value) =>
+                                        setItemsPerPage(Number(value) || 10)
+                                    }
+                                >
+                                    <SelectTrigger className="h-9 w-[88px] rounded-xl border-slate-200">
+                                        <SelectValue />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                        <SelectItem value="5">5</SelectItem>
+                                        <SelectItem value="10">10</SelectItem>
+                                        <SelectItem value="25">25</SelectItem>
+                                        <SelectItem value="50">50</SelectItem>
+                                    </SelectContent>
+                                </Select>
+                            </div>
+                            <ReusablePagination
+                                currentPage={currentPage}
+                                totalPages={totalPages}
+                                totalItems={filtered.length}
+                                itemsPerPage={itemsPerPage}
+                                onPageChange={setCurrentPage}
+                                className="mt-0 pt-0 border-t-0 w-full sm:w-auto"
+                            />
+                        </div>
 
                     </>
                 )}
+                </div>
             </div>
 
             {auditFindingsTourActive && auditFindingsTourStepConfig && (

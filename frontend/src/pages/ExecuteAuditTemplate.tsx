@@ -127,6 +127,10 @@ const ExecuteAuditTemplate = () => {
         refNo: "",
         clauseNo: "",
         department: "",
+        auditeeName: "",
+        auditDoneBy: "",
+        auditeeDept: "",
+        auditDate: "",
     });
     const [showExecutiveSummary, setShowExecutiveSummary] = useState(true);
     const [showAuditParticipants, setShowAuditParticipants] = useState(true);
@@ -1501,11 +1505,35 @@ const ExecuteAuditTemplate = () => {
                         {usesEoshScoredChecklistLayout(template) && (
                             <EoshCapabilityFormBanner
                                 {...getEoshCapabilityBannerCopy(template.id)}
+                                auditeeName={auditGlobalInfo.auditeeName}
+                                auditDate={auditGlobalInfo.auditDate}
+                                auditDoneBy={auditGlobalInfo.auditDoneBy}
+                                onAuditeeNameChange={(value) =>
+                                    setAuditGlobalInfo({ ...auditGlobalInfo, auditeeName: value })
+                                }
+                                onAuditDateChange={(value) =>
+                                    setAuditGlobalInfo({ ...auditGlobalInfo, auditDate: value })
+                                }
+                                onAuditDoneByChange={(value) =>
+                                    setAuditGlobalInfo({ ...auditGlobalInfo, auditDoneBy: value })
+                                }
                             />
                         )}
                         {usesQfsKoreScoredChecklistLayout(template) && (
                             <QfsKoreFormBanner
                                 {...getQfsKoreBannerCopy(template.id)}
+                                auditeeName={auditGlobalInfo.auditeeName}
+                                auditDoneBy={auditGlobalInfo.auditDoneBy}
+                                auditeeDept={auditGlobalInfo.auditeeDept}
+                                onAuditeeNameChange={(value) =>
+                                    setAuditGlobalInfo({ ...auditGlobalInfo, auditeeName: value })
+                                }
+                                onAuditDoneByChange={(value) =>
+                                    setAuditGlobalInfo({ ...auditGlobalInfo, auditDoneBy: value })
+                                }
+                                onAuditeeDeptChange={(value) =>
+                                    setAuditGlobalInfo({ ...auditGlobalInfo, auditeeDept: value })
+                                }
                             />
                         )}
                         <Card className="overflow-hidden border border-slate-200 shadow-sm">

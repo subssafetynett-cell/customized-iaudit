@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import {
   Select,
   SelectContent,
@@ -11,12 +12,6 @@ import {
 import { apiFetch } from "@/lib/api";
 import { formatUserDisplayName } from "@/lib/userRoles";
 import { cn } from "@/lib/utils";
-
-export type EoshOrgUserOption = {
-  id: number;
-  label: string;
-  email: string;
-};
 
 export type EoshExceptionFollowUpValues = {
   raisedBy?: string;
@@ -30,7 +25,54 @@ export type EoshExceptionFollowUpValues = {
   escalationToEmail?: string;
   escalationToName?: string;
   escalationDate?: string;
+  /** Required free-text details when raising an exception / NC. */
+  details?: string;
 };
+
+export type EoshOrgUserOption = {
+  id: number;
+  label: string;
+  email: string;
+};
+
+export type EoshExceptionFollowUpField =
+  | "raisedBy"
+  | "assignTo"
+  | "targetDate"
+  | "details";
+
+const REQUIRED_FIELD_LABELS: Record<EoshExceptionFollowUpField, string> = {
+  raisedBy: "Raised by",
+  assignTo: "Assign to",
+  targetDate: "Target date",
+  details: "Enter details",
+};
+
+export function getEoshExceptionFollowUpMissing(
+  values: EoshExceptionFollowUpValues | null | undefined,
+): EoshExceptionFollowUpField[] {
+  const v = values || {};
+  const missing: EoshExceptionFollowUpField[] = [];
+  if (!String(v.raisedByEmail || "").trim()) missing.push("raisedBy");
+  if (!String(v.assignToEmail || "").trim()) missing.push("assignTo");
+  if (!String(v.targetDate || "").trim()) missing.push("targetDate");
+  if (!String(v.details || "").trim()) missing.push("details");
+  return missing;
+}
+
+export function isEoshExceptionFollowUpComplete(
+  values: EoshExceptionFollowUpValues | null | undefined,
+): boolean {
+  return getEoshExceptionFollowUpMissing(values).length === 0;
+}
+
+export function formatEoshExceptionFollowUpMissing(
+  values: EoshExceptionFollowUpValues | null | undefined,
+): string {
+  return getEoshExceptionFollowUpMissing(values)
+    .map((key) => REQUIRED_FIELD_LABELS[key])
+    .join(", ");
+}
 
 export function useEoshOrgUsers(): EoshOrgUserOption[] {
   const [users, setUsers] = useState<EoshOrgUserOption[]>([]);
@@ -72,12 +114,34 @@ export function useEoshOrgUsers(): EoshOrgUserOption[] {
   return users;
 }
 
+function RequiredLabel({ children }: { children: ReactNode }) {
+  return (
+    <Label className="text-xs font-bold text-slate-700">
+      {children}
+      <span className="text-red-600 ml-0.5" aria-hidden>
+        *
+      </span>
+    </Label>
+  );
+}
+
+function OptionalLabel({ children }: { children: ReactNode }) {
+  return <Label className="text-xs font-bold text-slate-700">{children}</Label>;
+}
+
+function FieldError({ show, message = "Required" }: { show: boolean; message?: string }) {
+  if (!show) return null;
+  return <p className="text-[11px] font-medium text-red-600">{message}</p>;
+}
+
 function UserSelect({
   label,
   valueEmail,
   users,
   disabled,
   placeholder,
+  invalid,
+  required = true,
   onSelect,
 }: {
   label: string;
@@ -85,32 +149,36 @@ function UserSelect({
   users: EoshOrgUserOption[];
   disabled?: boolean;
   placeholder: string;
+  invalid?: boolean;
+  required?: boolean;
   onSelect: (user: EoshOrgUserOption | null) => void;
 }) {
   const currentEmail = (valueEmail || "").trim().toLowerCase();
   const selected = users.find((u) => u.email.toLowerCase() === currentEmail);
-  const selectValue = selected ? String(selected.id) : "__none__";
+  const selectValue = selected ? String(selected.id) : "";
 
   return (
     <div className="space-y-1.5">
-      <Label className="text-xs font-bold text-slate-700">{label}</Label>
+      {required ? <RequiredLabel>{label}</RequiredLabel> : <OptionalLabel>{label}</OptionalLabel>}
       <Select
-        value={selectValue}
+        value={selectValue || undefined}
         disabled={disabled}
         onValueChange={(val) => {
-          if (val === "__none__") {
-            onSelect(null);
-            return;
-          }
           const user = users.find((u) => String(u.id) === val) ?? null;
           onSelect(user);
         }}
       >
-        <SelectTrigger className="h-9 bg-white border-slate-300 text-sm">
+        <SelectTrigger
+          className={cn(
+            "h-9 bg-white border-slate-300 text-sm",
+            invalid && "border-red-500 focus:ring-red-500",
+          )}
+          aria-invalid={invalid || undefined}
+          aria-required={required || undefined}
+        >
           <SelectValue placeholder={placeholder} />
         </SelectTrigger>
         <SelectContent className="max-h-64">
-          <SelectItem value="__none__">— Select user —</SelectItem>
           {users.map((u) => (
             <SelectItem key={u.id} value={String(u.id)}>
               {u.label}
@@ -119,6 +187,7 @@ function UserSelect({
           ))}
         </SelectContent>
       </Select>
+      <FieldError show={Boolean(invalid)} />
     </div>
   );
 }
@@ -130,20 +199,32 @@ export function EoshExceptionFollowUp({
   disabled,
   className,
   onChange,
+  onAssignToSelect,
+  showErrors = false,
 }: {
   values: EoshExceptionFollowUpValues;
   users: EoshOrgUserOption[];
   disabled?: boolean;
   className?: string;
   onChange: (field: string, value: string) => void;
+  /** Fired when Assign to user is chosen (or cleared). */
+  onAssignToSelect?: (user: EoshOrgUserOption | null) => void;
+  /** When true, highlight empty required fields. */
+  showErrors?: boolean;
 }) {
+  const missing = new Set(getEoshExceptionFollowUpMissing(values));
+
   return (
     <div
       className={cn(
         "rounded-lg border border-amber-200 bg-amber-50/40 p-4 space-y-4",
+        showErrors && missing.size > 0 && "border-red-300",
         className,
       )}
     >
+      <p className="text-[11px] text-slate-600">
+        All fields marked <span className="text-red-600 font-bold">*</span> are required.
+      </p>
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <UserSelect
           label="Raised by"
@@ -151,6 +232,7 @@ export function EoshExceptionFollowUp({
           users={users}
           disabled={disabled}
           placeholder="Select who raised this…"
+          invalid={showErrors && missing.has("raisedBy")}
           onSelect={(user) => {
             onChange("raisedBy", user?.label || "");
             onChange("raisedByName", user?.label || "");
@@ -163,34 +245,65 @@ export function EoshExceptionFollowUp({
           users={users}
           disabled={disabled}
           placeholder="Select assignee…"
+          invalid={showErrors && missing.has("assignTo")}
           onSelect={(user) => {
             onChange("assignTo", user?.label || "");
             onChange("assignToName", user?.label || "");
             onChange("assignToEmail", user?.email || "");
+            onAssignToSelect?.(user);
           }}
         />
         <div className="space-y-1.5">
-          <Label className="text-xs font-bold text-slate-700">Target date</Label>
+          <RequiredLabel>Target date</RequiredLabel>
           <Input
             type="date"
             disabled={disabled}
-            className="h-9 bg-white border-slate-300"
+            required
+            aria-required
+            aria-invalid={showErrors && missing.has("targetDate") ? true : undefined}
+            className={cn(
+              "h-9 bg-white border-slate-300",
+              showErrors && missing.has("targetDate") && "border-red-500 focus-visible:ring-red-500",
+            )}
             value={values.targetDate || ""}
             onChange={(e) => onChange("targetDate", e.target.value)}
           />
+          <FieldError show={showErrors && missing.has("targetDate")} />
         </div>
+      </div>
+
+      <div className="space-y-1.5">
+        <RequiredLabel>Enter details</RequiredLabel>
+        <Textarea
+          disabled={disabled}
+          required
+          aria-required
+          aria-invalid={showErrors && missing.has("details") ? true : undefined}
+          className={cn(
+            "min-h-[96px] bg-white border-slate-300 text-sm resize-y",
+            showErrors &&
+              missing.has("details") &&
+              "border-red-500 focus-visible:ring-red-500",
+          )}
+          placeholder="Describe the nonconformance / exception details…"
+          value={values.details || ""}
+          onChange={(e) => onChange("details", e.target.value)}
+        />
+        <FieldError show={showErrors && missing.has("details")} />
       </div>
 
       <div className="pt-2 border-t border-amber-200/80 space-y-3">
         <h4 className="text-sm font-bold uppercase tracking-wide text-slate-800">
           Escalation
         </h4>
+        <p className="text-[11px] text-slate-500 -mt-1">Optional — fill if escalation is needed.</p>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <UserSelect
             label="Escalation to"
             valueEmail={values.escalationToEmail}
             users={users}
             disabled={disabled}
+            required={false}
             placeholder="Select escalation contact…"
             onSelect={(user) => {
               onChange("escalationTo", user?.label || "");
@@ -199,9 +312,7 @@ export function EoshExceptionFollowUp({
             }}
           />
           <div className="space-y-1.5">
-            <Label className="text-xs font-bold text-slate-700">
-              Escalation date
-            </Label>
+            <OptionalLabel>Escalation date</OptionalLabel>
             <Input
               type="date"
               disabled={disabled}

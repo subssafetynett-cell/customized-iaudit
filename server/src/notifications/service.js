@@ -16,7 +16,8 @@ export function serializeNotification(row) {
     return {
         id: row.id,
         recipientUserId: row.recipientUserId,
-        nonconformanceId: row.nonconformanceId,
+        nonconformanceId: row.nonconformanceId ?? null,
+        linkPath: row.linkPath ?? null,
         type: row.type,
         title: row.title,
         message: row.message,
@@ -37,17 +38,24 @@ export function serializeNotification(row) {
  */
 export async function createNotification(
     db,
-    { recipientUserId, nonconformanceId, type, title, message },
+    { recipientUserId, nonconformanceId = null, linkPath = null, type, title, message },
 ) {
     const recipient = Number(recipientUserId);
-    const ncId = Number(nonconformanceId);
     if (!Number.isInteger(recipient) || recipient < 1) return null;
-    if (!Number.isInteger(ncId) || ncId < 1) return null;
+
+    const ncRaw = nonconformanceId != null ? Number(nonconformanceId) : null;
+    const ncId =
+        Number.isInteger(ncRaw) && ncRaw > 0 ? ncRaw : null;
+    const path =
+        linkPath != null && String(linkPath).trim()
+            ? String(linkPath).trim().slice(0, 500)
+            : null;
 
     return db.notification.create({
         data: {
             recipientUserId: recipient,
             nonconformanceId: ncId,
+            linkPath: path,
             type: String(type || '').slice(0, 80),
             title: String(title || '').slice(0, 200),
             message: String(message || '').slice(0, 1000),
@@ -65,6 +73,7 @@ export async function notifyUsers(
         recipientUserIds,
         excludeUserId = null,
         nonconformanceId,
+        linkPath = null,
         type,
         title,
         message,
@@ -81,6 +90,7 @@ export async function notifyUsers(
         const row = await createNotification(db, {
             recipientUserId,
             nonconformanceId,
+            linkPath,
             type,
             title,
             message,
@@ -173,25 +183,78 @@ export async function markAllNotificationsRead({ actorId }) {
 
 /** Helpers used by the Nonconformance workflow. */
 export const NcNotificationTemplates = Object.freeze({
-    assigned(ncNumber) {
+    assigned(ncNumber, raisedByName) {
+        const raised = String(raisedByName || '').trim();
         return {
             type: NOTIFICATION_TYPES.NC_ASSIGNED,
             title: 'Nonconformance assigned',
-            message: `${ncNumber} has been assigned to you for response.`,
+            message: raised
+                ? `${ncNumber} was raised by ${raised} and assigned to you for response.`
+                : `${ncNumber} has been assigned to you for response.`,
         };
     },
-    responseSubmitted(ncNumber) {
+    findingAssigned(findingRef, raisedByName) {
+        const raised = String(raisedByName || '').trim();
+        const ref = String(findingRef || 'a finding').trim() || 'a finding';
+        return {
+            type: NOTIFICATION_TYPES.FINDING_ASSIGNED,
+            title: 'Nonconformance assigned',
+            message: raised
+                ? `${raised} raised a nonconformance (${ref}) and assigned it to you.`
+                : `A nonconformance (${ref}) has been assigned to you.`,
+        };
+    },
+    responseSubmitted(ncNumber, isUpdate = false) {
         return {
             type: NOTIFICATION_TYPES.NC_RESPONSE_SUBMITTED,
-            title: 'Response submitted',
-            message: `A response was submitted for ${ncNumber}.`,
+            title: isUpdate ? 'Response updated' : 'Response submitted',
+            message: isUpdate
+                ? `An updated response was submitted for ${ncNumber}.`
+                : `A response was submitted for ${ncNumber}.`,
         };
     },
-    changesRequested(ncNumber) {
+    findingResponseSubmitted(findingRef, responderName, isUpdate = false) {
+        const ref = String(findingRef || 'a finding').trim() || 'a finding';
+        const who = String(responderName || '').trim();
+        return {
+            type: NOTIFICATION_TYPES.FINDING_RESPONSE_SUBMITTED,
+            title: isUpdate ? 'Finding response updated' : 'Finding response received',
+            message: who
+                ? isUpdate
+                    ? `${who} updated their response for ${ref}.`
+                    : `${who} submitted a response for ${ref}.`
+                : isUpdate
+                  ? `An updated response was submitted for ${ref}.`
+                  : `A response was submitted for ${ref}.`,
+        };
+    },
+    changesRequested(ncNumber, reason) {
+        const note = String(reason || '').trim();
         return {
             type: NOTIFICATION_TYPES.NC_CHANGES_REQUESTED,
             title: 'Changes requested',
-            message: `Changes were requested on your response for ${ncNumber}.`,
+            message: note
+                ? `Changes were requested on your response for ${ncNumber}: ${note}`
+                : `Changes were requested on your response for ${ncNumber}.`,
+        };
+    },
+    findingReviewAccepted(findingRef) {
+        const ref = String(findingRef || 'a finding').trim() || 'a finding';
+        return {
+            type: NOTIFICATION_TYPES.FINDING_REVIEW_ACCEPTED,
+            title: 'Response accepted',
+            message: `Your response for ${ref} was accepted and the finding was closed.`,
+        };
+    },
+    findingReviewRejected(findingRef, reason) {
+        const ref = String(findingRef || 'a finding').trim() || 'a finding';
+        const note = String(reason || '').trim();
+        return {
+            type: NOTIFICATION_TYPES.FINDING_REVIEW_REJECTED,
+            title: 'Response rejected — please revise',
+            message: note
+                ? `Your response for ${ref} was rejected and reopened. Reason: ${note}`
+                : `Your response for ${ref} was rejected and reopened for revision.`,
         };
     },
     closed(ncNumber) {

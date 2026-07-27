@@ -59,6 +59,7 @@ import {
     imageAssetToBuffer,
 } from "@/utils/pdfBranding";
 import { EOSH_EXCEL_MODULE_META } from "@/data/eoshExcelModuleTemplates";
+import { QFS_KORE_EXCEL_MODULE_META } from "@/data/qfsKoreExcelModuleTemplates";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 
 const ISO_STANDARDS = [
@@ -69,11 +70,20 @@ const ISO_STANDARDS = [
 ];
 
 const EOSH_MODULE_PREFIX = "EOSH Module: ";
+const QFS_MODULE_PREFIX = "QFS KORE Module: ";
 
-const AUDIT_MODULES = EOSH_EXCEL_MODULE_META.map((m) => ({
+type AuditModuleOption = { id: string; label: string; value: string };
+
+const EOSH_AUDIT_MODULES: AuditModuleOption[] = EOSH_EXCEL_MODULE_META.map((m) => ({
     id: m.id,
     label: m.sectionTitle,
     value: `${EOSH_MODULE_PREFIX}${m.sectionTitle}`,
+}));
+
+const QFS_AUDIT_MODULES: AuditModuleOption[] = QFS_KORE_EXCEL_MODULE_META.map((m) => ({
+    id: m.id,
+    label: m.sectionTitle,
+    value: `${QFS_MODULE_PREFIX}${m.sectionTitle}`,
 }));
 
 type CriteriaType = "iso" | "module";
@@ -81,6 +91,19 @@ type ModuleFamily = "eosh" | "qfs-kore";
 
 function isEoshModuleValue(value: string): boolean {
     return value.startsWith(EOSH_MODULE_PREFIX);
+}
+
+function isQfsModuleValue(value: string): boolean {
+    return value.startsWith(QFS_MODULE_PREFIX);
+}
+
+function isAuditModuleValue(value: string): boolean {
+    return isEoshModuleValue(value) || isQfsModuleValue(value);
+}
+
+function modulesForFamily(family: ModuleFamily | null): AuditModuleOption[] {
+    if (family === "qfs-kore") return QFS_AUDIT_MODULES;
+    return EOSH_AUDIT_MODULES;
 }
 
 function detectCriteriaType(
@@ -91,7 +114,7 @@ function detectCriteriaType(
         return scheduleData.criteriaType as CriteriaType;
     }
     const parts = (isoStandard || "").split(", ").map((s) => s.trim()).filter(Boolean);
-    if (parts.length > 0 && parts.every(isEoshModuleValue)) return "module";
+    if (parts.length > 0 && parts.every(isAuditModuleValue)) return "module";
     return "iso";
 }
 
@@ -103,12 +126,14 @@ function detectModuleFamily(
         return scheduleData.moduleFamily as ModuleFamily;
     }
     const parts = (isoStandard || "").split(", ").map((s) => s.trim()).filter(Boolean);
+    if (parts.length > 0 && parts.every(isQfsModuleValue)) return "qfs-kore";
     if (parts.length > 0 && parts.every(isEoshModuleValue)) return "eosh";
     return null;
 }
 
 function standardDisplayLabel(std: string): string {
     if (isEoshModuleValue(std)) return std.replace(EOSH_MODULE_PREFIX, "");
+    if (isQfsModuleValue(std)) return std.replace(QFS_MODULE_PREFIX, "");
     if (std.includes("22000")) return "ISO 22000:2018";
     if (std.includes("9001")) return "ISO 9001:2015";
     if (std.includes("14001")) return "ISO 14001:2015";
@@ -118,6 +143,7 @@ function standardDisplayLabel(std: string): string {
 
 function standardBadgeLabel(std: string): string {
     if (isEoshModuleValue(std)) return std.replace(EOSH_MODULE_PREFIX, "");
+    if (isQfsModuleValue(std)) return std.replace(QFS_MODULE_PREFIX, "");
     if (std.includes("22000")) return "22000";
     if (std.includes("9001")) return "9001";
     if (std.includes("14001")) return "14001";
@@ -198,7 +224,16 @@ const YEARS = Array.from({ length: 10 }, (_, i) => (new Date().getFullYear() + i
 
 function splitScheduleData(loadData: Record<string, unknown> | null | undefined) {
     const data = loadData ?? {};
-    const { customRows, startDate, departmentIds, departmentNames, criteriaType, moduleFamily, ...rest } = data;
+    const {
+        customRows,
+        startDate,
+        departmentIds,
+        departmentNames,
+        criteriaType,
+        moduleFamily,
+        selectedModuleIds,
+        ...rest
+    } = data;
     return {
         customRows: (Array.isArray(customRows) ? customRows : []) as { id: string; text: string }[],
         startDate: typeof startDate === "string" ? startDate : undefined,
@@ -213,6 +248,9 @@ function splitScheduleData(loadData: Record<string, unknown> | null | undefined)
             moduleFamily === "eosh" || moduleFamily === "qfs-kore"
                 ? (moduleFamily as ModuleFamily)
                 : undefined,
+        selectedModuleIds: Array.isArray(selectedModuleIds)
+            ? selectedModuleIds.map((id) => String(id))
+            : [],
         selectedCells: rest as Record<string, boolean>,
     };
 }
@@ -305,6 +343,7 @@ const AuditPrograms = () => {
     const [selectedStandards, setSelectedStandards] = useState<string[]>([]);
     const [criteriaType, setCriteriaType] = useState<CriteriaType>("iso");
     const [moduleFamily, setModuleFamily] = useState<ModuleFamily | null>(null);
+    const activeAuditModules = modulesForFamily(moduleFamily);
     const [frequency, setFrequency] = useState("Bi-annually");
     const [duration, setDuration] = useState(3);
     const [selectedSite, setSelectedSite] = useState("");
@@ -449,13 +488,18 @@ const AuditPrograms = () => {
 
     const periods = calculatePeriods();
     const allDepartments = departmentsFromCompanies(companies);
+    const siteDepartments = selectedSite
+        ? allDepartments.filter((dept) => String(dept.siteId) === String(selectedSite))
+        : [];
     const allDepartmentsSelected =
-        allDepartments.length > 0 &&
-        allDepartments.every((dept) => selectedDepartmentIds.includes(dept.id));
-    const someDepartmentsSelected = allDepartments.some((dept) =>
+        siteDepartments.length > 0 &&
+        siteDepartments.every((dept) => selectedDepartmentIds.includes(dept.id));
+    const someDepartmentsSelected = siteDepartments.some((dept) =>
         selectedDepartmentIds.includes(dept.id),
     );
-    const selectedDepartments = resolveDepartmentsByIds(selectedDepartmentIds, companies);
+    const selectedDepartments = resolveDepartmentsByIds(selectedDepartmentIds, companies).filter(
+        (dept) => !selectedSite || String(dept.siteId) === String(selectedSite),
+    );
 
     const isPeriodActive = (colIndex: number) => {
         return Object.keys(selectedCells).some(key => {
@@ -492,13 +536,7 @@ const AuditPrograms = () => {
             return;
         }
         if (criteriaType === "module") {
-            if (moduleFamily === "qfs-kore") {
-                toast.error(
-                    "QFS KORE modules are not available yet. Select EOSH Audit Checklist.",
-                );
-                return;
-            }
-            if (moduleFamily !== "eosh") {
+            if (moduleFamily !== "eosh" && moduleFamily !== "qfs-kore") {
                 toast.error("Please select EOSH Audit Checklist or QFS KORE Audit Checklist");
                 return;
             }
@@ -512,7 +550,9 @@ const AuditPrograms = () => {
         toast.success(
             criteriaType === "module" && moduleFamily === "eosh"
                 ? "Select EOSH modules below to build the schedule"
-                : "Schedule updated!",
+                : criteriaType === "module" && moduleFamily === "qfs-kore"
+                  ? "Select QFS KORE modules below to build the schedule"
+                  : "Schedule updated!",
         );
     };
 
@@ -539,12 +579,41 @@ const AuditPrograms = () => {
             toast.error("Please fill in Audit Name and Site");
             return;
         }
-        if (selectedStandards.length === 0) {
+
+        // Keep module selection in sync with checked schedule cells
+        let standardsToSave = selectedStandards;
+        if (criteriaType === "module") {
+            const fromCells = activeAuditModules
+                .filter((mod, rowIndex) =>
+                    periods.some((_, colIndex) => Boolean(selectedCells[`${rowIndex}-${colIndex}`])),
+                )
+                .map((mod) => mod.value);
+            standardsToSave = fromCells.length > 0 ? fromCells : selectedStandards;
+            if (fromCells.length > 0) {
+                setSelectedStandards(fromCells);
+            }
+        }
+
+        if (standardsToSave.length === 0) {
             toast.error(
                 criteriaType === "module"
-                    ? "Please select at least one EOSH module in the schedule section"
+                    ? moduleFamily === "qfs-kore"
+                        ? "Please select at least one QFS KORE module in the schedule section"
+                        : "Please select at least one EOSH module in the schedule section"
                     : "Please select at least one ISO Standard",
             );
+            return;
+        }
+
+        const siteDeptIds = siteDepartments.map((dept) => dept.id);
+        const departmentIdsToSave = selectedDepartmentIds.filter((id) => siteDeptIds.includes(id));
+        const departmentNamesToSave = selectedDepartments
+            .filter((dept) => departmentIdsToSave.includes(dept.id))
+            .map((dept) => dept.name);
+
+        const durationToSave = Number.parseInt(String(duration), 10);
+        if (!Number.isInteger(durationToSave) || durationToSave < 1) {
+            toast.error("Please enter a valid duration (years)");
             return;
         }
 
@@ -558,20 +627,26 @@ const AuditPrograms = () => {
                 method,
                 body: JSON.stringify({
                     name: auditName,
-                    isoStandard: selectedStandards.join(', '),
+                    isoStandard: standardsToSave.join(', '),
                     frequency,
-                    duration,
+                    duration: durationToSave,
                     siteId: selectedSite,
                     auditorIds: selectedAuditors,
-                    leadAuditorId: leadAuditorId,
+                    leadAuditorId: leadAuditorId || null,
                     scheduleData: {
                         ...selectedCells,
                         customRows,
                         startDate: programStartDate.toISOString(),
-                        departmentIds: selectedDepartmentIds,
-                        departmentNames: selectedDepartments.map((dept) => dept.name),
+                        departmentIds: departmentIdsToSave,
+                        departmentNames: departmentNamesToSave,
                         criteriaType,
                         moduleFamily: criteriaType === "module" ? moduleFamily : null,
+                        selectedModuleIds:
+                            criteriaType === "module"
+                                ? activeAuditModules
+                                      .filter((mod) => standardsToSave.includes(mod.value))
+                                      .map((mod) => mod.id)
+                                : [],
                     },
                     userId: user.id
                 })
@@ -587,11 +662,22 @@ const AuditPrograms = () => {
                 setView("list");
                 resetForm();
             } else if (!(await parseTrialLimitApiError(response))) {
-                toast.error("Failed to save Audit Program");
+                let message = "Failed to save Audit Program";
+                try {
+                    const errBody = await response.json();
+                    if (errBody?.error && typeof errBody.error === "string") {
+                        message = errBody.error;
+                    }
+                } catch {
+                    /* ignore */
+                }
+                toast.error(message);
             }
         } catch (error) {
             console.error("Save error:", error);
-            toast.error("An error occurred while saving");
+            toast.error(
+                error instanceof Error ? error.message : "An error occurred while saving",
+            );
         } finally {
             setLoading(false);
         }
@@ -767,20 +853,18 @@ const AuditPrograms = () => {
                 toast.error("Please fill in Audit Name, ISO Standard(s) and Site");
                 return;
             }
-            if (criteriaType === "module" && moduleFamily !== "eosh") {
-                toast.error(
-                    moduleFamily === "qfs-kore"
-                        ? "QFS KORE modules are not available yet. Select EOSH Audit Checklist."
-                        : "Please select EOSH Audit Checklist",
-                );
+            if (criteriaType === "module" && moduleFamily !== "eosh" && moduleFamily !== "qfs-kore") {
+                toast.error("Please select EOSH Audit Checklist or QFS KORE Audit Checklist");
                 return;
             }
             setScrollToScheduleOnShow(true);
             setShowSchedule(true);
             toast.success(
-                criteriaType === "module"
-                    ? "Select EOSH modules below to build the schedule"
-                    : "Schedule generated!",
+                criteriaType === "module" && moduleFamily === "qfs-kore"
+                    ? "Select QFS KORE modules below to build the schedule"
+                    : criteriaType === "module"
+                      ? "Select EOSH modules below to build the schedule"
+                      : "Schedule generated!",
             );
             setAuditTourStep(5);
             return;
@@ -816,7 +900,7 @@ const AuditPrograms = () => {
         const result: { clause: ClauseMatrixRow; periods: string[] }[] = [];
 
         if (criteriaType === "module") {
-            AUDIT_MODULES.forEach((mod, rowIndex) => {
+            activeAuditModules.forEach((mod, rowIndex) => {
                 if (!selectedStandards.includes(mod.value)) return;
                 const activePeriods: string[] = [];
                 periods.forEach((period, colIndex) => {
@@ -1507,7 +1591,7 @@ const AuditPrograms = () => {
                                                     <div className="flex flex-wrap gap-1">
                                                         {(program.isoStandard || "").split(", ").map((std: string, sIdx: number) => (
                                                             <Badge key={sIdx} variant="outline" className="text-[10px] font-medium py-0 h-4 bg-blue-50 border-blue-200 text-blue-700 lowercase">
-                                                                {isEoshModuleValue(std) ? standardDisplayLabel(std) : std.split(" - ")[0]}
+                                                                {isAuditModuleValue(std) ? standardDisplayLabel(std) : std.split(" - ")[0]}
                                                             </Badge>
                                                         ))}
                                                     </div>
@@ -1752,12 +1836,12 @@ const AuditPrograms = () => {
                                         </div>
                                         {moduleFamily === "eosh" && (
                                             <p className="text-xs text-slate-500">
-                                                Click <span className="font-semibold text-slate-700">Generate Schedule</span> to choose from all 39 EOSH modules.
+                                                Click <span className="font-semibold text-slate-700">Generate Schedule</span> to choose from all {EOSH_AUDIT_MODULES.length} EOSH modules.
                                             </p>
                                         )}
                                         {moduleFamily === "qfs-kore" && (
-                                            <p className="text-xs text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2">
-                                                QFS KORE modules are coming soon.
+                                            <p className="text-xs text-slate-500">
+                                                Click <span className="font-semibold text-slate-700">Generate Schedule</span> to choose from all {QFS_AUDIT_MODULES.length} QFS KORE modules.
                                             </p>
                                         )}
                                     </div>
@@ -1839,7 +1923,21 @@ const AuditPrograms = () => {
 
                             <div className="space-y-2">
                                 <Label>Site</Label>
-                                <Select onValueChange={setSelectedSite} value={selectedSite} disabled={view === "view"}>
+                                <Select
+                                    onValueChange={(val) => {
+                                        setSelectedSite(val);
+                                        setSelectedDepartmentIds((prev) =>
+                                            prev.filter((id) =>
+                                                allDepartments.some(
+                                                    (dept) =>
+                                                        dept.id === id && String(dept.siteId) === String(val),
+                                                ),
+                                            ),
+                                        );
+                                    }}
+                                    value={selectedSite}
+                                    disabled={view === "view"}
+                                >
                                     <SelectTrigger className="bg-white border-slate-200">
                                         <SelectValue placeholder="Select site" />
                                     </SelectTrigger>
@@ -1862,13 +1960,13 @@ const AuditPrograms = () => {
                             <div className="space-y-2 md:col-span-2">
                                 <div className="flex items-center justify-between gap-3">
                                     <Label>Departments</Label>
-                                    {allDepartments.length > 0 && view !== "view" && (
+                                    {siteDepartments.length > 0 && view !== "view" && (
                                         <label className="flex items-center gap-2 text-sm text-slate-600 cursor-pointer">
                                             <Checkbox
                                                 checked={allDepartmentsSelected}
                                                 onCheckedChange={(checked) => {
                                                     if (checked === true) {
-                                                        setSelectedDepartmentIds(allDepartments.map((dept) => dept.id));
+                                                        setSelectedDepartmentIds(siteDepartments.map((dept) => dept.id));
                                                     } else {
                                                         setSelectedDepartmentIds([]);
                                                     }
@@ -1880,12 +1978,16 @@ const AuditPrograms = () => {
                                     )}
                                 </div>
                                 <div className="rounded-lg border border-slate-200 bg-white p-3 max-h-48 overflow-y-auto space-y-2">
-                                    {allDepartments.length === 0 ? (
+                                    {!selectedSite ? (
                                         <p className="text-sm text-slate-500">
-                                            No departments yet — add departments under Companies first
+                                            Select a site to choose departments
+                                        </p>
+                                    ) : siteDepartments.length === 0 ? (
+                                        <p className="text-sm text-slate-500">
+                                            No departments for this site — add departments under Companies first
                                         </p>
                                     ) : (
-                                        allDepartments.map((dept) => {
+                                        siteDepartments.map((dept) => {
                                             const isChecked = selectedDepartmentIds.includes(dept.id);
                                             return (
                                                 <label
@@ -1925,11 +2027,11 @@ const AuditPrograms = () => {
                                         })
                                     )}
                                 </div>
-                                {selectedDepartmentIds.length > 0 && (
+                                {selectedDepartments.length > 0 && (
                                     <p className="text-xs text-slate-500">
-                                        {selectedDepartmentIds.length} department
-                                        {selectedDepartmentIds.length === 1 ? "" : "s"} selected
-                                        {someDepartmentsSelected && !allDepartmentsSelected && allDepartments.length > 0
+                                        {selectedDepartments.length} department
+                                        {selectedDepartments.length === 1 ? "" : "s"} selected
+                                        {someDepartmentsSelected && !allDepartmentsSelected && siteDepartments.length > 0
                                             ? " (partial selection)"
                                             : ""}
                                     </p>
@@ -2083,7 +2185,7 @@ const AuditPrograms = () => {
                                             selectedSite &&
                                             (criteriaType === "iso"
                                                 ? selectedStandards.length > 0
-                                                : moduleFamily === "eosh")
+                                                : moduleFamily === "eosh" || moduleFamily === "qfs-kore")
                                         ) {
                                             setAuditTourStep(5);
                                         }
@@ -2177,18 +2279,20 @@ const AuditPrograms = () => {
                                 <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                                     <Badge variant="outline" className="px-4 py-1.5 rounded-full border-emerald-200 text-emerald-700 bg-white font-bold text-[10px] tracking-wide shadow-sm hover:bg-white transition-none uppercase w-fit">
                                         {criteriaType === "module" && moduleFamily === "eosh"
-                                            ? `EOSH modules · ${selectedStandards.length}/${AUDIT_MODULES.length} selected`
-                                            : selectedStandards.length > 0
-                                              ? selectedStandards.map(standardDisplayLabel).join(", ")
-                                              : "ISO 9001:2015 - Quality Management System"}
+                                            ? `EOSH modules · ${selectedStandards.length}/${activeAuditModules.length} selected`
+                                            : criteriaType === "module" && moduleFamily === "qfs-kore"
+                                              ? `QFS KORE modules · ${selectedStandards.length}/${activeAuditModules.length} selected`
+                                              : selectedStandards.length > 0
+                                                ? selectedStandards.map(standardDisplayLabel).join(", ")
+                                                : "ISO 9001:2015 - Quality Management System"}
                                     </Badge>
-                                    {criteriaType === "module" && moduleFamily === "eosh" && view !== "view" && (
+                                    {criteriaType === "module" && (moduleFamily === "eosh" || moduleFamily === "qfs-kore") && view !== "view" && (
                                         <Button
                                             type="button"
                                             variant="outline"
                                             className="rounded-xl border-emerald-200 text-emerald-800 hover:bg-emerald-50"
                                             onClick={() => {
-                                                const allSelected = AUDIT_MODULES.every((m) =>
+                                                const allSelected = activeAuditModules.every((m) =>
                                                     selectedStandards.includes(m.value),
                                                 );
                                                 if (allSelected) {
@@ -2201,10 +2305,10 @@ const AuditPrograms = () => {
                                                         return next;
                                                     });
                                                 } else {
-                                                    setSelectedStandards(AUDIT_MODULES.map((m) => m.value));
+                                                    setSelectedStandards(activeAuditModules.map((m) => m.value));
                                                     setSelectedCells((prev) => {
                                                         const next = { ...prev };
-                                                        AUDIT_MODULES.forEach((_, rowIndex) => {
+                                                        activeAuditModules.forEach((_, rowIndex) => {
                                                             // Mark the first period/month for every module
                                                             next[`${rowIndex}-0`] = true;
                                                         });
@@ -2213,7 +2317,7 @@ const AuditPrograms = () => {
                                                 }
                                             }}
                                         >
-                                            {AUDIT_MODULES.every((m) => selectedStandards.includes(m.value))
+                                            {activeAuditModules.every((m) => selectedStandards.includes(m.value))
                                                 ? "Clear all modules"
                                                 : "Select all modules"}
                                         </Button>
@@ -2270,7 +2374,7 @@ const AuditPrograms = () => {
                                         </thead>
                                         <tbody>
                                             {criteriaType === "module"
-                                                ? AUDIT_MODULES.map((mod, rowIndex) => {
+                                                ? activeAuditModules.map((mod, rowIndex) => {
                                                       const included = selectedStandards.includes(mod.value);
                                                       return (
                                                       <tr

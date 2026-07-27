@@ -3,6 +3,17 @@ import cors from 'cors';
 import { loadServerEnv } from './loadEnv.js';
 import nodemailer from 'nodemailer';
 import crypto from 'node:crypto';
+import {
+    applyFindingAssignmentToAuditData,
+} from './audit/findingAssignment.js';
+import {
+    sendNcAssignmentEmail,
+    sendFindingResponseEmail,
+} from './mail/smtp.js';
+import {
+    NcNotificationTemplates,
+    createNotification,
+} from './notifications/index.js';
 import prisma, { handlePrismaError, pool } from './prisma.js';
 import { runOtpSendExclusive, withPgOtpAdvisoryLock } from './otpSendLock.js';
 import bcrypt from 'bcrypt';
@@ -1644,51 +1655,6 @@ async function actorIsFindingAssignee(actorId, plan) {
     return collectAssigneeEmailsFromAuditData(plan.auditData).has(actorEmail);
 }
 
-function applyFindingAssignmentToAuditData(auditData, assignment, assignToEmail, assignToName) {
-    let data = auditData;
-    if (typeof data === 'string') {
-        try {
-            data = JSON.parse(data);
-        } catch {
-            data = {};
-        }
-    }
-    if (!data || typeof data !== 'object') {
-        data = {};
-    } else {
-        data = { ...data };
-    }
-
-    const email = String(assignToEmail || '').trim();
-    const name = String(assignToName || '').trim();
-    const patch = {
-        assignToEmail: email,
-        assignToName: name,
-        assignTo: name && email ? `${name} (${email})` : name || email,
-    };
-
-    const source = String(assignment?.source || '').trim();
-    const key = assignment?.key;
-
-    if (source === 'clause' && key != null && String(key).trim()) {
-        const clauseKey = String(key);
-        data.clauseData = { ...(data.clauseData || {}) };
-        data.clauseData[clauseKey] = { ...(data.clauseData[clauseKey] || {}), ...patch };
-    } else if (source === 'checklist' && key != null && String(key).trim() !== '') {
-        const checklistKey = String(key);
-        data.checklistData = { ...(data.checklistData || {}) };
-        data.checklistData[checklistKey] = { ...(data.checklistData[checklistKey] || {}), ...patch };
-    } else if (source === 'process' && key != null && String(key).trim() !== '') {
-        const idx = Number.parseInt(String(key), 10);
-        if (!Number.isNaN(idx) && Array.isArray(data.processAudits) && data.processAudits[idx]) {
-            data.processAudits = [...data.processAudits];
-            data.processAudits[idx] = { ...data.processAudits[idx], ...patch };
-        }
-    }
-
-    return data;
-}
-
 const ASSIGNED_FINDINGS_PLAN_SELECT = {
     id: true,
     executionId: true,
@@ -2109,7 +2075,11 @@ async function assertOrgAuditorUserIds(actorId, userIds, { allowEmpty = true } =
     }
     const allowed = await orgAuditorUserIdSet(actorId);
     if (normalized.some((id) => !allowed.has(id))) {
-        return { ok: false, status: 403, error: 'Forbidden' };
+        return {
+            ok: false,
+            status: 400,
+            error: 'One or more selected auditors are not allowed for this organization',
+        };
     }
     return { ok: true, ids: normalized };
 }
@@ -2139,10 +2109,14 @@ async function assertOrgSiteDepartments(actorId, siteId, scheduleData) {
         select: { id: true, siteId: true },
     });
     if (departments.length !== deptIds.length) {
-        return { ok: false, status: 403, error: 'Forbidden' };
+        return { ok: false, status: 400, error: 'One or more selected departments were not found' };
     }
     if (departments.some((dept) => dept.siteId !== parsedSiteId)) {
-        return { ok: false, status: 403, error: 'Forbidden' };
+        return {
+            ok: false,
+            status: 400,
+            error: 'Departments must belong to the selected site',
+        };
     }
     return { ok: true };
 }
@@ -2153,11 +2127,19 @@ async function validateAuditProgramAssignments(actorId, { siteId, leadAuditorId,
         return { ok: false, status: 400, error: 'Invalid site ID' };
     }
     if (!(await actorCanAssignAuditeeToSite(actorId, parsedSiteId))) {
-        return { ok: false, status: 403, error: 'Forbidden' };
+        return { ok: false, status: 403, error: 'You do not have access to the selected site' };
     }
     if (leadAuditorId != null && leadAuditorId !== '') {
         const leadCheck = await assertOrgAuditorUserIds(actorId, [leadAuditorId], { allowEmpty: false });
-        if (!leadCheck.ok) return leadCheck;
+        if (!leadCheck.ok) {
+            return {
+                ok: false,
+                status: leadCheck.status || 400,
+                error: leadCheck.error === 'Auditor user id is required'
+                    ? 'Lead auditor is required'
+                    : (leadCheck.error || 'Invalid lead auditor'),
+            };
+        }
     }
     const auditorCheck = await assertOrgAuditorUserIds(actorId, auditorIds ?? [], { allowEmpty: true });
     if (!auditorCheck.ok) return auditorCheck;
@@ -6203,6 +6185,7 @@ app.get('/audit-plans', authenticateToken, checkTrialExpiration, async (req, res
                     select: {
                         id: true,
                         name: true,
+                        scheduleData: true,
                         site: {
                             select: {
                                 id: true,
@@ -6490,8 +6473,20 @@ app.post('/audit-plans/:id/notify-finding-assignment', authenticateToken, checkT
         return res.status(400).json({ error: 'Invalid audit plan id' });
     }
 
-    const { assignToEmail, assignToName, findingRef, findingType, assignment } = req.body || {};
+    const {
+        assignToEmail,
+        assignToName,
+        findingRef,
+        findingType,
+        assignment,
+        raisedByName,
+        kind,
+        rowPatch,
+    } = req.body || {};
     const actorId = Number(req.user?.id);
+    const isNcStyle =
+        String(kind || '').toLowerCase() === 'nonconformance' ||
+        String(kind || '').toLowerCase() === 'nc';
 
     try {
         const existing = await prisma.auditPlan.findUnique({
@@ -6515,6 +6510,25 @@ app.post('/audit-plans/:id/notify-finding-assignment', authenticateToken, checkT
         }
 
         const resolvedName = assignToName || lookup.name;
+        const safeRowPatch =
+            rowPatch && typeof rowPatch === 'object'
+                ? Object.fromEntries(
+                      Object.entries(rowPatch).filter(
+                          ([k, v]) =>
+                              [
+                                  'findings',
+                                  'raisedBy',
+                                  'raisedByName',
+                                  'raisedByEmail',
+                                  'targetDate',
+                                  'description',
+                                  'details',
+                                  'ofi',
+                              ].includes(k) &&
+                              (typeof v === 'string' || typeof v === 'number'),
+                      ),
+                  )
+                : null;
         let persistedAuditData = existing.auditData;
         if (assignment?.source && assignment?.key != null) {
             persistedAuditData = applyFindingAssignmentToAuditData(
@@ -6522,6 +6536,7 @@ app.post('/audit-plans/:id/notify-finding-assignment', authenticateToken, checkT
                 assignment,
                 lookup.email,
                 resolvedName,
+                safeRowPatch,
             );
             await prisma.auditPlan.update({
                 where: { id: planId },
@@ -6540,16 +6555,49 @@ app.post('/audit-plans/:id/notify-finding-assignment', authenticateToken, checkT
             `${assigner?.firstName || ''} ${assigner?.lastName || ''}`.trim() ||
             assigner?.email ||
             'A team member';
+        const raisedName = String(raisedByName || '').trim() || assignerName;
 
-        const result = await sendFindingAssignmentEmail({
-            assignToEmail: lookup.email,
-            assignToName: resolvedName,
-            assignerName,
-            auditName: existing.auditName,
-            findingRef,
-            findingType,
-            auditPlanId: planId,
-        });
+        let result;
+        if (isNcStyle) {
+            result = await sendNcAssignmentEmail({
+                assignToEmail: lookup.email,
+                assignToName: resolvedName,
+                raisedByName: raisedName,
+                auditName: existing.auditName,
+                findingRef,
+                auditPlanId: planId,
+            });
+        } else {
+            result = await sendFindingAssignmentEmail({
+                assignToEmail: lookup.email,
+                assignToName: resolvedName,
+                assignerName,
+                auditName: existing.auditName,
+                findingRef,
+                findingType,
+                auditPlanId: planId,
+            });
+        }
+
+        // In-app notification for the assignee (Findings / NC inbox).
+        if (Number(lookup.id) !== actorId) {
+            try {
+                const tpl = isNcStyle
+                    ? NcNotificationTemplates.findingAssigned(findingRef, raisedName)
+                    : {
+                          type: 'FINDING_ASSIGNED',
+                          title: 'Finding assigned',
+                          message: `${assignerName} assigned you a finding (${findingRef || 'Finding'}).`,
+                      };
+                await createNotification(prisma, {
+                    recipientUserId: lookup.id,
+                    nonconformanceId: null,
+                    ...tpl,
+                });
+            } catch (notifErr) {
+                console.error('[FINDING-ASSIGN] Failed to create in-app notification:', notifErr);
+            }
+        }
 
         return res.json({
             ok: true,
@@ -6560,6 +6608,286 @@ app.post('/audit-plans/:id/notify-finding-assignment', authenticateToken, checkT
     } catch (error) {
         console.error('Failed to notify finding assignment:', error);
         return res.status(500).json({ error: 'Failed to send assignment notification' });
+    }
+});
+
+/**
+ * Notify the reporter (raised-by) when an assignee submits a finding response.
+ * Used for informal NC/exception findings that are not formal Nonconformance records.
+ */
+app.post('/audit-plans/:id/notify-finding-response', authenticateToken, checkTrialExpiration, async (req, res) => {
+    const planId = Number.parseInt(req.params.id, 10);
+    if (Number.isNaN(planId)) {
+        return res.status(400).json({ error: 'Invalid audit plan id' });
+    }
+
+    const {
+        findingId,
+        findingRef,
+        raisedByEmail,
+        raisedByUserId,
+        nonconformanceId,
+        isUpdate,
+    } = req.body || {};
+    const actorId = Number(req.user?.id);
+    const updated = Boolean(isUpdate);
+
+    try {
+        const existing = await prisma.auditPlan.findUnique({
+            where: { id: planId },
+            include: {
+                auditors: true,
+                auditProgram: { include: { auditors: true, leadAuditor: true } },
+            },
+        });
+        if (!existing) return res.status(404).json({ error: 'Audit plan not found' });
+        if (!(await actorCanAccessAuditPlan(actorId, existing))) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
+
+        const actor = await prisma.user.findUnique({
+            where: { id: actorId },
+            select: { firstName: true, lastName: true, email: true },
+        });
+        const responderName =
+            `${actor?.firstName || ''} ${actor?.lastName || ''}`.trim() ||
+            actor?.email ||
+            'The assignee';
+
+        let lookup = { found: false, id: null, name: '', email: '' };
+        const reporterId = Number(raisedByUserId);
+        if (Number.isInteger(reporterId) && reporterId > 0) {
+            const user = await prisma.user.findUnique({
+                where: { id: reporterId },
+                select: { id: true, firstName: true, lastName: true, email: true },
+            });
+            if (user) {
+                lookup = {
+                    found: true,
+                    id: user.id,
+                    name:
+                        `${user.firstName || ''} ${user.lastName || ''}`.trim() ||
+                        user.email ||
+                        '',
+                    email: user.email || '',
+                };
+            }
+        }
+        if (!lookup.found && raisedByEmail) {
+            const byEmail = await findUserByEmail(raisedByEmail);
+            if (byEmail.error) {
+                return res.status(byEmail.status || 400).json({ error: byEmail.error });
+            }
+            if (byEmail.found) {
+                lookup = {
+                    found: true,
+                    id: byEmail.id,
+                    name: byEmail.name,
+                    email: byEmail.email,
+                };
+            }
+        }
+        if (!lookup.found) {
+            return res.status(404).json({
+                error: 'Reporter user not found for the raised-by email.',
+            });
+        }
+
+        const safeFindingId = String(findingId || '').trim();
+        const linkPath = nonconformanceId
+            ? `/nonconformances/${Number(nonconformanceId)}`
+            : safeFindingId
+              ? `/audit-findings/${planId}/${encodeURIComponent(safeFindingId)}`
+              : '/audit-findings?tab=raised';
+
+        let notifiedInApp = false;
+        if (Number(lookup.id) !== actorId) {
+            try {
+                const tpl = NcNotificationTemplates.findingResponseSubmitted(
+                    findingRef || safeFindingId || 'Finding',
+                    responderName,
+                    updated,
+                );
+                await createNotification(prisma, {
+                    recipientUserId: lookup.id,
+                    nonconformanceId: nonconformanceId ? Number(nonconformanceId) : null,
+                    linkPath,
+                    ...tpl,
+                });
+                notifiedInApp = true;
+            } catch (notifErr) {
+                console.error('[FINDING-RESPONSE] Failed to create notification:', notifErr);
+            }
+        }
+
+        let mailResult = { sent: false, skipped: true };
+        if (lookup.email && Number(lookup.id) !== actorId) {
+            try {
+                mailResult = await sendFindingResponseEmail({
+                    reporterEmail: lookup.email,
+                    reporterName: lookup.name,
+                    responderName,
+                    auditName: existing.auditName,
+                    findingRef: findingRef || safeFindingId,
+                    auditPlanId: planId,
+                    findingId: safeFindingId,
+                    nonconformanceId: nonconformanceId ? Number(nonconformanceId) : null,
+                    isUpdate: updated,
+                });
+            } catch (mailErr) {
+                console.error('[FINDING-RESPONSE] Failed to send email:', mailErr);
+            }
+        }
+
+        return res.json({
+            ok: true,
+            notified: notifiedInApp || mailResult.sent === true,
+            emailed: mailResult.sent === true,
+            reporter: { id: lookup.id, name: lookup.name, email: lookup.email },
+        });
+    } catch (error) {
+        console.error('Failed to notify finding response:', error);
+        return res.status(500).json({ error: 'Failed to send response notification' });
+    }
+});
+
+/**
+ * Notify the assignee after the reporter accepts/closes or rejects/reopens a response.
+ */
+app.post('/audit-plans/:id/notify-finding-review', authenticateToken, checkTrialExpiration, async (req, res) => {
+    const planId = Number.parseInt(req.params.id, 10);
+    if (Number.isNaN(planId)) {
+        return res.status(400).json({ error: 'Invalid audit plan id' });
+    }
+
+    const {
+        findingId,
+        findingRef,
+        assignToEmail,
+        decision,
+        reason,
+        nonconformanceId,
+    } = req.body || {};
+    const actorId = Number(req.user?.id);
+    const decisionNorm = String(decision || '').trim().toUpperCase();
+    if (decisionNorm !== 'ACCEPT' && decisionNorm !== 'REJECT') {
+        return res.status(400).json({ error: 'decision must be ACCEPT or REJECT' });
+    }
+    if (decisionNorm === 'REJECT' && !String(reason || '').trim()) {
+        return res.status(400).json({ error: 'reason is required when rejecting' });
+    }
+
+    try {
+        const existing = await prisma.auditPlan.findUnique({
+            where: { id: planId },
+            include: {
+                auditors: true,
+                auditProgram: { include: { auditors: true, leadAuditor: true } },
+            },
+        });
+        if (!existing) return res.status(404).json({ error: 'Audit plan not found' });
+        if (!(await actorCanAccessAuditPlan(actorId, existing))) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
+
+        const lookup = await findUserByEmail(assignToEmail);
+        if (lookup.error) {
+            return res.status(lookup.status || 400).json({ error: lookup.error });
+        }
+        if (!lookup.found) {
+            return res.status(404).json({ error: 'Assignee user not found.' });
+        }
+
+        const safeFindingId = String(findingId || '').trim();
+        const linkPath = nonconformanceId
+            ? `/nonconformances/${Number(nonconformanceId)}`
+            : safeFindingId
+              ? `/audit-findings/${planId}/${encodeURIComponent(safeFindingId)}`
+              : '/audit-findings?tab=assigned';
+
+        const tpl =
+            decisionNorm === 'ACCEPT'
+                ? NcNotificationTemplates.findingReviewAccepted(
+                      findingRef || safeFindingId || 'Finding',
+                  )
+                : NcNotificationTemplates.findingReviewRejected(
+                      findingRef || safeFindingId || 'Finding',
+                      reason,
+                  );
+
+        let notifiedInApp = false;
+        if (Number(lookup.id) !== actorId) {
+            try {
+                await createNotification(prisma, {
+                    recipientUserId: lookup.id,
+                    nonconformanceId: nonconformanceId ? Number(nonconformanceId) : null,
+                    linkPath,
+                    ...tpl,
+                });
+                notifiedInApp = true;
+            } catch (notifErr) {
+                console.error('[FINDING-REVIEW] Failed to create notification:', notifErr);
+            }
+        }
+
+        // Best-effort email (reuse response email shape).
+        let mailed = false;
+        if (lookup.email && Number(lookup.id) !== actorId && isSmtpConfigured()) {
+            try {
+                const actor = await prisma.user.findUnique({
+                    where: { id: actorId },
+                    select: { firstName: true, lastName: true, email: true },
+                });
+                const reporterName =
+                    `${actor?.firstName || ''} ${actor?.lastName || ''}`.trim() ||
+                    actor?.email ||
+                    'The reporter';
+                const base = getAppLoginUrl();
+                const subject =
+                    decisionNorm === 'ACCEPT'
+                        ? `Response accepted — finding closed`
+                        : `Response rejected — please revise`;
+                const bodyReason =
+                    decisionNorm === 'REJECT'
+                        ? `<p style="font-size: 15px; line-height: 1.6;"><strong>Reason:</strong> ${escapeHtml(String(reason || ''))}</p>`
+                        : '';
+                await transporter.sendMail({
+                    from: getSmtpFromAddress(),
+                    to: lookup.email,
+                    subject,
+                    html: `
+                        <div style="font-family: Arial, sans-serif; max-width: 560px; margin: 0 auto; color: #1e293b;">
+                            <h2 style="color: #213847;">${escapeHtml(tpl.title)}</h2>
+                            <p style="font-size: 15px; line-height: 1.6;">
+                                <strong>${escapeHtml(reporterName)}</strong> reviewed your response for
+                                <strong>${escapeHtml(findingRef || safeFindingId || 'a finding')}</strong>
+                                on <strong>${escapeHtml(existing.auditName || 'an audit')}</strong>.
+                            </p>
+                            ${bodyReason}
+                            <p style="margin: 24px 0;">
+                                <a href="${base}${linkPath}" style="display: inline-block; background: #1e855e; color: #ffffff; text-decoration: none; padding: 12px 24px; border-radius: 8px; font-weight: bold;">
+                                    Open finding
+                                </a>
+                            </p>
+                        </div>
+                    `,
+                    text: `${tpl.message} Open: ${base}${linkPath}`,
+                });
+                mailed = true;
+            } catch (mailErr) {
+                console.error('[FINDING-REVIEW] Failed to send email:', mailErr);
+            }
+        }
+
+        return res.json({
+            ok: true,
+            notified: notifiedInApp || mailed,
+            emailed: mailed,
+            assignee: { id: lookup.id, name: lookup.name, email: lookup.email },
+        });
+    } catch (error) {
+        console.error('Failed to notify finding review:', error);
+        return res.status(500).json({ error: 'Failed to send review notification' });
     }
 });
 

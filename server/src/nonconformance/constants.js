@@ -8,10 +8,11 @@ export const NC_STATUSES = Object.freeze({
 
 export const NC_STATUS_VALUES = Object.freeze(Object.values(NC_STATUSES));
 
-/** Statuses that allow an auditee to submit a response. */
+/** Statuses that allow an auditee to submit / update a response. */
 export const NC_RESPONSE_ALLOWED_STATUSES = Object.freeze([
     NC_STATUSES.ASSIGNED,
     NC_STATUSES.CHANGES_REQUESTED,
+    NC_STATUSES.RESPONSE_SUBMITTED,
 ]);
 
 /** Status from which an auditor/reviewer may submit a review decision. */

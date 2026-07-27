@@ -3,7 +3,7 @@ import { Toaster } from "@/components/ui/toaster";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { BrowserRouter, Routes, Route, Navigate, useParams } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { AppLayout } from "./components/AppLayout";
 import { ProtectedRoute } from "./components/ProtectedRoute";
 import { SuperAdminProtectedRoute } from "./components/SuperAdminProtectedRoute";
@@ -24,6 +24,7 @@ const AuditExecute = lazy(() => import("./pages/AuditExecute"));
 const AuditFindings = lazy(() => import("./pages/AuditFindings"));
 const Nonconformances = lazy(() => import("./pages/Nonconformances"));
 const NonconformanceDetail = lazy(() => import("./pages/NonconformanceDetail"));
+const FindingDetail = lazy(() => import("./pages/FindingDetail"));
 const Notifications = lazy(() => import("./pages/Notifications"));
 const Subscription = lazy(() => import("./pages/Subscription"));
 const SubscriptionSuccess = lazy(() => import("./pages/SubscriptionSuccess"));
@@ -37,21 +38,6 @@ const SuperAdmin = lazy(() => import("./pages/SuperAdmin"));
 const GettingStarted = lazy(() => import("./pages/GettingStarted"));
 
 const queryClient = new QueryClient();
-
-function FindingAuditRedirect() {
-  const { auditId, findingId } = useParams<{ auditId: string; findingId: string }>();
-  if (!auditId) return <Navigate to="/audit-findings" replace />;
-  return (
-    <Navigate
-      to={`/audit/execute/${auditId}`}
-      replace
-      state={{
-        focusFindings: true,
-        ...(findingId ? { focusFindingId: decodeURIComponent(findingId) } : {}),
-      }}
-    />
-  );
-}
 
 const App = () => (
   <QueryClientProvider client={queryClient}>
@@ -95,7 +81,7 @@ const App = () => (
               <Route path="/audit-templates" element={<AuditTemplates />} />
               <Route path="/audit-templates/:id/execute" element={<ExecuteAuditTemplate />} />
               <Route path="/audit/execute/:id" element={<AuditExecute />} />
-              <Route path="/audit-findings/:auditId/:findingId" element={<FindingAuditRedirect />} />
+              <Route path="/audit-findings/:auditId/:findingId" element={<FindingDetail />} />
               <Route path="/audit-findings" element={<AuditFindings />} />
               <Route path="/nonconformances" element={<Nonconformances />} />
               <Route path="/nonconformances/:id" element={<NonconformanceDetail />} />

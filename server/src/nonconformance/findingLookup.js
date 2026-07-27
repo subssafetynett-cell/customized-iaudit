@@ -21,17 +21,23 @@ function mapSeverity(raw) {
         normalized === 'c' ||
         normalized === 'compliant' ||
         normalized === 'compliance' ||
+        normalized === '2' ||
         normalized === ''
     ) {
         return null;
     }
+    // EOSH / QFS scored checklists: 0 = Non Compliance, 1 = Meet with Exceptions
+    if (normalized === '0') return 'Minor';
+    if (normalized === '1') return 'OFI';
     if (normalized.includes('ofi') || normalized.includes('opportunity')) return 'OFI';
     if (normalized === 'min' || normalized.includes('minor')) return 'Minor';
     if (normalized === 'maj' || normalized.includes('major')) return 'Major';
     if (
         normalized === 'nc' ||
         normalized.includes('non-conformance') ||
-        normalized.includes('nonconformance')
+        normalized.includes('nonconformance') ||
+        normalized.includes('non compliance') ||
+        normalized.includes('non-compliance')
     ) {
         return 'Minor';
     }

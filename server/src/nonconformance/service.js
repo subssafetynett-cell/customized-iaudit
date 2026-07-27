@@ -20,6 +20,12 @@ import {
     NC_STATUSES,
 } from './constants.js';
 import { findFindingOnPlan } from './findingLookup.js';
+import {
+    applyFindingAssignmentToAuditData,
+    assignmentFromFindingId,
+} from '../audit/findingAssignment.js';
+import { sendNcAssignmentEmail, sendFindingResponseEmail } from '../mail/smtp.js';
+import { sanitizeAuditDataPayload } from '../textSanitize.js';
 
 function userSummary(user) {
     if (!user) return null;
@@ -321,7 +327,7 @@ export async function raiseNonconformance({
 
     const assigneeUser = await prisma.user.findUnique({
         where: { id: assignee },
-        select: { id: true, isActive: true },
+        select: { id: true, isActive: true, email: true, firstName: true, lastName: true },
     });
     if (!assigneeUser) {
         const err = new Error('Assignee user not found');
@@ -342,6 +348,19 @@ export async function raiseNonconformance({
         err.code = 'REVIEWER_NOT_FOUND';
         throw err;
     }
+
+    const actorUser = await prisma.user.findUnique({
+        where: { id: actor },
+        select: { firstName: true, lastName: true, email: true },
+    });
+    const raisedByName =
+        `${actorUser?.firstName || ''} ${actorUser?.lastName || ''}`.trim() ||
+        actorUser?.email ||
+        'A team member';
+    const assigneeName =
+        `${assigneeUser.firstName || ''} ${assigneeUser.lastName || ''}`.trim() ||
+        assigneeUser.email ||
+        'Assignee';
 
     const title =
         String(findingTitle || '').trim() ||
@@ -386,7 +405,7 @@ export async function raiseNonconformance({
             actorId: actor,
         });
 
-        const assignedTpl = NcNotificationTemplates.assigned(ncNumber);
+        const assignedTpl = NcNotificationTemplates.assigned(ncNumber, raisedByName);
         await notifyUsers(tx, {
             recipientUserIds: [assignee],
             excludeUserId: actor,
@@ -399,6 +418,46 @@ export async function raiseNonconformance({
             include: NC_DETAIL_INCLUDE,
         });
     });
+
+    // Persist assignee onto the finding so it appears on the assignee's Findings page.
+    try {
+        const assignment = assignmentFromFindingId(findingId, planId);
+        if (assignment && assigneeUser.email) {
+            const nextAuditData = applyFindingAssignmentToAuditData(
+                plan.auditData,
+                assignment,
+                assigneeUser.email,
+                assigneeName,
+            );
+            await prisma.auditPlan.update({
+                where: { id: planId },
+                data: {
+                    auditData: sanitizeAuditDataPayload(nextAuditData),
+                    updatedAt: new Date(),
+                },
+            });
+        }
+    } catch (syncErr) {
+        console.error('[NC] Failed to sync assignee onto audit finding:', syncErr);
+    }
+
+    // Email assignee (non-blocking for API success).
+    try {
+        if (assigneeUser.email) {
+            await sendNcAssignmentEmail({
+                assignToEmail: assigneeUser.email,
+                assignToName: assigneeName,
+                raisedByName,
+                auditName: plan.auditName,
+                findingRef: title,
+                ncNumber: created?.ncNumber,
+                auditPlanId: planId,
+                nonconformanceId: created?.id,
+            });
+        }
+    } catch (mailErr) {
+        console.error('[NC] Failed to send assignment email:', mailErr);
+    }
 
     return serializeNonconformance(created);
 }
@@ -568,9 +627,12 @@ export async function submitNonconformanceResponse({
             id: true,
             assigneeId: true,
             reviewerId: true,
+            createdById: true,
             status: true,
             ncNumber: true,
             auditPlanId: true,
+            findingId: true,
+            findingTitle: true,
         },
     });
     if (!nc) {
@@ -588,7 +650,7 @@ export async function submitNonconformanceResponse({
     const status = String(nc.status || '').trim().toUpperCase();
     if (!NC_RESPONSE_ALLOWED_STATUSES.includes(status)) {
         const err = new Error(
-            'Response can only be submitted when status is ASSIGNED or CHANGES_REQUESTED',
+            'Response can only be submitted when status is ASSIGNED, CHANGES_REQUESTED, or RESPONSE_SUBMITTED',
         );
         err.code = 'INVALID_STATUS';
         throw err;
@@ -596,6 +658,7 @@ export async function submitNonconformanceResponse({
 
     const plan = await loadPlanForNc(nc.auditPlanId);
     const reviewRecipients = [
+        nc.createdById,
         nc.reviewerId,
         plan?.leadAuditorId,
         plan?.auditProgram?.leadAuditorId,
@@ -606,6 +669,21 @@ export async function submitNonconformanceResponse({
         'proposedCompletionDate',
     );
     const evidenceList = normalizeEvidenceFilenames(evidenceFilenames ?? evidence);
+
+    const priorAgg = await prisma.nonconformanceResponse.aggregate({
+        where: { nonconformanceId: ncId },
+        _max: { version: true },
+    });
+    const isUpdate = (priorAgg._max.version || 0) >= 1;
+
+    const actorUser = await prisma.user.findUnique({
+        where: { id: actor },
+        select: { firstName: true, lastName: true, email: true },
+    });
+    const responderName =
+        `${actorUser?.firstName || ''} ${actorUser?.lastName || ''}`.trim() ||
+        actorUser?.email ||
+        'The assignee';
 
     const updated = await prisma.$transaction(async (tx) => {
         const agg = await tx.nonconformanceResponse.aggregate({
@@ -635,15 +713,21 @@ export async function submitNonconformanceResponse({
         await createNcActivity(tx, {
             nonconformanceId: ncId,
             type: NC_ACTIVITY_TYPES.RESPONSE_SUBMITTED,
-            message: `Response v${nextVersion} submitted`,
+            message: isUpdate
+                ? `Response v${nextVersion} updated and resubmitted`
+                : `Response v${nextVersion} submitted`,
             actorId: actor,
         });
 
-        const responseTpl = NcNotificationTemplates.responseSubmitted(nc.ncNumber);
+        const responseTpl = NcNotificationTemplates.responseSubmitted(
+            nc.ncNumber,
+            isUpdate,
+        );
         await notifyUsers(tx, {
             recipientUserIds: reviewRecipients,
             excludeUserId: actor,
             nonconformanceId: ncId,
+            linkPath: `/nonconformances/${ncId}`,
             ...responseTpl,
         });
 
@@ -653,6 +737,95 @@ export async function submitNonconformanceResponse({
             include: NC_DETAIL_INCLUDE,
         });
     });
+
+    // Email reporter(s) — created by / reviewer / lead auditors (best-effort).
+    try {
+        const recipientIds = [
+            ...new Set(
+                reviewRecipients
+                    .map((id) => Number(id))
+                    .filter((id) => Number.isInteger(id) && id > 0 && id !== actor),
+            ),
+        ];
+        if (recipientIds.length > 0) {
+            const users = await prisma.user.findMany({
+                where: { id: { in: recipientIds } },
+                select: { id: true, email: true, firstName: true, lastName: true },
+            });
+            for (const u of users) {
+                if (!u.email) continue;
+                const reporterName =
+                    `${u.firstName || ''} ${u.lastName || ''}`.trim() || u.email;
+                try {
+                    await sendFindingResponseEmail({
+                        reporterEmail: u.email,
+                        reporterName,
+                        responderName,
+                        auditName: plan?.auditName,
+                        findingRef: nc.findingTitle || nc.ncNumber,
+                        ncNumber: nc.ncNumber,
+                        auditPlanId: nc.auditPlanId,
+                        findingId: nc.findingId,
+                        nonconformanceId: nc.id,
+                        isUpdate,
+                    });
+                } catch (mailErr) {
+                    console.error(
+                        '[NC] Failed to send response email to',
+                        u.email,
+                        mailErr,
+                    );
+                }
+            }
+        }
+    } catch (mailErr) {
+        console.error('[NC] Failed to send response emails:', mailErr);
+    }
+
+    // Best-effort: mark linked finding override as Responded for Raised-by-me list.
+    try {
+        const findingId = String(nc.findingId || '').trim();
+        if (findingId) {
+            const planRow = await prisma.auditPlan.findUnique({
+                where: { id: Number(nc.auditPlanId) },
+                select: { findingsData: true },
+            });
+            let overrides = {};
+            try {
+                overrides =
+                    typeof planRow?.findingsData === 'string'
+                        ? JSON.parse(planRow.findingsData)
+                        : planRow?.findingsData && typeof planRow.findingsData === 'object'
+                          ? { ...planRow.findingsData }
+                          : {};
+            } catch {
+                overrides = {};
+            }
+            const prev = overrides[findingId] && typeof overrides[findingId] === 'object'
+                ? overrides[findingId]
+                : {};
+            overrides[findingId] = {
+                ...prev,
+                status: 'New Response',
+                rootCause: root.slice(0, 10000),
+                correction:
+                    String(immediateCorrection ?? '').trim().slice(0, 10000) ||
+                    prev.correction ||
+                    '',
+                correctiveAction: corrective.slice(0, 10000),
+                rejectReason: '',
+            };
+            await prisma.auditPlan.update({
+                where: { id: Number(nc.auditPlanId) },
+                data: {
+                    findingsData: overrides,
+                    updatedAt: new Date(),
+                },
+            });
+        }
+    } catch (syncErr) {
+        console.error('[NC] Failed to sync finding Responded status:', syncErr);
+    }
 
     return serializeNonconformance(updated);
 }
@@ -712,6 +885,7 @@ export async function reviewNonconformance({
             reviewerId: true,
             createdById: true,
             auditPlanId: true,
+            findingId: true,
         },
     });
     if (!nc) {
@@ -770,11 +944,12 @@ export async function reviewNonconformance({
         const reviewTpl =
             decisionNorm === NC_REVIEW_DECISIONS.APPROVE
                 ? NcNotificationTemplates.closed(nc.ncNumber)
-                : NcNotificationTemplates.changesRequested(nc.ncNumber);
+                : NcNotificationTemplates.changesRequested(nc.ncNumber, storedComment);
         await notifyUsers(tx, {
             recipientUserIds: [nc.assigneeId],
             excludeUserId: actor,
             nonconformanceId: ncId,
+            linkPath: `/nonconformances/${ncId}`,
             ...reviewTpl,
         });
 
@@ -787,6 +962,55 @@ export async function reviewNonconformance({
             include: NC_DETAIL_INCLUDE,
         });
     });
+
+    // Sync linked finding status for Raised-by-me / Assign-to-me lists.
+    try {
+        const findingId = String(nc.findingId || '').trim();
+        if (findingId) {
+            const planRow = await prisma.auditPlan.findUnique({
+                where: { id: Number(nc.auditPlanId) },
+                select: { findingsData: true },
+            });
+            let overrides = {};
+            try {
+                overrides =
+                    typeof planRow?.findingsData === 'string'
+                        ? JSON.parse(planRow.findingsData)
+                        : planRow?.findingsData && typeof planRow.findingsData === 'object'
+                          ? { ...planRow.findingsData }
+                          : {};
+            } catch {
+                overrides = {};
+            }
+            const prev =
+                overrides[findingId] && typeof overrides[findingId] === 'object'
+                    ? overrides[findingId]
+                    : {};
+            const isApprove = decisionNorm === NC_REVIEW_DECISIONS.APPROVE;
+            overrides[findingId] = {
+                ...prev,
+                status: isApprove ? 'Closed' : 'Opened',
+                rejectReason: isApprove ? '' : commentText.slice(0, 5000),
+                capaReviews: [
+                    ...(Array.isArray(prev.capaReviews) ? prev.capaReviews : []),
+                    {
+                        decision: isApprove ? 'ACCEPT' : 'REJECT',
+                        reason: isApprove ? undefined : commentText.slice(0, 5000),
+                        reviewedAt: new Date().toISOString(),
+                    },
+                ],
+            };
+            await prisma.auditPlan.update({
+                where: { id: Number(nc.auditPlanId) },
+                data: {
+                    findingsData: overrides,
+                    updatedAt: new Date(),
+                },
+            });
+        }
+    } catch (syncErr) {
+        console.error('[NC] Failed to sync finding review status:', syncErr);
+    }
 
     return serializeNonconformance(updated);
 }

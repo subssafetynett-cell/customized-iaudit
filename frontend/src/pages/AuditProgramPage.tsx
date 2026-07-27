@@ -52,6 +52,7 @@ import {
 } from "@/lib/auditProgramDepartments";
 import { CLAUSE_MATRIX, ClauseMatrixRow } from "@/data/clauseMapping";
 import { EOSH_EXCEL_MODULE_META } from "@/data/eoshExcelModuleTemplates";
+import { QFS_KORE_EXCEL_MODULE_META } from "@/data/qfsKoreExcelModuleTemplates";
 import { TourStepPopover } from "@/components/TourStepPopover";
 import {
     AUDIT_PLAN_TOUR_TOTAL_STEPS,
@@ -65,13 +66,135 @@ interface Clause {
     standard?: string;
 }
 
-const EOSH_MODULE_PREFIX = "EOSH Module: ";
+type ClauseDisplayRow = {
+    key: string;
+    name: string;
+    isHeading?: boolean;
+    standards: string[];
+};
 
-function isEoshModuleProgram(program: any): boolean {
+/** Group mapped multi-ISO clauses that share a base id (e.g. clause-1-9001 / clause-1-14001). */
+function groupClausesByBaseId(clauses: Clause[]): Clause[][] {
+    const groups = new Map<string, Clause[]>();
+    clauses.forEach((clause) => {
+        const lastDashIndex = clause.id.lastIndexOf("-");
+        const baseId = lastDashIndex !== -1 ? clause.id.substring(0, lastDashIndex) : clause.id;
+        if (!groups.has(baseId)) groups.set(baseId, []);
+        groups.get(baseId)!.push(clause);
+    });
+    return Array.from(groups.values());
+}
+
+/** Collapse same-named standards into one row with multiple ISO badges. */
+function flattenClauseGroupForDisplay(group: Clause[]): ClauseDisplayRow[] {
+    const byName = new Map<string, ClauseDisplayRow>();
+    for (const clause of group) {
+        const key = clause.name;
+        let row = byName.get(key);
+        if (!row) {
+            row = { key, name: clause.name, isHeading: clause.isHeading, standards: [] };
+            byName.set(key, row);
+        }
+        if (clause.isHeading) row.isHeading = true;
+        if (clause.standard && !row.standards.includes(clause.standard)) {
+            row.standards.push(clause.standard);
+        }
+    }
+    return Array.from(byName.values());
+}
+
+function ClauseGroupPreview({
+    group,
+    compact = false,
+}: {
+    group: Clause[];
+    compact?: boolean;
+}) {
+    const rows = flattenClauseGroupForDisplay(group);
+    return (
+        <div
+            className={cn(
+                "w-full bg-slate-50 px-3 py-2 rounded-lg border border-slate-100 flex flex-col gap-1.5",
+                compact ? "text-[10px] font-semibold text-slate-600" : "text-sm font-medium text-slate-500 md:w-fit",
+            )}
+        >
+            {rows.map((row) => (
+                <div key={row.key} className="flex items-center gap-2 min-w-0">
+                    {row.standards.length > 0 && (
+                        <div className="flex flex-wrap items-center gap-1 shrink-0">
+                            {row.standards.map((std) => (
+                                <span
+                                    key={std}
+                                    className={cn(
+                                        "uppercase font-black text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded-sm",
+                                        compact ? "text-[8px]" : "text-[10px]",
+                                    )}
+                                >
+                                    {std}
+                                </span>
+                            ))}
+                        </div>
+                    )}
+                    <span
+                        className={cn(
+                            "min-w-0 flex-1 truncate",
+                            row.isHeading && "font-black text-slate-800",
+                            !compact && "text-slate-700 font-semibold",
+                        )}
+                        title={row.name}
+                    >
+                        {row.name}
+                    </span>
+                </div>
+            ))}
+        </div>
+    );
+}
+
+const EOSH_MODULE_PREFIX = "EOSH Module: ";
+const QFS_MODULE_PREFIX = "QFS KORE Module: ";
+
+function getModuleProgramMeta(program: any): {
+    isModule: boolean;
+    family: "eosh" | "qfs-kore" | null;
+    modules: ReadonlyArray<{ id: string; sectionTitle: string }>;
+    standardLabel: string;
+} {
     const scheduleData = program?.scheduleData;
-    if (scheduleData?.criteriaType === "module") return true;
     const iso = String(program?.isoStandard || "");
-    return iso.includes(EOSH_MODULE_PREFIX);
+    const familyFromData =
+        scheduleData?.moduleFamily === "eosh" || scheduleData?.moduleFamily === "qfs-kore"
+            ? (scheduleData.moduleFamily as "eosh" | "qfs-kore")
+            : null;
+    const isModule =
+        scheduleData?.criteriaType === "module" ||
+        iso.includes(EOSH_MODULE_PREFIX) ||
+        iso.includes(QFS_MODULE_PREFIX);
+    const family: "eosh" | "qfs-kore" | null =
+        familyFromData ||
+        (iso.includes(QFS_MODULE_PREFIX)
+            ? "qfs-kore"
+            : iso.includes(EOSH_MODULE_PREFIX)
+              ? "eosh"
+              : null);
+
+    if (!isModule) {
+        return { isModule: false, family: null, modules: [], standardLabel: "Custom" };
+    }
+    if (family === "qfs-kore") {
+        return {
+            isModule: true,
+            family: "qfs-kore",
+            modules: QFS_KORE_EXCEL_MODULE_META,
+            standardLabel: "QFS KORE",
+        };
+    }
+    return {
+        isModule: true,
+        family: "eosh",
+        modules: EOSH_EXCEL_MODULE_META,
+        standardLabel: "EOSH",
+    };
 }
 
 const AuditProgramPage = () => {
@@ -234,7 +357,8 @@ const AuditProgramPage = () => {
         const programPeriods = calculatePeriods(program.frequency, program.duration, loadData.startDate || program.createdAt);
         const executions: any[] = [];
         const isoStandard = program.isoStandard || "";
-        const moduleProgram = isEoshModuleProgram(program);
+        const moduleMeta = getModuleProgramMeta(program);
+        const moduleProgram = moduleMeta.isModule;
         const is9001 = !moduleProgram && isoStandard.includes("9001");
         const is14001 = !moduleProgram && isoStandard.includes("14001");
         const is45001 = !moduleProgram && isoStandard.includes("45001");
@@ -244,12 +368,12 @@ const AuditProgramPage = () => {
             const selectedClauses: Clause[] = [];
 
             if (moduleProgram) {
-                EOSH_EXCEL_MODULE_META.forEach((mod, rowIndex) => {
+                moduleMeta.modules.forEach((mod, rowIndex) => {
                     if (loadData?.[`${rowIndex}-${colIndex}`]) {
                         selectedClauses.push({
                             id: mod.id,
                             name: mod.sectionTitle,
-                            standard: "EOSH",
+                            standard: moduleMeta.standardLabel,
                         });
                     }
                 });
@@ -286,7 +410,7 @@ const AuditProgramPage = () => {
                 selectedClauses.push({
                     id: `custom_${row.id}`,
                     name: row.text?.trim() || "Custom Requirement",
-                    standard: moduleProgram ? "EOSH" : "Custom",
+                    standard: moduleProgram ? moduleMeta.standardLabel : "Custom",
                 });
             });
 
@@ -979,32 +1103,14 @@ const AuditProgramPage = () => {
                                                     </div>
                                                 </div>
 
-                                                <div className="flex-1">
+                                                <div className="flex-1 min-w-0">
                                                     <div className="flex flex-col gap-2">
                                                         {(() => {
-                                                            const groups = new Map<string, Clause[]>();
-                                                            exec.clauses.forEach((clause: Clause) => {
-                                                                const lastDashIndex = clause.id.lastIndexOf('-');
-                                                                const baseId = lastDashIndex !== -1 ? clause.id.substring(0, lastDashIndex) : clause.id;
-                                                                if (!groups.has(baseId)) groups.set(baseId, []);
-                                                                groups.get(baseId)!.push(clause);
-                                                            });
-                                                            const groupArray = Array.from(groups.values());
+                                                            const groupArray = groupClausesByBaseId(exec.clauses);
                                                             return (
                                                                 <>
                                                                     {groupArray.slice(0, 3).map((group, gIdx) => (
-                                                                        <div key={gIdx} className="w-full text-[10px] font-semibold text-slate-600 bg-slate-50 px-3 py-2 rounded-lg border border-slate-100 flex flex-col gap-1.5">
-                                                                            {group.map((clause) => (
-                                                                                <div key={clause.id} className="flex items-center gap-2 truncate max-w-full">
-                                                                                    {clause.standard && (
-                                                                                        <span className="text-[8px] uppercase font-black text-emerald-600 bg-emerald-50 px-1 rounded-sm shrink-0">
-                                                                                            {clause.standard}
-                                                                                        </span>
-                                                                                    )}
-                                                                                    <span className={cn("truncate", clause.isHeading && "font-black text-slate-800")}>{clause.name}</span>
-                                                                                </div>
-                                                                            ))}
-                                                                        </div>
+                                                                        <ClauseGroupPreview key={gIdx} group={group} compact />
                                                                     ))}
                                                                     {groupArray.length > 3 && (
                                                                         <span className="text-[10px] font-bold text-slate-400 px-2 truncate mt-1">+{groupArray.length - 3} more</span>
@@ -1082,30 +1188,10 @@ const AuditProgramPage = () => {
                                                             ))}
                                                         </div>
                                                     )}
-                                                    <div className="flex flex-col gap-2">
-                                                        {(() => {
-                                                            const groups = new Map<string, Clause[]>();
-                                                            exec.clauses.forEach((clause: Clause) => {
-                                                                const lastDashIndex = clause.id.lastIndexOf('-');
-                                                                const baseId = lastDashIndex !== -1 ? clause.id.substring(0, lastDashIndex) : clause.id;
-                                                                if (!groups.has(baseId)) groups.set(baseId, []);
-                                                                groups.get(baseId)!.push(clause);
-                                                            });
-                                                            return Array.from(groups.values()).map((group, gIdx) => (
-                                                                <div key={gIdx} className="text-sm font-medium text-slate-500 bg-slate-50 px-3 py-2 rounded-lg flex flex-col gap-1.5 border border-slate-100 w-full md:w-fit">
-                                                                    {group.map(clause => (
-                                                                        <div key={clause.id} className="flex items-center gap-2">
-                                                                            {clause.standard && (
-                                                                                <span className="text-[10px] uppercase font-black text-emerald-600 bg-emerald-50 px-1 rounded-sm shrink-0">
-                                                                                    {clause.standard}
-                                                                                </span>
-                                                                            )}
-                                                                            <span>{clause.name}</span>
-                                                                        </div>
-                                                                    ))}
-                                                                </div>
-                                                            ));
-                                                        })()}
+                                                    <div className="flex flex-col gap-2 min-w-0">
+                                                        {groupClausesByBaseId(exec.clauses).map((group, gIdx) => (
+                                                            <ClauseGroupPreview key={gIdx} group={group} />
+                                                        ))}
                                                     </div>
                                                 </div>
 

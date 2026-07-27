@@ -4,12 +4,15 @@ export type NotificationType =
     | "NC_ASSIGNED"
     | "NC_RESPONSE_SUBMITTED"
     | "NC_CHANGES_REQUESTED"
-    | "NC_CLOSED";
+    | "NC_CLOSED"
+    | "FINDING_ASSIGNED"
+    | "FINDING_RESPONSE_SUBMITTED";
 
 export type AppNotification = {
     id: number;
     recipientUserId: number;
-    nonconformanceId: number;
+    nonconformanceId: number | null;
+    linkPath?: string | null;
     type: NotificationType | string;
     title: string;
     message: string;

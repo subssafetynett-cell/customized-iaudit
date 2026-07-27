@@ -149,8 +149,15 @@ export function formatNcDate(value: string | null | undefined): string {
 }
 
 export function formatNcStatusLabel(status: string | undefined | null): string {
-    const raw = String(status ?? "").trim();
+    const raw = String(status ?? "").trim().toUpperCase();
     if (!raw) return "—";
+    const labels: Record<string, string> = {
+        ASSIGNED: "Opened",
+        RESPONSE_SUBMITTED: "Pending Review",
+        CHANGES_REQUESTED: "Changes Requested",
+        CLOSED: "Closed",
+    };
+    if (labels[raw]) return labels[raw];
     return raw
         .split("_")
         .map((part) => part.charAt(0) + part.slice(1).toLowerCase())
@@ -182,6 +189,34 @@ export async function listNonconformancesForPlan(
     auditPlanId: number,
 ): Promise<NonconformanceSummary[]> {
     return listNonconformances({ auditPlanId });
+}
+
+export async function findNonconformanceForFinding(
+    auditPlanId: number,
+    findingId: string,
+): Promise<NonconformanceSummary | null> {
+    const rows = await listNonconformancesForPlan(auditPlanId);
+    const target = String(findingId || "").trim();
+    return rows.find((row) => String(row.findingId || "").trim() === target) ?? null;
+}
+
+export function canUserRespondToNc(
+    nc: Pick<NonconformanceSummary, "assigneeId" | "status" | "assignee"> | null | undefined,
+    user: { id?: number | string; email?: string | null } | null | undefined,
+): boolean {
+    if (!nc || !user) return false;
+    const status = String(nc.status ?? "").trim().toUpperCase();
+    if (
+        status !== "ASSIGNED" &&
+        status !== "CHANGES_REQUESTED" &&
+        status !== "RESPONSE_SUBMITTED"
+    ) {
+        return false;
+    }
+    if (user.id != null && Number(nc.assigneeId) === Number(user.id)) return true;
+    const assigneeEmail = nc.assignee?.email?.toLowerCase().trim();
+    const userEmail = String(user.email ?? "").toLowerCase().trim();
+    return Boolean(assigneeEmail && userEmail && assigneeEmail === userEmail);
 }
 
 export async function getNonconformanceById(
@@ -252,7 +287,11 @@ export function canAuditeeSubmitNcResponse(
     if (!nc || userId == null) return false;
     if (Number(nc.assigneeId) !== Number(userId)) return false;
     const status = String(nc.status ?? "").trim().toUpperCase();
-    return status === "ASSIGNED" || status === "CHANGES_REQUESTED";
+    return (
+        status === "ASSIGNED" ||
+        status === "CHANGES_REQUESTED" ||
+        status === "RESPONSE_SUBMITTED"
+    );
 }
 
 export async function submitNonconformanceReview(

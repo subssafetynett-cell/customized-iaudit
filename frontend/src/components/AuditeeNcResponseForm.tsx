@@ -6,12 +6,14 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { FindingResponseVersionTabs } from "@/components/FindingResponseVersionTabs";
 import {
     formatNcDate,
     submitNonconformanceResponse,
     type NonconformanceResponse,
     type NonconformanceSummary,
 } from "@/lib/nonconformanceApi";
+import type { FindingCapaHistoryEntry } from "@/lib/auditFindings";
 
 type FormProps = {
     nonconformanceId: number;
@@ -246,69 +248,91 @@ export function SubmittedNcResponses({ responses }: ListProps) {
         );
     }
 
-    return (
-        <div className="space-y-4">
-            {responses.map((response) => (
-                <div
-                    key={response.id}
-                    className="rounded-xl border border-slate-200 bg-slate-50/40 p-4 space-y-4"
-                >
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                        <p className="text-sm font-semibold text-[#213847]">
-                            Submitted Response
-                            <span className="ml-2 text-xs font-bold text-slate-500">
-                                Version {response.version}
-                            </span>
-                        </p>
-                        <p className="text-xs text-slate-500">
-                            Submitted {formatNcDate(response.submittedAt)}
-                        </p>
-                    </div>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <ResponseField label="Root Cause" value={response.rootCause} />
-                        <ResponseField
-                            label="Immediate Correction"
-                            value={response.immediateCorrection}
-                        />
-                        <ResponseField
-                            label="Corrective Action"
-                            value={response.correctiveAction}
-                        />
-                        <ResponseField
-                            label="Preventive Action"
-                            value={response.preventiveAction}
-                        />
-                        <ResponseField
-                            label="Proposed Completion Date"
-                            value={formatNcDate(response.proposedCompletionDate)}
-                        />
-                        <ResponseField
-                            label="Additional Comments"
-                            value={response.additionalComments}
-                        />
-                    </div>
-                    <div className="space-y-1.5">
-                        <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
-                            Evidence
-                        </p>
-                        {(response.evidenceFilenames?.length ?? 0) === 0 ? (
-                            <p className="text-sm text-slate-500">No evidence attached.</p>
-                        ) : (
-                            <ul className="space-y-1">
-                                {response.evidenceFilenames!.map((name) => (
-                                    <li
-                                        key={`${response.id}-${name}`}
-                                        className="flex items-center gap-2 text-sm text-slate-700"
-                                    >
-                                        <FileText className="h-3.5 w-3.5 text-slate-400" />
-                                        {name}
-                                    </li>
-                                ))}
-                            </ul>
-                        )}
-                    </div>
-                </div>
-            ))}
+    const sorted = [...responses].sort((a, b) => (a.version || 0) - (b.version || 0));
+    const current = sorted[sorted.length - 1]!;
+    const previousEntries: FindingCapaHistoryEntry[] = sorted.slice(0, -1).map((r) => ({
+        submittedAt: r.submittedAt,
+        rootCause: r.rootCause,
+        correction: r.immediateCorrection || undefined,
+        correctiveAction: r.correctiveAction,
+        findingDetails: [
+            r.preventiveAction?.trim()
+                ? `Preventive Action: ${r.preventiveAction.trim()}`
+                : "",
+            r.additionalComments?.trim() || "",
+        ]
+            .filter(Boolean)
+            .join("\n\n"),
+    }));
+
+    const renderResponse = (response: NonconformanceResponse) => (
+        <div
+            key={response.id}
+            className="rounded-xl border border-slate-200 bg-slate-50/40 p-4 space-y-4"
+        >
+            <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-sm font-semibold text-[#213847]">
+                    Submitted Response
+                    <span className="ml-2 text-xs font-bold text-slate-500">
+                        Version {response.version}
+                    </span>
+                </p>
+                <p className="text-xs text-slate-500">
+                    Submitted {formatNcDate(response.submittedAt)}
+                </p>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <ResponseField label="Root Cause" value={response.rootCause} />
+                <ResponseField
+                    label="Immediate Correction"
+                    value={response.immediateCorrection}
+                />
+                <ResponseField
+                    label="Corrective Action"
+                    value={response.correctiveAction}
+                />
+                <ResponseField
+                    label="Preventive Action"
+                    value={response.preventiveAction}
+                />
+                <ResponseField
+                    label="Proposed Completion Date"
+                    value={formatNcDate(response.proposedCompletionDate)}
+                />
+                <ResponseField
+                    label="Additional Comments"
+                    value={response.additionalComments}
+                />
+            </div>
+            <div className="space-y-1.5">
+                <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                    Evidence
+                </p>
+                {(response.evidenceFilenames?.length ?? 0) === 0 ? (
+                    <p className="text-sm text-slate-500">No evidence attached.</p>
+                ) : (
+                    <ul className="space-y-1">
+                        {response.evidenceFilenames!.map((name) => (
+                            <li
+                                key={`${response.id}-${name}`}
+                                className="flex items-center gap-2 text-sm text-slate-700"
+                            >
+                                <FileText className="h-3.5 w-3.5 text-slate-400" />
+                                {name}
+                            </li>
+                        ))}
+                    </ul>
+                )}
+            </div>
         </div>
+    );
+
+    return (
+        <FindingResponseVersionTabs
+            currentContent={renderResponse(current)}
+            previous={previousEntries}
+            currentLabel="Current response"
+            previousLabel="Previous response"
+        />
     );
 }

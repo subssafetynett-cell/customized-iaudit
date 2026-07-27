@@ -386,20 +386,23 @@ model NonconformanceActivity {
   @@index([createdAt])
 }
 
-/// In-app notification for Nonconformance workflow events.
+/// In-app notification for Nonconformance / finding assignment events.
 model Notification {
   id                 Int       @id @default(autoincrement())
   recipientUserId    Int
-  nonconformanceId   Int
-  /// NC_ASSIGNED | NC_RESPONSE_SUBMITTED | NC_CHANGES_REQUESTED | NC_CLOSED
+  /// Optional — finding assignments may notify without a formal NC record.
+  nonconformanceId   Int?
+  /// Optional deep link (e.g. /audit-findings/12/checklist-1-2).
+  linkPath           String?
+  /// NC_ASSIGNED | NC_RESPONSE_SUBMITTED | NC_CHANGES_REQUESTED | NC_CLOSED | FINDING_ASSIGNED | FINDING_RESPONSE_SUBMITTED
   type               String
   title              String
   message            String
   isRead             Boolean   @default(false)
   createdAt          DateTime  @default(now())
 
-  recipient          User           @relation("NotificationRecipient", fields: [recipientUserId], references: [id], onDelete: Cascade)
-  nonconformance     Nonconformance @relation(fields: [nonconformanceId], references: [id], onDelete: Cascade)
+  recipient          User            @relation("NotificationRecipient", fields: [recipientUserId], references: [id], onDelete: Cascade)
+  nonconformance     Nonconformance? @relation(fields: [nonconformanceId], references: [id], onDelete: Cascade)
 
   @@index([recipientUserId, createdAt])
   @@index([recipientUserId, isRead])

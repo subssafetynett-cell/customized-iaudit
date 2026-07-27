@@ -17,7 +17,13 @@ import {
 import { saveAs } from "file-saver";
 import * as XLSX from "xlsx";
 import { format } from "date-fns";
-import { auditTemplates, ChecklistContent, ClauseChecklistContent, ProcessAuditContent } from "@/data/auditTemplates";
+import {
+    ChecklistContent,
+    ClauseChecklistContent,
+    ProcessAuditContent,
+    parseAuditPlanTemplateIds,
+    type AuditTemplate,
+} from "@/data/auditTemplates";
 import { sanitizeAuditEvidenceMediaMap, type AuditEvidenceMedia } from "@/lib/evidenceImageUpload";
 import {
     collectReportEvidenceFileList,
@@ -41,13 +47,27 @@ import {
     type ClauseEvidenceSegment,
 } from "@/lib/reportClauseEvidence";
 import {
+    buildChecklistReportTable,
     buildFindingEvidenceText,
+    buildNonConformanceReportTable,
     collectFindingAttachmentMedia,
     extractFindingDetailFields,
     findingDetailCells,
     FINDING_DETAIL_HEADERS,
+    hexToRgb,
+    isModuleAuditPlan,
+    normalizeReportNonConformances,
     resolveChecklistContent,
+    resolveQfsScoreModeForPlan,
+    resolveReportTemplate,
+    type ChecklistReportCell,
+    type ChecklistReportHeaderCell,
+    type ReportNonConformance,
 } from "@/lib/auditReportFindings";
+import {
+    computeEoshCapabilityScores,
+    isEoshScoredCapabilityChecklist,
+} from "@/lib/eoshChecklistUi";
 import type { FindingsReportForm } from "@/lib/findingsReportForm";
 import {
     buildManagementMetadataRows,
@@ -112,7 +132,8 @@ interface ReportContext {
     scope: string;
     criteriaAndMethod: string;
     executiveSummary: string;
-    nonConformances: { id: string; statement: string }[];
+    nonConformances: ReportNonConformance[];
+    isModuleAudit: boolean;
     participants: { name: string; position: string; department: string }[];
     issueDate: string;
     acknowledgement: {
@@ -153,7 +174,8 @@ async function buildReportContext(plan: Record<string, any>): Promise<ReportCont
     const auditData = getAuditData(plan);
     const form = auditData.findingsReportForm as Partial<FindingsReportForm> | undefined;
     const globalInfo = (auditData.auditGlobalInfo as Record<string, string>) || {};
-    const template = auditTemplates.find((t) => t.id === plan.templateId);
+    const template = resolveReportTemplate(plan);
+    const isModuleAudit = isModuleAuditPlan(plan.templateId, template);
 
     const selectedDepartments = await resolveSelectedDepartmentsText(plan);
 
@@ -207,12 +229,7 @@ async function buildReportContext(plan: Record<string, any>): Promise<ReportCont
               ? legacyParticipants
               : executePersonnel;
 
-    const nonConformances = ((auditData.nonConformances as { id?: string; statement?: string }[]) || [])
-        .filter((nc) => nc.statement?.trim())
-        .map((nc, i) => ({
-            id: nc.id || String(i + 1),
-            statement: nc.statement || "",
-        }));
+    const nonConformances = normalizeReportNonConformances(auditData.nonConformances);
 
     const criteriaParts = [plan.criteria, plan.objective].filter(Boolean);
     const defaultCriteriaAndMethod =
@@ -281,6 +298,7 @@ async function buildReportContext(plan: Record<string, any>): Promise<ReportCont
         criteriaAndMethod: findingsForm.auditCriteriaAndMethod,
         executiveSummary,
         nonConformances,
+        isModuleAudit,
         participants,
         issueDate: findingsForm.issueDate,
         acknowledgement: {
@@ -474,7 +492,7 @@ async function embedClauseEvidenceSegmentsInPdf(
 
 function buildAllClauseEvidenceSegments(
     auditData: Record<string, unknown>,
-    template: ReturnType<typeof auditTemplates.find>,
+    template: AuditTemplate | null | undefined,
     clauseFiles: Record<string, import("@/lib/evidenceImageUpload").AuditEvidenceMedia[]>,
     genericFiles: Record<string, import("@/lib/evidenceImageUpload").AuditEvidenceMedia[]>,
 ): ClauseEvidenceSegment[] {
@@ -955,18 +973,15 @@ function renderSzlReportSummaryAndSignatures(doc: jsPDF, ctx: ReportContext, y: 
 
     y = checkPage(doc, y, 20, pageH);
     y = pdfSubHeading(doc, `${getSectionLabel(form, "nonConformitiesSummary")}:`, y);
-    const ncRows =
-        ctx.nonConformances.length > 0
-            ? ctx.nonConformances.map((nc, idx) => [String(idx + 1), nc.statement])
-            : Array.from({ length: 6 }, () => ["", ""]);
+    const ncTable = buildNonConformanceReportTable(ctx.nonConformances, ctx.isModuleAudit);
     pdfAutoTable(doc, {
         startY: y,
-        head: [["Number", "Statement of nonconformity"]],
-        body: ncRows,
+        head: [ncTable.headers],
+        body: ncTable.body,
         theme: "grid",
-        styles: { font: FONT, fontSize: 10, cellPadding: 4, minCellHeight: 10 },
-        headStyles: { fontStyle: "bold", fillColor: [255, 255, 255], textColor: [0, 0, 0] },
-        columnStyles: { 0: { cellWidth: 18 } },
+        styles: { font: FONT, fontSize: 9, cellPadding: 3, minCellHeight: 10, overflow: "linebreak" },
+        headStyles: { fontStyle: "bold", fillColor: [255, 255, 255], textColor: [0, 0, 0], fontSize: 8 },
+        columnStyles: { 0: { cellWidth: 16 } },
     });
     y = (doc as unknown as { lastAutoTable: { finalY: number } }).lastAutoTable.finalY + 8;
 
@@ -998,17 +1013,94 @@ function renderSzlReportSummaryAndSignatures(doc: jsPDF, ctx: ReportContext, y: 
     return renderAcknowledgementSectionPdf(doc, ctx, y, pageH, pageW);
 }
 
+function renderEoshTotalsPdf(
+    doc: jsPDF,
+    checklistData: Record<string, { findings?: string } | undefined>,
+    questionCount: number,
+    y: number,
+    pageH: number,
+    sectionHeading: (title: string, startY: number) => number,
+): number {
+    const scores = computeEoshCapabilityScores(checklistData, questionCount);
+    y = checkPage(doc, y, 30, pageH);
+    y = sectionHeading("EOSH Score Summary", y);
+    pdfAutoTable(doc, {
+        startY: y,
+        head: [["Metric", "Value"]],
+        body: [
+            ["Subtotal", String(scores.subtotal)],
+            ["Grand Total", String(scores.grandTotal)],
+            ["Maximum Marks", String(scores.maximumMarks)],
+            [
+                "% Compliance",
+                scores.percentCompliance == null ? "—" : `${scores.percentCompliance}%`,
+            ],
+        ],
+        theme: "grid",
+        styles: { font: FONT, fontSize: 9 },
+        headStyles: { fontStyle: "bold", fillColor: [230, 240, 250], textColor: [0, 0, 0] },
+        columnStyles: { 0: { cellWidth: 50 }, 1: { cellWidth: 30, halign: "right" } },
+    });
+    return (doc as unknown as { lastAutoTable: { finalY: number } }).lastAutoTable.finalY + 8;
+}
+
+function planUsesEoshTotals(plan: { templateId?: string | null }): boolean {
+    return parseAuditPlanTemplateIds(plan.templateId).some((id) =>
+        isEoshScoredCapabilityChecklist(id),
+    );
+}
+
+function checklistTableToPdfBody(
+    headerCells: ChecklistReportHeaderCell[],
+    bodyCells: ChecklistReportCell[][],
+) {
+    const head = [
+        headerCells.map((h) => {
+            if (!h.fillHex) return h.text;
+            return {
+                content: h.text,
+                styles: {
+                    fillColor: hexToRgb(h.fillHex),
+                    textColor: h.textHex ? hexToRgb(h.textHex) : [17, 24, 39],
+                    fontStyle: "bold" as const,
+                    halign: "center" as const,
+                },
+            };
+        }),
+    ];
+    const body = bodyCells.map((row) =>
+        row.map((cell) => {
+            if (!cell.fillHex) {
+                return {
+                    content: cell.text,
+                    styles: cell.align ? { halign: cell.align } : {},
+                };
+            }
+            return {
+                content: cell.text || " ",
+                styles: {
+                    fillColor: hexToRgb(cell.fillHex),
+                    textColor: cell.textHex ? hexToRgb(cell.textHex) : [17, 24, 39],
+                    halign: "center" as const,
+                },
+            };
+        }),
+    );
+    return { head, body };
+}
+
 /** Full audit execution report as PDF */
 export async function generateAuditReportPdf(plan: Record<string, any>) {
     const doc = new jsPDF();
     const pageW = doc.internal.pageSize.getWidth();
     const pageH = doc.internal.pageSize.getHeight();
-    const template = auditTemplates.find((t) => t.id === plan.templateId);
+    const template = resolveReportTemplate(plan);
     const auditData = getAuditData(plan);
     const fileName = auditReportBaseName(plan);
     const ctx = await buildReportContext(plan);
     const logo = await loadSzlLogoBase64();
     const form = ctx.findingsForm;
+    const isModule = ctx.isModuleAudit;
 
     activePdfPageLayout = {
         contentStartY: computeSzlPdfHeaderContentStartY(form, !!logo),
@@ -1050,7 +1142,7 @@ export async function generateAuditReportPdf(plan: Record<string, any>) {
         y = blueSectionHeading("DETAILED AUDIT RECORD", y);
     }
 
-    if (auditData.summaryCounts) {
+    if (auditData.summaryCounts && !isModule) {
         const sc = auditData.summaryCounts as Record<string, string | number>;
         pdfAutoTable(doc, {
             startY: y,
@@ -1075,54 +1167,59 @@ export async function generateAuditReportPdf(plan: Record<string, any>) {
         genericFilesForReport,
     );
 
-    if (auditData.checklistData && template?.content) {
-        const checklistRows: string[][] = [];
+    if (template?.content && (template.type === "checklist" || auditData.checklistData)) {
         const checklistContent = resolveChecklistContent(
             auditData,
             template.content as ChecklistContent[],
         );
-        Object.entries(auditData.checklistData as Record<string, any>)
-            .filter(([, v]) => v?.findings)
-            .forEach(([idx, v]) => {
-                const itemIndex = Number(idx);
-                const item = checklistContent[itemIndex];
-                const clauseKey = item?.clause || String(idx);
-                const attached = collectFindingAttachmentMedia(
-                    clauseFilesForReport,
-                    genericFilesForReport,
-                    clauseKey,
-                    itemIndex,
-                );
-                const evidenceText = buildFindingEvidenceText(v.evidence, attached);
-                const details = extractFindingDetailFields(v);
-                checklistRows.push([
-                    clauseKey,
-                    item?.question || "—",
-                    v.findings,
-                    evidenceText || "—",
-                    ...findingDetailCells(details, "—"),
-                ]);
+        if (checklistContent.length > 0) {
+            const { bodyCells, headerCells } = buildChecklistReportTable({
+                content: checklistContent,
+                checklistData: (auditData.checklistData as Record<string, any>) || {},
+                isModule,
+                isEosh: planUsesEoshTotals(plan),
+                qfsScoreMode: resolveQfsScoreModeForPlan(plan),
+                collectEvidence: (clauseKey, itemIndex, textEvidence) =>
+                    buildFindingEvidenceText(
+                        textEvidence,
+                        collectFindingAttachmentMedia(
+                            clauseFilesForReport,
+                            genericFilesForReport,
+                            clauseKey,
+                            itemIndex,
+                        ),
+                    ),
             });
-        if (checklistRows.length > 0) {
             y = checkPage(doc, y, 20, pageH);
-            y = sectionHeading("Checklist Findings", y);
+            y = sectionHeading("Checklist", y);
+            const pdfTable = checklistTableToPdfBody(headerCells, bodyCells);
             pdfAutoTable(doc, {
                 startY: y,
-                head: [["Clause", "Question", "Finding", "Evidence", ...FINDING_DETAIL_HEADERS]],
-                body: checklistRows,
+                head: pdfTable.head as any,
+                body: pdfTable.body as any,
                 styles: { font: FONT, fontSize: 7, overflow: "linebreak" },
                 headStyles: { fontSize: 7 },
                 theme: "grid",
             });
             y = (doc as unknown as { lastAutoTable: { finalY: number } }).lastAutoTable.finalY + 8;
+
+            if (planUsesEoshTotals(plan)) {
+                y = renderEoshTotalsPdf(
+                    doc,
+                    (auditData.checklistData as Record<string, { findings?: string }>) || {},
+                    checklistContent.length,
+                    y,
+                    pageH,
+                    sectionHeading,
+                );
+            }
         }
     }
 
     if (template?.type === "clause-checklist" && auditData.clauseData) {
         const checklistRows: string[][] = [];
         (template.content as ClauseChecklistContent[]).forEach((item) => {
-            const v = auditData.clauseData[item.clauseId];
-            if (!v || !v.findingType) return;
+            const v = auditData.clauseData[item.clauseId] || {};
             const clauseKey = item.clauseId;
             const attached = collectFindingAttachmentMedia(
                 clauseFilesForReport,
@@ -1138,18 +1235,26 @@ export async function generateAuditReportPdf(plan: Record<string, any>) {
             checklistRows.push([
                 clauseKey,
                 requirement,
-                v.findingType,
-                evidenceText || "—",
-                ...findingDetailCells(details, "—"),
+                v.findingType || "",
+                evidenceText || "",
+                ...findingDetailCells(details, ""),
             ]);
         });
-        if (checklistRows.length > 0) {
+        // Drop entirely empty optional columns (finding + evidence + CAPA)
+        const baseHeaders = ["Clause", "Requirement", "Finding", "Evidence", ...FINDING_DETAIL_HEADERS];
+        const keepIdx = baseHeaders.map((_, colIdx) => {
+            if (colIdx <= 1) return true;
+            return checklistRows.some((row) => Boolean(String(row[colIdx] || "").trim()));
+        });
+        const headers = baseHeaders.filter((_, i) => keepIdx[i]);
+        const body = checklistRows.map((row) => row.filter((_, i) => keepIdx[i]));
+        if (body.length > 0) {
             y = checkPage(doc, y, 20, pageH);
             y = sectionHeading("Checklist Findings", y);
             pdfAutoTable(doc, {
                 startY: y,
-                head: [["Clause", "Requirement", "Finding", "Evidence", ...FINDING_DETAIL_HEADERS]],
-                body: checklistRows,
+                head: [headers],
+                body,
                 styles: { font: FONT, fontSize: 7, overflow: "linebreak" },
                 headStyles: { fontSize: 7 },
                 theme: "grid",
@@ -1161,25 +1266,31 @@ export async function generateAuditReportPdf(plan: Record<string, any>) {
     if (template?.type === "process-audit" && auditData.processAudits) {
         const processRows: string[][] = [];
         (auditData.processAudits as ProcessAuditContent[]).forEach((audit, index) => {
-            if (!audit.findingType) return;
-            const details = extractFindingDetailFields(audit);
+            const details = extractFindingDetailFields(audit as unknown as Record<string, unknown>);
             processRows.push([
                 String(index + 1),
-                audit.processArea || "—",
-                audit.auditees || "—",
-                audit.evidence || "—",
-                audit.conclusion || "—",
-                audit.findingType,
-                ...findingDetailCells(details, "—"),
+                audit.processArea || "",
+                audit.auditees || "",
+                audit.evidence || "",
+                audit.conclusion || "",
+                audit.findingType || "",
+                ...findingDetailCells(details, ""),
             ]);
         });
-        if (processRows.length > 0) {
+        const baseHeaders = ["No.", "Process Area", "Auditee(s)", "Evidence", "Conclusion", "Finding", ...FINDING_DETAIL_HEADERS];
+        const keepIdx = baseHeaders.map((_, colIdx) => {
+            if (colIdx === 0) return true;
+            return processRows.some((row) => Boolean(String(row[colIdx] || "").trim()));
+        });
+        const headers = baseHeaders.filter((_, i) => keepIdx[i]);
+        const body = processRows.map((row) => row.filter((_, i) => keepIdx[i]));
+        if (body.length > 0) {
             y = checkPage(doc, y, 20, pageH);
             y = sectionHeading("Process Audit Record", y);
             pdfAutoTable(doc, {
                 startY: y,
-                head: [["No.", "Process Area", "Auditee(s)", "Evidence", "Conclusion", "Finding", ...FINDING_DETAIL_HEADERS]],
-                body: processRows,
+                head: [headers],
+                body,
                 styles: { font: FONT, fontSize: 7, overflow: "linebreak" },
                 headStyles: { fontSize: 7 },
                 theme: "grid",
@@ -1250,7 +1361,11 @@ export async function generateAuditReportPdf(plan: Record<string, any>) {
     doc.save(`${fileName}.pdf`);
 }
 
-function docxBorderedCell(children: Paragraph[], widthPct = 33) {
+function docxBorderedCell(
+    children: Paragraph[],
+    widthPct = 33,
+    options?: { fillHex?: string },
+) {
     return new DocxTableCell({
         children,
         width: { size: widthPct, type: WidthType.PERCENTAGE },
@@ -1260,6 +1375,9 @@ function docxBorderedCell(children: Paragraph[], widthPct = 33) {
             left: { style: BorderStyle.SINGLE, size: 1 },
             right: { style: BorderStyle.SINGLE, size: 1 },
         },
+        ...(options?.fillHex
+            ? { shading: { fill: options.fillHex.replace("#", "") } }
+            : {}),
     });
 }
 
@@ -1537,7 +1655,7 @@ export async function generateAuditReportDocx(plan: Record<string, any>) {
     const auditData = getAuditData(plan);
     const fileName = auditReportBaseName(plan);
     const ctx = await buildReportContext(plan);
-    const template = auditTemplates.find((t) => t.id === plan.templateId);
+    const template = resolveReportTemplate(plan);
     const logoBuffer = await loadSzlLogoBuffer();
     const form = ctx.findingsForm;
     const pageHeader = buildSzlDocxPageHeader(form, ctx, logoBuffer);
@@ -1604,59 +1722,123 @@ export async function generateAuditReportDocx(plan: Record<string, any>) {
         children.push(docxBlueSectionHeading("DETAILED AUDIT RECORD"));
 
         // Checklist / Clause Checklist Table / Process Audit Record Table
-        if (template?.type === "checklist" && auditData.checklistData) {
+        if ((template?.type === "checklist" || auditData.checklistData) && template?.content) {
             const checklistContent = resolveChecklistContent(
                 auditData,
                 template.content as ChecklistContent[],
             );
-            const rows: DocxTableRow[] = [
-                new DocxTableRow({
-                    children: [
-                        docxBorderedCell([new Paragraph({ children: [new TextRun({ text: "Clause", bold: true })] })], 6),
-                        docxBorderedCell([new Paragraph({ children: [new TextRun({ text: "Question", bold: true })] })], 18),
-                        docxBorderedCell([new Paragraph({ children: [new TextRun({ text: "Finding", bold: true })] })], 6),
-                        docxBorderedCell([new Paragraph({ children: [new TextRun({ text: "Evidence", bold: true })] })], 14),
-                        ...docxFindingDetailHeaderCells(),
-                    ],
-                }),
-            ];
-
-            Object.entries(auditData.checklistData as Record<string, any>)
-                .filter(([, v]) => v?.findings)
-                .forEach(([idx, v]) => {
-                    const itemIndex = Number(idx);
-                    const item = checklistContent[itemIndex];
-                    const clauseKey = item?.clause || String(idx);
-                    const attached = collectFindingAttachmentMedia(
-                        clauseFilesForReport,
-                        genericFilesForReport,
-                        clauseKey,
-                        itemIndex,
-                    );
-                    const evidenceText = buildFindingEvidenceText(v.evidence, attached) || "—";
-                    const details = extractFindingDetailFields(v);
-
-                    rows.push(
-                        new DocxTableRow({
-                            children: [
-                                docxBorderedCell([new Paragraph(clauseKey)], 6),
-                                docxBorderedCell([new Paragraph(item?.question || "—")], 18),
-                                docxBorderedCell([new Paragraph(v.findings || "—")], 6),
-                                docxBorderedCell([new Paragraph(evidenceText)], 14),
-                                ...docxFindingDetailDataCells(details),
-                            ],
-                        }),
-                    );
+            if (checklistContent.length > 0) {
+                const { headerCells, bodyCells } = buildChecklistReportTable({
+                    content: checklistContent,
+                    checklistData: (auditData.checklistData as Record<string, any>) || {},
+                    isModule: ctx.isModuleAudit,
+                    isEosh: planUsesEoshTotals(plan),
+                    qfsScoreMode: resolveQfsScoreModeForPlan(plan),
+                    collectEvidence: (clauseKey, itemIndex, textEvidence) =>
+                        buildFindingEvidenceText(
+                            textEvidence,
+                            collectFindingAttachmentMedia(
+                                clauseFilesForReport,
+                                genericFilesForReport,
+                                clauseKey,
+                                itemIndex,
+                            ),
+                        ),
                 });
-
-            if (rows.length > 1) {
-                children.push(docxSubHeading("Checklist Findings"));
+                const colWidth = Math.max(4, Math.floor(100 / Math.max(headerCells.length, 1)));
+                const rows: DocxTableRow[] = [
+                    new DocxTableRow({
+                        children: headerCells.map((header) =>
+                            docxBorderedCell(
+                                [
+                                    new Paragraph({
+                                        children: [
+                                            new TextRun({
+                                                text: header.text,
+                                                bold: true,
+                                                size: 16,
+                                                color: header.textHex
+                                                    ? header.textHex.replace("#", "")
+                                                    : undefined,
+                                            }),
+                                        ],
+                                    }),
+                                ],
+                                colWidth,
+                                { fillHex: header.fillHex },
+                            ),
+                        ),
+                    }),
+                    ...bodyCells.map(
+                        (row) =>
+                            new DocxTableRow({
+                                children: row.map((cell) =>
+                                    docxBorderedCell(
+                                        [
+                                            new Paragraph({
+                                                children: [
+                                                    new TextRun({
+                                                        text: cell.text || (cell.fillHex ? " " : ""),
+                                                        size: 16,
+                                                    }),
+                                                ],
+                                            }),
+                                        ],
+                                        colWidth,
+                                        { fillHex: cell.fillHex },
+                                    ),
+                                ),
+                            }),
+                    ),
+                ];
+                children.push(docxSubHeading("Checklist"));
                 children.push(
                     new DocxTable({
                         width: { size: 100, type: WidthType.PERCENTAGE },
                         rows,
                     }),
                 );
+
+                if (planUsesEoshTotals(plan)) {
+                    const scores = computeEoshCapabilityScores(
+                        (auditData.checklistData as Record<string, { findings?: string }>) || {},
+                        checklistContent.length,
+                    );
+                    children.push(docxSubHeading("EOSH Score Summary"));
+                    children.push(
+                        new DocxTable({
+                            width: { size: 50, type: WidthType.PERCENTAGE },
+                            rows: [
+                                ["Subtotal", String(scores.subtotal)],
+                                ["Grand Total", String(scores.grandTotal)],
+                                ["Maximum Marks", String(scores.maximumMarks)],
+                                [
+                                    "% Compliance",
+                                    scores.percentCompliance == null
+                                        ? "—"
+                                        : `${scores.percentCompliance}%`,
+                                ],
+                            ].map(
+                                ([label, value]) =>
+                                    new DocxTableRow({
+                                        children: [
+                                            docxBorderedCell(
+                                                [
+                                                    new Paragraph({
+                                                        children: [
+                                                            new TextRun({ text: label, bold: true }),
+                                                        ],
+                                                    }),
+                                                ],
+                                                70,
+                                            ),
+                                            docxBorderedCell([new Paragraph(value)], 30),
+                                        ],
+                                    }),
+                            ),
+                        }),
+                    );
+                }
             }
         } else if (template?.type === "clause-checklist" && auditData.clauseData) {
             const rows: DocxTableRow[] = [
@@ -1672,8 +1854,7 @@ export async function generateAuditReportDocx(plan: Record<string, any>) {
             ];
 
             (template.content as ClauseChecklistContent[]).forEach((item) => {
-                const v = auditData.clauseData[item.clauseId];
-                if (!v || !v.findingType) return;
+                const v = auditData.clauseData[item.clauseId] || {};
                 const clauseKey = item.clauseId;
                 const requirement = [item.title, ...(item.subClauses || [])].filter(Boolean).join('\n');
                 const attached = collectFindingAttachmentMedia(
@@ -1681,7 +1862,7 @@ export async function generateAuditReportDocx(plan: Record<string, any>) {
                     genericFilesForReport,
                     clauseKey,
                 );
-                const evidenceText = buildFindingEvidenceText(v.findingDetails || v.evidence, attached) || "—";
+                const evidenceText = buildFindingEvidenceText(v.findingDetails || v.evidence, attached) || "";
                 const details = extractFindingDetailFields(v);
 
                 rows.push(
@@ -1689,7 +1870,7 @@ export async function generateAuditReportDocx(plan: Record<string, any>) {
                         children: [
                             docxBorderedCell([new Paragraph(clauseKey)], 6),
                             docxBorderedCell([new Paragraph(requirement)], 18),
-                            docxBorderedCell([new Paragraph(v.findingType || "—")], 6),
+                            docxBorderedCell([new Paragraph(v.findingType || "")], 6),
                             docxBorderedCell([new Paragraph(evidenceText)], 14),
                             ...docxFindingDetailDataCells(details),
                         ],
@@ -1722,18 +1903,19 @@ export async function generateAuditReportDocx(plan: Record<string, any>) {
             ];
 
             (auditData.processAudits as ProcessAuditContent[]).forEach((audit, index) => {
-                if (!audit.findingType) return;
-                const details = extractFindingDetailFields(audit);
+                const details = extractFindingDetailFields(
+                    audit as unknown as Record<string, unknown>,
+                );
 
                 rows.push(
                     new DocxTableRow({
                         children: [
                             docxBorderedCell([new Paragraph(String(index + 1))], 4),
-                            docxBorderedCell([new Paragraph(audit.processArea || "—")], 10),
-                            docxBorderedCell([new Paragraph(audit.auditees || "—")], 10),
-                            docxBorderedCell([new Paragraph(audit.evidence || "—")], 12),
-                            docxBorderedCell([new Paragraph(audit.conclusion || "—")], 10),
-                            docxBorderedCell([new Paragraph(audit.findingType || "—")], 6),
+                            docxBorderedCell([new Paragraph(audit.processArea || "")], 10),
+                            docxBorderedCell([new Paragraph(audit.auditees || "")], 10),
+                            docxBorderedCell([new Paragraph(audit.evidence || "")], 12),
+                            docxBorderedCell([new Paragraph(audit.conclusion || "")], 10),
+                            docxBorderedCell([new Paragraph(audit.findingType || "")], 6),
                             ...docxFindingDetailDataCells(details),
                         ],
                     }),
@@ -1794,28 +1976,29 @@ export async function generateAuditReportDocx(plan: Record<string, any>) {
     // --- 4. AUDIT SUMMARY ---
     children.push(docxBlueSectionHeading(getSectionLabel(form, "auditSummary")));
     children.push(docxSubHeading(`${getSectionLabel(form, "nonConformitiesSummary")}:`));
-    const ncDocxRows =
-        ctx.nonConformances.length > 0
-            ? ctx.nonConformances.map((nc, idx) => [String(idx + 1), nc.statement])
-            : Array.from({ length: 6 }, () => ["", ""]);
+    const ncDocxTable = buildNonConformanceReportTable(ctx.nonConformances, ctx.isModuleAudit);
+    const ncColWidth = Math.max(8, Math.floor(100 / Math.max(ncDocxTable.headers.length, 1)));
     children.push(
         new DocxTable({
             width: { size: 100, type: WidthType.PERCENTAGE },
             rows: [
                 new DocxTableRow({
-                    children: ["Number", "Statement of nonconformity"].map((h) =>
-                        docxBorderedCell([
-                            new Paragraph({ children: [new TextRun({ text: h, bold: true })] }),
-                        ]),
+                    children: ncDocxTable.headers.map((h) =>
+                        docxBorderedCell(
+                            [new Paragraph({ children: [new TextRun({ text: h, bold: true })] })],
+                            ncColWidth,
+                        ),
                     ),
                 }),
-                ...ncDocxRows.map(
+                ...ncDocxTable.body.map(
                     (row) =>
                         new DocxTableRow({
-                            children: [
-                                docxBorderedCell([new Paragraph(row[0])], 18),
-                                docxBorderedCell([new Paragraph(row[1])], 82),
-                            ],
+                            children: row.map((cell, idx) =>
+                                docxBorderedCell(
+                                    [new Paragraph(cell)],
+                                    idx === 0 ? 12 : ncColWidth,
+                                ),
+                            ),
                         }),
                 ),
             ],
@@ -1877,7 +2060,7 @@ export async function generateAuditReportDocx(plan: Record<string, any>) {
 
 /** Full audit execution report as Excel */
 export async function generateAuditReportExcel(plan: Record<string, any>) {
-    const template = auditTemplates.find((t) => t.id === plan.templateId);
+    const template = resolveReportTemplate(plan);
     const auditData = getAuditData(plan);
     const fileName = auditReportBaseName(plan);
     const ctx = await buildReportContext(plan);
@@ -1933,8 +2116,8 @@ export async function generateAuditReportExcel(plan: Record<string, any>) {
     }
 
     if (ctx.nonConformances.length > 0) {
-        const ncData = [["No.", "Statement"]];
-        ctx.nonConformances.forEach((nc, i) => ncData.push([String(i + 1), nc.statement]));
+        const ncTable = buildNonConformanceReportTable(ctx.nonConformances, ctx.isModuleAudit);
+        const ncData = [ncTable.headers, ...ncTable.body];
         XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(ncData), "Non-Conformities");
     }
 
@@ -1945,42 +2128,76 @@ export async function generateAuditReportExcel(plan: Record<string, any>) {
         auditData.genericFiles as Record<string, AuditEvidenceMedia[]> | undefined,
     );
 
-    if (auditData.checklistData && Object.keys(auditData.checklistData as object).length > 0 && template?.content) {
+    if (template?.content && (template.type === "checklist" || auditData.checklistData)) {
         const checklistContent = resolveChecklistContent(
             auditData,
             template.content as ChecklistContent[],
         );
-        const cData = [["Clause", "Question", "Finding", "Evidence", ...FINDING_DETAIL_HEADERS]];
-        Object.entries(auditData.checklistData as Record<string, any>)
-            .filter(([, v]) => v.findings)
-            .forEach(([idx, v]) => {
-                const itemIndex = Number(idx);
-                const item = checklistContent[itemIndex];
-                const clauseKey = item?.clause || String(idx);
-                const attached = collectFindingAttachmentMedia(
-                    clauseFilesForExcel,
-                    genericFilesForExcel,
-                    clauseKey,
-                    itemIndex,
-                );
-                const evidenceText = buildFindingEvidenceText(v.evidence, attached);
-                const details = extractFindingDetailFields(v);
-                cData.push([
-                    clauseKey,
-                    item?.question || "-",
-                    v.findings,
-                    evidenceText,
-                    ...findingDetailCells(details),
-                ]);
+        if (checklistContent.length > 0) {
+            const { bodyCells, headerCells } = buildChecklistReportTable({
+                content: checklistContent,
+                checklistData: (auditData.checklistData as Record<string, any>) || {},
+                isModule: ctx.isModuleAudit,
+                isEosh: planUsesEoshTotals(plan),
+                qfsScoreMode: resolveQfsScoreModeForPlan(plan),
+                collectEvidence: (clauseKey, itemIndex, textEvidence) =>
+                    buildFindingEvidenceText(
+                        textEvidence,
+                        collectFindingAttachmentMedia(
+                            clauseFilesForExcel,
+                            genericFilesForExcel,
+                            clauseKey,
+                            itemIndex,
+                        ),
+                    ),
             });
-        if (cData.length > 1) XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(cData), "Checklist");
+            // Excel (community xlsx) has limited cell fills — mark selected QFS score with ●.
+            const excelRows = bodyCells.map((row) =>
+                row.map((cell) => {
+                    if (cell.fillHex) {
+                        if (cell.fillHex === "#92D050") return "● GREEN";
+                        if (cell.fillHex === "#FF0000") return "● RED";
+                        if (cell.fillHex === "#FFC000") return "● AMBER";
+                        return "●";
+                    }
+                    return cell.text;
+                }),
+            );
+            const cData = [
+                headerCells.map((h) => h.text),
+                ...excelRows,
+            ];
+            XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(cData), "Checklist");
+
+            if (planUsesEoshTotals(plan)) {
+                const scores = computeEoshCapabilityScores(
+                    (auditData.checklistData as Record<string, { findings?: string }>) || {},
+                    checklistContent.length,
+                );
+                XLSX.utils.book_append_sheet(
+                    wb,
+                    XLSX.utils.aoa_to_sheet([
+                        ["Metric", "Value"],
+                        ["Subtotal", scores.subtotal],
+                        ["Grand Total", scores.grandTotal],
+                        ["Maximum Marks", scores.maximumMarks],
+                        [
+                            "% Compliance",
+                            scores.percentCompliance == null
+                                ? "—"
+                                : `${scores.percentCompliance}%`,
+                        ],
+                    ]),
+                    "EOSH Scores",
+                );
+            }
+        }
     }
 
     if (template?.type === "clause-checklist" && auditData.clauseData) {
         const cData = [["Clause", "Requirement", "Finding", "Evidence", ...FINDING_DETAIL_HEADERS]];
         (template.content as ClauseChecklistContent[]).forEach((item) => {
-            const v = auditData.clauseData[item.clauseId];
-            if (!v || !v.findingType) return;
+            const v = auditData.clauseData[item.clauseId] || {};
             const requirement = [item.title, ...(item.subClauses || [])].filter(Boolean).join('\n');
             const attached = collectFindingAttachmentMedia(
                 clauseFilesForExcel,
@@ -1992,7 +2209,7 @@ export async function generateAuditReportExcel(plan: Record<string, any>) {
             cData.push([
                 item.clauseId,
                 requirement,
-                v.findingType,
+                v.findingType || "",
                 evidenceText,
                 ...findingDetailCells(details),
             ]);
@@ -2003,15 +2220,16 @@ export async function generateAuditReportExcel(plan: Record<string, any>) {
     if (template?.type === "process-audit" && auditData.processAudits) {
         const cData = [["No.", "Process Area", "Auditee(s)", "Evidence", "Conclusion", "Finding", ...FINDING_DETAIL_HEADERS]];
         (auditData.processAudits as ProcessAuditContent[]).forEach((audit, index) => {
-            if (!audit.findingType) return;
-            const details = extractFindingDetailFields(audit);
+            const details = extractFindingDetailFields(
+                audit as unknown as Record<string, unknown>,
+            );
             cData.push([
                 String(index + 1),
                 audit.processArea || "",
                 audit.auditees || "",
                 audit.evidence || "",
                 audit.conclusion || "",
-                audit.findingType,
+                audit.findingType || "",
                 ...findingDetailCells(details),
             ]);
         });

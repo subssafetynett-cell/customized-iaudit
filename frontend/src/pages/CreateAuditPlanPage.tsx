@@ -44,10 +44,14 @@ import {
 } from "@/components/ui/table";
 import {
     auditTemplates,
+    findAuditTemplate,
+    findAuditTemplates,
     getAuditPlanTemplateLabel,
     getAuditPlanTemplateOptions,
     getAuditPlanTemplateSubtitle,
+    getLockedPlanTemplatesFromExecution,
     isAuditPlanMultiStandard,
+    serializeAuditPlanTemplateIds,
 } from "@/data/auditTemplates";
 import { TourStepPopover } from "@/components/TourStepPopover";
 import {
@@ -180,6 +184,19 @@ const CreateAuditPlanPage = () => {
         () => resolveDepartmentsFromProgram(activeProgram, companies),
         [activeProgram, companies],
     );
+    const lockedPlanTemplates = useMemo(() => {
+        const fromExecution = getLockedPlanTemplatesFromExecution(execution, activeProgram);
+        if (fromExecution && fromExecution.length > 0) return fromExecution;
+        const iso = String(activeProgram?.isoStandard || "");
+        const isModuleProgram =
+            activeProgram?.scheduleData?.criteriaType === "module" ||
+            iso.includes("EOSH Module:") ||
+            iso.includes("QFS KORE Module:");
+        if (!isModuleProgram) return null;
+        const fromPlan = findAuditTemplates(plan?.templateId);
+        return fromPlan.length > 0 ? fromPlan : null;
+    }, [execution, activeProgram, plan?.templateId]);
+    const templatesLockedFromProgram = Boolean(lockedPlanTemplates && lockedPlanTemplates.length > 0);
 
     const collectSeedAuditors = (...sources: any[]) => {
         const collected: any[] = [];
@@ -369,7 +386,12 @@ const CreateAuditPlanPage = () => {
             }
 
             setAuditObjective(`To verify compliance with ${currentStandard} and internal procedures, and to identify areas for improvement.`);
-            setAuditCriteria(`${currentStandard}, Internal Manual, Local Regulations`);
+            if (lockedPlanTemplates && lockedPlanTemplates.length > 0) {
+                const moduleLabels = lockedPlanTemplates.map((t) => getAuditPlanTemplateLabel(t)).join("; ");
+                setAuditCriteria(`${moduleLabels}, Internal Manual, Local Regulations`);
+            } else {
+                setAuditCriteria(`${currentStandard}, Internal Manual, Local Regulations`);
+            }
 
             if (program) {
                 if (program.leadAuditor) {
@@ -385,8 +407,12 @@ const CreateAuditPlanPage = () => {
                     setSelectedAuditorId(program.auditorIds[0].toString());
                 }
 
-                // Auto-select template based on ISO Standard
-                if (program.isoStandard) {
+                // Lock / auto-select templates from audit program modules (EOSH / QFS)
+                if (lockedPlanTemplates && lockedPlanTemplates.length > 0) {
+                    setSelectedTemplateId(
+                        serializeAuditPlanTemplateIds(lockedPlanTemplates.map((t) => t.id)),
+                    );
+                } else if (program.isoStandard) {
                     const options = getAuditPlanTemplateOptions(
                         `${currentStandard}, Internal Manual, Local Regulations`,
                         program.isoStandard,
@@ -400,15 +426,28 @@ const CreateAuditPlanPage = () => {
                 setSeedAuditors(collectSeedAuditors(program?.leadAuditor, program?.auditors));
             }
         }
-    }, [execution, program, site, location.state, isEditMode, plan]);
+    }, [execution, program, site, location.state, isEditMode, plan, lockedPlanTemplates]);
 
     useEffect(() => {
+        if (templatesLockedFromProgram && lockedPlanTemplates) {
+            const lockedIds = serializeAuditPlanTemplateIds(lockedPlanTemplates.map((t) => t.id));
+            if (selectedTemplateId !== lockedIds) {
+                setSelectedTemplateId(lockedIds);
+            }
+            return;
+        }
         const options = getAuditPlanTemplateOptions(auditCriteria, program?.isoStandard);
         if (!selectedTemplateId) return;
         if (!options.some((t) => t.id === selectedTemplateId)) {
             setSelectedTemplateId(options[0]?.id ?? "");
         }
-    }, [auditCriteria, program?.isoStandard, selectedTemplateId]);
+    }, [
+        auditCriteria,
+        program?.isoStandard,
+        selectedTemplateId,
+        templatesLockedFromProgram,
+        lockedPlanTemplates,
+    ]);
 
     const handleItineraryChange = (id: string, field: keyof ItineraryItem, value: string) => {
         setItinerary(prev => prev.map(item => item.id === id ? { ...item, [field]: value } : item));
@@ -546,7 +585,9 @@ const CreateAuditPlanPage = () => {
         }
     };
 
-    const previewTemplate = auditTemplates.find(t => t.id === previewTemplateId);
+    const previewTemplate = previewTemplateId
+        ? findAuditTemplate(previewTemplateId) || auditTemplates.find((t) => t.id === previewTemplateId)
+        : undefined;
 
     const handleAuditPlanTourNext = () => {
         if (auditPlanTourStep === 4 && !auditPlanBasicFieldsValid()) {
@@ -674,54 +715,100 @@ const CreateAuditPlanPage = () => {
                                 <div className="flex items-center justify-between">
                                     <Label className="text-xs font-black text-indigo-700 uppercase tracking-wide flex items-center gap-1.5">
                                         <FileText className="w-3.5 h-3.5" />
-                                        Choose Audit Template
+                                        {templatesLockedFromProgram
+                                            ? "Assigned Audit Modules"
+                                            : "Choose Audit Template"}
                                     </Label>
-                                    <span className="bg-amber-400 text-amber-900 text-[9px] font-black uppercase px-2 py-0.5 rounded-full tracking-wider">Required</span>
+                                    <span className="bg-amber-400 text-amber-900 text-[9px] font-black uppercase px-2 py-0.5 rounded-full tracking-wider">
+                                        {templatesLockedFromProgram ? "From program" : "Required"}
+                                    </span>
                                 </div>
-                                <div className="flex gap-2">
-                                    <Select value={selectedTemplateId} onValueChange={setSelectedTemplateId}>
-                                        <SelectTrigger className="font-semibold bg-white border-indigo-200 h-11 flex-1 focus:ring-indigo-400 shadow-sm">
-                                            <SelectValue placeholder="Choose an audit template…" />
-                                        </SelectTrigger>
-                                        <SelectContent>
-                                            {(() => {
-                                                const isMultiStandard = isAuditPlanMultiStandard(auditCriteria, program?.isoStandard);
-                                                return getAuditPlanTemplateOptions(auditCriteria, program?.isoStandard).map((template) => (
-                                                    <SelectItem key={template.id} value={template.id}>
-                                                        {getAuditPlanTemplateLabel(template, isMultiStandard)}
-                                                    </SelectItem>
-                                                ));
-                                            })()}
-                                        </SelectContent>
-                                    </Select>
-                                    {selectedTemplateId && (
-                                        <Button
-                                            variant="outline"
-                                            size="icon"
-                                            className="h-11 w-11 shrink-0 border-indigo-200 text-indigo-600 hover:bg-indigo-50"
-                                            onClick={() => setPreviewTemplateId(selectedTemplateId)}
-                                            title="Preview Template"
-                                        >
-                                            <Eye className="w-4 h-4" />
-                                        </Button>
-                                    )}
-                                </div>
-                                {selectedTemplateId && (() => {
-                                    const t = auditTemplates.find(t => t.id === selectedTemplateId);
-                                    const isMultiStandard = isAuditPlanMultiStandard(auditCriteria, program?.isoStandard);
-                                    return t ? (
-                                        <div className="flex items-center gap-3 p-3 bg-white border border-indigo-100 rounded-xl shadow-sm">
-                                            <div className="w-8 h-8 rounded-lg bg-indigo-100 flex items-center justify-center shrink-0">
-                                                <FileText className="w-4 h-4 text-indigo-600" />
+
+                                {templatesLockedFromProgram && lockedPlanTemplates ? (
+                                    <div className="space-y-2">
+                                        <p className="text-xs text-slate-500">
+                                            These modules were selected in the audit program for this period and cannot be changed here.
+                                        </p>
+                                        {lockedPlanTemplates.map((t) => (
+                                            <div
+                                                key={t.id}
+                                                className="flex items-center gap-3 p-3 bg-white border border-indigo-100 rounded-xl shadow-sm"
+                                            >
+                                                <div className="w-8 h-8 rounded-lg bg-indigo-100 flex items-center justify-center shrink-0">
+                                                    <FileText className="w-4 h-4 text-indigo-600" />
+                                                </div>
+                                                <div className="min-w-0 flex-1">
+                                                    <p className="text-sm font-bold text-slate-800 truncate">
+                                                        {getAuditPlanTemplateLabel(t)}
+                                                    </p>
+                                                    <p className="text-xs text-slate-500">
+                                                        {getAuditPlanTemplateSubtitle(t, false)}
+                                                    </p>
+                                                </div>
+                                                <Button
+                                                    type="button"
+                                                    variant="outline"
+                                                    size="icon"
+                                                    className="h-9 w-9 shrink-0 border-indigo-200 text-indigo-600 hover:bg-indigo-50"
+                                                    onClick={() => setPreviewTemplateId(t.id)}
+                                                    title="Preview Template"
+                                                >
+                                                    <Eye className="w-4 h-4" />
+                                                </Button>
+                                                <span className="bg-emerald-100 text-emerald-700 text-[10px] font-bold uppercase px-2 py-0.5 rounded-full shrink-0">
+                                                    Assigned ✓
+                                                </span>
                                             </div>
-                                            <div>
-                                                <p className="text-sm font-bold text-slate-800">{getAuditPlanTemplateLabel(t, isMultiStandard)}</p>
-                                                <p className="text-xs text-slate-500">{getAuditPlanTemplateSubtitle(t, isMultiStandard)}</p>
-                                            </div>
-                                            <span className="ml-auto bg-emerald-100 text-emerald-700 text-[10px] font-bold uppercase px-2 py-0.5 rounded-full">Selected ✓</span>
+                                        ))}
+                                    </div>
+                                ) : (
+                                    <>
+                                        <div className="flex gap-2">
+                                            <Select value={selectedTemplateId} onValueChange={setSelectedTemplateId}>
+                                                <SelectTrigger className="font-semibold bg-white border-indigo-200 h-11 flex-1 focus:ring-indigo-400 shadow-sm">
+                                                    <SelectValue placeholder="Choose an audit template…" />
+                                                </SelectTrigger>
+                                                <SelectContent>
+                                                    {(() => {
+                                                        const isMultiStandard = isAuditPlanMultiStandard(auditCriteria, program?.isoStandard);
+                                                        return getAuditPlanTemplateOptions(auditCriteria, program?.isoStandard).map((template) => (
+                                                            <SelectItem key={template.id} value={template.id}>
+                                                                {getAuditPlanTemplateLabel(template, isMultiStandard)}
+                                                            </SelectItem>
+                                                        ));
+                                                    })()}
+                                                </SelectContent>
+                                            </Select>
+                                            {selectedTemplateId && (
+                                                <Button
+                                                    variant="outline"
+                                                    size="icon"
+                                                    className="h-11 w-11 shrink-0 border-indigo-200 text-indigo-600 hover:bg-indigo-50"
+                                                    onClick={() => setPreviewTemplateId(selectedTemplateId)}
+                                                    title="Preview Template"
+                                                >
+                                                    <Eye className="w-4 h-4" />
+                                                </Button>
+                                            )}
                                         </div>
-                                    ) : null;
-                                })()}
+                                        {selectedTemplateId && (() => {
+                                            const t = findAuditTemplate(selectedTemplateId) || auditTemplates.find(x => x.id === selectedTemplateId);
+                                            const isMultiStandard = isAuditPlanMultiStandard(auditCriteria, program?.isoStandard);
+                                            return t ? (
+                                                <div className="flex items-center gap-3 p-3 bg-white border border-indigo-100 rounded-xl shadow-sm">
+                                                    <div className="w-8 h-8 rounded-lg bg-indigo-100 flex items-center justify-center shrink-0">
+                                                        <FileText className="w-4 h-4 text-indigo-600" />
+                                                    </div>
+                                                    <div>
+                                                        <p className="text-sm font-bold text-slate-800">{getAuditPlanTemplateLabel(t, isMultiStandard)}</p>
+                                                        <p className="text-xs text-slate-500">{getAuditPlanTemplateSubtitle(t, isMultiStandard)}</p>
+                                                    </div>
+                                                    <span className="ml-auto bg-emerald-100 text-emerald-700 text-[10px] font-bold uppercase px-2 py-0.5 rounded-full">Selected ✓</span>
+                                                </div>
+                                            ) : null;
+                                        })()}
+                                    </>
+                                )}
                             </div>
 
 
@@ -1019,24 +1106,49 @@ const CreateAuditPlanPage = () => {
                                                 if (!groups.has(baseId)) groups.set(baseId, []);
                                                 groups.get(baseId)!.push(clause);
                                             });
-                                            return Array.from(groups.values()).map((group, idx) => (
-                                                <Card key={idx} className="border border-slate-200 shadow-sm bg-white overflow-hidden group hover:shadow-md transition-all">
-                                                    <div className="h-1 bg-emerald-500 w-0 group-hover:w-full transition-all duration-500" />
-                                                    <CardContent className="p-3">
-                                                        <div className="text-[12px] font-bold text-slate-800 leading-tight">
-                                                            {group.map((clause: any) => {
-                                                                const label = clause.standard || "";
-                                                                return (
-                                                                    <div key={clause.id} className="mb-2 pb-2 border-b border-slate-50 last:border-0 last:mb-0 last:pb-0 font-normal">
-                                                                        {label && <span className="text-[9px] uppercase font-black text-emerald-600 mr-2 bg-emerald-50 px-1 py-0.5 rounded">{label}</span>}
-                                                                        <span className="text-slate-700 font-semibold">{clause.name}</span>
+                                            return Array.from(groups.values()).map((group, idx) => {
+                                                const byName = new Map<string, { name: string; standards: string[] }>();
+                                                for (const clause of group) {
+                                                    const key = clause.name as string;
+                                                    let row = byName.get(key);
+                                                    if (!row) {
+                                                        row = { name: key, standards: [] };
+                                                        byName.set(key, row);
+                                                    }
+                                                    if (clause.standard && !row.standards.includes(clause.standard)) {
+                                                        row.standards.push(clause.standard);
+                                                    }
+                                                }
+                                                const rows = Array.from(byName.values());
+                                                return (
+                                                    <Card key={idx} className="border border-slate-200 shadow-sm bg-white overflow-hidden group hover:shadow-md transition-all">
+                                                        <div className="h-1 bg-emerald-500 w-0 group-hover:w-full transition-all duration-500" />
+                                                        <CardContent className="p-3">
+                                                            <div className="flex flex-col gap-2">
+                                                                {rows.map((row) => (
+                                                                    <div key={row.name} className="flex items-start gap-2 min-w-0">
+                                                                        {row.standards.length > 0 && (
+                                                                            <div className="flex flex-wrap items-center gap-1 shrink-0 pt-0.5">
+                                                                                {row.standards.map((label) => (
+                                                                                    <span
+                                                                                        key={label}
+                                                                                        className="text-[9px] uppercase font-black text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded"
+                                                                                    >
+                                                                                        {label}
+                                                                                    </span>
+                                                                                ))}
+                                                                            </div>
+                                                                        )}
+                                                                        <span className="text-[12px] text-slate-700 font-semibold leading-tight min-w-0 flex-1">
+                                                                            {row.name}
+                                                                        </span>
                                                                     </div>
-                                                                );
-                                                            })}
-                                                        </div>
-                                                    </CardContent>
-                                                </Card>
-                                            ));
+                                                                ))}
+                                                            </div>
+                                                        </CardContent>
+                                                    </Card>
+                                                );
+                                            });
                                         })()}
                                     </div>
                                 </CardContent>

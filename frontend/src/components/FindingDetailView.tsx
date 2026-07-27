@@ -9,7 +9,7 @@ import type { AuditEvidenceMedia } from "@/lib/evidenceImageUpload";
 import { AuditEvidencePreviewDialog } from "@/components/AuditEvidencePreviewDialog";
 
 export function FindingStatusBadge({ status }: { status: FindingStatus }) {
-    const cfg = STATUS_CONFIG[status];
+    const cfg = STATUS_CONFIG[status] ?? STATUS_CONFIG.Opened;
     return (
         <span
             className={`inline-block px-2.5 py-1 rounded-full text-xs font-semibold ring-1 ${cfg.className}`}
@@ -140,7 +140,7 @@ export function FindingDetailPanel({ finding }: { finding: Finding }) {
 
             <FindingDetailBlock label="Description" value={finding.description} />
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                 <div className="space-y-1">
                     <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Status</p>
                     <FindingStatusBadge status={finding.status} />
@@ -156,6 +156,18 @@ export function FindingDetailPanel({ finding }: { finding: Finding }) {
                 <div className="space-y-1">
                     <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Assigned to</p>
                     <p className="text-sm text-slate-800">{finding.assignTo?.trim() || "—"}</p>
+                </div>
+                <div className="space-y-1">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Escalation to</p>
+                    <p className="text-sm text-slate-800">
+                        {(finding.escalationToName || finding.escalationTo || "")
+                            .replace(/\s*\([^)]*@[^)]*\)\s*$/, "")
+                            .trim() || "—"}
+                    </p>
+                </div>
+                <div className="space-y-1">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Escalation date</p>
+                    <p className="text-sm text-slate-800">{finding.escalationDate?.trim() || "—"}</p>
                 </div>
             </div>
 
