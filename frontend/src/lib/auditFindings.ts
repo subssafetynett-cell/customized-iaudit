@@ -453,6 +453,22 @@ export function mergeFindingWithOverrides(
             }),
         ];
     }
+    // Never let empty override fields wipe assignee / reporter identity used for
+    // Assigned-to-me and "Respond to finding" visibility.
+    const pickText = (overrideVal: unknown, baseVal: string | undefined) => {
+        const next = typeof overrideVal === "string" ? overrideVal.trim() : "";
+        if (next) return next;
+        return baseVal?.trim() || "";
+    };
+    merged.assignToEmail = pickText(override.assignToEmail, finding.assignToEmail);
+    merged.assignToName = pickText(override.assignToName, finding.assignToName);
+    merged.assignTo = pickText(override.assignTo, finding.assignTo);
+    merged.raisedByEmail = pickText(override.raisedByEmail, finding.raisedByEmail);
+    merged.raisedByName = pickText(override.raisedByName, finding.raisedByName);
+    merged.raisedBy = pickText(override.raisedBy, finding.raisedBy);
+    if (override.createdByUserId == null && finding.createdByUserId != null) {
+        merged.createdByUserId = finding.createdByUserId;
+    }
     merged.status =
         normalizeFindingStatus(override.status) ?? resolveFindingStatus(merged);
     return merged;

@@ -859,7 +859,13 @@ export default function AuditFindings() {
                                                         }
                                                         onClick={() =>
                                                             navigate(
-                                                                `/audit-findings/${finding.auditId}/${encodeURIComponent(finding.id)}`,
+                                                                {
+                                                                    pathname: `/audit-findings/${finding.auditId}/${encodeURIComponent(finding.id)}`,
+                                                                    search:
+                                                                        isNc && assignedToMe
+                                                                            ? "?respond=1"
+                                                                            : "",
+                                                                },
                                                                 {
                                                                     state: {
                                                                         returnTab: ownershipTab,

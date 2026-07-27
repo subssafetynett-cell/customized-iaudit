@@ -149,14 +149,18 @@ export default function FindingDetail() {
 
     const viewerEmail = String(user?.email ?? "").toLowerCase().trim();
     const viewerId = user?.id != null ? Number(user.id) : null;
+    const respondUser = {
+        id: user?.id as number | string | undefined,
+        email: typeof user?.email === "string" ? user.email : null,
+    };
     const isNc = finding ? isNcFindingType(finding.type) : false;
     const isFindingAssignee = finding
         ? isFindingAssignedToViewer(finding, viewerEmail)
         : false;
     const isNcAssigneeIdentity = Boolean(
         nc &&
-            user &&
-            ((user.id != null && Number(nc.assigneeId) === Number(user.id)) ||
+            ((respondUser.id != null &&
+                Number(nc.assigneeId) === Number(respondUser.id)) ||
                 (viewerEmail &&
                     String(nc.assignee?.email ?? "")
                         .toLowerCase()
@@ -167,6 +171,8 @@ export default function FindingDetail() {
     const isRaisedByMe = finding
         ? isFindingRaisedByViewer(finding, viewerEmail, viewerId)
         : false;
+    const findingClosed = finding?.status === "Closed";
+    const ncClosed = String(nc?.status ?? "").trim().toUpperCase() === "CLOSED";
     const ncStatusAllowsResponse = (() => {
         const status = String(nc?.status ?? "").trim().toUpperCase();
         return (
@@ -176,18 +182,29 @@ export default function FindingDetail() {
         );
     })();
     const canRespondViaNc =
-        canUserRespondToNc(nc, user) ||
-        // Finding assignee with a linked open NC can respond even if NC assignee
-        // email was omitted from a partial list payload.
-        Boolean(
-            nc &&
-                isFindingAssignee &&
-                ncStatusAllowsResponse &&
-                finding?.status !== "Closed",
-        );
+        canUserRespondToNc(nc, respondUser) ||
+        Boolean(nc && isFindingAssignee && ncStatusAllowsResponse && !findingClosed) ||
+        Boolean(nc && isNcAssigneeIdentity && ncStatusAllowsResponse && !findingClosed);
+    // Assigned Minor/Major findings can use the CAPA form when not closed,
+    // even if the formal NC row failed to load or id formats differ.
     const canRespondViaFinding =
-        isFindingAssignee && isNc && !nc && finding?.status !== "Closed";
-    const canRespond = canRespondViaNc || canRespondViaFinding;
+        isFindingAssignee &&
+        isNc &&
+        !findingClosed &&
+        !ncClosed &&
+        (!nc || ncStatusAllowsResponse);
+    const canRespond =
+        !findingClosed && !ncClosed && (canRespondViaNc || canRespondViaFinding);
+    const showRespondCta =
+        Boolean(finding) && isAssignee && (isNc || Boolean(nc)) && !showResponseForm;
+
+    // If ?respond=1 was set but the user cannot respond, fall back to the CTA banner.
+    useEffect(() => {
+        if (!loading && showResponseForm && !canRespond) {
+            setShowResponseForm(false);
+        }
+    }, [loading, showResponseForm, canRespond]);
+
     const isEditingExistingResponse =
         Boolean(finding) &&
         (hasAssigneeResponse(finding!) || (nc?.responses?.length ?? 0) > 0);
@@ -529,7 +546,7 @@ export default function FindingDetail() {
                     </Card>
                 ) : null}
 
-                {isAssignee && isNc && !showResponseForm ? (
+                {showRespondCta ? (
                     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white px-4 py-4 shadow-sm">
                         <div>
                             <p className="text-sm font-semibold text-[#213847]">
@@ -542,7 +559,7 @@ export default function FindingDetail() {
                                     ? isEditingExistingResponse
                                         ? "Edit your CAPA / RCA form and send the updated response to the reporter."
                                         : "Submit your root cause analysis and corrective actions."
-                                    : finding.status === "Closed" || nc?.status === "CLOSED"
+                                    : findingClosed || ncClosed
                                       ? "This finding is closed."
                                       : "You cannot edit this response right now."}
                             </p>

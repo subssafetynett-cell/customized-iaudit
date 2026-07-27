@@ -22,12 +22,16 @@ import {
 const MARGIN_X = 14;
 const HEADER_TOP = 10;
 const HEADER_ROW1_H = 9;
-const HEADER_ROW2_H = 16;
+const HEADER_ROW2_H = 24;
 const HEADER_GAP = 4;
 /** Total vertical space reserved for the repeating document header. */
 const HEADER_BLOCK_H = HEADER_TOP + HEADER_ROW1_H + HEADER_ROW2_H + HEADER_GAP;
 const CONTENT_TOP = HEADER_BLOCK_H;
 const FOOTER_RESERVE = IAUDIT_FOOTER_RESERVE_MM;
+const SZL_LOGO_SRC = "/szl-logo.png";
+const CAPA_DOC_NUMBER = "SH-CP-FM-15";
+const CAPA_FORM_TITLE = "Corrective & Preventive Action Plan (CAPA) Form";
+const CAPA_REVISION_NO = "06";
 
 type CapaHeaderMeta = {
     docNumber: string;
@@ -48,8 +52,7 @@ function yesNo(row: { yes?: boolean; no?: boolean }): string {
 }
 
 function generateDocNumber(): string {
-    const n = Math.floor(10000 + Math.random() * 90000);
-    return `IA-CP-FM-${n}`;
+    return CAPA_DOC_NUMBER;
 }
 
 function formatIssueDate(d = new Date()): string {
@@ -59,17 +62,8 @@ function formatIssueDate(d = new Date()): string {
     return `${dd}/${mm}/${yy}`;
 }
 
-function resolveHeaderTitle(finding: Finding): string {
-    const moduleName = finding.moduleName?.trim();
-    if (moduleName) return moduleName;
-    const clause = finding.clauseRef?.trim();
-    if (clause) {
-        // Prefer module portion when clause looks like "Module · Item"
-        const parts = clause.split("·").map((p) => p.trim()).filter(Boolean);
-        if (parts.length > 1) return parts[0];
-        return clause;
-    }
-    return "Corrective & Preventive Action Plan (CAPA) Form";
+function resolveHeaderTitle(_finding: Finding): string {
+    return CAPA_FORM_TITLE;
 }
 
 function actionRowsBody(rows: CapaActionRow[]): string[][] {
@@ -226,7 +220,11 @@ function drawWrappedText(
 }
 
 /** Formal 2×3 document control header (matches CAPA form template). */
-function drawCapaDocumentHeader(doc: jsPDF, meta: CapaHeaderMeta) {
+function drawCapaDocumentHeader(
+    doc: jsPDF,
+    meta: CapaHeaderMeta,
+    szlLogo: PdfImageAsset | null = null,
+) {
     const pageW = doc.internal.pageSize.getWidth();
     const tableW = pageW - MARGIN_X * 2;
     const x0 = MARGIN_X;
@@ -252,7 +250,7 @@ function drawCapaDocumentHeader(doc: jsPDF, meta: CapaHeaderMeta) {
     doc.line(x2, y0, x2, y2);
 
     doc.setTextColor(0, 0, 0);
-    doc.setFont("helvetica", "normal");
+    doc.setFont("times", "normal");
     doc.setFontSize(8);
 
     const pad = 1.8;
@@ -260,7 +258,30 @@ function drawCapaDocumentHeader(doc: jsPDF, meta: CapaHeaderMeta) {
     drawWrappedText(doc, `Title: ${meta.title}`, x1 + pad, y0 + 4.2, col2 - pad * 2, 3.4, 2);
     doc.text(`Revision No: ${meta.revisionNo}`, x2 + pad, y0 + 5.5);
 
-    // Bottom-left logo cell left blank (company branding slot)
+    // Bottom-left: SZL company logo (first column of second row)
+    if (szlLogo?.dataUrl) {
+        const maxW = col1 - pad * 2;
+        const maxH = HEADER_ROW2_H - 4;
+        let imgW = maxW;
+        let imgH = imgW * szlLogo.ratio;
+        if (imgH > maxH) {
+            imgH = maxH;
+            imgW = imgH / szlLogo.ratio;
+        }
+        const imgX = x0 + (col1 - imgW) / 2;
+        const imgY = y1 + (HEADER_ROW2_H - imgH) / 2;
+        doc.addImage(
+            szlLogo.dataUrl,
+            szlLogo.format,
+            imgX,
+            imgY,
+            imgW,
+            imgH,
+            undefined,
+            "FAST",
+        );
+    }
+
     // Bottom-middle empty
     doc.text(`Issue Date: ${meta.issueDate}`, x2 + pad, y1 + 6);
 }
@@ -393,15 +414,22 @@ export async function downloadCapaResponsePdf(
     const headerMeta: CapaHeaderMeta = {
         docNumber: generateDocNumber(),
         title: resolveHeaderTitle(finding),
-        revisionNo: "01",
+        revisionNo: CAPA_REVISION_NO,
         issueDate: formatIssueDate(),
     };
 
     let iauditAsset: PdfImageAsset | null = null;
+    let szlLogo: PdfImageAsset | null = null;
     try {
-        iauditAsset = await loadImageAsset(IAUDIT_FOOTER_LOGO_SRC, 100);
+        const [iaudit, szl] = await Promise.all([
+            loadImageAsset(IAUDIT_FOOTER_LOGO_SRC, 100),
+            loadImageAsset(SZL_LOGO_SRC, 280),
+        ]);
+        iauditAsset = iaudit;
+        szlLogo = szl;
     } catch {
         iauditAsset = null;
+        szlLogo = null;
     }
 
     let y = CONTENT_TOP;
@@ -576,7 +604,7 @@ export async function downloadCapaResponsePdf(
     const pageCount = doc.getNumberOfPages();
     for (let i = 1; i <= pageCount; i += 1) {
         doc.setPage(i);
-        drawCapaDocumentHeader(doc, headerMeta);
+        drawCapaDocumentHeader(doc, headerMeta, szlLogo);
     }
     applyBuiltWithIauditPdfFooter(doc, iauditAsset, MARGIN_X);
 

@@ -196,25 +196,57 @@ export async function findNonconformanceForFinding(
     findingId: string,
 ): Promise<NonconformanceSummary | null> {
     const target = String(findingId || "").trim();
-    try {
-        const rows = await listNonconformancesForPlan(auditPlanId);
-        const hit =
+    const planId = Number(auditPlanId);
+
+    const checklistIndex = (id: string): string | null => {
+        const modular = id.match(new RegExp(`^checklist-${planId}-(.+)-(\\d+)$`));
+        if (modular) return modular[2];
+        const legacy = id.match(new RegExp(`^checklist-${planId}-(\\d+)$`));
+        if (legacy) return legacy[1];
+        return null;
+    };
+
+    const matchesFindingId = (rowFindingId: string): boolean => {
+        const fid = String(rowFindingId || "").trim();
+        if (!fid || !target) return false;
+        if (fid === target) return true;
+        // Raise NC often uses checklist-{plan}-{idx} while findings list uses
+        // checklist-{plan}-{templateId}-{idx} (and vice versa).
+        const a = checklistIndex(fid);
+        const b = checklistIndex(target);
+        return Boolean(a && b && a === b);
+    };
+
+    const pick = (rows: NonconformanceSummary[]): NonconformanceSummary | null => {
+        const exact =
             rows.find((row) => String(row.findingId || "").trim() === target) ?? null;
-        if (hit) return hit;
+        if (exact) return exact;
+        return rows.find((row) => matchesFindingId(String(row.findingId || ""))) ?? null;
+    };
+
+    let hit: NonconformanceSummary | null = null;
+    try {
+        hit = pick(await listNonconformancesForPlan(auditPlanId));
     } catch {
         // Auditees may not list by plan in some access edge cases; fall through.
     }
+    if (!hit) {
+        try {
+            const mine = await listNonconformances();
+            hit =
+                pick(
+                    mine.filter((row) => Number(row.auditPlanId) === planId),
+                ) ?? null;
+        } catch {
+            return null;
+        }
+    }
+    if (!hit?.id) return hit;
+    // Prefer detail payload so assignee email is present for respond checks.
     try {
-        const mine = await listNonconformances();
-        return (
-            mine.find(
-                (row) =>
-                    Number(row.auditPlanId) === Number(auditPlanId) &&
-                    String(row.findingId || "").trim() === target,
-            ) ?? null
-        );
+        return await getNonconformanceById(hit.id);
     } catch {
-        return null;
+        return hit;
     }
 }
 
