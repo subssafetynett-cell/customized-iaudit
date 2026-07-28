@@ -5904,7 +5904,15 @@ app.get('/audit-programs/:id', authenticateToken, checkTrialExpiration, async (r
             include: {
                 site: { include: { company: true } },
                 auditors: true,
-                leadAuditor: true
+                leadAuditor: true,
+                user: {
+                    select: {
+                        id: true,
+                        firstName: true,
+                        lastName: true,
+                        email: true,
+                    },
+                },
             }
         });
         if (!program) return res.status(404).json({ error: 'Audit program not found' });

@@ -202,6 +202,33 @@ async function loadImageAsset(src: string, maxDim = 120): Promise<PdfImageAsset 
     }
 }
 
+function formatProgramPersonName(
+    person?: { firstName?: string | null; lastName?: string | null; email?: string | null } | null,
+): string {
+    if (!person) return "N/A";
+    const name = `${person.firstName || ""} ${person.lastName || ""}`.trim();
+    return name || person.email?.trim() || "N/A";
+}
+
+function resolveProgramPeopleLabels(program: any): {
+    leadAuditor: string;
+    author: string;
+    auditors: string;
+} {
+    const leadAuditor = formatProgramPersonName(program?.leadAuditor);
+    const author = formatProgramPersonName(program?.user);
+    const auditorNames = Array.isArray(program?.auditors)
+        ? program.auditors
+              .map((a: any) => formatProgramPersonName(a))
+              .filter((n: string) => n && n !== "N/A")
+        : [];
+    return {
+        leadAuditor,
+        author,
+        auditors: auditorNames.length > 0 ? auditorNames.join(", ") : "N/A",
+    };
+}
+
 function resolveProgramCompany(program: any, sitesList: any[]) {
     const nested = program?.site?.company;
     if (nested?.name) {
@@ -1024,6 +1051,7 @@ const AuditPrograms = () => {
             metaY += Math.max(6, lines.length * 5);
         };
 
+        const people = resolveProgramPeopleLabels(program);
         addMetaLine("Program Name", program.name);
         addMetaLine("Standard", program.isoStandard || "N/A");
         addMetaLine("Frequency", program.frequency || "N/A");
@@ -1033,6 +1061,9 @@ const AuditPrograms = () => {
             companies,
         );
         addMetaLine("Departments", formatDepartmentNames(programDepartments));
+        addMetaLine("Lead Auditor", people.leadAuditor);
+        addMetaLine("Author", people.author);
+        addMetaLine("Auditors", people.auditors);
 
         // Company block: name first, then logo below
         metaY += 3;
@@ -1351,6 +1382,7 @@ const AuditPrograms = () => {
                 );
             }
 
+            const people = resolveProgramPeopleLabels(program);
             children.push(
                 new Paragraph({
                     text: "Audit Program Schedule",
@@ -1368,6 +1400,11 @@ const AuditPrograms = () => {
                             companies,
                         ),
                     )}`,
+                }),
+                new Paragraph({ text: `Lead Auditor: ${people.leadAuditor}` }),
+                new Paragraph({ text: `Author: ${people.author}` }),
+                new Paragraph({
+                    text: `Auditors: ${people.auditors}`,
                     spacing: { after: 160 },
                 }),
                 new Paragraph({
