@@ -212,21 +212,179 @@ function formatProgramPersonName(
 
 function resolveProgramPeopleLabels(program: any): {
     leadAuditor: string;
-    author: string;
     auditors: string;
 } {
     const leadAuditor = formatProgramPersonName(program?.leadAuditor);
-    const author = formatProgramPersonName(program?.user);
     const auditorNames = Array.isArray(program?.auditors)
         ? program.auditors
               .map((a: any) => formatProgramPersonName(a))
               .filter((n: string) => n && n !== "N/A")
         : [];
+    // Prefer unique names so lead+team listing doesn't repeat the same person.
+    const uniqueAuditors = Array.from(new Set(auditorNames));
     return {
         leadAuditor,
-        author,
-        auditors: auditorNames.length > 0 ? auditorNames.join(", ") : "N/A",
+        auditors: uniqueAuditors.length > 0 ? uniqueAuditors.join(", ") : "N/A",
     };
+}
+
+type ScheduleExportCell =
+    | string
+    | {
+          content: string;
+          colSpan?: number;
+          styles?: Record<string, unknown>;
+      };
+
+/** Build PDF/Word schedule table — modules as rows for module programs, clauses for ISO. */
+function buildProgramScheduleExport(
+    program: any,
+    programPeriods: { label: string }[],
+): {
+    isModuleProgram: boolean;
+    tableHead: string[][];
+    tableBody: ScheduleExportCell[][];
+} {
+    const scheduleData = (program?.scheduleData || {}) as Record<string, unknown>;
+    const standards: string[] = program?.isoStandard
+        ? String(program.isoStandard)
+              .split(", ")
+              .map((s: string) => s.trim())
+              .filter(Boolean)
+        : [];
+    const criteriaType = detectCriteriaType(program?.isoStandard, scheduleData);
+    const moduleFamily = detectModuleFamily(scheduleData, program?.isoStandard);
+
+    if (criteriaType === "module") {
+        const modules = modulesForFamily(moduleFamily || "eosh");
+        const tableHead = [["Audit Module", ...programPeriods.map((p) => p.label)]];
+        const tableBody: ScheduleExportCell[][] = [];
+
+        modules.forEach((mod, rowIndex) => {
+            const hasPeriod = programPeriods.some(
+                (_, colIndex) => Boolean(scheduleData[`${rowIndex}-${colIndex}`]),
+            );
+            const isListed = standards.includes(mod.value);
+            if (!isListed && !hasPeriod) return;
+
+            const row: ScheduleExportCell[] = [
+                {
+                    content: mod.label,
+                    styles: { halign: "left", fontStyle: "bold", fontSize: 7 },
+                },
+            ];
+            programPeriods.forEach((_, colIndex) => {
+                row.push(scheduleData[`${rowIndex}-${colIndex}`] ? "X" : "");
+            });
+            tableBody.push(row);
+        });
+
+        const customRows = (Array.isArray(scheduleData.customRows)
+            ? scheduleData.customRows
+            : []) as { id: string; text?: string }[];
+        customRows.forEach((cRow) => {
+            const row: ScheduleExportCell[] = [
+                {
+                    content: cRow.text || "Custom Requirement",
+                    styles: {
+                        fontStyle: "italic",
+                        textColor: [100, 116, 139],
+                        halign: "left",
+                    },
+                },
+            ];
+            programPeriods.forEach((_, colIndex) => {
+                row.push(scheduleData[`custom_${cRow.id}-${colIndex}`] ? "X" : "");
+            });
+            tableBody.push(row);
+        });
+
+        if (tableBody.length === 0) {
+            tableBody.push([
+                { content: "No modules scheduled", styles: { halign: "left" } },
+                ...programPeriods.map(() => ""),
+            ]);
+        }
+
+        return { isModuleProgram: true, tableHead, tableBody };
+    }
+
+    const stdLabels = (standards.length > 0 ? standards : ["Clause"]).map(standardDisplayLabel);
+    const tableHead = [[...stdLabels, ...programPeriods.map((p) => p.label)]];
+    const tableBody: ScheduleExportCell[][] = [];
+    const stds = standards.length > 0 ? standards : ["anything"];
+
+    CLAUSE_MATRIX.forEach((clause, rowIndex) => {
+        const isHeading = isClauseMatrixHeading(clause);
+        const isMainHeading = isMainClauseHeading(clause);
+        if (standards.length === 1 && !isMainClauseHeading(clause)) {
+            const text = clauseTextForStandard(clause, standards[0]);
+            if (text === "Corresponding Clause does not exist") return;
+        }
+
+        const row: ScheduleExportCell[] = [];
+        stds.forEach((std: string, index: number) => {
+            const cellText = clauseTextForStandard(clause, std);
+            if (isHeading) {
+                if (index === 0) {
+                    row.push({
+                        content: cellText,
+                        colSpan: stds.length,
+                        styles: {
+                            fillColor: isMainHeading ? [33, 56, 71] : [240, 240, 240],
+                            textColor: isMainHeading ? [255, 255, 255] : [33, 56, 71],
+                            fontStyle: "bold",
+                            halign: "left",
+                        },
+                    });
+                }
+            } else {
+                row.push({ content: cellText, styles: { halign: "left" } });
+            }
+        });
+
+        programPeriods.forEach((_, colIndex) => {
+            const isSelected = Boolean(scheduleData[`${rowIndex}-${colIndex}`]);
+            if (isHeading) {
+                row.push({
+                    content: isSelected ? "X" : "",
+                    styles: {
+                        fillColor: isMainHeading ? [33, 56, 71] : [240, 240, 240],
+                        textColor: isMainHeading ? [255, 255, 255] : [33, 56, 71],
+                        fontStyle: "bold",
+                        halign: "center",
+                    },
+                });
+            } else {
+                row.push(isSelected ? "X" : "");
+            }
+        });
+        tableBody.push(row);
+    });
+
+    const customRows = (Array.isArray(scheduleData.customRows)
+        ? scheduleData.customRows
+        : []) as { id: string; text?: string }[];
+    const numStandardCols = standards.length || 1;
+    customRows.forEach((cRow) => {
+        const row: ScheduleExportCell[] = [
+            {
+                content: cRow.text || "Custom Requirement",
+                colSpan: numStandardCols,
+                styles: {
+                    fontStyle: "italic",
+                    textColor: [100, 116, 139],
+                    halign: "left",
+                },
+            },
+        ];
+        programPeriods.forEach((_, colIndex) => {
+            row.push(scheduleData[`custom_${cRow.id}-${colIndex}`] ? "X" : "");
+        });
+        tableBody.push(row);
+    });
+
+    return { isModuleProgram: false, tableHead, tableBody };
 }
 
 function resolveProgramCompany(program: any, sitesList: any[]) {
@@ -1052,8 +1210,21 @@ const AuditPrograms = () => {
         };
 
         const people = resolveProgramPeopleLabels(program);
+        const standardsLabel = program.isoStandard
+            ? String(program.isoStandard)
+                  .split(", ")
+                  .map((s: string) => s.trim())
+                  .filter(Boolean)
+                  .map(standardDisplayLabel)
+                  .join(", ")
+            : "N/A";
         addMetaLine("Program Name", program.name);
-        addMetaLine("Standard", program.isoStandard || "N/A");
+        addMetaLine(
+            detectCriteriaType(program.isoStandard, program.scheduleData) === "module"
+                ? "Modules"
+                : "Standard",
+            standardsLabel,
+        );
         addMetaLine("Frequency", program.frequency || "N/A");
         addMetaLine("Site", program.site?.name || "N/A");
         const programDepartments = resolveDepartmentsByIds(
@@ -1062,7 +1233,6 @@ const AuditPrograms = () => {
         );
         addMetaLine("Departments", formatDepartmentNames(programDepartments));
         addMetaLine("Lead Auditor", people.leadAuditor);
-        addMetaLine("Author", people.author);
         addMetaLine("Auditors", people.auditors);
 
         // Company block: name first, then logo below
@@ -1092,80 +1262,7 @@ const AuditPrograms = () => {
 
         const tableStartY = metaY + 2;
 
-        // Prepare table data - handles comma-separated standards string
-        const standards: string[] = program.isoStandard ? program.isoStandard.split(', ').map((s: string) => s.trim()).filter(Boolean) : [];
-        const stdLabels = (standards.length > 0 ? standards : ["Clause"]).map(standardDisplayLabel);
-        const tableHead = [[...stdLabels, ...programPeriods.map((p: any) => p.label)]];
-        const tableBody: any[] = [];
-
-        CLAUSE_MATRIX.forEach((clause, rowIndex) => {
-            const isHeading = isClauseMatrixHeading(clause);
-            const isMainHeading = isMainClauseHeading(clause);
-            if (standards.length === 1 && !isMainClauseHeading(clause)) {
-                const text = clauseTextForStandard(clause, standards[0]);
-                if (text === "Corresponding Clause does not exist") return;
-            }
-
-            const row: any[] = [];
-            const stds = standards.length > 0 ? standards : ["anything"];
-
-            stds.forEach((std: string, index: number) => {
-                const cellText = clauseTextForStandard(clause, std);
-
-                if (isHeading) {
-                    if (index === 0) {
-                        row.push({
-                            content: cellText,
-                            colSpan: stds.length,
-                            styles: {
-                                fillColor: isMainHeading ? [33, 56, 71] : [240, 240, 240],
-                                textColor: isMainHeading ? [255, 255, 255] : [33, 56, 71],
-                                fontStyle: "bold",
-                                halign: "left",
-                            },
-                        });
-                    }
-                } else {
-                    row.push({ content: cellText, styles: { halign: 'left' } });
-                }
-            });
-
-            programPeriods.forEach((_, colIndex) => {
-                const key = `${rowIndex}-${colIndex}`;
-                const isSelected = program.scheduleData && program.scheduleData[key];
-
-                if (isHeading) {
-                    row.push({
-                        content: isSelected ? "X" : "",
-                        styles: {
-                            fillColor: isMainHeading ? [33, 56, 71] : [240, 240, 240],
-                            textColor: isMainHeading ? [255, 255, 255] : [33, 56, 71],
-                            fontStyle: "bold",
-                            halign: "center",
-                        },
-                    });
-                } else {
-                    row.push(isSelected ? "X" : "");
-                }
-            });
-            tableBody.push(row);
-        });
-
-        const customProgramRows = program.scheduleData?.customRows || [];
-        const numStandardCols = standards.length || 1;
-        customProgramRows.forEach((cRow: any) => {
-            const row: any[] = [{
-                content: cRow.text || "Custom Requirement",
-                colSpan: numStandardCols,
-                styles: { fontStyle: "italic", textColor: [100, 116, 139], halign: "left" },
-            }];
-            programPeriods.forEach((_, colIndex) => {
-                const key = `custom_${cRow.id}-${colIndex}`;
-                const isSelected = program.scheduleData && program.scheduleData[key];
-                row.push(isSelected ? "X" : "");
-            });
-            tableBody.push(row);
-        });
+        const { tableHead, tableBody } = buildProgramScheduleExport(program, programPeriods);
 
         // Generate Table
         autoTable(doc, {
@@ -1179,6 +1276,9 @@ const AuditPrograms = () => {
                 fontStyle: 'bold',
                 halign: 'center',
                 valign: 'middle'
+            },
+            columnStyles: {
+                0: { halign: "left", cellWidth: "auto" },
             },
             styles: { fontSize: 6, cellPadding: 0.8, halign: 'center', valign: 'middle' },
             margin: { left: leftX, right: 14, bottom: IAUDIT_FOOTER_RESERVE_MM },
@@ -1239,117 +1339,72 @@ const AuditPrograms = () => {
             console.error("Failed to fetch iAudit logo for Word doc:", error);
         }
 
-        const standards: string[] = program.isoStandard ? program.isoStandard.split(', ').map((s: string) => s.trim()).filter(Boolean) : [];
-        const stdLabels = (standards.length > 0 ? standards : ["Clause"]).map(standardDisplayLabel);
+        const { tableHead, tableBody } = buildProgramScheduleExport(program, programPeriods);
+        const headLabels = tableHead[0] || [];
 
-        // Create table header row
-        const headerCells = [
-            ...stdLabels.map((label: string) => new DocxTableCell({
-                children: [new Paragraph({ text: label, style: "strong" })],
-                width: { size: 3000, type: WidthType.DXA },
-            })),
-            ...programPeriods.map((p: any) => new DocxTableCell({
-                children: [new Paragraph({ text: p.label, style: "strong", alignment: AlignmentType.CENTER })],
-                width: { size: 1000, type: WidthType.DXA },
-            }))
-        ];
+        const cellText = (cell: ScheduleExportCell): string =>
+            typeof cell === "string" ? cell : String(cell.content ?? "");
 
-        // Create table body rows
-        const bodyRows: any[] = [];
+        const cellStyles = (cell: ScheduleExportCell): Record<string, unknown> =>
+            typeof cell === "string" ? {} : ((cell.styles || {}) as Record<string, unknown>);
 
-        CLAUSE_MATRIX.forEach((clause, rowIndex) => {
-            const isHeading = isClauseMatrixHeading(clause);
-            const isMainHeading = isMainClauseHeading(clause);
-            if (standards.length === 1 && !isMainClauseHeading(clause)) {
-                const text = clauseTextForStandard(clause, standards[0]);
-                if (text === "Corresponding Clause does not exist") return;
-            }
+        const headerCells = headLabels.map((label: string, idx: number) =>
+            new DocxTableCell({
+                children: [
+                    new Paragraph({
+                        text: label,
+                        style: "strong",
+                        alignment: idx === 0 ? AlignmentType.LEFT : AlignmentType.CENTER,
+                    }),
+                ],
+                width: { size: idx === 0 ? 3500 : 1000, type: WidthType.DXA },
+                shading: { fill: "10B981" },
+            }),
+        );
 
-            const cells: any[] = [];
-            const stds = standards.length > 0 ? standards : ["anything"];
-
-            stds.forEach((std: string, index: number) => {
-                const cellText = clauseTextForStandard(clause, std);
-
-                if (isHeading) {
-                    if (index === 0) {
-                        cells.push(new DocxTableCell({
-                            children: [new Paragraph({
-                                children: [
-                                    new TextRun({
-                                        text: cellText,
-                                        color: isMainHeading ? "FFFFFF" : "213847",
-                                        bold: true,
-                                    }),
-                                ]
-                            })],
-                            columnSpan: stds.length,
-                            shading: { fill: isMainHeading ? "213847" : "F1F5F9" }
-                        }));
-                    }
-                } else {
-                    cells.push(new DocxTableCell({
-                        children: [new Paragraph({ text: cellText })]
-                    }));
-                }
+        const bodyRows = tableBody.map((row) => {
+            const cells = row.map((cell, idx) => {
+                const styles = cellStyles(cell);
+                const fill =
+                    Array.isArray(styles.fillColor) && styles.fillColor.length >= 3
+                        ? (styles.fillColor as number[])
+                              .slice(0, 3)
+                              .map((n) => Number(n).toString(16).padStart(2, "0"))
+                              .join("")
+                              .toUpperCase()
+                        : undefined;
+                const textColor =
+                    Array.isArray(styles.textColor) && styles.textColor.length >= 3
+                        ? (styles.textColor as number[])
+                              .slice(0, 3)
+                              .map((n) => Number(n).toString(16).padStart(2, "0"))
+                              .join("")
+                              .toUpperCase()
+                        : undefined;
+                const colSpan =
+                    typeof cell === "object" && cell.colSpan ? Number(cell.colSpan) : undefined;
+                return new DocxTableCell({
+                    children: [
+                        new Paragraph({
+                            alignment:
+                                idx === 0 || styles.halign === "left"
+                                    ? AlignmentType.LEFT
+                                    : AlignmentType.CENTER,
+                            children: [
+                                new TextRun({
+                                    text: cellText(cell),
+                                    bold: styles.fontStyle === "bold",
+                                    italics: styles.fontStyle === "italic",
+                                    color: textColor,
+                                }),
+                            ],
+                        }),
+                    ],
+                    columnSpan: colSpan,
+                    shading: fill ? { fill } : undefined,
+                });
             });
-
-            programPeriods.forEach((_, colIndex) => {
-                const key = `${rowIndex}-${colIndex}`;
-                const isSelected = program.scheduleData && program.scheduleData[key];
-
-                if (isHeading) {
-                    cells.push(new DocxTableCell({
-                        children: [
-                            new Paragraph({
-                                text: isSelected ? "X" : "",
-                                alignment: AlignmentType.CENTER,
-                                children: [
-                                    new TextRun({
-                                        text: isSelected ? "X" : "",
-                                        color: isMainHeading ? "FFFFFF" : "213847",
-                                        bold: true,
-                                    }),
-                                ],
-                            }),
-                        ],
-                        shading: { fill: isMainHeading ? "213847" : "F1F5F9" }
-                    }));
-                } else {
-                    cells.push(new DocxTableCell({
-                        children: [new Paragraph({
-                            text: isSelected ? "X" : "",
-                            alignment: AlignmentType.CENTER
-                        })]
-                    }));
-                }
-            });
-
-            bodyRows.push(new DocxTableRow({ children: cells }));
-        });
-
-        const customProgramRowsDocx = program.scheduleData?.customRows || [];
-        const numStandardCols = standards.length || 1;
-        customProgramRowsDocx.forEach((cRow: any) => {
-            const cells: any[] = [
-                new DocxTableCell({
-                    children: [new Paragraph({ text: cRow.text || "Custom Requirement", alignment: AlignmentType.LEFT })],
-                    columnSpan: numStandardCols,
-                    shading: { fill: "FCFCFC" },
-                }),
-            ];
-            programPeriods.forEach((_, colIndex) => {
-                const key = `custom_${cRow.id}-${colIndex}`;
-                const isSelected = program.scheduleData && program.scheduleData[key];
-                cells.push(new DocxTableCell({
-                    children: [new Paragraph({
-                        text: isSelected ? "X" : "",
-                        alignment: AlignmentType.CENTER,
-                    })],
-                    shading: { fill: "FCFCFC" },
-                }));
-            });
-            bodyRows.push(new DocxTableRow({ children: cells }));
+            return new DocxTableRow({ children: cells });
         });
 
         const table = new DocxTable({
@@ -1383,6 +1438,16 @@ const AuditPrograms = () => {
             }
 
             const people = resolveProgramPeopleLabels(program);
+            const isModuleProgram =
+                detectCriteriaType(program.isoStandard, program.scheduleData) === "module";
+            const standardsLabel = program.isoStandard
+                ? String(program.isoStandard)
+                      .split(", ")
+                      .map((s: string) => s.trim())
+                      .filter(Boolean)
+                      .map(standardDisplayLabel)
+                      .join(", ")
+                : "N/A";
             children.push(
                 new Paragraph({
                     text: "Audit Program Schedule",
@@ -1390,7 +1455,9 @@ const AuditPrograms = () => {
                     spacing: { after: 200 },
                 }),
                 new Paragraph({ text: `Program Name: ${program.name}` }),
-                new Paragraph({ text: `Standard: ${program.isoStandard}` }),
+                new Paragraph({
+                    text: `${isModuleProgram ? "Modules" : "Standard"}: ${standardsLabel}`,
+                }),
                 new Paragraph({ text: `Frequency: ${program.frequency}` }),
                 new Paragraph({ text: `Site: ${program.site?.name || "N/A"}` }),
                 new Paragraph({
@@ -1402,7 +1469,6 @@ const AuditPrograms = () => {
                     )}`,
                 }),
                 new Paragraph({ text: `Lead Auditor: ${people.leadAuditor}` }),
-                new Paragraph({ text: `Author: ${people.author}` }),
                 new Paragraph({
                     text: `Auditors: ${people.auditors}`,
                     spacing: { after: 160 },
