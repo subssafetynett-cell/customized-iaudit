@@ -302,7 +302,9 @@ export function FindingAssigneeResponseForm({
 
     const handleEvidenceUpload = async (files: FileList | null) => {
         if (!files?.length) return;
-        const { accepted, rejected } = await processAuditEvidenceFileList(files);
+        const { accepted, rejected } = await processAuditEvidenceFileList(files, {
+            planId: finding.auditId,
+        });
         if (rejected.length > 0) {
             toast.error(rejected[0].error || "Some files could not be uploaded");
         }

@@ -1,4 +1,5 @@
 import { apiFetch } from "@/lib/api";
+import { buildPageQuery, parsePaginatedResponse, type PaginatedResult } from "@/lib/pagination";
 
 export type NotificationType =
     | "NC_ASSIGNED"
@@ -25,8 +26,16 @@ export type AppNotification = {
     } | null;
 };
 
-export async function listNotifications(): Promise<AppNotification[]> {
-    const res = await apiFetch("/notifications", { skipSessionLogout: true });
+/** Bell / lightweight polls — no page param keeps legacy array response. */
+export async function listNotifications(opts?: {
+    limit?: number;
+}): Promise<AppNotification[]> {
+    const limit = opts?.limit;
+    const qs =
+        limit != null && Number.isFinite(limit)
+            ? `?limit=${Math.max(1, Math.floor(limit))}`
+            : "";
+    const res = await apiFetch(`/notifications${qs}`, { skipSessionLogout: true });
     const data = await res.json().catch(() => []);
     if (!res.ok) {
         throw new Error(
@@ -34,7 +43,27 @@ export async function listNotifications(): Promise<AppNotification[]> {
                 "Failed to load notifications",
         );
     }
-    return Array.isArray(data) ? data : [];
+    if (Array.isArray(data)) return data;
+    return parsePaginatedResponse<AppNotification>(data).items;
+}
+
+export async function listNotificationsPaged(opts: {
+    page: number;
+    limit?: number;
+}): Promise<PaginatedResult<AppNotification>> {
+    const qs = buildPageQuery({
+        page: opts.page,
+        limit: opts.limit ?? 20,
+    });
+    const res = await apiFetch(`/notifications${qs}`, { skipSessionLogout: true });
+    const data = await res.json().catch(() => []);
+    if (!res.ok) {
+        throw new Error(
+            (typeof data.error === "string" && data.error) ||
+                "Failed to load notifications",
+        );
+    }
+    return parsePaginatedResponse<AppNotification>(data, opts.page, opts.limit ?? 20);
 }
 
 export async function markNotificationRead(
@@ -57,7 +86,6 @@ export async function markNotificationRead(
 export async function markAllNotificationsRead(): Promise<{ updated: number }> {
     const res = await apiFetch("/notifications/read-all", {
         method: "PATCH",
-        skipSessionLogout: true,
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
@@ -80,6 +108,5 @@ export function formatNotificationTimeAgo(value: string | null | undefined): str
     const hours = Math.floor(minutes / 60);
     if (hours < 24) return `${hours}h ago`;
     const days = Math.floor(hours / 24);
-    if (days < 7) return `${days}d ago`;
-    return new Date(value).toLocaleDateString();
+    return `${days}d ago`;
 }

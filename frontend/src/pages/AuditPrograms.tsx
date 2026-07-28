@@ -39,6 +39,7 @@ import {
     AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import ReusablePagination from "@/components/ReusablePagination";
+import { buildPageQuery, parsePaginatedResponse } from "@/lib/pagination";
 import {
     CLAUSE_MATRIX,
     ClauseMatrixRow,
@@ -541,29 +542,48 @@ const AuditPrograms = () => {
 
     // Pagination
     const [currentPage, setCurrentPage] = useState(1);
+    const [totalItems, setTotalItems] = useState(0);
     const itemsPerPage = 8;
+    const totalPages = totalItems === 0 ? 0 : Math.ceil(totalItems / itemsPerPage);
+
+    const [debouncedSearch, setDebouncedSearch] = useState(searchQuery);
+    useEffect(() => {
+        const t = window.setTimeout(() => setDebouncedSearch(searchQuery), 300);
+        return () => window.clearTimeout(t);
+    }, [searchQuery]);
+
+    useEffect(() => {
+        setCurrentPage(1);
+    }, [debouncedSearch, standardFilter, siteFilter]);
+
+    const fetchPrograms = async () => {
+        try {
+            const qs = buildPageQuery({
+                page: currentPage,
+                limit: itemsPerPage,
+                scope: "org",
+                search: debouncedSearch || undefined,
+                standard: standardFilter !== "all" ? standardFilter : undefined,
+                siteId: siteFilter !== "all" ? siteFilter : undefined,
+            });
+            const res = await apiFetch(`/audit-programs${qs}`);
+            if (res.ok) {
+                const data = await res.json();
+                const parsed = parsePaginatedResponse<any>(data, currentPage, itemsPerPage);
+                setAuditPrograms(parsed.items);
+                setTotalItems(parsed.total);
+            } else {
+                toast.error("Failed to refresh audit programs");
+                setAuditPrograms([]);
+                setTotalItems(0);
+            }
+        } catch (error) {
+            console.error("Failed to fetch programs:", error);
+        }
+    };
 
     useEffect(() => {
         let cancelled = false;
-
-        const loadPrograms = async () => {
-            try {
-                const programsRes = await apiFetch(`/audit-programs?scope=org`);
-                const programsData = programsRes.ok ? await programsRes.json() : [];
-                if (cancelled) return;
-                setAuditPrograms(Array.isArray(programsData) ? programsData : []);
-                if (!programsRes.ok) {
-                    toast.error("Failed to load audit programs");
-                }
-            } catch (error) {
-                console.error("Failed to fetch audit programs:", error);
-                if (!cancelled) {
-                    toast.error("Failed to load audit programs");
-                }
-            } finally {
-                if (!cancelled) setListLoading(false);
-            }
-        };
 
         const loadFormBootstrap = async () => {
             try {
@@ -578,6 +598,9 @@ const AuditPrograms = () => {
                 const sitesData = sitesRes.ok ? await sitesRes.json() : [];
                 const companiesData = companiesRes.ok ? await companiesRes.json() : [];
                 let usersData = usersRes.ok ? await usersRes.json() : [];
+                if (usersData && !Array.isArray(usersData) && Array.isArray(usersData.items)) {
+                    usersData = usersData.items;
+                }
 
                 if (user && user.id) {
                     if (Array.isArray(usersData)) {
@@ -590,11 +613,16 @@ const AuditPrograms = () => {
                 }
 
                 let sitesList = Array.isArray(sitesData) ? sitesData : [];
-                if (sitesList.length === 0 && Array.isArray(companiesData) && companiesData.length > 0) {
-                    sitesList = sitesFromCompanies(companiesData);
+                const companiesList = Array.isArray(companiesData)
+                    ? companiesData
+                    : Array.isArray(companiesData?.items)
+                      ? companiesData.items
+                      : [];
+                if (sitesList.length === 0 && companiesList.length > 0) {
+                    sitesList = sitesFromCompanies(companiesList);
                 }
                 setSites(sitesList);
-                setCompanies(Array.isArray(companiesData) ? companiesData : []);
+                setCompanies(companiesList);
                 setAuditors(usersEligibleAsAuditors(Array.isArray(usersData) ? usersData : []));
 
                 if (!sitesRes.ok || !usersRes.ok) {
@@ -605,7 +633,6 @@ const AuditPrograms = () => {
             }
         };
 
-        loadPrograms();
         loadFormBootstrap();
 
         return () => {
@@ -613,39 +640,27 @@ const AuditPrograms = () => {
         };
     }, []);
 
-    const fetchPrograms = async () => {
-        try {
-            const res = await apiFetch(`/audit-programs?scope=org`);
-            if (res.ok) {
-                const data = await res.json();
-                setAuditPrograms(Array.isArray(data) ? data : []);
-            } else {
-                toast.error("Failed to refresh audit programs");
-                setAuditPrograms([]);
-            }
-        } catch (error) {
-            console.error("Failed to fetch programs:", error);
-        }
-    };
-
-    const filteredAuditPrograms = (Array.isArray(auditPrograms) ? auditPrograms : []).filter(program => {
-        const matchesSearch = program.name.toLowerCase().includes(searchQuery.toLowerCase());
-        const matchesStandard = standardFilter === "all" || program.isoStandard === standardFilter;
-        const matchesSite = siteFilter === "all" || program.siteId?.toString() === siteFilter;
-        return matchesSearch && matchesStandard && matchesSite;
-    });
-
-    const totalPages = Math.ceil(filteredAuditPrograms.length / itemsPerPage);
-    const paginatedPrograms = filteredAuditPrograms.slice(
-        (currentPage - 1) * itemsPerPage,
-        currentPage * itemsPerPage
-    );
-
-    // Reset page to 1 when filters change
     useEffect(() => {
-        setCurrentPage(1);
-    }, [searchQuery, standardFilter, siteFilter]);
+        let cancelled = false;
+        (async () => {
+            try {
+                setListLoading(true);
+                await fetchPrograms();
+            } catch (error) {
+                console.error("Failed to fetch audit programs:", error);
+                if (!cancelled) toast.error("Failed to load audit programs");
+            } finally {
+                if (!cancelled) setListLoading(false);
+            }
+        })();
+        return () => {
+            cancelled = true;
+        };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [currentPage, debouncedSearch, standardFilter, siteFilter]);
 
+    const filteredAuditPrograms = Array.isArray(auditPrograms) ? auditPrograms : [];
+    const paginatedPrograms = filteredAuditPrograms;
     const calculatePeriods = (frequencyVal = frequency, durationVal = duration, startDate = programStartDate) => {
         const count = frequencyVal === "Monthly" ? durationVal * 12 :
             frequencyVal === "Quarterly" ? durationVal * 4 :
@@ -1766,7 +1781,7 @@ const AuditPrograms = () => {
                     <ReusablePagination
                         currentPage={currentPage}
                         totalPages={totalPages}
-                        totalItems={filteredAuditPrograms.length}
+                        totalItems={totalItems}
                         itemsPerPage={itemsPerPage}
                         onPageChange={setCurrentPage}
                         className="mt-4"

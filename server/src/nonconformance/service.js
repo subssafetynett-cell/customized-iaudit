@@ -474,6 +474,8 @@ export async function listNonconformances({
     status,
     assigneeId,
     canAccessPlan,
+    page,
+    limit,
 }) {
     const actor = Number(actorId);
     const where = {};
@@ -527,26 +529,57 @@ export async function listNonconformances({
         ];
     }
 
-    const rows = await prisma.nonconformance.findMany({
-        where,
-        include: {
-            assignee: { select: { id: true, firstName: true, lastName: true, email: true, role: true } },
-            reviewer: { select: { id: true, firstName: true, lastName: true, email: true, role: true } },
-            createdBy: { select: { id: true, firstName: true, lastName: true, email: true, role: true } },
-            auditPlan: {
-                select: {
-                    id: true,
-                    auditName: true,
-                    executionId: true,
-                    auditProgramId: true,
-                },
+    const pageNum = Number.parseInt(String(page ?? ''), 10);
+    const paginate = Number.isFinite(pageNum) && pageNum >= 1;
+    let take = Number.parseInt(String(limit ?? (paginate ? 10 : 200)), 10);
+    if (!Number.isFinite(take) || take < 1) take = paginate ? 10 : 200;
+    take = Math.min(paginate ? 100 : 200, take);
+    const skip = paginate ? (pageNum - 1) * take : 0;
+
+    const include = {
+        assignee: { select: { id: true, firstName: true, lastName: true, email: true, role: true } },
+        reviewer: { select: { id: true, firstName: true, lastName: true, email: true, role: true } },
+        createdBy: { select: { id: true, firstName: true, lastName: true, email: true, role: true } },
+        auditPlan: {
+            select: {
+                id: true,
+                auditName: true,
+                executionId: true,
+                auditProgramId: true,
             },
         },
-        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-        take: 200,
-    });
+    };
 
-    return rows.map(serializeNonconformance);
+    if (!paginate) {
+        const rows = await prisma.nonconformance.findMany({
+            where,
+            include,
+            orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+            take,
+        });
+        return rows.map(serializeNonconformance);
+    }
+
+    const [total, rows] = await Promise.all([
+        prisma.nonconformance.count({ where }),
+        prisma.nonconformance.findMany({
+            where,
+            include,
+            orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+            skip,
+            take,
+        }),
+    ]);
+
+    const items = rows.map(serializeNonconformance);
+    const totalPages = total === 0 ? 0 : Math.ceil(total / take);
+    return {
+        items,
+        page: pageNum,
+        limit: take,
+        total,
+        totalPages,
+    };
 }
 
 /**

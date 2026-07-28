@@ -1481,7 +1481,7 @@ const AuditExecute = () => {
   };
 
   const handleClauseFileUpload = async (clause: string, files: FileList | null) => {
-    const { accepted, rejected } = await processAuditEvidenceFileList(files);
+    const { accepted, rejected } = await processAuditEvidenceFileList(files, { planId: id });
     reportRejectedEvidence(rejected, accepted.length);
     if (accepted.length === 0) return;
 
@@ -1519,7 +1519,7 @@ const AuditExecute = () => {
   };
 
   const handleGenericFileUpload = async (key: string, files: FileList | null) => {
-    const { accepted, rejected } = await processAuditEvidenceFileList(files);
+    const { accepted, rejected } = await processAuditEvidenceFileList(files, { planId: id });
     reportRejectedEvidence(rejected, accepted.length);
     if (accepted.length === 0) return;
 
@@ -1753,7 +1753,10 @@ const AuditExecute = () => {
         body: JSON.stringify({ auditData }),
       });
 
+      // Clear loading as soon as status is known — do not wait on / parse a large body.
       if (res.ok) {
+        // Drain body in background so the connection can close; ignore contents.
+        void res.text().catch(() => "");
         const savedPayload = buildAuditDataPayload();
         if (savedPayload.auditCompleted) {
           toast.success("Audit completed — all clauses assessed and findings closed.", { id: toastId });

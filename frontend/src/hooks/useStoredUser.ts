@@ -14,7 +14,17 @@ export function useStoredUser() {
   const [user, setUserState] = useState<Record<string, unknown> | null>(readStoredUser);
 
   useEffect(() => {
-    const refresh = () => setUserState(readStoredUser());
+    const refresh = () => {
+      const next = readStoredUser();
+      setUserState((prev) => {
+        try {
+          if (JSON.stringify(prev) === JSON.stringify(next)) return prev;
+        } catch {
+          /* fall through */
+        }
+        return next;
+      });
+    };
     window.addEventListener("user-updated", refresh);
     window.addEventListener("storage", refresh);
     window.addEventListener("focus", refresh);

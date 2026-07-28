@@ -132,7 +132,7 @@ export default function GettingStarted() {
                             }
                         }),
                         apiFetch(
-                            `/audit-plans?scope=org&includeData=true`,
+                            `/audit-plans?scope=org`,
                         ).then(async (res) => {
                             if (!cancelled && res.ok) {
                                 const data = await res.json();

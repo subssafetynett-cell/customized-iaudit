@@ -27,6 +27,7 @@ import { toast } from "sonner";
 import { format } from "date-fns";
 import { downloadAuditReport, type AuditReportFormat } from "@/utils/auditReportExport";
 import ReusablePagination from "@/components/ReusablePagination";
+import { buildPageQuery, parsePaginatedResponse } from "@/lib/pagination";
 import { TourStepPopover } from "@/components/TourStepPopover";
 import {
     AUDIT_EXECUTE_TOUR_TOTAL_STEPS,
@@ -141,23 +142,72 @@ const AuditList = () => {
 
     // Pagination
     const [currentPage, setCurrentPage] = useState(1);
+    const [totalItems, setTotalItems] = useState(0);
+    const [siteOptions, setSiteOptions] = useState<string[]>(["all"]);
     const itemsPerPage = 8;
+    const totalPages = totalItems === 0 ? 0 : Math.ceil(totalItems / itemsPerPage);
+
+    const [debouncedSearch, setDebouncedSearch] = useState(searchQuery);
+    useEffect(() => {
+        const t = window.setTimeout(() => setDebouncedSearch(searchQuery), 300);
+        return () => window.clearTimeout(t);
+    }, [searchQuery]);
 
     useEffect(() => {
-        const fetchPlans = async () => {
+        setCurrentPage(1);
+    }, [debouncedSearch, selectedSite, typeFilter]);
+
+    const fetchPlans = async () => {
+        try {
+            setLoading(true);
+            const qs = buildPageQuery({
+                page: currentPage,
+                limit: itemsPerPage,
+                scope: "org",
+                search: debouncedSearch || undefined,
+                site: selectedSite !== "all" ? selectedSite : undefined,
+                type: typeFilter !== "all" ? typeFilter : undefined,
+            });
+            const res = await apiFetch(`/audit-plans${qs}`);
+            const data = await res.json();
+            const parsed = parsePaginatedResponse<any>(data, currentPage, itemsPerPage);
+            setAuditPlans(parsed.items);
+            setTotalItems(parsed.total);
+        } catch (error) {
+            console.error("Failed to fetch audit plans:", error);
+            toast.error("Failed to load audit plans");
+            setAuditPlans([]);
+            setTotalItems(0);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    useEffect(() => {
+        void fetchPlans();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [currentPage, debouncedSearch, selectedSite, typeFilter]);
+
+    useEffect(() => {
+        let cancelled = false;
+        (async () => {
             try {
-                const user = JSON.parse(localStorage.getItem('user') || '{}');
-                const res = await apiFetch(`/audit-plans?scope=org&includeData=true`);
+                const res = await apiFetch("/sites");
+                if (!res.ok || cancelled) return;
                 const data = await res.json();
-                setAuditPlans(Array.isArray(data) ? data : []);
-            } catch (error) {
-                console.error("Failed to fetch audit plans:", error);
-                toast.error("Failed to load audit plans");
-            } finally {
-                setLoading(false);
+                const names = (Array.isArray(data) ? data : [])
+                    .map((s: any) => String(s?.name || "").trim())
+                    .filter(Boolean);
+                if (!cancelled) {
+                    setSiteOptions(["all", ...Array.from(new Set(names))]);
+                }
+            } catch {
+                /* ignore — site filter still works with typed values */
             }
+        })();
+        return () => {
+            cancelled = true;
         };
-        fetchPlans();
     }, []);
 
     const handleDeletePlan = async (planId: number) => {
@@ -166,8 +216,8 @@ const AuditList = () => {
                 method: "DELETE"
             });
             if (res.ok) {
-                setAuditPlans(prev => prev.filter(p => p.id !== planId));
                 toast.success("Audit plan deleted successfully");
+                void fetchPlans();
             } else {
                 throw new Error("Failed to delete");
             }
@@ -210,40 +260,12 @@ const AuditList = () => {
         }
     };
 
-    const filteredPlansBySearch = auditPlans.filter(plan =>
-        (plan.auditName && plan.auditName.toLowerCase().includes(searchQuery.toLowerCase())) ||
-        (plan.executionId && plan.executionId.toLowerCase().includes(searchQuery.toLowerCase())) ||
-        (plan.location && plan.location.toLowerCase().includes(searchQuery.toLowerCase()))
-    );
-
-    const filteredPlansByType = filteredPlansBySearch.filter((plan) => {
-        if (typeFilter === "all") return true;
-        const isModule = isModuleAuditListPlan(plan);
-        if (typeFilter === "module") return isModule;
-        return !isModule;
-    });
-
-    const uniqueSites = React.useMemo(() => {
-        const sites = auditPlans.map(plan => plan.auditProgram?.site?.name || plan.location).filter(Boolean);
-        return ["all", ...Array.from(new Set(sites))];
-    }, [auditPlans]);
-
-    const filteredPlansBySite = filteredPlansByType.filter(plan => {
-        if (selectedSite === "all") return true;
-        const siteName = plan.auditProgram?.site?.name || plan.location;
-        return siteName === selectedSite;
-    });
-
-    const filteredPlans = filteredPlansBySite;
-
-    const totalPages = Math.ceil(filteredPlans.length / itemsPerPage);
-    const paginatedPlans = filteredPlans.slice(
-        (currentPage - 1) * itemsPerPage,
-        currentPage * itemsPerPage
-    );
+    const filteredPlans = auditPlans;
+    const paginatedPlans = auditPlans;
+    const uniqueSites = siteOptions;
 
     const tourTargetPlan =
-        paginatedPlans[0] ?? filteredPlans[0] ?? auditPlans[0] ?? null;
+        paginatedPlans[0] ?? auditPlans[0] ?? null;
 
     const handleAuditExecuteTourNext = () => {
         if (auditExecuteTourStep === 3) {
@@ -277,10 +299,7 @@ const AuditList = () => {
         setAuditExecuteTourStep(auditExecuteTourStep - 1);
     };
 
-    // Reset page to 1 when filters change
-    useEffect(() => {
-        setCurrentPage(1);
-    }, [searchQuery, selectedSite, typeFilter]);
+    // Filters are applied server-side; page resets when debounced search / filters change.
 
     return (
         <div className="flex-1 space-y-8 p-8 pt-6 min-h-screen bg-white relative">
@@ -548,7 +567,7 @@ const AuditList = () => {
                     <ReusablePagination
                         currentPage={currentPage}
                         totalPages={totalPages}
-                        totalItems={filteredPlans.length}
+                        totalItems={totalItems}
                         itemsPerPage={itemsPerPage}
                         onPageChange={setCurrentPage}
                         className="mt-6"

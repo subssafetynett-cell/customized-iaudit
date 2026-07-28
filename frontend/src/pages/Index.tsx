@@ -173,34 +173,48 @@ const Index = () => {
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
     const fetchData = async () => {
       try {
-        const user = JSON.parse(localStorage.getItem('user') || '{}');
+        // Light list first (no multi‑MB auditData) so the dashboard paints quickly.
         const [usersRes, plansRes, programsRes] = await Promise.all([
           apiFetch(`/users`),
-          apiFetch(`/audit-plans?scope=org&includeData=true`),
-          apiFetch(`/audit-programs?scope=org`)
+          apiFetch(`/audit-plans?scope=org`),
+          apiFetch(`/audit-programs?scope=org`),
         ]);
 
+        if (cancelled) return;
         if (usersRes.ok) setUsers(await usersRes.json());
         if (plansRes.ok) setAuditPlans(await plansRes.json());
         if (programsRes.ok) setAuditPrograms(await programsRes.json());
 
         const { assessments } = await fetchSelfAssessmentsPersisted();
-        setSelfAssessments(assessments);
+        if (!cancelled) setSelfAssessments(assessments);
 
         const { analyses } = await fetchGapAnalysesPersisted();
-        setGapAnalyses(analyses);
-
+        if (!cancelled) setGapAnalyses(analyses);
       } catch (error) {
         console.error("Failed to fetch dashboard data:", error);
         toast.error("Failed to load dashboard statistics");
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
+      }
+
+      // Enrich with slim auditData (evidence stripped server-side) for findings charts only.
+      try {
+        const heavyRes = await apiFetch(`/audit-plans?scope=org&includeData=true`);
+        if (!cancelled && heavyRes.ok) {
+          setAuditPlans(await heavyRes.json());
+        }
+      } catch (error) {
+        console.warn("Failed to enrich dashboard findings:", error);
       }
     };
 
-    fetchData();
+    void fetchData();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // Self Assessment Score distribution logic

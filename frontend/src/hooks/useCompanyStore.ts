@@ -69,7 +69,8 @@ async function fetchCompaniesFromApi() {
     const response = await apiFetch(`/companies?_t=${Date.now()}`);
     if (response.ok) {
       const data = await response.json();
-      globalCompanies = data.map(normalizeCompany);
+      const rows = Array.isArray(data) ? data : Array.isArray(data?.items) ? data.items : [];
+      globalCompanies = rows.map(normalizeCompany);
     }
   } catch (error) {
     console.error("Failed to fetch companies:", error);

@@ -86,8 +86,12 @@ export async function parseApiJson<T = unknown>(response: Response): Promise<T> 
     return response.json() as Promise<T>;
 }
 
+/** Coalesce identical in-flight GETs so React Strict Mode / dual mounts don't double-fetch. */
+const inflightGetRequests = new Map<string, Promise<Response>>();
+
 export async function apiFetch(endpoint: string, options: ApiFetchOptions = {}) {
     const { skipSessionLogout = false, ...fetchOptions } = options;
+    const method = String(fetchOptions.method || "GET").toUpperCase();
     const hadSession = hasClientAuthSession();
 
     const headers: Record<string, string> = {
@@ -99,28 +103,53 @@ export async function apiFetch(endpoint: string, options: ApiFetchOptions = {}) 
     }
 
     const url = resolveApiUrl(endpoint);
+    const canCoalesce = method === "GET" && !fetchOptions.body;
+    const coalesceKey = canCoalesce ? `${method}:${url}` : "";
 
-    let response: Response;
-    try {
-        response = await fetch(url, {
-            ...fetchOptions,
-            headers,
-            credentials: "include",
-        });
-    } catch {
-        // Proxy/backend blip (ECONNRESET during nodemon restart, etc.) — never treat as logout.
-        throw new Error("The API is temporarily unavailable. Please try again.");
+    if (canCoalesce) {
+        const existing = inflightGetRequests.get(coalesceKey);
+        if (existing) {
+            const shared = await existing;
+            return shared.clone();
+        }
     }
 
-    applySessionExpiryFromResponse(response);
+    const run = (async () => {
+        let response: Response;
+        try {
+            response = await fetch(url, {
+                ...fetchOptions,
+                method,
+                headers,
+                credentials: "include",
+            });
+        } catch {
+            // Proxy/backend blip (ECONNRESET during nodemon restart, etc.) — never treat as logout.
+            throw new Error("The API is temporarily unavailable. Please try again.");
+        }
 
-    // Never auto-logout from a single 401. Sidebar pages and optional polls must not
-    // destroy a valid UI session if the cookie briefly fails to attach. Explicit
-    // status/session hooks handle real expiry.
-    if (response.status === 401 && hadSession && !skipSessionLogout) {
-        // Soft signal only — leave localStorage intact so navigation keeps working.
-        console.warn(`[apiFetch] 401 for ${endpoint} (session left intact)`);
+        applySessionExpiryFromResponse(response);
+
+        // Never auto-logout from a single 401. Sidebar pages and optional polls must not
+        // destroy a valid UI session if the cookie briefly fails to attach. Explicit
+        // status/session hooks handle real expiry.
+        if (response.status === 401 && hadSession && !skipSessionLogout) {
+            // Soft signal only — leave localStorage intact so navigation keeps working.
+            console.warn(`[apiFetch] 401 for ${endpoint} (session left intact)`);
+        }
+
+        return response;
+    })();
+
+    if (canCoalesce) {
+        inflightGetRequests.set(coalesceKey, run);
+        try {
+            const response = await run;
+            return response.clone();
+        } finally {
+            inflightGetRequests.delete(coalesceKey);
+        }
     }
 
-    return response;
+    return run;
 }

@@ -39,8 +39,24 @@ import {
     sanitizeShortLabel,
     sanitizeStringArray,
     sanitizeAuditDataPayload,
+    stripHeavyAuditListPayload,
     escapeHtml
 } from './textSanitize.js';
+import {
+    auditEvidenceUpload,
+    handleUploadAuditEvidence,
+    handleAuditEvidenceUploadError,
+} from './uploadAuditEvidence.js';
+import {
+    companyLogoUpload,
+    handleUploadCompanyLogo,
+    handleCompanyLogoUploadError,
+} from './uploadCompanyLogo.js';
+import {
+    parsePaginationQuery,
+    paginatedResponse,
+    paginateArray,
+} from './pagination.js';
 
 loadServerEnv();
 
@@ -1260,8 +1276,8 @@ app.use((req, res, next) => {
         "font-src 'self' data: https://fonts.gstatic.com; " +
         "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
         "script-src 'self' 'unsafe-inline'; " +
-        "img-src 'self' data:; " +
-        "connect-src 'self' https://iaudit.global https://*.iaudit.global https://fonts.googleapis.com; " +
+        "img-src 'self' data: https: blob:; " +
+        "connect-src 'self' https://iaudit.global https://*.iaudit.global https://fonts.googleapis.com https://res.cloudinary.com https://*.cloudinary.com; " +
         "frame-ancestors 'self';"
     );
 
@@ -1398,6 +1414,40 @@ const authenticateToken = async (req, res, next) => {
         return res.status(503).json({ error: 'Authentication service temporarily unavailable. Please try again.' });
     }
 };
+
+// Multipart uploads (must not rely on express.json body parsing)
+app.post(
+    '/uploads/company-logo',
+    authenticateToken,
+    checkTrialExpiration,
+    companyLogoUpload.single('logo'),
+    handleUploadCompanyLogo,
+    handleCompanyLogoUploadError,
+);
+app.post(
+    '/uploads/audit-evidence',
+    authenticateToken,
+    checkTrialExpiration,
+    auditEvidenceUpload.single('file'),
+    handleUploadAuditEvidence,
+    handleAuditEvidenceUploadError,
+);
+mountedApiRouter.post(
+    '/uploads/company-logo',
+    authenticateToken,
+    checkTrialExpiration,
+    companyLogoUpload.single('logo'),
+    handleUploadCompanyLogo,
+    handleCompanyLogoUploadError,
+);
+mountedApiRouter.post(
+    '/uploads/audit-evidence',
+    authenticateToken,
+    checkTrialExpiration,
+    auditEvidenceUpload.single('file'),
+    handleUploadAuditEvidence,
+    handleAuditEvidenceUploadError,
+);
 
 const router = express.Router();
 
@@ -2775,6 +2825,8 @@ app.get('/companies', authenticateToken, checkTrialExpiration, async (req, res) 
 
     const { admin } = req.query;
     const rawQueryUserId = req.query.userId;
+    const pagination = parsePaginationQuery(req.query, { defaultLimit: 8 });
+    const search = String(req.query.search || '').trim();
 
     console.log(`[DEBUG] GET /companies called for actor: ${actorId}, admin: ${admin}`);
 
@@ -2799,19 +2851,50 @@ app.get('/companies', authenticateToken, checkTrialExpiration, async (req, res) 
             }
         }
 
+        const companyInclude = {
+            sites: {
+                include: { departments: true }
+            }
+        };
+
+        const searchWhere = search
+            ? { name: { contains: search, mode: 'insensitive' } }
+            : {};
+
+        const sendCompanies = async (where) => {
+            const fullWhere = { ...where, ...searchWhere };
+            if (!pagination.paginate) {
+                const companies = await prisma.company.findMany({
+                    where: fullWhere,
+                    include: companyInclude,
+                    orderBy: { id: 'asc' },
+                });
+                return res.json(companies);
+            }
+            const [total, companies] = await Promise.all([
+                prisma.company.count({ where: fullWhere }),
+                prisma.company.findMany({
+                    where: fullWhere,
+                    include: companyInclude,
+                    orderBy: { id: 'asc' },
+                    skip: pagination.skip,
+                    take: pagination.limit,
+                }),
+            ]);
+            return res.json(
+                paginatedResponse(companies, {
+                    page: pagination.page,
+                    limit: pagination.limit,
+                    total,
+                }),
+            );
+        };
+
         if (admin === 'true') {
             if (viewer.role !== 'superadmin') {
                 return res.status(403).json({ error: 'Forbidden' });
             }
-            const companies = await prisma.company.findMany({
-                include: {
-                    sites: {
-                        include: { departments: true }
-                    }
-                }
-            });
-            console.log(`[DEBUG] Fetched ${companies.length} companies for superadmin (admin=all).`);
-            return res.json(companies);
+            return await sendCompanies({});
         }
 
         if (normalizeUserRole(viewer.role) === 'auditee') {
@@ -2827,6 +2910,9 @@ app.get('/companies', authenticateToken, checkTrialExpiration, async (req, res) 
             for (const site of assignedSites) {
                 const company = site.company;
                 if (!company) continue;
+                if (search && !String(company.name || '').toLowerCase().includes(search.toLowerCase())) {
+                    continue;
+                }
                 if (!companyMap.has(company.id)) {
                     const { sites: _s, ...companyBase } = company;
                     companyMap.set(company.id, { ...companyBase, sites: [] });
@@ -2834,7 +2920,11 @@ app.get('/companies', authenticateToken, checkTrialExpiration, async (req, res) 
                 const { company: _c, ...siteRow } = site;
                 companyMap.get(company.id).sites.push(siteRow);
             }
-            return res.json(Array.from(companyMap.values()));
+            const all = Array.from(companyMap.values());
+            if (!pagination.paginate) {
+                return res.json(all);
+            }
+            return res.json(paginateArray(all, pagination));
         }
 
         let ownerUserIds;
@@ -2847,20 +2937,17 @@ app.get('/companies', authenticateToken, checkTrialExpiration, async (req, res) 
         }
 
         if (ownerUserIds.length === 0) {
-            return res.json([]);
+            if (!pagination.paginate) return res.json([]);
+            return res.json(
+                paginatedResponse([], {
+                    page: pagination.page,
+                    limit: pagination.limit,
+                    total: 0,
+                }),
+            );
         }
 
-        const companies = await prisma.company.findMany({
-            where: { userId: { in: ownerUserIds } },
-            include: {
-                sites: {
-                    include: { departments: true }
-                }
-            }
-        });
-
-        console.log(`[DEBUG] Successfully fetched ${companies.length} companies for allowed owners.`);
-        res.json(companies);
+        return await sendCompanies({ userId: { in: ownerUserIds } });
     } catch (error) {
         console.error('Failed to fetch companies:', error);
         res.status(500).json({ error: 'Failed to fetch companies', details: error.message || String(error) });
@@ -4480,11 +4567,51 @@ async function requirePlatformSuperAdmin(req, res) {
 app.get('/super-admin/users', authenticateToken, async (req, res) => {
     try {
         if (!(await requirePlatformSuperAdmin(req, res))) return;
-        const users = await prisma.user.findMany({
-            select: SUPER_ADMIN_USER_LIST_SELECT,
-            orderBy: [{ createdAt: 'desc' }, { id: 'desc' }]
-        });
-        res.json(users);
+        const pagination = parsePaginationQuery(req.query, { defaultLimit: 15 });
+        const search = String(req.query.search || '').trim();
+        const role = String(req.query.role || '').trim();
+        const status = String(req.query.status || '').trim().toLowerCase();
+
+        const where = {};
+        if (search) {
+            where.OR = [
+                { firstName: { contains: search, mode: 'insensitive' } },
+                { lastName: { contains: search, mode: 'insensitive' } },
+                { email: { contains: search, mode: 'insensitive' } },
+            ];
+        }
+        if (role && role !== 'all') {
+            where.role = role;
+        }
+        if (status === 'active') where.isActive = true;
+        if (status === 'inactive') where.isActive = false;
+
+        if (!pagination.paginate) {
+            const users = await prisma.user.findMany({
+                where,
+                select: SUPER_ADMIN_USER_LIST_SELECT,
+                orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+            });
+            return res.json(users);
+        }
+
+        const [total, users] = await Promise.all([
+            prisma.user.count({ where }),
+            prisma.user.findMany({
+                where,
+                select: SUPER_ADMIN_USER_LIST_SELECT,
+                orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+                skip: pagination.skip,
+                take: pagination.limit,
+            }),
+        ]);
+        res.json(
+            paginatedResponse(users, {
+                page: pagination.page,
+                limit: pagination.limit,
+                total,
+            }),
+        );
     } catch (error) {
         console.error('Failed to fetch super-admin users:', error);
         res.status(500).json({ error: 'Failed to fetch users' });
@@ -4495,15 +4622,46 @@ app.get('/super-admin/users', authenticateToken, async (req, res) => {
 app.get('/super-admin/companies', authenticateToken, async (req, res) => {
     try {
         if (!(await requirePlatformSuperAdmin(req, res))) return;
-        const companies = await prisma.company.findMany({
-            include: {
-                sites: {
-                    include: { departments: true }
-                }
-            },
-            orderBy: { id: 'asc' }
-        });
-        res.json(companies);
+        const pagination = parsePaginationQuery(req.query, { defaultLimit: 15 });
+        const search = String(req.query.search || '').trim();
+        const where = search
+            ? { name: { contains: search, mode: 'insensitive' } }
+            : {};
+
+        if (!pagination.paginate) {
+            const companies = await prisma.company.findMany({
+                where,
+                include: {
+                    sites: {
+                        include: { departments: true }
+                    }
+                },
+                orderBy: { id: 'asc' }
+            });
+            return res.json(companies);
+        }
+
+        const [total, companies] = await Promise.all([
+            prisma.company.count({ where }),
+            prisma.company.findMany({
+                where,
+                include: {
+                    sites: {
+                        include: { departments: true }
+                    }
+                },
+                orderBy: { id: 'asc' },
+                skip: pagination.skip,
+                take: pagination.limit,
+            }),
+        ]);
+        res.json(
+            paginatedResponse(companies, {
+                page: pagination.page,
+                limit: pagination.limit,
+                total,
+            }),
+        );
     } catch (error) {
         console.error('Failed to fetch super-admin companies:', error);
         res.status(500).json({ error: 'Failed to fetch companies' });
@@ -4526,8 +4684,20 @@ app.get('/users', authenticateToken, async (req, res) => {
             return res.status(401).json({ error: 'User not found.' });
         }
 
+        const pagination = parsePaginationQuery(req.query, { defaultLimit: 8 });
+        const search = String(req.query.search || '').trim();
+        const roleFilter = String(req.query.role || '').trim();
+        const statusFilter = String(req.query.status || '').trim().toLowerCase();
+
         if (normalizeUserRole(viewer.role) === 'auditee') {
-            return res.json([]);
+            if (!pagination.paginate) return res.json([]);
+            return res.json(
+                paginatedResponse([], {
+                    page: pagination.page,
+                    limit: pagination.limit,
+                    total: 0,
+                }),
+            );
         }
 
         const scopeAll =
@@ -4560,58 +4730,74 @@ app.get('/users', authenticateToken, async (req, res) => {
         }
 
         if (allowedIds.length === 0) {
-            return res.json([]);
+            if (!pagination.paginate) return res.json([]);
+            return res.json(
+                paginatedResponse([], {
+                    page: pagination.page,
+                    limit: pagination.limit,
+                    total: 0,
+                }),
+            );
         }
 
         const whereBase = {
             id: { in: allowedIds },
         };
-        const where =
-            filterCreatorId != null ? { ...whereBase, creatorId: filterCreatorId } : whereBase;
-
-        const users = await prisma.user.findMany({
-            where,
-            select: {
-                id: true,
-                firstName: true,
-                lastName: true,
-                email: true,
-                mobile: true,
-                role: true,
-                customRoleName: true,
-                isActive: true,
-                emailVerifiedAt: true,
-                creatorId: true,
-                createdAt: true
-            },
-            orderBy: [{ createdAt: 'desc' }, { id: 'desc' }]
-        });
-
-        const auditeeIds = users
-            .filter((u) => normalizeUserRole(u.role) === 'auditee')
-            .map((u) => u.id);
-        const sitesByAuditeeId = new Map();
-        if (auditeeIds.length > 0) {
-            const sites = await prisma.site.findMany({
-                where: { userId: { in: auditeeIds } },
-                select: {
-                    id: true,
-                    name: true,
-                    userId: true,
-                    company: { select: { name: true } },
-                },
-                orderBy: { name: 'asc' },
-            });
-            for (const site of sites) {
-                if (site.userId == null) continue;
-                const uid = Number(site.userId);
-                if (!sitesByAuditeeId.has(uid)) sitesByAuditeeId.set(uid, []);
-                sitesByAuditeeId.get(uid).push(site);
-            }
+        if (filterCreatorId != null) {
+            whereBase.creatorId = filterCreatorId;
         }
+        if (search) {
+            whereBase.OR = [
+                { firstName: { contains: search, mode: 'insensitive' } },
+                { lastName: { contains: search, mode: 'insensitive' } },
+                { email: { contains: search, mode: 'insensitive' } },
+            ];
+        }
+        if (roleFilter && roleFilter !== 'all') {
+            whereBase.role = roleFilter;
+        }
+        if (statusFilter === 'active') whereBase.isActive = true;
+        if (statusFilter === 'inactive') whereBase.isActive = false;
 
-        res.json(
-            users.map((u) => {
+        const userSelect = {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+            mobile: true,
+            role: true,
+            customRoleName: true,
+            isActive: true,
+            emailVerifiedAt: true,
+            creatorId: true,
+            createdAt: true
+        };
+
+        const attachAuditeeSites = async (users) => {
+            const auditeeIds = users
+                .filter((u) => normalizeUserRole(u.role) === 'auditee')
+                .map((u) => u.id);
+            const sitesByAuditeeId = new Map();
+            if (auditeeIds.length > 0) {
+                const sites = await prisma.site.findMany({
+                    where: { userId: { in: auditeeIds } },
+                    select: {
+                        id: true,
+                        name: true,
+                        userId: true,
+                        company: { select: { name: true } },
+                    },
+                    orderBy: { name: 'asc' },
+                });
+                for (const site of sites) {
+                    if (site.userId == null) continue;
+                    const uid = Number(site.userId);
+                    if (!sitesByAuditeeId.has(uid)) sitesByAuditeeId.set(uid, []);
+                    sitesByAuditeeId.get(uid).push(site);
+                }
+            }
+
+            return users.map((u) => {
                 if (normalizeUserRole(u.role) !== 'auditee') return u;
                 const assigned = sitesByAuditeeId.get(u.id) ?? [];
                 const siteIds = assigned.map((s) => s.id);
@@ -4625,6 +4811,34 @@ app.get('/users', authenticateToken, async (req, res) => {
                     siteId: siteIds[0] ?? null,
                     siteLabel: siteLabels.length > 0 ? siteLabels.join(', ') : null,
                 };
+            });
+        };
+
+        if (!pagination.paginate) {
+            const users = await prisma.user.findMany({
+                where: whereBase,
+                select: userSelect,
+                orderBy: [{ createdAt: 'desc' }, { id: 'desc' }]
+            });
+            return res.json(await attachAuditeeSites(users));
+        }
+
+        const [total, users] = await Promise.all([
+            prisma.user.count({ where: whereBase }),
+            prisma.user.findMany({
+                where: whereBase,
+                select: userSelect,
+                orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+                skip: pagination.skip,
+                take: pagination.limit,
+            }),
+        ]);
+
+        res.json(
+            paginatedResponse(await attachAuditeeSites(users), {
+                page: pagination.page,
+                limit: pagination.limit,
+                total,
             }),
         );
     } catch (error) {
@@ -5810,85 +6024,136 @@ app.get('/audit-programs', authenticateToken, checkTrialExpiration, async (req, 
         }
         }
 
-        const programs = await prisma.auditProgram.findMany({
-            where: programWhere,
-            orderBy: { createdAt: 'desc' },
-            select: wantFull
-                ? {
-                    id: true,
-                    name: true,
-                    isoStandard: true,
-                    frequency: true,
-                    duration: true,
-                    status: true,
-                    createdAt: true,
-                    updatedAt: true,
-                    siteId: true,
-                    site: {
-                        select: {
-                            id: true,
-                            name: true
-                        }
-                    },
-                    leadAuditor: {
-                        select: {
-                            id: true,
-                            firstName: true,
-                            lastName: true
-                        }
-                    },
-                    auditors: {
-                        select: {
-                            id: true,
-                            firstName: true,
-                            lastName: true
-                        }
-                    },
-                    scheduleData: true
-                }
-                : {
-                    id: true,
-                    name: true,
-                    isoStandard: true,
-                    frequency: true,
-                    duration: true,
-                    status: true,
-                    createdAt: true,
-                    updatedAt: true,
-                    siteId: true,
-                    site: {
-                        select: {
-                            id: true,
-                            name: true
-                        }
-                    },
-                    scheduleData: true
-                }
-        });
-
-        const optimizedPrograms = programs.map(p => {
-            const sd = p.scheduleData && typeof p.scheduleData === 'object' ? p.scheduleData : null;
-            const isConfigured = Boolean(sd && Object.keys(sd).length > 0);
-            const departmentIds = Array.isArray(sd?.departmentIds)
-                ? sd.departmentIds.map((id) => String(id))
-                : [];
-            const departmentNames = Array.isArray(sd?.departmentNames)
-                ? sd.departmentNames.map((name) => String(name))
-                : [];
-
-            if (wantFull) {
-                return { ...p, isConfigured, departmentIds, departmentNames };
+        const programSelect = wantFull
+            ? {
+                id: true,
+                name: true,
+                isoStandard: true,
+                frequency: true,
+                duration: true,
+                status: true,
+                createdAt: true,
+                updatedAt: true,
+                siteId: true,
+                site: {
+                    select: {
+                        id: true,
+                        name: true
+                    }
+                },
+                leadAuditor: {
+                    select: {
+                        id: true,
+                        firstName: true,
+                        lastName: true
+                    }
+                },
+                auditors: {
+                    select: {
+                        id: true,
+                        firstName: true,
+                        lastName: true
+                    }
+                },
+                scheduleData: true
             }
-
-            const { scheduleData: _, ...programWithoutData } = p;
-            return {
-                ...programWithoutData,
-                isConfigured,
-                departmentIds,
-                departmentNames,
+            : {
+                id: true,
+                name: true,
+                isoStandard: true,
+                frequency: true,
+                duration: true,
+                status: true,
+                createdAt: true,
+                updatedAt: true,
+                siteId: true,
+                site: {
+                    select: {
+                        id: true,
+                        name: true
+                    }
+                },
+                scheduleData: true
             };
-        });
-        res.json(optimizedPrograms);
+
+        const search = String(req.query.search || '').trim();
+        const standardFilter = String(req.query.standard || req.query.isoStandard || '').trim();
+        const siteFilter = String(req.query.siteId || '').trim();
+        const pagination = parsePaginationQuery(req.query, { defaultLimit: 8 });
+
+        if (search) {
+            programWhere = {
+                AND: [
+                    programWhere,
+                    { name: { contains: search, mode: 'insensitive' } },
+                ],
+            };
+        }
+        if (standardFilter && standardFilter !== 'all') {
+            programWhere = {
+                AND: [programWhere, { isoStandard: standardFilter }],
+            };
+        }
+        if (siteFilter && siteFilter !== 'all') {
+            const siteIdNum = Number.parseInt(siteFilter, 10);
+            if (!Number.isNaN(siteIdNum)) {
+                programWhere = {
+                    AND: [programWhere, { siteId: siteIdNum }],
+                };
+            }
+        }
+
+        const mapPrograms = (programs) =>
+            programs.map((p) => {
+                const sd = p.scheduleData && typeof p.scheduleData === 'object' ? p.scheduleData : null;
+                const isConfigured = Boolean(sd && Object.keys(sd).length > 0);
+                const departmentIds = Array.isArray(sd?.departmentIds)
+                    ? sd.departmentIds.map((id) => String(id))
+                    : [];
+                const departmentNames = Array.isArray(sd?.departmentNames)
+                    ? sd.departmentNames.map((name) => String(name))
+                    : [];
+
+                if (wantFull) {
+                    return { ...p, isConfigured, departmentIds, departmentNames };
+                }
+
+                const { scheduleData: _, ...programWithoutData } = p;
+                return {
+                    ...programWithoutData,
+                    isConfigured,
+                    departmentIds,
+                    departmentNames,
+                };
+            });
+
+        if (!pagination.paginate) {
+            const programs = await prisma.auditProgram.findMany({
+                where: programWhere,
+                orderBy: { createdAt: 'desc' },
+                select: programSelect,
+            });
+            return res.json(mapPrograms(programs));
+        }
+
+        const [total, programs] = await Promise.all([
+            prisma.auditProgram.count({ where: programWhere }),
+            prisma.auditProgram.findMany({
+                where: programWhere,
+                orderBy: { createdAt: 'desc' },
+                select: programSelect,
+                skip: pagination.skip,
+                take: pagination.limit,
+            }),
+        ]);
+
+        res.json(
+            paginatedResponse(mapPrograms(programs), {
+                page: pagination.page,
+                limit: pagination.limit,
+                total,
+            }),
+        );
     } catch (error) {
         console.error('Failed to fetch audit programs:', error);
         res.status(500).json({ error: 'Failed to fetch audit programs' });
@@ -6156,88 +6421,196 @@ app.get('/audit-plans', authenticateToken, checkTrialExpiration, async (req, res
             }
         }
 
-        const plans = await prisma.auditPlan.findMany({
-            where: whereClause,
-            orderBy: { createdAt: 'desc' },
-            select: {
-                id: true,
-                executionId: true,
-                auditType: true,
-                auditName: true,
-                date: true,
-                location: true,
-                createdAt: true,
-                updatedAt: true,
-                templateId: true,
-                auditProgramId: true,
-                userId: true,
-                leadAuditorId: true,
-                // We fetch auditData only to calculate progress on server
-                auditData: true,
-                findingsData: true,
-                leadAuditor: {
-                    select: {
-                        id: true,
-                        firstName: true,
-                        lastName: true
-                    }
-                },
-                auditors: {
-                    select: {
-                        id: true,
-                        firstName: true,
-                        lastName: true
-                    }
-                },
-                auditProgram: {
-                    select: {
-                        id: true,
-                        name: true,
-                        scheduleData: true,
-                        site: {
-                            select: {
-                                id: true,
-                                name: true
-                            }
+        const includeData = req.query.includeData === 'true';
+        const pagination = parsePaginationQuery(req.query, { defaultLimit: 8 });
+        const search = String(req.query.search || '').trim();
+        const siteName = String(req.query.site || req.query.siteName || '').trim();
+        const typeFilter = String(req.query.type || '').trim().toLowerCase();
+
+        const andFilters = [];
+        if (search) {
+            andFilters.push({
+                OR: [
+                    { auditName: { contains: search, mode: 'insensitive' } },
+                    { executionId: { contains: search, mode: 'insensitive' } },
+                    { location: { contains: search, mode: 'insensitive' } },
+                ],
+            });
+        }
+        if (siteName && siteName !== 'all') {
+            andFilters.push({
+                OR: [
+                    { location: { equals: siteName, mode: 'insensitive' } },
+                    {
+                        auditProgram: {
+                            is: {
+                                site: {
+                                    is: { name: { equals: siteName, mode: 'insensitive' } },
+                                },
+                            },
+                        },
+                    },
+                ],
+            });
+        }
+        // Module vs ISO: module plans typically have a non-empty templateId.
+        if (typeFilter === 'module') {
+            andFilters.push({
+                AND: [
+                    { templateId: { not: null } },
+                    { NOT: { templateId: '' } },
+                ],
+            });
+        } else if (typeFilter === 'iso') {
+            andFilters.push({
+                OR: [{ templateId: null }, { templateId: '' }],
+            });
+        }
+
+        const listWhere =
+            andFilters.length > 0 ? { AND: [whereClause, ...andFilters] } : whereClause;
+
+        const planSelect = {
+            id: true,
+            executionId: true,
+            auditType: true,
+            auditName: true,
+            date: true,
+            location: true,
+            createdAt: true,
+            updatedAt: true,
+            templateId: true,
+            auditProgramId: true,
+            userId: true,
+            leadAuditorId: true,
+            // Heavy auditData only when explicitly requested. findingsData is small overrides.
+            findingsData: true,
+            ...(includeData ? { auditData: true } : {}),
+            leadAuditor: {
+                select: {
+                    id: true,
+                    firstName: true,
+                    lastName: true
+                }
+            },
+            auditors: {
+                select: {
+                    id: true,
+                    firstName: true,
+                    lastName: true
+                }
+            },
+            auditProgram: {
+                select: {
+                    id: true,
+                    name: true,
+                    // scheduleData can be multi‑MB — never include on list responses
+                    site: {
+                        select: {
+                            id: true,
+                            name: true
                         }
                     }
                 }
-            },
-            orderBy: {
-                createdAt: 'desc'
             }
+        };
+
+        const plans = await prisma.auditPlan.findMany({
+            where: listWhere,
+            orderBy: { createdAt: 'desc' },
+            select: planSelect,
+            ...(pagination.paginate
+                ? { skip: pagination.skip, take: pagination.limit }
+                : {}),
         });
+        const total = pagination.paginate
+            ? await prisma.auditPlan.count({ where: listWhere })
+            : plans.length;
 
-        // Calculate progress on backend to reduce logic on frontend and keep it consistent
-        const optimizedPlans = plans.map(plan => {
-            let progress = 0;
-            let auditCompleted = false;
-            if (plan.auditData) {
-                const data = typeof plan.auditData === 'string' ? JSON.parse(plan.auditData) : plan.auditData;
-                progress = data.progress ?? 0;
-                auditCompleted = data.auditCompleted === true;
+        // Pull only progress / completed flags from Postgres JSON (avoids shipping full auditData to Node when includeData=false).
+        const planIds = plans.map((p) => p.id).filter((id) => Number.isInteger(id) && id > 0);
+        /** @type {Map<number, { progress: number, auditCompleted: boolean }>} */
+        const progressById = new Map();
+        if (planIds.length > 0) {
+            try {
+                const metaResult = await pool.query(
+                    `SELECT
+                        id,
+                        COALESCE(("auditData"->>'progress')::double precision, 0) AS progress,
+                        COALESCE(("auditData"->>'auditCompleted')::boolean, false) AS "auditCompleted"
+                     FROM "AuditPlan"
+                     WHERE id = ANY($1::int[])`,
+                    [planIds],
+                );
+                for (const row of metaResult.rows) {
+                    const id = Number(row.id);
+                    const progressNum = Number(row.progress);
+                    progressById.set(id, {
+                        progress: Number.isFinite(progressNum)
+                            ? Math.min(100, Math.max(0, Math.round(progressNum)))
+                            : 0,
+                        auditCompleted: row.auditCompleted === true,
+                    });
+                }
+            } catch (metaErr) {
+                console.warn('[audit-plans] progress meta query failed:', metaErr?.message || metaErr);
+            }
+        }
+
+        const optimizedPlans = plans.map((plan) => {
+            const meta = progressById.get(plan.id) || { progress: 0, auditCompleted: false };
+            let progress = meta.progress;
+            let auditCompleted = meta.auditCompleted;
+
+            if (includeData && plan.auditData) {
+                try {
+                    const data =
+                        typeof plan.auditData === 'string'
+                            ? JSON.parse(plan.auditData)
+                            : plan.auditData;
+                    if (data && typeof data === 'object') {
+                        if (data.progress != null) {
+                            const p = Number(data.progress);
+                            if (Number.isFinite(p)) {
+                                progress = Math.min(100, Math.max(0, Math.round(p)));
+                            }
+                        }
+                        if (data.auditCompleted === true) auditCompleted = true;
+                    }
+                } catch {
+                    /* ignore */
+                }
             }
 
-            const includeData = req.query.includeData === 'true';
-
-            // Remove full auditData from the list response UNLESS includeData=true is passed
             if (!includeData) {
-                const { auditData: _, ...planWithoutData } = plan;
                 return {
-                    ...planWithoutData,
+                    ...plan,
+                    findingsData: stripHeavyAuditListPayload(plan.findingsData),
                     progress,
                     auditCompleted,
                 };
             }
 
+            // Strip evidence/base64 so list payloads stay small (findings pages still work).
             return {
                 ...plan,
+                auditData: stripHeavyAuditListPayload(plan.auditData),
+                findingsData: stripHeavyAuditListPayload(plan.findingsData),
                 progress,
                 auditCompleted,
             };
         });
 
-        res.json(optimizedPlans);
+        if (!pagination.paginate) {
+            return res.json(optimizedPlans);
+        }
+        res.json(
+            paginatedResponse(optimizedPlans, {
+                page: pagination.page,
+                limit: pagination.limit,
+                total,
+            }),
+        );
     } catch (error) {
         console.error('Failed to fetch audit plans:', error);
         res.status(500).json({ error: 'Failed to fetch audit plans' });
@@ -6425,11 +6798,33 @@ app.put('/audit-plans/:id', authenticateToken, checkTrialExpiration, async (req,
         if (req.body.findingsData !== undefined) updateData.findingsData = req.body.findingsData;
         updateData.updatedAt = new Date();
 
+        // Do not echo multi‑MB auditData back to the client — Save Audit only needs ack + progress.
+        let progress = 0;
+        let auditCompleted = false;
+        if (updateData.auditData && typeof updateData.auditData === 'object') {
+            const p = Number(updateData.auditData.progress);
+            if (Number.isFinite(p)) progress = Math.min(100, Math.max(0, Math.round(p)));
+            auditCompleted = updateData.auditData.auditCompleted === true;
+        }
+
         const plan = await prisma.auditPlan.update({
             where: { id: Number.parseInt(id) },
-            data: updateData
+            data: updateData,
+            select: {
+                id: true,
+                updatedAt: true,
+                auditName: true,
+                executionId: true,
+                templateId: true,
+                auditProgramId: true,
+            },
         });
-        res.status(200).json(plan);
+        res.status(200).json({
+            ...plan,
+            progress,
+            auditCompleted,
+            saved: true,
+        });
     } catch (error) {
         console.error('Error updating audit plan:', error);
         res.status(500).json({ error: 'Failed to update audit plan' });
@@ -6451,22 +6846,54 @@ app.get('/assigned-audit-findings', authenticateToken, checkTrialExpiration, asy
         const isAuditee = await actorIsAuditee(actorId);
         const auditeeSiteIds = isAuditee ? await getAuditeeAssignedSiteIds(actorId) : null;
 
+        /** Limit scan to plans the actor can already see — never all org rows with auditData. */
+        let visibilityWhere = { auditData: { not: null } };
+        if (isAuditee && auditeeSiteIds) {
+            visibilityWhere = {
+                auditData: { not: null },
+                auditProgram: {
+                    is: auditeeSiteIds.length > 0
+                        ? { siteId: { in: auditeeSiteIds } }
+                        : { siteId: -1 },
+                },
+            };
+        } else if (await actorHasFullOrgAuditVisibility(actorId)) {
+            const orgRootId = await resolveActorOrgRootId(actorId);
+            const subtreeIds = await collectOrgSubtreeUserIds(orgRootId);
+            visibilityWhere = {
+                auditData: { not: null },
+                OR: buildOrgSubtreePlanVisibilityOr(subtreeIds),
+            };
+        } else {
+            visibilityWhere = {
+                auditData: { not: null },
+                OR: buildAssignedAuditPlanVisibilityOr(actorId),
+            };
+        }
+
         const plans = await prisma.auditPlan.findMany({
-            where: { auditData: { not: null } },
+            where: visibilityWhere,
             select: ASSIGNED_FINDINGS_PLAN_SELECT,
             orderBy: { updatedAt: 'desc' },
+            take: 200,
         });
 
-        const assignedPlans = plans.filter((plan) => {
-            if (!collectAssigneeEmailsFromAuditData(plan.auditData).has(actorEmail)) {
-                return false;
-            }
-            if (isAuditee && auditeeSiteIds) {
-                const siteId = plan.auditProgram?.siteId;
-                return siteId != null && auditeeSiteIds.includes(Number(siteId));
-            }
-            return true;
-        });
+        const assignedPlans = plans
+            .filter((plan) => {
+                if (!collectAssigneeEmailsFromAuditData(plan.auditData).has(actorEmail)) {
+                    return false;
+                }
+                if (isAuditee && auditeeSiteIds) {
+                    const siteId = plan.auditProgram?.siteId;
+                    return siteId != null && auditeeSiteIds.includes(Number(siteId));
+                }
+                return true;
+            })
+            .map((plan) => ({
+                ...plan,
+                auditData: stripHeavyAuditListPayload(plan.auditData),
+                findingsData: stripHeavyAuditListPayload(plan.findingsData),
+            }));
 
         res.json(assignedPlans);
     } catch (error) {

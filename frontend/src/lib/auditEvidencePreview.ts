@@ -5,8 +5,22 @@ export function isPreviewableAuditEvidence(media: AuditEvidenceMedia): boolean {
 }
 
 export function downloadAuditEvidenceMedia(media: AuditEvidenceMedia): void {
+    const href = media.data;
+    if (!href) return;
+    // Hosted Cloudinary URLs: open/download via navigation; data URLs use download attribute.
+    if (/^https?:\/\//i.test(href)) {
+        const link = document.createElement("a");
+        link.href = href;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.download = media.name || "attachment";
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        return;
+    }
     const link = document.createElement("a");
-    link.href = media.data;
+    link.href = href;
     link.download = media.name || "attachment";
     document.body.appendChild(link);
     link.click();
