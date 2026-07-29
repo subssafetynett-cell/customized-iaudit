@@ -1,6 +1,8 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { useCompanyStore } from "@/hooks/useCompanyStore";
+import { apiFetch } from "@/lib/api";
+import { buildPageQuery, parsePaginatedResponse } from "@/lib/pagination";
 import {
   formatDeleteDepartmentDescription,
   formatDeleteSiteDescription,
@@ -78,7 +80,8 @@ function siteContactDisplay(site: Site): { primary: string; secondary?: string }
 const CompaniesPage = () => {
   const {
     companies, addCompany, addSite, addDepartment, deleteSite,
-    deleteDepartment, updateCompany, updateSite, updateDepartment, deleteCompany, isLoading
+    deleteDepartment, updateCompany, updateSite, updateDepartment, deleteCompany, isLoading,
+    refetchCompanies,
   } = useCompanyStore();
   const navigate = useNavigate();
 
@@ -120,12 +123,65 @@ const CompaniesPage = () => {
 
   // Pagination state
   const [currentPage, setCurrentPage] = useState(1);
+  const [pagedCompanies, setPagedCompanies] = useState<Company[]>([]);
+  const [totalItems, setTotalItems] = useState(0);
+  const [listLoading, setListLoading] = useState(true);
   const itemsPerPage = 8;
+  const totalPages = totalItems === 0 ? 0 : Math.ceil(totalItems / itemsPerPage);
+
+  const [debouncedSearch, setDebouncedSearch] = useState(searchQuery);
+  useEffect(() => {
+    const t = window.setTimeout(() => setDebouncedSearch(searchQuery), 300);
+    return () => window.clearTimeout(t);
+  }, [searchQuery]);
 
   // Reset page when search changes
   useEffect(() => {
     setCurrentPage(1);
-  }, [searchQuery]);
+  }, [debouncedSearch]);
+
+  const fetchCompaniesPage = useCallback(async () => {
+    try {
+      setListLoading(true);
+      const qs = buildPageQuery({
+        page: currentPage,
+        limit: itemsPerPage,
+        search: debouncedSearch || undefined,
+      });
+      const res = await apiFetch(`/companies${qs}`);
+      if (res.ok) {
+        const data = await res.json();
+        const parsed = parsePaginatedResponse<any>(data, currentPage, itemsPerPage);
+        setPagedCompanies(
+          parsed.items.map((c) => ({
+            ...c,
+            id: String(c.id),
+            isoStandards: c.isoStandards || [],
+            sites: c.sites || [],
+          })),
+        );
+        setTotalItems(parsed.total);
+      } else {
+        setPagedCompanies([]);
+        setTotalItems(0);
+      }
+    } catch (error) {
+      console.error("Failed to fetch companies page:", error);
+      setPagedCompanies([]);
+      setTotalItems(0);
+    } finally {
+      setListLoading(false);
+    }
+  }, [currentPage, debouncedSearch, itemsPerPage]);
+
+  useEffect(() => {
+    void fetchCompaniesPage();
+  }, [fetchCompaniesPage]);
+
+  const refreshCompanyList = useCallback(async () => {
+    await refetchCompanies();
+    await fetchCompaniesPage();
+  }, [refetchCompanies, fetchCompaniesPage]);
 
   // Modal states
   const [showCreateCompany, setShowCreateCompany] = useState(false);
@@ -194,23 +250,12 @@ const CompaniesPage = () => {
   const [isDeleting, setIsDeleting] = useState(false);
 
   // Derived states
-  const selectedCompany = useMemo(() =>
-    companies.find(c => c.id === selectedCompanyId),
-    [companies, selectedCompanyId]
-  );
-
-  const filteredCompanies = useMemo(() => {
-    return companies.filter(c =>
-      c.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      c.isoStandards.some(std => std.toLowerCase().includes(searchQuery.toLowerCase()))
-    );
-  }, [companies, searchQuery]);
-
-  const totalPages = Math.ceil(filteredCompanies.length / itemsPerPage);
-  const paginatedCompanies = useMemo(() => {
-    const start = (currentPage - 1) * itemsPerPage;
-    return filteredCompanies.slice(start, start + itemsPerPage);
-  }, [filteredCompanies, currentPage, itemsPerPage]);
+  const selectedCompany = useMemo(() => {
+    if (!selectedCompanyId) return undefined;
+    const fromPage = pagedCompanies.find((c) => c.id === selectedCompanyId);
+    if (fromPage) return fromPage;
+    return companies.find((c) => c.id === selectedCompanyId);
+  }, [selectedCompanyId, pagedCompanies, companies]);
 
   const activeSite = selectedCompany?.sites.find((s) => s.id === addDeptSiteId);
   const selectedCompanyHasSites = (selectedCompany?.sites?.length ?? 0) > 0;
@@ -269,7 +314,7 @@ const CompaniesPage = () => {
               <h1 className="text-2xl font-bold tracking-tight text-foreground">Company Details</h1>
               <p className="text-sm text-muted-foreground mt-1">Manage your company profile, sites, and departments</p>
             </div>
-            {!isLoading && companies.length === 0 && !selectedCompanyId && (
+            {!isLoading && totalItems === 0 && !selectedCompanyId && (
               <Button onClick={() => setShowCreateCompany(true)} className="gap-2 shadow-sm font-semibold bg-[#213847] hover:bg-[#213847]/90 text-white rounded-xl px-5 h-11">
                 <Plus className="h-4 w-4" /> Create Company
               </Button>
@@ -780,7 +825,10 @@ const CompaniesPage = () => {
             <CompanyModal
               open={!!showEditCompany}
               onClose={() => setShowEditCompany(null)}
-              onSubmit={(data) => updateCompany(selectedCompany.id, data)}
+              onSubmit={async (data) => {
+                await updateCompany(selectedCompany.id, data);
+                await refreshCompanyList();
+              }}
               initialData={showEditCompany}
               mode="edit"
             />
@@ -866,6 +914,7 @@ const CompaniesPage = () => {
               if (companyToDelete) {
                 setIsDeleting(true);
                 await deleteCompany(companyToDelete.id);
+                await refreshCompanyList();
                 setIsDeleting(false);
                 setCompanyToDelete(null);
                 setSelectedCompanyId(null);
@@ -890,7 +939,7 @@ const CompaniesPage = () => {
             <h1 className="text-2xl font-bold tracking-tight text-foreground">Company Details</h1>
             <p className="text-sm text-muted-foreground mt-1">Manage your company profile, sites, and departments</p>
           </div>
-          {!isLoading && companies.length === 0 && !selectedCompanyId && (
+          {!listLoading && totalItems === 0 && !selectedCompanyId && (
             <Button onClick={() => setShowCreateCompany(true)} className="gap-2 shadow-sm font-semibold bg-[#213847] hover:bg-[#213847]/90 text-white rounded-xl px-5 h-11">
               <Plus className="h-4 w-4" /> Create Company
             </Button>
@@ -898,12 +947,12 @@ const CompaniesPage = () => {
         </div>
 
         {/* Companies Table or Empty State */}
-        {isLoading ? (
+        {listLoading ? (
           <div className="bg-white/40 rounded-[2rem] border-2 border-dashed border-slate-200 p-20 flex flex-col items-center justify-center text-center space-y-6">
             <div className="w-12 h-12 border-4 border-emerald-100 border-t-emerald-600 rounded-full animate-spin" />
             <p className="text-slate-500 font-medium">Loading companies...</p>
           </div>
-        ) : filteredCompanies.length === 0 && !searchQuery && !selectedCompanyId ? (
+        ) : totalItems === 0 && !debouncedSearch && !selectedCompanyId ? (
           <div className="bg-white/40 rounded-[2rem] border-2 border-dashed border-slate-200 p-20 flex flex-col items-center justify-center text-center space-y-6">
             <div className="w-24 h-24 bg-slate-100 rounded-[2rem] flex items-center justify-center text-slate-400">
               <Building2 className="w-12 h-12" />
@@ -935,7 +984,7 @@ const CompaniesPage = () => {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {filteredCompanies.length === 0 ? (
+                {pagedCompanies.length === 0 ? (
                   <TableRow>
                     <TableCell colSpan={6} className="h-48 text-center text-muted-foreground">
                       <div className="flex flex-col items-center gap-2">
@@ -946,7 +995,7 @@ const CompaniesPage = () => {
                     </TableCell>
                   </TableRow>
                 ) : (
-                  paginatedCompanies.map((company, index) => (
+                  pagedCompanies.map((company, index) => (
                     <TableRow key={company.id} className="group cursor-pointer hover:bg-muted/20 border-muted/30" onClick={() => setSelectedCompanyId(company.id)}>
                       <TableCell className="font-medium text-muted-foreground/60 pl-6">{(currentPage - 1) * itemsPerPage + index + 1}</TableCell>
                       <TableCell>
@@ -1007,7 +1056,7 @@ const CompaniesPage = () => {
               <ReusablePagination
                 currentPage={currentPage}
                 totalPages={totalPages}
-                totalItems={filteredCompanies.length}
+                totalItems={totalItems}
                 itemsPerPage={itemsPerPage}
                 onPageChange={setCurrentPage}
               />
@@ -1020,7 +1069,10 @@ const CompaniesPage = () => {
       <CompanyModal
         open={showCreateCompany}
         onClose={() => setShowCreateCompany(false)}
-        onSubmit={addCompany}
+        onSubmit={async (data) => {
+          await addCompany(data);
+          await refreshCompanyList();
+        }}
         mode="create"
       />
 
@@ -1028,7 +1080,10 @@ const CompaniesPage = () => {
         <CompanyModal
           open={!!showEditCompany}
           onClose={() => setShowEditCompany(null)}
-          onSubmit={(data) => updateCompany(showEditCompany.id, data)}
+          onSubmit={async (data) => {
+            await updateCompany(showEditCompany.id, data);
+            await refreshCompanyList();
+          }}
           initialData={showEditCompany}
           mode="edit"
         />
@@ -1041,6 +1096,7 @@ const CompaniesPage = () => {
           if (companyToDelete) {
             setIsDeleting(true);
             await deleteCompany(companyToDelete.id);
+            await refreshCompanyList();
             setIsDeleting(false);
             setCompanyToDelete(null);
           }

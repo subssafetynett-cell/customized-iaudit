@@ -1,6 +1,7 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { apiFetch } from "@/lib/api";
+import { buildPageQuery, parsePaginatedResponse } from "@/lib/pagination";
 import { hasValidSuperAdminSession, logoutSuperAdmin } from "@/lib/superAdminAuth";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -71,16 +72,6 @@ function formatLoginDate(value: string | null | undefined): string {
     });
 }
 
-/** Newest users first so row #1 is the latest signup. */
-function sortUsersNewestFirst(list: any[]): any[] {
-    return [...list].sort((a, b) => {
-        const aTime = a.createdAt ? new Date(a.createdAt).getTime() : 0;
-        const bTime = b.createdAt ? new Date(b.createdAt).getTime() : 0;
-        if (bTime !== aTime) return bTime - aTime;
-        return (Number(b.id) || 0) - (Number(a.id) || 0);
-    });
-}
-
 export default function SuperAdmin() {
     const navigate = useNavigate();
     const [users, setUsers] = useState<any[]>([]);
@@ -94,12 +85,20 @@ export default function SuperAdmin() {
 
     // Pagination
     const [currentPage, setCurrentPage] = useState(1);
-    const [itemsPerPage, setItemsPerPage] = useState(15);
+    const [totalItems, setTotalItems] = useState(0);
+    const itemsPerPage = 15;
+    const totalPages = totalItems === 0 ? 0 : Math.ceil(totalItems / itemsPerPage);
 
-    // Reset page to 1 when filters or page size change
+    const [debouncedSearch, setDebouncedSearch] = useState(searchQuery);
+    useEffect(() => {
+        const t = window.setTimeout(() => setDebouncedSearch(searchQuery), 300);
+        return () => window.clearTimeout(t);
+    }, [searchQuery]);
+
+    // Reset page to 1 when filters or search change
     useEffect(() => {
         setCurrentPage(1);
-    }, [searchQuery, roleFilter, statusFilter, itemsPerPage]);
+    }, [debouncedSearch, roleFilter, statusFilter]);
 
     // Modal States
     const [showUserModal, setShowUserModal] = useState(false);
@@ -108,59 +107,79 @@ export default function SuperAdmin() {
     const [modalMode, setModalMode] = useState<"create" | "edit" | "view">("view");
     const [isDeleting, setIsDeleting] = useState(false);
 
-    useEffect(() => {
-        if (!hasValidSuperAdminSession()) {
-            navigate("/login", { replace: true });
-            return;
-        }
-        fetchData();
-    }, [navigate]);
+    const legacyHeaders = { "X-Super-Admin-Console": "true" };
 
-    const fetchData = async () => {
-        const legacyHeaders = { "X-Super-Admin-Console": "true" };
-
+    const fetchCompanies = useCallback(async () => {
         try {
-            setIsLoading(true);
-
-            let usersRes = await apiFetch("/super-admin/users");
-            if (!usersRes.ok) {
-                usersRes = await apiFetch("/users?scope=all", { headers: legacyHeaders });
-            }
-
             let companiesRes = await apiFetch("/super-admin/companies");
             if (!companiesRes.ok) {
                 companiesRes = await apiFetch("/companies?admin=true", { headers: legacyHeaders });
             }
-
-            if (usersRes.ok) {
-                const usersData = await usersRes.json();
-                setUsers(
-                    Array.isArray(usersData) ? sortUsersNewestFirst(usersData) : [],
-                );
-            } else {
-                const usersErr = await usersRes.json().catch(() => ({}));
-                setUsers([]);
-                toast.error(
-                    usersErr?.error ||
-                        "Could not load users. Sign in again at /login."
-                );
-            }
-
             if (companiesRes.ok) {
                 const companiesData = await companiesRes.json();
-                setCompanies(Array.isArray(companiesData) ? companiesData : []);
+                const parsed = parsePaginatedResponse<any>(companiesData);
+                setCompanies(parsed.items);
             } else {
                 const companiesErr = await companiesRes.json().catch(() => ({}));
                 setCompanies([]);
                 toast.error(companiesErr?.error || "Could not load company associations.");
             }
         } catch (error) {
-            console.error("Failed to fetch data:", error);
-            toast.error("Failed to load dashboard data");
+            console.error("Failed to fetch companies:", error);
+            toast.error("Failed to load company associations");
+        }
+    }, []);
+
+    const fetchUsers = useCallback(async () => {
+        try {
+            setIsLoading(true);
+            const qs = buildPageQuery({
+                page: currentPage,
+                limit: itemsPerPage,
+                search: debouncedSearch || undefined,
+                role: roleFilter !== "all" ? roleFilter : undefined,
+                status: statusFilter !== "all" ? statusFilter : undefined,
+            });
+            let usersRes = await apiFetch(`/super-admin/users${qs}`);
+            if (!usersRes.ok) {
+                usersRes = await apiFetch(`/users?scope=all${qs.replace("?", "&")}`, {
+                    headers: legacyHeaders,
+                });
+            }
+            if (usersRes.ok) {
+                const usersData = await usersRes.json();
+                const parsed = parsePaginatedResponse<any>(usersData, currentPage, itemsPerPage);
+                setUsers(parsed.items);
+                setTotalItems(parsed.total);
+            } else {
+                const usersErr = await usersRes.json().catch(() => ({}));
+                setUsers([]);
+                setTotalItems(0);
+                toast.error(
+                    usersErr?.error ||
+                        "Could not load users. Sign in again at /login.",
+                );
+            }
+        } catch (error) {
+            console.error("Failed to fetch users:", error);
+            toast.error("Failed to load users");
         } finally {
             setIsLoading(false);
         }
-    };
+    }, [currentPage, debouncedSearch, roleFilter, statusFilter, itemsPerPage]);
+
+    useEffect(() => {
+        if (!hasValidSuperAdminSession()) {
+            navigate("/login", { replace: true });
+            return;
+        }
+        void fetchCompanies();
+    }, [navigate, fetchCompanies]);
+
+    useEffect(() => {
+        if (!hasValidSuperAdminSession()) return;
+        void fetchUsers();
+    }, [fetchUsers]);
 
     const handleToggleStatus = async (user: any) => {
         try {
@@ -171,7 +190,7 @@ export default function SuperAdmin() {
 
             if (response.ok) {
                 const updatedUser = await response.json();
-                setUsers(users.map(u => u.id === updatedUser.id ? updatedUser : u));
+                void fetchUsers();
                 toast.success(`User ${updatedUser.firstName} is now ${updatedUser.isActive ? 'Active' : 'Inactive'}`);
             } else {
                 toast.error("Failed to update status");
@@ -193,14 +212,13 @@ export default function SuperAdmin() {
             });
 
             if (response.ok) {
-                const updatedUser = await response.json();
-                if (modalMode === "create") {
-                    setUsers(sortUsersNewestFirst([updatedUser, ...users]));
-                    toast.success("User created successfully!");
-                } else {
-                    setUsers(users.map(u => u.id === updatedUser.id ? updatedUser : u));
-                    toast.success("User updated successfully!");
-                }
+                await response.json();
+                void fetchUsers();
+                toast.success(
+                    modalMode === "create"
+                        ? "User created successfully!"
+                        : "User updated successfully!",
+                );
             } else {
                 const errorData = await response.json();
                 console.error("Server error data:", errorData);
@@ -229,7 +247,7 @@ export default function SuperAdmin() {
             });
 
             if (response.ok) {
-                setUsers(users.filter((u) => String(u.id) !== String(selectedUser.id)));
+                void fetchUsers();
                 toast.success(`${selectedUser.firstName} ${selectedUser.lastName} was deleted successfully`);
                 setShowDeleteDialog(false);
                 setSelectedUser(null);
@@ -250,26 +268,6 @@ export default function SuperAdmin() {
     const getUserCompany = (userId: any) => {
         return companies.find(c => String(c.userId) === String(userId));
     };
-
-    const filteredUsers = users.filter(user => {
-        const fullName = `${user.firstName} ${user.lastName}`.toLowerCase();
-        const userCompany = getUserCompany(user.id);
-        const companyName = userCompany?.name?.toLowerCase() || "";
-
-        const matchesSearch =
-            fullName.includes(searchQuery.toLowerCase()) ||
-            user.email.toLowerCase().includes(searchQuery.toLowerCase()) ||
-            companyName.includes(searchQuery.toLowerCase());
-
-        const matchesRole = roleFilter === "all" || user.role === roleFilter;
-        const userStatus = user.isActive ? "active" : "inactive";
-        const matchesStatus = statusFilter === "all" || userStatus === statusFilter;
-
-        return matchesSearch && matchesRole && matchesStatus;
-    });
-
-    const totalPages = Math.ceil(filteredUsers.length / itemsPerPage);
-    const paginatedUsers = filteredUsers.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage);
 
     const openUserModal = (mode: "create" | "edit" | "view", user: any = null) => {
         setModalMode(mode);
@@ -362,7 +360,7 @@ export default function SuperAdmin() {
                                         Loading users...
                                     </TableCell>
                                 </TableRow>
-                            ) : paginatedUsers.length === 0 ? (
+                            ) : users.length === 0 ? (
                                 <TableRow>
                                     <TableCell colSpan={8} className="h-64 text-center">
                                         <div className="flex flex-col items-center justify-center py-10">
@@ -372,7 +370,7 @@ export default function SuperAdmin() {
                                     </TableCell>
                                 </TableRow>
                             ) : (
-                                paginatedUsers.map((user, index) => {
+                                users.map((user, index) => {
                                     const company = getUserCompany(user.id);
                                     return (
                                         <TableRow key={user.id} className="group hover:bg-muted/50 transition-colors">
@@ -490,7 +488,7 @@ export default function SuperAdmin() {
                     <ReusablePagination
                         currentPage={currentPage}
                         totalPages={totalPages}
-                        totalItems={filteredUsers.length}
+                        totalItems={totalItems}
                         itemsPerPage={itemsPerPage}
                         onPageChange={setCurrentPage}
                     />

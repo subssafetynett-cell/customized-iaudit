@@ -100,7 +100,7 @@ export async function notifyUsers(
     return created;
 }
 
-export async function listNotificationsForUser({ actorId, limit = 50 }) {
+export async function listNotificationsForUser({ actorId, limit = 50, page }) {
     const actor = Number(actorId);
     if (!Number.isInteger(actor) || actor < 1) {
         const err = new Error('Invalid user');
@@ -109,18 +109,37 @@ export async function listNotificationsForUser({ actorId, limit = 50 }) {
     }
 
     const take = Math.min(Math.max(Number(limit) || 50, 1), 200);
-    const rows = await prisma.notification.findMany({
-        where: { recipientUserId: actor },
-        include: {
-            nonconformance: {
-                select: { id: true, ncNumber: true, status: true },
-            },
-        },
-        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-        take,
-    });
+    const pageNum = Number.parseInt(String(page ?? ''), 10);
+    const paginate = Number.isFinite(pageNum) && pageNum >= 1;
+    const skip = paginate ? (pageNum - 1) * take : 0;
 
-    return rows.map(serializeNotification);
+    const where = { recipientUserId: actor };
+    const [total, rows] = await Promise.all([
+        paginate ? prisma.notification.count({ where }) : Promise.resolve(null),
+        prisma.notification.findMany({
+            where,
+            include: {
+                nonconformance: {
+                    select: { id: true, ncNumber: true, status: true },
+                },
+            },
+            orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+            ...(paginate ? { skip, take } : { take }),
+        }),
+    ]);
+
+    const items = rows.map(serializeNotification);
+    if (!paginate) return items;
+
+    const totalCount = total ?? items.length;
+    const totalPages = totalCount === 0 ? 0 : Math.ceil(totalCount / take);
+    return {
+        items,
+        page: pageNum,
+        limit: take,
+        total: totalCount,
+        totalPages,
+    };
 }
 
 export async function markNotificationRead({ id, actorId }) {

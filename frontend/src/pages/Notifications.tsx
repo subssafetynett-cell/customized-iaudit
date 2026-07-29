@@ -11,9 +11,10 @@ import {
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import ReusablePagination from "@/components/ReusablePagination";
 import {
     formatNotificationTimeAgo,
-    listNotifications,
+    listNotificationsPaged,
     markAllNotificationsRead,
     markNotificationRead,
     type AppNotification,
@@ -48,25 +49,35 @@ function notificationIconClass(type: string) {
     return "bg-slate-100 text-slate-600";
 }
 
+const ITEMS_PER_PAGE = 20;
+
 export default function NotificationsPage() {
     const navigate = useNavigate();
     const [loading, setLoading] = useState(true);
     const [markingAll, setMarkingAll] = useState(false);
     const [items, setItems] = useState<AppNotification[]>([]);
+    const [currentPage, setCurrentPage] = useState(1);
+    const [totalItems, setTotalItems] = useState(0);
+    const totalPages = totalItems === 0 ? 0 : Math.ceil(totalItems / ITEMS_PER_PAGE);
 
     const load = useCallback(async () => {
         setLoading(true);
         try {
-            const data = await listNotifications();
-            setItems(data);
+            const result = await listNotificationsPaged({
+                page: currentPage,
+                limit: ITEMS_PER_PAGE,
+            });
+            setItems(result.items);
+            setTotalItems(result.total);
         } catch (err) {
             console.error(err);
             toast.error(err instanceof Error ? err.message : "Failed to load notifications");
             setItems([]);
+            setTotalItems(0);
         } finally {
             setLoading(false);
         }
-    }, []);
+    }, [currentPage]);
 
     useEffect(() => {
         void load();
@@ -224,6 +235,17 @@ export default function NotificationsPage() {
                         )}
                     </CardContent>
                 </Card>
+
+                {!loading && (
+                    <ReusablePagination
+                        currentPage={currentPage}
+                        totalPages={totalPages}
+                        totalItems={totalItems}
+                        itemsPerPage={ITEMS_PER_PAGE}
+                        onPageChange={setCurrentPage}
+                        className="mt-0 pt-4 border-t-0"
+                    />
+                )}
             </div>
         </div>
     );

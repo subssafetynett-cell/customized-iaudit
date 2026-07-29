@@ -1,4 +1,5 @@
 import { apiFetch } from "@/lib/api";
+import { parsePaginatedResponse, type PaginatedResult } from "@/lib/pagination";
 
 export type NonconformanceStatus =
     | "ASSIGNED"
@@ -168,11 +169,26 @@ export async function listNonconformances(params?: {
     auditPlanId?: number;
     status?: string;
     assigneeId?: number;
+    page?: number;
+    limit?: number;
 }): Promise<NonconformanceSummary[]> {
+    const result = await listNonconformancesPaged(params);
+    return result.items;
+}
+
+export async function listNonconformancesPaged(params?: {
+    auditPlanId?: number;
+    status?: string;
+    assigneeId?: number;
+    page?: number;
+    limit?: number;
+}): Promise<PaginatedResult<NonconformanceSummary>> {
     const query = new URLSearchParams();
     if (params?.auditPlanId != null) query.set("auditPlanId", String(params.auditPlanId));
     if (params?.status) query.set("status", params.status);
     if (params?.assigneeId != null) query.set("assigneeId", String(params.assigneeId));
+    if (params?.page != null) query.set("page", String(params.page));
+    if (params?.limit != null) query.set("limit", String(params.limit));
     const qs = query.toString();
     const res = await apiFetch(`/nonconformances${qs ? `?${qs}` : ""}`);
     const data = await res.json().catch(() => []);
@@ -182,7 +198,11 @@ export async function listNonconformances(params?: {
                 "Failed to load nonconformances",
         );
     }
-    return Array.isArray(data) ? data : [];
+    return parsePaginatedResponse<NonconformanceSummary>(
+        data,
+        params?.page ?? 1,
+        params?.limit ?? 10,
+    );
 }
 
 export async function listNonconformancesForPlan(

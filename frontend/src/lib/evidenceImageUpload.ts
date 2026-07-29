@@ -268,9 +268,10 @@ export type AuditEvidenceBatchResult = {
     rejected: { fileName: string; error: string }[];
 };
 
-/** Process multiple files; skips invalid ones and reports each failure. */
+/** Process multiple files; uploads to Cloudinary when possible, else embeds data URL. */
 export async function processAuditEvidenceFileList(
-    files: FileList | null
+    files: FileList | null,
+    options?: { planId?: string | number },
 ): Promise<AuditEvidenceBatchResult> {
     if (!files || files.length === 0) {
         return { accepted: [], rejected: [] };
@@ -282,16 +283,45 @@ export async function processAuditEvidenceFileList(
         const result = await readValidatedAuditEvidenceFile(file);
         if (result.ok === false) {
             rejected.push({ fileName: file.name, error: result.error });
-        } else {
-            accepted.push(result.media);
+            continue;
+        }
+
+        try {
+            const { uploadAuditEvidenceFile } = await import("@/lib/uploadAuditEvidence");
+            const uploaded = await uploadAuditEvidenceFile(file, { planId: options?.planId });
+            accepted.push({
+                name: uploaded.name || result.media.name,
+                data: uploaded.url,
+                type: uploaded.type || result.media.type,
+                description: result.media.description,
+            });
+        } catch (err) {
+            const code = (err as { code?: string })?.code;
+            // Fall back to embedded data URL when Cloudinary is unavailable (local/dev).
+            if (code === "CLOUDINARY_NOT_CONFIGURED") {
+                accepted.push(result.media);
+            } else {
+                const message =
+                    err instanceof Error && err.message
+                        ? err.message
+                        : "Could not upload evidence to storage.";
+                // Prefer hosted storage; only embed tiny failures as rejection.
+                rejected.push({ fileName: file.name, error: message });
+            }
         }
     }
     return { accepted, rejected };
 }
 
 const SAFE_PDF_DATA_RE = /^data:application\/pdf;base64,[A-Za-z0-9+/=]+$/i;
+const SAFE_EVIDENCE_URL_RE = /^https?:\/\/[^\s<>"']{1,2000}$/i;
 
-/** Strip invalid media before save/autosave. */
+export function isHostedEvidenceUrl(value: string | undefined | null): boolean {
+    if (!value || typeof value !== "string") return false;
+    return SAFE_EVIDENCE_URL_RE.test(value.trim()) && value.trim().length <= 2048;
+}
+
+/** Strip invalid media before save/autosave. Accepts data URLs or hosted HTTPS URLs. */
 export function sanitizeAuditEvidenceMedia(
     media: AuditEvidenceMedia | null | undefined
 ): AuditEvidenceMedia | null {
@@ -300,25 +330,41 @@ export function sanitizeAuditEvidenceMedia(
         typeof media.name === "string" && media.name.trim()
             ? media.name.trim().slice(0, 255)
             : "file";
-    const type = typeof media.type === "string" ? media.type.toLowerCase() : "";
+    let type = typeof media.type === "string" ? media.type.toLowerCase() : "";
     const data = typeof media.data === "string" ? media.data.trim() : "";
+    if (!data) return null;
+
+    if (!type && isHostedEvidenceUrl(data)) {
+        if (/\.pdf(\?|$)/i.test(data) || /\/raw\//i.test(data)) type = "application/pdf";
+        else type = "image/jpeg";
+    }
 
     if (type.startsWith("image/")) {
+        if (isHostedEvidenceUrl(data)) {
+            const description = normalizeEvidenceDescription(media.description);
+            return description
+                ? { name, data, type: type.startsWith("image/") ? type : "image/jpeg", description }
+                : { name, data, type: type.startsWith("image/") ? type : "image/jpeg" };
+        }
         const safe = sanitizeEvidenceImageDataUrl(data);
         if (!safe) return null;
         const mime = safe.startsWith("data:image/png") ? "image/png" : "image/jpeg";
         const description = normalizeEvidenceDescription(media.description);
         return description ? { name, data: safe, type: mime, description } : { name, data: safe, type: mime };
     }
-    if (
-        type === "application/pdf" &&
-        SAFE_PDF_DATA_RE.test(data) &&
-        data.length <= AUDIT_EVIDENCE_PDF_DATA_URL_MAX
-    ) {
-        const description = normalizeEvidenceDescription(media.description);
-        return description
-            ? { name, data, type: "application/pdf", description }
-            : { name, data, type: "application/pdf" };
+    if (type === "application/pdf") {
+        if (isHostedEvidenceUrl(data)) {
+            const description = normalizeEvidenceDescription(media.description);
+            return description
+                ? { name, data, type: "application/pdf", description }
+                : { name, data, type: "application/pdf" };
+        }
+        if (SAFE_PDF_DATA_RE.test(data) && data.length <= AUDIT_EVIDENCE_PDF_DATA_URL_MAX) {
+            const description = normalizeEvidenceDescription(media.description);
+            return description
+                ? { name, data, type: "application/pdf", description }
+                : { name, data, type: "application/pdf" };
+        }
     }
     return null;
 }

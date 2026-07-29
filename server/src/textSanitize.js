@@ -194,23 +194,64 @@ const SAFE_PDF_DATA_RE = /^data:application\/pdf;base64,[A-Za-z0-9+/=]+$/i;
 const AUDIT_EVIDENCE_IMAGE_MAX = 8_000_000;
 const AUDIT_EVIDENCE_PDF_MAX = 15_000_000;
 
-/** Single audit evidence attachment (PNG/JPEG data URL or PDF). */
+const SAFE_EVIDENCE_URL_RE = /^https?:\/\/[^\s<>"']{1,2000}$/i;
+
+/** Prefer hosted URLs (Cloudinary); keep legacy data-URLs for older audits. */
+function sanitizeEvidenceDataField(rawData, type) {
+    const data = typeof rawData === 'string' ? rawData.trim() : '';
+    if (!data) return null;
+    if (SAFE_EVIDENCE_URL_RE.test(data) && data.length <= 2048) {
+        return data;
+    }
+    if (type.startsWith('image/')) {
+        return sanitizeLogoField(data, AUDIT_EVIDENCE_IMAGE_MAX) || null;
+    }
+    if (type === 'application/pdf') {
+        if (!SAFE_PDF_DATA_RE.test(data) || data.length > AUDIT_EVIDENCE_PDF_MAX) return null;
+        return data;
+    }
+    return null;
+}
+
+/** Single audit evidence attachment (hosted URL, PNG/JPEG data URL, or PDF). */
 export function sanitizeAuditEvidenceMediaItem(item) {
     if (!item || typeof item !== 'object') return null;
     const name = sanitizePlainText(item.name, 255) || 'file';
-    const type = typeof item.type === 'string' ? item.type.toLowerCase() : '';
+    let type = typeof item.type === 'string' ? item.type.toLowerCase() : '';
     const rawData = typeof item.data === 'string' ? item.data.trim() : '';
 
+    if (!type && SAFE_EVIDENCE_URL_RE.test(rawData)) {
+        if (/\.pdf(\?|$)/i.test(rawData) || /\/raw\//i.test(rawData)) type = 'application/pdf';
+        else type = 'image/jpeg';
+    }
+
     if (type.startsWith('image/')) {
-        const data = sanitizeLogoField(rawData, AUDIT_EVIDENCE_IMAGE_MAX);
+        const data = sanitizeEvidenceDataField(rawData, type);
         if (!data) return null;
-        const mime = data.startsWith('data:image/png') ? 'image/png' : 'image/jpeg';
-        return { name, type: mime, data };
+        const mime = data.startsWith('data:image/png')
+            ? 'image/png'
+            : data.startsWith('data:image/jpeg')
+              ? 'image/jpeg'
+              : type.startsWith('image/')
+                ? type
+                : 'image/jpeg';
+        const description =
+            typeof item.description === 'string'
+                ? sanitizePlainText(item.description, 500) || undefined
+                : undefined;
+        return description ? { name, type: mime, data, description } : { name, type: mime, data };
     }
 
     if (type === 'application/pdf') {
-        if (!SAFE_PDF_DATA_RE.test(rawData) || rawData.length > AUDIT_EVIDENCE_PDF_MAX) return null;
-        return { name, type: 'application/pdf', data: rawData };
+        const data = sanitizeEvidenceDataField(rawData, type);
+        if (!data) return null;
+        const description =
+            typeof item.description === 'string'
+                ? sanitizePlainText(item.description, 500) || undefined
+                : undefined;
+        return description
+            ? { name, data, type: 'application/pdf', description }
+            : { name, data, type: 'application/pdf' };
     }
 
     return null;
@@ -241,6 +282,76 @@ export function sanitizeAuditDataPayload(auditData) {
     }
     if (out.genericFiles !== undefined) {
         out.genericFiles = sanitizeAuditEvidenceMediaMap(out.genericFiles);
+    }
+    return out;
+}
+
+/**
+ * Strip base64 / data-URL blobs from audit JSON for list responses.
+ * Keeps finding metadata so extractFindings still works, but drops multi‑MB evidence.
+ */
+export function stripHeavyAuditListPayload(value, depth = 0) {
+    if (value == null || depth > 40) return value;
+    if (typeof value === 'string') {
+        if (
+            value.length > 400 &&
+            (value.startsWith('data:') ||
+                value.startsWith('blob:') ||
+                /^[A-Za-z0-9+/=\s]{800,}$/.test(value.slice(0, 900)))
+        ) {
+            return '[omitted]';
+        }
+        return value;
+    }
+    if (Array.isArray(value)) {
+        return value.map((item) => stripHeavyAuditListPayload(item, depth + 1));
+    }
+    if (typeof value !== 'object') return value;
+
+    const out = {};
+    for (const [key, child] of Object.entries(value)) {
+        if (
+            (key === 'data' ||
+                key === 'preview' ||
+                key === 'thumbnail' ||
+                key === 'base64' ||
+                key === 'content') &&
+            typeof child === 'string' &&
+            child.length > 200
+        ) {
+            out[key] = child.startsWith('data:') || child.length > 400 ? '[omitted]' : child;
+            out.hasData = true;
+            continue;
+        }
+        if (
+            key === 'media' ||
+            key === 'evidenceMedia' ||
+            key === 'attachments' ||
+            key === 'files'
+        ) {
+            if (Array.isArray(child)) {
+                out[key] = child.map((item) => {
+                    if (!item || typeof item !== 'object') {
+                        return stripHeavyAuditListPayload(item, depth + 1);
+                    }
+                    const { data, preview, thumbnail, base64, content, ...rest } = item;
+                    const slim = stripHeavyAuditListPayload(rest, depth + 1);
+                    if (data || preview || thumbnail || base64 || content) {
+                        slim.hasData = true;
+                    }
+                    return slim;
+                });
+            } else {
+                out[key] = stripHeavyAuditListPayload(child, depth + 1);
+            }
+            continue;
+        }
+        if (key === 'clauseFiles' || key === 'genericFiles') {
+            // Evidence maps are almost entirely binary — omit from list payloads.
+            out[key] = {};
+            continue;
+        }
+        out[key] = stripHeavyAuditListPayload(child, depth + 1);
     }
     return out;
 }

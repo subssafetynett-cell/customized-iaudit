@@ -31,6 +31,7 @@ import {
     type AuditeeSiteOption,
 } from "@/lib/orgSites";
 import ReusablePagination from "@/components/ReusablePagination";
+import { buildPageQuery, parsePaginatedResponse } from "@/lib/pagination";
 import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
 import {
@@ -112,12 +113,21 @@ function UsersPage() {
 
     // Pagination
     const [currentPage, setCurrentPage] = useState(1);
+    const [totalItems, setTotalItems] = useState(0);
     const itemsPerPage = 8;
+    const totalPages = totalItems === 0 ? 0 : Math.ceil(totalItems / itemsPerPage);
 
     // Reset page to 1 when filters change
     useEffect(() => {
         setCurrentPage(1);
     }, [searchQuery, roleFilter, statusFilter]);
+
+    // Debounced search for server requests
+    const [debouncedSearch, setDebouncedSearch] = useState(searchQuery);
+    useEffect(() => {
+        const t = window.setTimeout(() => setDebouncedSearch(searchQuery), 300);
+        return () => window.clearTimeout(t);
+    }, [searchQuery]);
 
     // Edit/View States
     const [selectedUser, setSelectedUser] = useState<any>(null);
@@ -206,19 +216,27 @@ function UsersPage() {
         } catch {
             setLoggedInUserId(null);
         }
-        fetchUsers();
         void refetchCompanies();
     }, []);
 
+    useEffect(() => {
+        void fetchUsers();
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- refetch when server list params change
+    }, [currentPage, debouncedSearch, roleFilter, statusFilter]);
+
     const auditeeUserIds = useMemo(() => {
         const ids = new Set<number>();
+        for (const site of sitesFromCompanies(companies)) {
+            const id = Number.parseInt(String(site.userId ?? ""), 10);
+            if (Number.isFinite(id) && id >= 1) ids.add(id);
+        }
         for (const user of users) {
             if (!isAuditeeRole(user.role)) continue;
             const id = Number(user.id);
             if (Number.isFinite(id) && id >= 1) ids.add(id);
         }
         return ids;
-    }, [users]);
+    }, [companies, users]);
 
     const validatedSites = useMemo(() => sitesFromCompanies(companies), [companies]);
 
@@ -298,10 +316,23 @@ function UsersPage() {
     const fetchUsers = async () => {
         try {
             setIsLoading(true);
-            const response = await apiFetch(`/users`);
+            const qs = buildPageQuery({
+                page: currentPage,
+                limit: itemsPerPage,
+                search: debouncedSearch || undefined,
+                role: roleFilter !== "all" ? roleFilter : undefined,
+                status: statusFilter !== "all" ? statusFilter : undefined,
+            });
+            const response = await apiFetch(`/users${qs}`);
             if (response.ok) {
                 const responseData = await response.json();
-                const data = Array.isArray(responseData) ? responseData : [];
+                const parsed = parsePaginatedResponse<any>(
+                    responseData,
+                    currentPage,
+                    itemsPerPage,
+                );
+                const data = [...parsed.items];
+                setTotalItems(parsed.total);
 
                 // Add the currently logged-in user to the list if they aren't already there
                 let loggedInUser: { id?: number } | null = null;
@@ -316,7 +347,7 @@ function UsersPage() {
                     );
                     if (selfFromApi) {
                         setStoredUser({ ...loggedInUser, ...selfFromApi });
-                    } else {
+                    } else if (currentPage === 1 && !debouncedSearch && roleFilter === "all" && statusFilter === "all") {
                         data.unshift(loggedInUser as any);
                     }
                 }
@@ -347,7 +378,7 @@ function UsersPage() {
             if (response.ok) {
                 const updatedUser = await response.json();
                 if (modalMode === "create") {
-                    setUsers([...users, updatedUser]);
+                    void fetchUsers();
                     void refetchCompanies();
                     if (updatedUser.emailVerificationPending) {
                         toast.success(
@@ -449,7 +480,7 @@ function UsersPage() {
                 method: "DELETE",
             });
             if (response.ok) {
-                setUsers(users.filter(u => u.id !== userToDelete.id));
+                void fetchUsers();
                 toast.success("User deleted successfully");
             } else {
                 toast.error("Failed to delete user");
@@ -475,21 +506,7 @@ function UsersPage() {
         setShowCreate(true);
     };
 
-    const filteredUsers = users.filter(user => {
-        const matchesSearch = (user.firstName + " " + user.lastName + " " + user.email)
-            .toLowerCase()
-            .includes(searchQuery.toLowerCase());
-
-        const matchesRole = roleFilter === "all" || user.role === roleFilter;
-
-        const userStatus = user.isActive ? "active" : "inactive";
-        const matchesStatus = statusFilter === "all" || userStatus === statusFilter;
-
-        return matchesSearch && matchesRole && matchesStatus;
-    });
-
-    const totalPages = Math.ceil(filteredUsers.length / itemsPerPage);
-    const paginatedUsers = filteredUsers.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage);
+    const paginatedUsers = users;
 
     return (
         <div className="h-full bg-white">
@@ -582,7 +599,7 @@ function UsersPage() {
                                             Loading users...
                                         </TableCell>
                                     </TableRow>
-                                ) : filteredUsers.length === 0 ? (
+                                ) : paginatedUsers.length === 0 ? (
                                     <TableRow>
                                         <TableCell colSpan={8} className="h-64 text-center">
                                             <div className="flex flex-col items-center justify-center py-10">
@@ -735,7 +752,7 @@ function UsersPage() {
                 <ReusablePagination
                     currentPage={currentPage}
                     totalPages={totalPages}
-                    totalItems={filteredUsers.length}
+                    totalItems={totalItems}
                     itemsPerPage={itemsPerPage}
                     onPageChange={setCurrentPage}
                 />
