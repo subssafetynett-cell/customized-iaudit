@@ -127,6 +127,7 @@ import {
   getQfsKoreBannerCopy,
   getQfsScoreMode,
   needsQfsExceptionFollowUp,
+  isQfsKoreSectionHeader,
   qfsHeaderCellClass,
   qfsHeaderStyle,
   qfsScoreFromFindings,
@@ -991,7 +992,8 @@ const AuditExecute = () => {
 
     if (template.type === "checklist" && Array.isArray(template.content)) {
       const activeItems = (template.content as ChecklistContent[]).filter(
-        (item) => isClauseSelected(item.clause),
+        (item) =>
+          isClauseSelected(item.clause) && !isQfsKoreSectionHeader(item.clause),
       );
       totalItems = activeItems.length;
       completedItems = Object.keys(checklistData).filter((key) => {
@@ -4409,13 +4411,28 @@ const AuditExecute = () => {
                       const qfsOpts = qfsScoreOptions(qfsMode);
                       const qfsScore = qfsScoreFromFindings(type, qfsMode);
                       const qfsColSpan = 4 + qfsOpts.length;
-                      // Execute/preview: show Excel # only. Section headers / unnumbered placeholders show as —.
+                      const isQfsSection = isQfsKoreSectionHeader(item.clause);
+                      // Execute/preview: show sequential question # from clause id. Section headers show as —.
                       const rowNo = (() => {
                         const raw = String(item.clause || "").trim();
-                        if (/^[A-Za-z0-9]+-SEC-\d+$/i.test(raw)) return "—";
+                        if (isQfsSection) return "—";
                         if (/^[A-Za-z0-9]+-U\d+$/i.test(raw)) return "—";
                         return raw.replace(/^[A-Za-z0-9]+-/i, "") || String(index + 1);
                       })();
+
+                      if (qfsLayout && isQfsSection) {
+                        return (
+                          <TableRow key={index} className="border-slate-300">
+                            <TableCell
+                              colSpan={qfsColSpan}
+                              className="border border-slate-300 px-3 py-2.5 text-sm font-bold text-slate-900 whitespace-pre-wrap"
+                              style={{ backgroundColor: QFS_KORE_CHECKLIST_COLORS.subheading }}
+                            >
+                              {item.question}
+                            </TableCell>
+                          </TableRow>
+                        );
+                      }
 
                       if (qfsLayout) {
                         return (

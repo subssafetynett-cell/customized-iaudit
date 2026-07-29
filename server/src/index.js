@@ -29,13 +29,13 @@ import {
     COMPANY_TEXT_LIMITS,
     DEPT_TEXT_LIMITS,
     PERSON_NAME_MAX,
-    PHONE_DIGITS_LENGTH,
     SITE_TEXT_LIMITS,
     organizationTextLengthError,
     sanitizeLogoField,
     sanitizeOrganizationText,
     sanitizePersonName,
     sanitizePhoneField,
+    phoneFieldValidationError,
     sanitizePlainText,
     sanitizeShortLabel,
     sanitizeStringArray,
@@ -3115,10 +3115,11 @@ app.post('/companies/:companyId/sites', authenticateToken, checkTrialExpiration,
             return res.status(400).json({ error: 'Address is required' });
         }
 
-        const sitePhone = sanitizePhoneField(contactNumber);
+        const sitePhone = sanitizePhoneField(contactNumber, { countryName: country });
         if (!sitePhone) {
             return res.status(400).json({
-                error: `Contact number must be exactly ${PHONE_DIGITS_LENGTH} digits (no letters or extra characters).`
+                error: phoneFieldValidationError(contactNumber, { countryName: country }, 'Contact number')
+                    || 'Contact number is required.',
             });
         }
 
@@ -3325,10 +3326,19 @@ app.put('/sites/:id', authenticateToken, checkTrialExpiration, async (req, res) 
             data.contactPosition = sanitizePlainText(contactPosition, SITE_TEXT_LIMITS.contactPosition);
         }
         if (contactNumber !== undefined) {
-            const cn = sanitizePhoneField(contactNumber);
+            let countryName = country;
+            if (countryName === undefined) {
+                const existingSite = await prisma.site.findUnique({
+                    where: { id: Number(id) },
+                    select: { country: true },
+                });
+                countryName = existingSite?.country;
+            }
+            const cn = sanitizePhoneField(contactNumber, { countryName });
             if (!cn) {
                 return res.status(400).json({
-                    error: `Contact number must be exactly ${PHONE_DIGITS_LENGTH} digits (no letters or extra characters).`
+                    error: phoneFieldValidationError(contactNumber, { countryName }, 'Contact number')
+                        || 'Contact number is required.',
                 });
             }
             data.contactNumber = cn;
@@ -3570,10 +3580,11 @@ app.post('/companies', authenticateToken, checkTrialExpiration, async (req, res)
         const sCity = sanitizePlainText(city, COMPANY_TEXT_LIMITS.city);
         const sCountry = sanitizePlainText(country, COMPANY_TEXT_LIMITS.country);
 
-        const companyPhone = sanitizePhoneField(contactNumber);
+        const companyPhone = sanitizePhoneField(contactNumber, { countryName: country });
         if (!companyPhone) {
             return res.status(400).json({
-                error: `Contact number must be exactly ${PHONE_DIGITS_LENGTH} digits (no letters or extra characters).`
+                error: phoneFieldValidationError(contactNumber, { countryName: country }, 'Contact number')
+                    || 'Contact number is required.',
             });
         }
 
@@ -3692,10 +3703,15 @@ app.put('/companies/:id', authenticateToken, checkTrialExpiration, async (req, r
             data.isoStandards = sanitizeStringArray(standards);
         }
         if (contactNumber !== undefined) {
-            const cn = sanitizePhoneField(contactNumber);
+            let countryName = country;
+            if (countryName === undefined) {
+                countryName = existing.country;
+            }
+            const cn = sanitizePhoneField(contactNumber, { countryName });
             if (!cn) {
                 return res.status(400).json({
-                    error: `Contact number must be exactly ${PHONE_DIGITS_LENGTH} digits (no letters or extra characters).`
+                    error: phoneFieldValidationError(contactNumber, { countryName }, 'Contact number')
+                        || 'Contact number is required.',
                 });
             }
             data.contactNumber = cn;
@@ -4235,7 +4251,7 @@ app.post('/auth/verify-otp-and-signup', async (req, res) => {
     const mobileDigits = sanitizePhoneField(mobile);
     if (!mobileDigits) {
         return res.status(400).json({
-            error: `Mobile number is required and must be exactly ${PHONE_DIGITS_LENGTH} digits.`
+            error: phoneFieldValidationError(mobile, {}, 'Mobile number') || 'Mobile number is required.',
         });
     }
 
@@ -5396,7 +5412,7 @@ app.post('/users/invite-auditee', authenticateToken, async (req, res) => {
     const userMobile = sanitizePhoneField(mobile);
     if (!userMobile) {
         return res.status(400).json({
-            error: `Mobile number is required and must be exactly ${PHONE_DIGITS_LENGTH} digits.`,
+            error: phoneFieldValidationError(mobile, {}, 'Mobile number') || 'Mobile number is required.',
         });
     }
 
@@ -5589,7 +5605,7 @@ app.post('/users', authenticateToken, async (req, res) => {
     const userMobile = sanitizePhoneField(mobile);
     if (!userMobile) {
         return res.status(400).json({
-            error: `Mobile number is required and must be exactly ${PHONE_DIGITS_LENGTH} digits.`
+            error: phoneFieldValidationError(mobile, {}, 'Mobile number') || 'Mobile number is required.',
         });
     }
 
@@ -5969,7 +5985,7 @@ app.put('/users/:id', authenticateToken, async (req, res) => {
                 const m = sanitizePhoneField(mobile);
                 if (!m) {
                     return res.status(400).json({
-                        error: `Mobile number must be exactly ${PHONE_DIGITS_LENGTH} digits.`
+                        error: phoneFieldValidationError(mobile, {}, 'Mobile number') || 'Mobile number is required.',
                     });
                 }
                 updateData.mobile = m;

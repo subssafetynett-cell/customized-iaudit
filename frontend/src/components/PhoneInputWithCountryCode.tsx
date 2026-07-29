@@ -16,10 +16,11 @@ import {
     DEFAULT_PHONE_COUNTRY_CODE,
     getDialForCountryCode,
     getPhoneCountryByCode,
+    getPhoneLengthForCountry,
     getPhonePlaceholder,
     PHONE_COUNTRIES,
 } from "@/lib/phoneCountries";
-import { PHONE_DIGITS_LENGTH } from "@/lib/validation";
+import { normalizePhoneDigits } from "@/lib/validation";
 
 export interface PhoneInputWithCountryCodeProps {
     /** ISO-style country code (e.g. IN, US). */
@@ -54,6 +55,7 @@ export function PhoneInputWithCountryCode({
     );
     const dial = getDialForCountryCode(countryCode);
     const placeholder = getPhonePlaceholder(countryCode);
+    const { max: phoneMaxLength } = getPhoneLengthForCountry(countryCode);
 
     return (
         <div className={cn("flex gap-2", className)}>
@@ -122,12 +124,12 @@ export function PhoneInputWithCountryCode({
                 id={id}
                 type="tel"
                 inputMode="numeric"
-                maxLength={PHONE_DIGITS_LENGTH}
+                maxLength={phoneMaxLength}
                 placeholder={placeholder}
                 value={value}
                 disabled={disabled}
                 onChange={(e) => {
-                    const digits = e.target.value.replace(/\D/g, "").slice(0, PHONE_DIGITS_LENGTH);
+                    const digits = normalizePhoneDigits(e.target.value, countryCode);
                     onChange(digits);
                 }}
                 className={cn(

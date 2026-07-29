@@ -21,9 +21,9 @@ import { DEFAULT_PHONE_COUNTRY_CODE } from "@/lib/phoneCountries";
 import {
     PASSWORD_REGEX,
     PASSWORD_ERROR_MESSAGE,
-    isTenDigitPhone,
-    normalizePhone10Digits,
-    PHONE_10_ERROR_MESSAGE,
+    getPhoneErrorMessage,
+    isValidPhone,
+    normalizePhoneDigits,
 } from "@/lib/validation";
 import { apiFetch } from "@/lib/api";
 import type { AuditeeSiteOption } from "@/lib/orgSites";
@@ -88,8 +88,8 @@ export function InviteAuditeeModal({
             setError("Please enter a valid email address.");
             return;
         }
-        if (!isTenDigitPhone(mobile)) {
-            setError(PHONE_10_ERROR_MESSAGE);
+        if (!isValidPhone(mobile, mobileCountry)) {
+            setError(getPhoneErrorMessage(mobileCountry));
             return;
         }
         if (password !== confirmPassword) {
@@ -108,7 +108,7 @@ export function InviteAuditeeModal({
                 body: JSON.stringify({
                     email: trimmedEmail,
                     password,
-                    mobile: normalizePhone10Digits(mobile),
+                    mobile: normalizePhoneDigits(mobile, mobileCountry),
                     siteIds: siteIds.map((id) => Number(id)),
                     sendWelcomeEmail: true,
                 }),

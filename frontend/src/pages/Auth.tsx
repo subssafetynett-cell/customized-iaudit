@@ -9,7 +9,7 @@ import { Eye, EyeOff } from "lucide-react";
 import gsap from "gsap";
 import { PhoneInputWithCountryCode } from "@/components/PhoneInputWithCountryCode";
 import { DEFAULT_PHONE_COUNTRY_CODE } from "@/lib/phoneCountries";
-import { PASSWORD_REGEX, PASSWORD_ERROR_MESSAGE, isTenDigitPhone, normalizePhone10Digits, PHONE_10_ERROR_MESSAGE } from "@/lib/validation";
+import { PASSWORD_REGEX, PASSWORD_ERROR_MESSAGE, capitalizeFirstLetter, getPhoneErrorMessage, isValidPhone, normalizePhoneDigits } from "@/lib/validation";
 
 /** Must match server PASSWORD_RESET_CODE_MIN_LENGTH (high-entropy reset token). */
 const PASSWORD_RESET_CODE_MIN_LENGTH = 20;
@@ -500,8 +500,8 @@ export default function Auth() {
         }
         if (!signupPhone.trim()) {
             errors.phone = "Phone number is required";
-        } else if (!isTenDigitPhone(signupPhone)) {
-            errors.phone = PHONE_10_ERROR_MESSAGE;
+        } else if (!isValidPhone(signupPhone, signupPhoneCountry)) {
+            errors.phone = getPhoneErrorMessage(signupPhoneCountry);
         }
         if (!signupPassword) {
             errors.password = "Password is required";
@@ -607,7 +607,7 @@ export default function Auth() {
                     otp: otpCode,
                     firstName: signupFirstName,
                     lastName: signupLastName,
-                    mobile: normalizePhone10Digits(signupPhone),
+                    mobile: normalizePhoneDigits(signupPhone, signupPhoneCountry),
                     password: signupPassword,
                 })
             });
@@ -683,7 +683,7 @@ export default function Auth() {
                                                 placeholder="John"
                                                 value={signupFirstName}
                                                 onChange={(e) => {
-                                                    setSignupFirstName(e.target.value);
+                                                    setSignupFirstName(capitalizeFirstLetter(e.target.value));
                                                     if (signupErrors.firstName) setSignupErrors(prev => ({ ...prev, firstName: "" }));
                                                 }}
                                                 className={`h-11 bg-[#F9FAFB] border-[#E5E7EB] rounded-lg text-sm text-[#111827] placeholder:text-[#9CA3AF] focus:ring-1 focus:ring-[#00875B] ${signupErrors.firstName ? "border-red-500 focus:ring-red-500" : ""}`}
@@ -696,7 +696,7 @@ export default function Auth() {
                                                 placeholder="Doe"
                                                 value={signupLastName}
                                                 onChange={(e) => {
-                                                    setSignupLastName(e.target.value);
+                                                    setSignupLastName(capitalizeFirstLetter(e.target.value));
                                                     if (signupErrors.lastName) setSignupErrors(prev => ({ ...prev, lastName: "" }));
                                                 }}
                                                 className={`h-11 bg-[#F9FAFB] border-[#E5E7EB] rounded-lg text-sm text-[#111827] placeholder:text-[#9CA3AF] focus:ring-1 focus:ring-[#00875B] ${signupErrors.lastName ? "border-red-500 focus:ring-red-500" : ""}`}

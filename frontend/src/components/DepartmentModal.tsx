@@ -6,7 +6,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Users, Info, Pencil, ShieldAlert } from "lucide-react";
 import { Department } from "@/types/company";
-import { DEPT_NAME_MAX, DEPT_NAME_ERROR_MESSAGE, isWithinMaxLength } from "@/lib/validation";
+import { capitalizeFirstLetter, DEPT_NAME_MAX, DEPT_NAME_ERROR_MESSAGE, isWithinMaxLength } from "@/lib/validation";
 import { apiFetch } from "@/lib/api";
 import {
     formatUserDisplayName,
@@ -257,7 +257,7 @@ export default function DepartmentModal({
                                     placeholder="e.g. Operations"
                                     maxLength={DEPT_NAME_MAX}
                                     value={name}
-                                    onChange={(e) => { setName(e.target.value); setError(""); }}
+                                    onChange={(e) => { setName(capitalizeFirstLetter(e.target.value)); setError(""); }}
                                 />
                                 <p className="text-[11px] text-muted-foreground ml-1">
                                     {name.length}/{DEPT_NAME_MAX} characters
@@ -330,7 +330,7 @@ export default function DepartmentModal({
                                 id="dept-desc"
                                 placeholder="Brief description of the department"
                                 value={description}
-                                onChange={(e) => setDescription(e.target.value)}
+                                onChange={(e) => setDescription(capitalizeFirstLetter(e.target.value))}
                             />
                         </div>
                     </div>

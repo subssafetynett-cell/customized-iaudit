@@ -21,6 +21,42 @@ function cellText(ws, R, C) {
     .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u00AD]/g, "");
 }
 
+function cellStyle(ws, R, C) {
+  const c = ws[XLSX.utils.encode_cell({ r: R, c: C })];
+  return c?.s || null;
+}
+
+/** Excel light/medium grey solid fills mark section subheadings (not checklist questions). */
+function isGreySectionFill(style) {
+  if (!style || style.patternType !== "solid") return false;
+  const fg = style.fgColor || {};
+  const rgb = String(fg.rgb || "")
+    .replace(/^FF/i, "")
+    .toUpperCase();
+  // Score / header column colors — never treat as section fills
+  if (
+    rgb === "92D050" ||
+    rgb === "FF0000" ||
+    rgb === "FFC000" ||
+    rgb === "D9E2F3" ||
+    rgb === "C9A227"
+  ) {
+    return false;
+  }
+  if (rgb.length === 6) {
+    const R = parseInt(rgb.slice(0, 2), 16);
+    const G = parseInt(rgb.slice(2, 4), 16);
+    const B = parseInt(rgb.slice(4, 6), 16);
+    const max = Math.max(R, G, B);
+    const min = Math.min(R, G, B);
+    // Near-grey medium/light fills used for subheadings in this workbook
+    if (max - min <= 30 && R >= 100 && R <= 235) return true;
+  }
+  // Theme greys (theme 0/1 with tint, theme 2 → E7E6E6, etc.)
+  if (fg.theme === 0 || fg.theme === 1 || fg.theme === 2) return true;
+  return false;
+}
+
 /** Excel often pads bullets/sub-items with spaces instead of newlines — normalize for readable UI. */
 function normalizeRequirementLayout(text) {
   if (!text) return text;
@@ -55,7 +91,7 @@ function normalizeRequirementLayout(text) {
   return t;
 }
 
-function parseModule(sheetName, { numCol, reqCol, prefix, skipHeaderPred, inferUnnumberedRequirements = false, treatNumberedSectionTitles = false, numberedSectionMaxWords = 6 }) {
+function parseModule(sheetName, { numCol, reqCol, prefix, skipHeaderPred, inferUnnumberedRequirements = false, treatNumberedSectionTitles = false, numberedSectionMaxWords = 6, sequentialQuestionNumbers = true }) {
   const ws = wb.Sheets[sheetName];
   if (!ws) throw new Error(`Missing sheet: ${sheetName}`);
   const range = XLSX.utils.decode_range(ws["!ref"]);
@@ -63,24 +99,29 @@ function parseModule(sheetName, { numCol, reqCol, prefix, skipHeaderPred, inferU
   for (let R = range.s.r; R <= range.e.r; R++) {
     let num = cellText(ws, R, numCol).trim();
     let req = cellText(ws, R, reqCol);
+    const greySection = isGreySectionFill(cellStyle(ws, R, reqCol));
     if (!num && !req.trim()) continue;
     // Empty numbered stub rows (padding at bottom of some sheets) — skip.
     if (/^\d+$/.test(num) && !req.trim()) continue;
     // Header row may carry the first section title in the Requirement column
     // (e.g. GMP Facility Design: "#" + "Construction and Layout of Buildings").
     if (num === "#" && req.trim() && !/^requirement$/i.test(req.trim())) {
-      raw.push({ num: "", question: normalizeRequirementLayout(req) });
+      raw.push({
+        num: "",
+        question: normalizeRequirementLayout(req),
+        greySection: greySection || true,
+      });
       continue;
     }
     // Some sheets put the requirement text in the # column (e.g. HACCP training row).
     if (num && !/^\d+$/.test(num) && num !== "#") {
       const question = normalizeRequirementLayout(req.trim() || num);
       if (skipHeaderPred("", question)) continue;
-      raw.push({ num: "", question });
+      raw.push({ num: "", question, greySection });
       continue;
     }
     if (skipHeaderPred(num, req)) continue;
-    raw.push({ num, question: normalizeRequirementLayout(req) });
+    raw.push({ num, question: normalizeRequirementLayout(req), greySection });
   }
 
   const items = [];
@@ -149,6 +190,15 @@ function parseModule(sheetName, { numCol, reqCol, prefix, skipHeaderPred, inferU
   };
 
   let unnumberedPlaceholder = 0;
+  let questionSeq = 0;
+
+  const nextQuestionClause = (excelNum = 0) => {
+    if (sequentialQuestionNumbers) {
+      questionSeq += 1;
+      return `${prefix}-${questionSeq}`;
+    }
+    return `${prefix}-${excelNum}`;
+  };
 
   const pushSection = (title) => {
     if (pending) items.push(pending);
@@ -179,6 +229,16 @@ function parseModule(sheetName, { numCol, reqCol, prefix, skipHeaderPred, inferU
 
   for (let ri = 0; ri < raw.length; ri++) {
     const r = raw[ri];
+    // Excel grey-fill rows are subheadings — but numbered Excel rows are always questions
+    // (e.g. PFR #11 has grey fill in Excel but is not a section title).
+    if (
+      r.greySection &&
+      r.question.trim() &&
+      !/^\d+\s*$/.test(String(r.num || "").trim())
+    ) {
+      pushSection(r.question);
+      continue;
+    }
     if (!r.num) {
       if (looksLikeSectionHeader(r.question)) {
         pushSection(r.question);
@@ -188,8 +248,7 @@ function parseModule(sheetName, { numCol, reqCol, prefix, skipHeaderPred, inferU
         pending.question += "\n" + r.question;
         continue;
       }
-      // Opt-in: some sheets omit a # for a full requirement (e.g. Security #28, Calibration, Control and Destruction).
-      // If the next Excel # is already prev+1, use a placeholder id (PREFIX-U*) so we don't collide.
+      // Opt-in: some sheets omit a # for a full requirement (e.g. Security, Calibration, Warehouse).
       if (
         inferUnnumberedRequirements &&
         r.question.trim().length >= 40 &&
@@ -199,17 +258,10 @@ function parseModule(sheetName, { numCol, reqCol, prefix, skipHeaderPred, inferU
         !r.question.trim().startsWith("▪")
       ) {
         if (pending) items.push(pending);
-        const prev = lastNumericFromItems();
-        const nextExcel = nextUpcomingExcelNumber(ri);
-        const candidate = prev != null ? prev + 1 : null;
-        const wouldCollide =
-          candidate != null && nextExcel != null && candidate === nextExcel;
         pending = {
-          clause: wouldCollide
-            ? `${prefix}-U${++unnumberedPlaceholder}`
-            : candidate != null
-              ? `${prefix}-${candidate}`
-              : `${prefix}-U${++unnumberedPlaceholder}`,
+          clause: sequentialQuestionNumbers
+            ? nextQuestionClause()
+            : `${prefix}-U${++unnumberedPlaceholder}`,
           question: r.question,
           findings: "",
           evidence: "",
@@ -236,9 +288,27 @@ function parseModule(sheetName, { numCol, reqCol, prefix, skipHeaderPred, inferU
       pushSection(r.question);
       continue;
     }
+    // Excel sometimes wraps one requirement across two numbered rows (e.g. "spread" / "pread via the air").
+    if (pending && /^[a-z(]/.test(r.question.trim())) {
+      const prev = pending.question.trimEnd();
+      let next = r.question.trim();
+      // Drop duplicated tail from previous row when Excel repeats it on the next line.
+      for (let len = Math.min(40, next.length); len >= 6; len--) {
+        const head = next.slice(0, len);
+        if (prev.toLowerCase().endsWith(head.toLowerCase())) {
+          next = next.slice(len).trimStart();
+          break;
+        }
+      }
+      if (!next) continue;
+      pending.question =
+        !/\s$/.test(prev) && /^[a-z]/.test(next) ? prev + next : `${prev}\n${next}`;
+      continue;
+    }
     if (pending) items.push(pending);
+    const excelNum = parseInt(String(r.num).trim(), 10);
     pending = {
-      clause: `${prefix}-${r.num}`,
+      clause: nextQuestionClause(excelNum),
       question: r.question,
       findings: "",
       evidence: "",
@@ -434,6 +504,17 @@ const ice = parseModule("Immediate Consumption Equipment", {
   skipHeaderPred: commonSkip,
 });
 
+const envMonitoring = parseModule("Enviromental Monitoring", {
+  numCol: 0,
+  reqCol: 1,
+  prefix: "ENVM",
+  skipHeaderPred: commonSkip,
+  // Unnumbered full requirements (e.g. zoning definition, intrinsic factors intro).
+  inferUnnumberedRequirements: true,
+  // Excel #10 "Target Microorganisms", #34 "Verification of sampling", etc.
+  treatNumberedSectionTitles: true,
+});
+
 const emp = parseModule("Environmental Monitoring Prog", {
   numCol: 0,
   reqCol: 1,
@@ -535,12 +616,7 @@ const designWater = parseModule("Design and Operation of Water ", {
   treatNumberedSectionTitles: true,
 });
 
-// GOR had duplicate #12 — use sequential numbering (current shipped behavior).
-const gorFixed = gor.map((item, idx) => ({
-  ...item,
-  clause: `GOR-${idx + 1}`,
-}));
-
+// All modules: scoreable questions numbered 1..N in checklist order (Excel # is not used for display).
 const modules = [
   {
     id: "qfs-kore-general-operating-requirements-checklist",
@@ -551,7 +627,7 @@ const modules = [
     title: "KORE QFS Internal Audit Checklist — General Operating Requirements",
     description:
       "KORE QFS internal audit checklist for General Operating Requirements. Score findings as Compliance / Non Compliance.",
-    content: gorFixed,
+    content: gor,
   },
   {
     id: "qfs-kore-imcr-checklist",
@@ -788,7 +864,18 @@ const modules = [
     content: ice,
   },
   {
-    id: "qfs-kore-environmental-monitoring-checklist",
+    id: "qfs-kore-environmental-monitoring-program-checklist",
+    layout: "requirement",
+    scoreMode: "compliance-noncompliance",
+    moduleLabel: "MODULE:QFS-RQ-440 Environmental Monitoring Program",
+    sectionTitle: "Environmental Monitoring Program",
+    title: "KORE QFS Internal Audit Checklist — Environmental Monitoring Program",
+    description:
+      "KORE QFS internal audit checklist for Environmental Monitoring Program (detailed requirements). Score findings as Compliance / Non Compliance.",
+    content: envMonitoring,
+  },
+  {
+    id: "qfs-kore-environmental-monitoring-programme-checklist",
     layout: "requirement",
     scoreMode: "compliance-noncompliance",
     moduleLabel: "MODULE: QFS-RQ-440 Environmental Monitoring Programme",
@@ -796,7 +883,7 @@ const modules = [
     title:
       "KORE QFS Internal Audit Checklist — Environmental Monitoring Programme",
     description:
-      "KORE QFS internal audit checklist for Environmental Monitoring Programme. Score findings as Compliance / Non Compliance.",
+      "KORE QFS internal audit checklist for Environmental Monitoring Programme (audit checklist). Score findings as Compliance / Non Compliance.",
     content: emp,
   },
   {
@@ -951,8 +1038,8 @@ ${content}
   .join(",\n");
 
 const file = `// Auto-generated from QFS KORE Audit Checklist.xlsx
-// Question text copied exactly from Excel. Internal clause ids (GOR-*, IMCR-*, GMP-*, SEC-*, MAINT-*, CAL-*, PEST-*, PPE-*, CTRL-*, REC-*, CE-*, RET-*, HACCP-*, LCT-*, IRH-*, PHP-*, MB-*, PFR-*, CARB-*, ETP-*, ICE-*, EMP-*, PPM-*, MM-*, ST-*, CS-*, FAC-*, WD-*, PS-*, WPM-*, WMR-*, DOW-*) are for plan view only;
-// execute/preview pages show the numeric suffix.
+// Question text copied exactly from Excel. Clause ids use sequential question numbers (1..N per module);
+// section subheadings use PREFIX-SEC-* and show as — in execute/preview.
 import type { AuditTemplate } from "./auditTemplateTypes";
 
 export const QFS_KORE_EXCEL_MODULE_META = [
@@ -970,4 +1057,31 @@ for (const m of modules) {
   const qs = m.content.filter((c) => !String(c.clause).includes("-SEC-")).length;
   const secs = m.content.filter((c) => String(c.clause).includes("-SEC-")).length;
   console.log(m.id, "items", m.content.length, "questions", qs, "sections", secs);
+  let expected = 0;
+  for (const c of m.content) {
+    if (String(c.clause).includes("-SEC-")) continue;
+    expected += 1;
+    const suffix = Number(String(c.clause).replace(/^[A-Za-z0-9]+-/i, ""));
+    if (suffix !== expected) {
+      console.warn("  numbering gap:", m.id, "expected", expected, "got", c.clause);
+    }
+  }
+  if (m.id === "qfs-kore-environmental-monitoring-program-checklist") {
+    const text = m.content.map((c) => c.question).join("\n");
+    if (text.includes("1.1 Obtain Operating Unit")) {
+      console.warn("  PROGRAMME text leaked into Environmental Monitoring Program:", m.id);
+    }
+    if (!text.includes("General requirements")) {
+      console.warn("  missing General requirements section:", m.id);
+    }
+  }
+  if (m.id === "qfs-kore-environmental-monitoring-programme-checklist") {
+    const text = m.content.map((c) => c.question).join("\n");
+    if (!text.includes("1.1 Obtain Operating Unit")) {
+      console.warn("  missing Programme combined requirement 1.1:", m.id);
+    }
+    if (text.includes("General requirements")) {
+      console.warn("  PROGRAM text leaked into Environmental Monitoring Programme:", m.id);
+    }
+  }
 }
