@@ -1,4 +1,11 @@
 /** Escape for safe HTML interpolation (email templates, etc.). */
+import {
+    getPhoneLengthForCountry,
+    PHONE_MAX_DIGITS,
+    phoneLengthErrorMessage,
+} from './phoneLengthRules.js';
+import { resolveCountryIsoFromName } from './worldCountries.js';
+
 export function escapeHtml(value) {
     if (value === undefined || value === null) return '';
     return String(value)
@@ -114,16 +121,37 @@ export function sanitizeShortLabel(value, maxLen = 120) {
     return sanitizePlainText(oneLine, maxLen);
 }
 
-/** Exactly 10 digits (US-style line); strips formatting. Empty optional input → `''`. Invalid length → `null` (reject). */
-export const PHONE_DIGITS_LENGTH = 10;
+/** National phone digits; strips formatting. Empty optional input → `''`. Invalid length → `null` (reject). */
+export const PHONE_DIGITS_LENGTH = PHONE_MAX_DIGITS;
 
-export function sanitizePhoneField(value) {
+function resolvePhoneCountryIso(options = {}) {
+    const { countryCode, countryName } = options;
+    if (countryCode) return String(countryCode).trim().toUpperCase();
+    if (countryName) return resolveCountryIsoFromName(countryName);
+    return null;
+}
+
+export function sanitizePhoneField(value, options = {}) {
     if (value === undefined) return undefined;
     if (value === null) return null;
     const digits = String(value).replace(/\D/g, '');
     if (digits.length === 0) return '';
-    if (digits.length !== PHONE_DIGITS_LENGTH) return null;
+    const countryIso = resolvePhoneCountryIso(options);
+    const { min, max } = getPhoneLengthForCountry(countryIso);
+    if (digits.length < min || digits.length > max) return null;
     return digits;
+}
+
+export function phoneFieldValidationError(value, options = {}, fieldLabel = 'Phone number') {
+    if (value === undefined || value === null) return null;
+    const digits = String(value).replace(/\D/g, '');
+    if (digits.length === 0) return `${fieldLabel} is required.`;
+    const countryIso = resolvePhoneCountryIso(options);
+    const { min, max } = getPhoneLengthForCountry(countryIso);
+    if (digits.length < min || digits.length > max) {
+        return phoneLengthErrorMessage(countryIso, fieldLabel);
+    }
+    return null;
 }
 
 /** Company / site / street lines: plain text plus common business & address punctuation (no brackets/script). */
@@ -157,7 +185,7 @@ export const COMPANY_TEXT_LIMITS = {
     industry: 200,
     description: 500,
     logo: 500_000,
-    contactNumber: PHONE_DIGITS_LENGTH,
+    contactNumber: PHONE_MAX_DIGITS,
     streetAddress: 500,
     city: 120,
     state: 120,
@@ -177,7 +205,7 @@ export const SITE_TEXT_LIMITS = {
     postalCode: 40,
     contactName: 200,
     contactPosition: 200,
-    contactNumber: PHONE_DIGITS_LENGTH,
+    contactNumber: PHONE_MAX_DIGITS,
     email: 254
 };
 

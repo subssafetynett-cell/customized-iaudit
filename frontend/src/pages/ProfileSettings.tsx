@@ -8,7 +8,7 @@ import { useNavigate } from "react-router-dom";
 import { apiFetch } from "@/lib/api";
 import { PhoneInputWithCountryCode } from "@/components/PhoneInputWithCountryCode";
 import { DEFAULT_PHONE_COUNTRY_CODE, getDialForCountryCode } from "@/lib/phoneCountries";
-import { isTenDigitPhone, normalizePhone10Digits, PHONE_10_ERROR_MESSAGE, normalizePersonNameInput, PERSON_NAME_MAX, PERSON_NAME_ERROR_MESSAGE, isWithinMaxLength } from "@/lib/validation";
+import { getPhoneErrorMessage, isValidPhone, normalizePhoneDigits, normalizePersonNameInput, PERSON_NAME_MAX, PERSON_NAME_ERROR_MESSAGE, isWithinMaxLength } from "@/lib/validation";
 
 export default function ProfileSettings() {
     const { toast } = useToast();
@@ -84,11 +84,11 @@ export default function ProfileSettings() {
 
         setIsLoading(true);
 
-        const mobileDigits = normalizePhone10Digits(formData.mobile);
-        if (formData.mobile.trim() !== "" && !isTenDigitPhone(formData.mobile)) {
+        const mobileDigits = normalizePhoneDigits(formData.mobile, mobileCountry);
+        if (formData.mobile.trim() !== "" && !isValidPhone(formData.mobile, mobileCountry)) {
             toast({
                 title: "Invalid phone number",
-                description: PHONE_10_ERROR_MESSAGE,
+                description: getPhoneErrorMessage(mobileCountry),
                 variant: "destructive",
             });
             setIsLoading(false);

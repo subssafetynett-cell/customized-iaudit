@@ -11,7 +11,7 @@ import { UserPlus, Mail, Lock, Shield, Eye, EyeOff, Edit2 } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { PhoneInputWithCountryCode } from "@/components/PhoneInputWithCountryCode";
 import { DEFAULT_PHONE_COUNTRY_CODE } from "@/lib/phoneCountries";
-import { PASSWORD_REGEX, PASSWORD_ERROR_MESSAGE, isTenDigitPhone, normalizePhone10Digits, PHONE_10_ERROR_MESSAGE } from "@/lib/validation";
+import { PASSWORD_REGEX, PASSWORD_ERROR_MESSAGE, capitalizeFirstLetter, getPhoneErrorMessage, isValidPhone, normalizePhoneDigits } from "@/lib/validation";
 import { formatUserRoleLabel, isAuditeeRole, USERS_PAGE_ROLE_OPTIONS } from "@/lib/userRoles";
 import {
     AuditeeSiteMultiSelect,
@@ -253,14 +253,14 @@ export default function UserModal({
             }
         }
 
-        const mobileDigits = normalizePhone10Digits(mobile);
+        const mobileDigits = normalizePhoneDigits(mobile, mobileCountry);
         if (mode === "create") {
-            if (!isTenDigitPhone(mobile)) {
-                setError(PHONE_10_ERROR_MESSAGE);
+            if (!isValidPhone(mobile, mobileCountry)) {
+                setError(getPhoneErrorMessage(mobileCountry));
                 return;
             }
-        } else if (mobile.trim() !== "" && !isTenDigitPhone(mobile)) {
-            setError(PHONE_10_ERROR_MESSAGE);
+        } else if (mobile.trim() !== "" && !isValidPhone(mobile, mobileCountry)) {
+            setError(getPhoneErrorMessage(mobileCountry));
             return;
         }
 
@@ -378,7 +378,7 @@ export default function UserModal({
                                 value={firstName}
                                 onChange={(e) => {
                                     e.stopPropagation();
-                                    setFirstName(e.target.value);
+                                    setFirstName(capitalizeFirstLetter(e.target.value));
                                 }}
                                 disabled={isViewMode}
                             />
@@ -391,7 +391,7 @@ export default function UserModal({
                                 value={lastName}
                                 onChange={(e) => {
                                     e.stopPropagation();
-                                    setLastName(e.target.value);
+                                    setLastName(capitalizeFirstLetter(e.target.value));
                                 }}
                                 disabled={isViewMode}
                             />
@@ -517,7 +517,7 @@ export default function UserModal({
                                     value={customRoleName}
                                     onChange={(e) => {
                                         e.stopPropagation();
-                                        setCustomRoleName(e.target.value);
+                                        setCustomRoleName(capitalizeFirstLetter(e.target.value));
                                     }}
                                     disabled={isViewMode}
                                 />

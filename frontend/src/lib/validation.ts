@@ -2,6 +2,8 @@
  * Common validation utilities for the iAudit application.
  */
 
+import { getPhoneLengthForCountry, PHONE_MAX_DIGITS } from "@/lib/phoneCountries";
+
 /** Minimum length for new passwords (account creation & updates). */
 export const PASSWORD_MIN_LENGTH = 8;
 
@@ -18,18 +20,41 @@ export const validatePassword = (password: string): boolean => {
 
 export const PASSWORD_ERROR_MESSAGE = `Password must be at least ${PASSWORD_MIN_LENGTH} characters and include at least one uppercase letter, one number, and one special character.`;
 
-/** US-style 10-digit phone (digits only in API). */
-export const PHONE_DIGITS_LENGTH = 10;
+/** @deprecated Use PHONE_MAX_DIGITS — kept for older imports. */
+export const PHONE_DIGITS_LENGTH = PHONE_MAX_DIGITS;
 
-export function normalizePhone10Digits(value: string): string {
-    return String(value || "").replace(/\D/g, "").slice(0, PHONE_DIGITS_LENGTH);
+export function normalizePhoneDigits(value: string, countryCode?: string): string {
+    const { max } = getPhoneLengthForCountry(countryCode);
+    return String(value || "").replace(/\D/g, "").slice(0, max);
 }
 
-export function isTenDigitPhone(value: string): boolean {
-    return normalizePhone10Digits(value).length === PHONE_DIGITS_LENGTH;
+export function isValidPhone(value: string, countryCode?: string): boolean {
+    const digits = String(value || "").replace(/\D/g, "");
+    if (!digits) return false;
+    const { min, max } = getPhoneLengthForCountry(countryCode);
+    return digits.length >= min && digits.length <= max;
 }
 
-export const PHONE_10_ERROR_MESSAGE = `Phone number must be exactly ${PHONE_DIGITS_LENGTH} digits.`;
+export function getPhoneErrorMessage(countryCode?: string): string {
+    const { min, max } = getPhoneLengthForCountry(countryCode);
+    if (min === max) {
+        return `Phone number must be exactly ${min} digits.`;
+    }
+    return `Phone number must be between ${min} and ${max} digits.`;
+}
+
+/** @deprecated Use normalizePhoneDigits */
+export function normalizePhone10Digits(value: string, countryCode?: string): string {
+    return normalizePhoneDigits(value, countryCode);
+}
+
+/** @deprecated Use isValidPhone */
+export function isTenDigitPhone(value: string, countryCode?: string): boolean {
+    return isValidPhone(value, countryCode);
+}
+
+/** @deprecated Use getPhoneErrorMessage */
+export const PHONE_10_ERROR_MESSAGE = getPhoneErrorMessage();
 
 /** Person first/last name (matches server PERSON_NAME_MAX). */
 export const PERSON_NAME_MAX = 100;
@@ -87,6 +112,12 @@ export function getCompanyLogoFileSizeError(fileSizeBytes: number): string | nul
         return "Logo image is too large. Use a smaller file (under 10MB).";
     }
     return null;
+}
+
+/** Capitalize the first character as the user types (leaves the rest unchanged). */
+export function capitalizeFirstLetter(value: string): string {
+    if (!value) return value;
+    return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
 export function isWithinMaxLength(value: string, max: number): boolean {

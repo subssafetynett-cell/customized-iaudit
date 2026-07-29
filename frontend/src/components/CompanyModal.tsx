@@ -6,10 +6,12 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Company } from "@/types/company";
 import { Building2, Phone, MapPin, Info, Pencil } from "lucide-react";
+import { getPhoneLengthForCountry } from "@/lib/phoneCountries";
 import {
-  isTenDigitPhone,
-  normalizePhone10Digits,
-  PHONE_10_ERROR_MESSAGE,
+  capitalizeFirstLetter,
+  getPhoneErrorMessage,
+  isValidPhone,
+  normalizePhoneDigits,
   COMPANY_NAME_MAX,
   COMPANY_NAME_ERROR_MESSAGE,
   COMPANY_DESCRIPTION_MAX,
@@ -106,8 +108,13 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
     }
   }, [open, initialData]);
 
+  useEffect(() => {
+    setContactNumber((prev) => normalizePhoneDigits(prev, countryIso));
+  }, [countryIso]);
+
   const statesForSelectedCountry = countryIso ? StateCity.getStatesOfCountry(countryIso) : [];
   const hasStatesForCountry = statesForSelectedCountry.length > 0;
+  const contactPhoneMaxLength = getPhoneLengthForCountry(countryIso).max;
 
   const clearFieldError = (field: string) => {
     setFieldErrors((prev) => {
@@ -207,7 +214,7 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
     }
     if (!industry) errors.industry = "Industry is required";
     if (!contactNumber.trim()) errors.contactNumber = "Contact number is required";
-    else if (!isTenDigitPhone(contactNumber)) errors.contactNumber = PHONE_10_ERROR_MESSAGE;
+    else if (!isValidPhone(contactNumber, countryIso)) errors.contactNumber = getPhoneErrorMessage(countryIso);
     if (!trimmedAddress) errors.streetAddress = "Street address is required";
     else if (!isWithinMaxLength(trimmedAddress, STREET_ADDRESS_MAX)) {
       errors.streetAddress = STREET_ADDRESS_ERROR_MESSAGE;
@@ -240,7 +247,7 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
           name: trimmedName,
           logo,
           industry,
-          contactNumber: normalizePhone10Digits(contactNumber),
+          contactNumber: normalizePhoneDigits(contactNumber, countryIso),
           description: description.trim(),
           streetAddress: trimmedAddress,
           city: city.trim(),
@@ -346,7 +353,7 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
                 className={`h-11 bg-[#F9FAFB] border-[#E5E7EB] rounded-lg text-sm text-[#111827] placeholder:text-[#9CA3AF] focus:ring-1 focus:ring-[#00875B] ${fieldErrors.name ? "border-red-500 focus:ring-red-500" : ""}`}
                 value={name}
                 onChange={(e) => {
-                  setName(e.target.value);
+                  setName(capitalizeFirstLetter(e.target.value));
                   if (fieldErrors.name) setFieldErrors(prev => ({ ...prev, name: "" }));
                   setError("");
                 }}
@@ -385,12 +392,12 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
                   id="company-contact"
                   type="tel"
                   inputMode="numeric"
-                  maxLength={10}
-                  placeholder="10-digit number"
+                  maxLength={contactPhoneMaxLength}
+                  placeholder="Phone number"
                   className={`pl-9 ${fieldErrors.contactNumber ? "border-red-500 focus:ring-red-500" : ""}`}
                   value={contactNumber}
                   onChange={(e) => {
-                    const value = e.target.value.replace(/\D/g, "").slice(0, 10);
+                    const value = normalizePhoneDigits(e.target.value, countryIso);
                     setContactNumber(value);
                     if (fieldErrors.contactNumber) setFieldErrors(prev => ({ ...prev, contactNumber: "" }));
                     setError("");
@@ -409,7 +416,7 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
               maxLength={COMPANY_DESCRIPTION_MAX}
               value={description}
               onChange={(e) => {
-                setDescription(e.target.value);
+                setDescription(capitalizeFirstLetter(e.target.value));
                 if (fieldErrors.description) setFieldErrors(prev => ({ ...prev, description: "" }));
                 setError("");
               }}
@@ -440,7 +447,7 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
               className={`${fieldErrors.streetAddress ? "border-red-500 focus:ring-red-500" : ""}`}
               value={streetAddress}
               onChange={(e) => {
-                setStreetAddress(e.target.value);
+                setStreetAddress(capitalizeFirstLetter(e.target.value));
                 if (fieldErrors.streetAddress) setFieldErrors(prev => ({ ...prev, streetAddress: "" }));
                 setError("");
               }}
@@ -499,7 +506,7 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
                   className={`${fieldErrors.state ? "border-red-500 focus:ring-red-500" : ""}`}
                   value={state}
                   onChange={(e) => {
-                    setState(e.target.value);
+                    setState(capitalizeFirstLetter(e.target.value));
                     clearFieldError("state");
                     setError("");
                   }}
@@ -518,7 +525,7 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
                 className={`${fieldErrors.city ? "border-red-500 focus:ring-red-500" : ""}`}
                 value={city}
                 onChange={(e) => {
-                  setCity(e.target.value);
+                  setCity(capitalizeFirstLetter(e.target.value));
                   if (fieldErrors.city) setFieldErrors(prev => ({ ...prev, city: "" }));
                   setError("");
                 }}

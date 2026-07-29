@@ -10,11 +10,13 @@ import { Country, State as StateCity } from "country-state-city";
 import { CountrySelect } from "@/components/CountrySelect";
 import { StateSelect } from "@/components/StateSelect";
 import { resolveCountryIsoFromName } from "@/lib/worldCountries";
+import { getPhoneLengthForCountry } from "@/lib/phoneCountries";
 import {
-    isTenDigitPhone,
+    capitalizeFirstLetter,
+    getPhoneErrorMessage,
+    isValidPhone,
     isWithinMaxLength,
-    normalizePhone10Digits,
-    PHONE_10_ERROR_MESSAGE,
+    normalizePhoneDigits,
     SITE_ADDRESS_ERROR_MESSAGE,
     SITE_ADDRESS_MAX,
     SITE_NAME_ERROR_MESSAGE,
@@ -54,6 +56,7 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
 
     const statesForSelectedCountry = countryIso ? StateCity.getStatesOfCountry(countryIso) : [];
     const hasStatesForCountry = statesForSelectedCountry.length > 0;
+    const contactPhoneMaxLength = getPhoneLengthForCountry(countryIso).max;
 
     useEffect(() => {
         if (open) {
@@ -91,6 +94,10 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
         }
     }, [open, initialData]);
 
+    useEffect(() => {
+        setContactNumber((prev) => normalizePhoneDigits(prev, countryIso));
+    }, [countryIso]);
+
     const handleSubmit = () => {
         const trimmedName = name.trim();
         const trimmedDescription = description.trim();
@@ -100,7 +107,7 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
         const trimmedContactName = contactName.trim();
         const trimmedContactPosition = contactPosition.trim();
         const trimmedContactNumber = contactNumber.trim();
-        const contactDigits = normalizePhone10Digits(trimmedContactNumber);
+        const contactDigits = normalizePhoneDigits(trimmedContactNumber, countryIso);
         const trimmedEmail = email.trim();
 
         const countryName = Country.getCountryByCode(countryIso)?.name || "";
@@ -136,8 +143,8 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
         if (!trimmedContactPosition) errors.contactPosition = "Position is required";
         if (!trimmedContactNumber) {
             errors.contactNumber = "Contact number is required";
-        } else if (!isTenDigitPhone(trimmedContactNumber)) {
-            errors.contactNumber = PHONE_10_ERROR_MESSAGE;
+        } else if (!isValidPhone(trimmedContactNumber, countryIso)) {
+            errors.contactNumber = getPhoneErrorMessage(countryIso);
         }
         if (!trimmedEmail) {
             errors.email = "Email is required";
@@ -226,7 +233,7 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
                                 maxLength={SITE_NAME_MAX}
                                 className={fieldErrorClass("name")}
                                 value={name}
-                                onChange={(e) => { setName(e.target.value); clearFieldError("name"); }}
+                                onChange={(e) => { setName(capitalizeFirstLetter(e.target.value)); clearFieldError("name"); }}
                             />
                             <p className="text-[11px] text-muted-foreground ml-1">
                                 {name.length}/{SITE_NAME_MAX} characters
@@ -241,7 +248,7 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
                                 placeholder="Brief description of the site"
                                 className={fieldErrorClass("description")}
                                 value={description}
-                                onChange={(e) => { setDescription(e.target.value); clearFieldError("description"); }}
+                                onChange={(e) => { setDescription(capitalizeFirstLetter(e.target.value)); clearFieldError("description"); }}
                             />
                             {fieldErrors.description && <p className="text-[10px] text-red-500 mt-1 pl-1 font-medium">{fieldErrors.description}</p>}
                         </div>
@@ -293,7 +300,7 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
                                 maxLength={SITE_ADDRESS_MAX}
                                 className={fieldErrorClass("address")}
                                 value={address}
-                                onChange={(e) => { setAddress(e.target.value); clearFieldError("address"); }}
+                                onChange={(e) => { setAddress(capitalizeFirstLetter(e.target.value)); clearFieldError("address"); }}
                             />
                             <p className="text-[11px] text-muted-foreground ml-1">
                                 {address.length}/{SITE_ADDRESS_MAX} characters
@@ -309,7 +316,7 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
                                     placeholder="City"
                                     className={fieldErrorClass("city")}
                                     value={city}
-                                    onChange={(e) => { setCity(e.target.value); clearFieldError("city"); }}
+                                    onChange={(e) => { setCity(capitalizeFirstLetter(e.target.value)); clearFieldError("city"); }}
                                 />
                                 {fieldErrors.city && <p className="text-[10px] text-red-500 mt-1 pl-1 font-medium">{fieldErrors.city}</p>}
                             </div>
@@ -358,7 +365,7 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
                                         className={fieldErrorClass("state")}
                                         value={stateText}
                                         onChange={(e) => {
-                                            setStateText(e.target.value);
+                                            setStateText(capitalizeFirstLetter(e.target.value));
                                             clearFieldError("state");
                                         }}
                                     />
@@ -397,7 +404,7 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
                                     placeholder="Full name"
                                     className={fieldErrorClass("contactName")}
                                     value={contactName}
-                                    onChange={(e) => { setContactName(e.target.value); clearFieldError("contactName"); }}
+                                    onChange={(e) => { setContactName(capitalizeFirstLetter(e.target.value)); clearFieldError("contactName"); }}
                                 />
                                 {fieldErrors.contactName && <p className="text-[10px] text-red-500 mt-1 pl-1 font-medium">{fieldErrors.contactName}</p>}
                             </div>
@@ -408,7 +415,7 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
                                     placeholder="e.g. Site Manager"
                                     className={fieldErrorClass("contactPosition")}
                                     value={contactPosition}
-                                    onChange={(e) => { setContactPosition(e.target.value); clearFieldError("contactPosition"); }}
+                                    onChange={(e) => { setContactPosition(capitalizeFirstLetter(e.target.value)); clearFieldError("contactPosition"); }}
                                 />
                                 {fieldErrors.contactPosition && <p className="text-[10px] text-red-500 mt-1 pl-1 font-medium">{fieldErrors.contactPosition}</p>}
                             </div>
@@ -421,12 +428,12 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
                                     id="contact-num"
                                     type="tel"
                                     inputMode="numeric"
-                                    maxLength={10}
-                                    placeholder="10-digit number"
+                                    maxLength={contactPhoneMaxLength}
+                                    placeholder="Phone number"
                                     className={fieldErrorClass("contactNumber")}
                                     value={contactNumber}
                                     onChange={(e) => {
-                                        setContactNumber(e.target.value.replace(/\D/g, "").slice(0, 10));
+                                        setContactNumber(normalizePhoneDigits(e.target.value, countryIso));
                                         clearFieldError("contactNumber");
                                     }}
                                 />
