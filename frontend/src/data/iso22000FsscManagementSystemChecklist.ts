@@ -7,6 +7,7 @@ export const ISO_22000_FSSC_MANAGEMENT_SYSTEM_CHECKLIST: AuditTemplate = {
     standard: "ISO 22000",
     type: "checklist",
     alwaysAvailableInPlan: true,
+    findingScale: "yes-no",
     description:
         "ISO 22000:2018 FSMS checklist (Yes/No/Comments) covering Part 1 ISO 22000:2018, Part 2 PRPs (ISO/TS 22002-1:2009), and Part 3 FSSC 22000 V6 additional requirements.",
     content: [

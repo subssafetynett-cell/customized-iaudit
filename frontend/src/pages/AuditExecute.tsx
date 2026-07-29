@@ -49,6 +49,7 @@ import {
   findAuditTemplates,
   parseAuditPlanTemplateIds,
   resolveAuditTemplateId,
+  usesYesNoChecklistFindings,
 } from "@/data/auditTemplates";
 import { toast } from "sonner";
 import { format } from "date-fns";
@@ -1192,9 +1193,12 @@ const AuditExecute = () => {
     }
 
     if (template?.type === "checklist" || template?.isTripleMapping) {
+      const yesNoScale = usesYesNoChecklistFindings(template);
       Object.entries(checklistData).forEach(([idx, data]) => {
         const type = data.findings;
-        if (type && type !== "C" && type !== "") {
+        // Yes/No checklists do not produce OFI/Minor/Major findings rows.
+        if (yesNoScale) return;
+        if (type && type !== "C" && type !== "" && type !== "Yes" && type !== "No") {
           const item =
             editableChecklist[Number(idx)] ||
             (template?.content as ChecklistContent[])?.[Number(idx)];
@@ -4357,10 +4361,10 @@ const AuditExecute = () => {
                       Audit Question
                     </TableHead>
                     <TableHead className="w-[20%] font-bold text-white text-center border-r border-slate-700">
-                      Finding
+                      {usesYesNoChecklistFindings(template) ? "Yes / No" : "Finding"}
                     </TableHead>
                     <TableHead className="w-[35%] font-bold text-white text-center">
-                      Audit Evidence
+                      {usesYesNoChecklistFindings(template) ? "Comments" : "Audit Evidence"}
                     </TableHead>
                   </TableRow>
                   )}
@@ -4388,7 +4392,7 @@ const AuditExecute = () => {
 
                       if (
                         focusFindings &&
-                        !["OFI", "Min", "Maj", "C", "2", "1", "0"].includes(type as string)
+                        !["OFI", "Min", "Maj", "C", "2", "1", "0", "Yes", "No"].includes(type as string)
                       ) {
                         return null;
                       }
@@ -4397,6 +4401,7 @@ const AuditExecute = () => {
                       const isLastInGroup = index === array.length - 1 || array[index + 1].clause !== item.clause;
                       const qfsLayout = usesQfsKoreScoredChecklistLayout(template) && !isEditMode;
                       const eoshLayout = usesEoshScoredChecklistLayout(template) && !isEditMode;
+                      const yesNoFindings = usesYesNoChecklistFindings(template);
                       const showIntent = eoshChecklistShowsIntentColumn(templateId);
                       const eoshColSpan = showIntent ? 8 : 7;
                       const eoshScore = eoshScoreFromFindings(type);
@@ -4689,12 +4694,18 @@ const AuditExecute = () => {
                                 {/* Findings Selection */}
                                 <TableCell className="p-4 align-top">
                                   <div className="flex flex-wrap gap-2 justify-center">
-                                    {[
-                                      { val: "C", color: "bg-emerald-500" },
-                                      { val: "OFI", color: "bg-amber-500" },
-                                      { val: "Min", color: "bg-orange-600" },
-                                      { val: "Maj", color: "bg-red-600" },
-                                    ].map((opt) => (
+                                    {(yesNoFindings
+                                      ? [
+                                          { val: "Yes", color: "bg-emerald-500" },
+                                          { val: "No", color: "bg-red-600" },
+                                        ]
+                                      : [
+                                          { val: "C", color: "bg-emerald-500" },
+                                          { val: "OFI", color: "bg-amber-500" },
+                                          { val: "Min", color: "bg-orange-600" },
+                                          { val: "Maj", color: "bg-red-600" },
+                                        ]
+                                    ).map((opt) => (
                                       <div
                                         key={opt.val}
                                         className={`
@@ -4718,13 +4729,17 @@ const AuditExecute = () => {
                                   </div>
                                 </TableCell>
 
-                                {/* Evidence */}
+                                {/* Evidence / Comments */}
                                 <TableCell className="p-3 align-top">
                                   <div className="flex flex-col h-full gap-1">
-                                    {!["OFI", "Min", "Maj"].includes(type) && (
+                                    {(yesNoFindings || !["OFI", "Min", "Maj"].includes(type)) && (
                                       <Textarea
                                         className="min-h-[100px] text-sm resize-y border-slate-200 bg-slate-50/50 focus:bg-white shadow-sm transition-colors placeholder:text-slate-400 p-3"
-                                        placeholder="Documented info / records checked..."
+                                        placeholder={
+                                          yesNoFindings
+                                            ? "Comments..."
+                                            : "Documented info / records checked..."
+                                        }
                                         value={checklistData[index]?.evidence || ""}
                                         onChange={(e) =>
                                           handleChecklistChange(
@@ -4753,8 +4768,8 @@ const AuditExecute = () => {
                             )}
                           </TableRow>
 
-                          {/* Extended findings conditionally */}
-                          {["OFI", "Min", "Maj"].includes(type) && (
+                          {/* Extended findings conditionally — not used for Yes/No checklists */}
+                          {!yesNoFindings && ["OFI", "Min", "Maj"].includes(type) && (
                             <TableRow className="bg-slate-50 border-b-4 border-slate-200 text-sm">
                               <TableCell colSpan={4} className="p-0">
                                 <div className="p-6 ml-6 mr-6 my-4 border bg-white rounded-xl shadow-[0_2px_10px_-3px_rgba(6,81,237,0.1)] border-slate-200">
@@ -4979,7 +4994,18 @@ const AuditExecute = () => {
                                       </TableCell>
                                       <TableCell className="p-4 align-top">
                                         <div className="flex flex-wrap gap-2 justify-center">
-                                          {[{ val: "C", color: "bg-emerald-500" }, { val: "OFI", color: "bg-amber-500" }, { val: "Min", color: "bg-orange-600" }, { val: "Maj", color: "bg-red-600" }].map((opt) => (
+                                          {(usesYesNoChecklistFindings(template)
+                                            ? [
+                                                { val: "Yes", color: "bg-emerald-500" },
+                                                { val: "No", color: "bg-red-600" },
+                                              ]
+                                            : [
+                                                { val: "C", color: "bg-emerald-500" },
+                                                { val: "OFI", color: "bg-amber-500" },
+                                                { val: "Min", color: "bg-orange-600" },
+                                                { val: "Maj", color: "bg-red-600" },
+                                              ]
+                                          ).map((opt) => (
                                             <div
                                               key={opt.val}
                                               className={`w-10 h-10 rounded-lg flex items-center justify-center text-xs font-black cursor-pointer border transition-all shadow-sm ${eqType === opt.val ? `${opt.color} text-white border-transparent scale-105 shadow-md` : "bg-white text-slate-500 border-slate-200 hover:border-slate-300"}`}
@@ -4997,7 +5023,8 @@ const AuditExecute = () => {
                                         />
                                       </TableCell>
                                     </TableRow>
-                                    {["OFI", "Min", "Maj", "C"].includes(eqType) && (
+                                    {["OFI", "Min", "Maj", "C"].includes(eqType) &&
+                                      !usesYesNoChecklistFindings(template) && (
                                       <TableRow className="bg-slate-50 border-b-2 border-slate-200 text-sm">
                                         <TableCell colSpan={4} className="p-0">
                                           <div className="p-4 ml-4 mr-4 my-3 border bg-white rounded-xl border-slate-200 grid grid-cols-2 gap-4">
