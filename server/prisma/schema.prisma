@@ -148,6 +148,7 @@ model User {
   @@index([creatorId])
   @@index([role])
   @@index([createdAt])
+  @@index([isActive, createdAt])
 }
 
 /// Organization-wide gap analysis history and in-progress draft (shared by all org members).

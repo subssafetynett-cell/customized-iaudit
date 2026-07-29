@@ -162,6 +162,7 @@ const STATUS_CARDS: {
 
 const TYPE_COLORS: Record<FindingType, string> = {
     OFI: "#F59E0B",
+    NC: "#DC2626",
     Minor: "#EA580C",
     Major: "#DC2626",
 };
@@ -297,7 +298,7 @@ export default function Nonconformances() {
     }, [findings]);
 
     const typeCounts = useMemo(() => {
-        const counts: Record<FindingType, number> = { OFI: 0, Minor: 0, Major: 0 };
+        const counts: Record<FindingType, number> = { OFI: 0, NC: 0, Minor: 0, Major: 0 };
         for (const f of findings) {
             if (f.type in counts) counts[f.type] += 1;
         }
@@ -307,7 +308,7 @@ export default function Nonconformances() {
     const total = findings.length;
 
     const typeDistribution = useMemo(() => {
-        return (["OFI", "Minor", "Major"] as FindingType[]).map((type) => ({
+        return (["OFI", "NC", "Minor", "Major"] as FindingType[]).map((type) => ({
             name: TYPE_CONFIG[type].label,
             value: typeCounts[type],
             color: TYPE_COLORS[type],
@@ -452,7 +453,7 @@ export default function Nonconformances() {
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                    {(["OFI", "Minor", "Major"] as FindingType[]).map((type) => {
+                    {(["OFI", "NC", "Minor", "Major"] as FindingType[]).map((type) => {
                         const cfg = TYPE_CONFIG[type];
                         return (
                             <div

@@ -116,6 +116,7 @@ import {
   eoshHeaderCellClass,
   eoshHeaderStyle,
   eoshScoreFromFindings,
+  eoshFindingsValueForScore,
   eoshChecklistShowsIntentColumn,
   getEoshCapabilityBannerCopy,
   isEoshScoredCapabilityChecklist,
@@ -131,6 +132,7 @@ import {
   qfsHeaderCellClass,
   qfsHeaderStyle,
   qfsScoreFromFindings,
+  qfsFindingsValueForScore,
   qfsScoreOptions,
   usesQfsKoreScoredChecklistLayout,
 } from "@/lib/qfsKoreChecklistUi";
@@ -185,6 +187,31 @@ function getLoggedInUserId(): number | undefined {
   }
 }
 
+function getLoggedInUserRaisedBy(): {
+  raisedBy?: string;
+  raisedByName?: string;
+  raisedByEmail?: string;
+} {
+  try {
+    const userStr = localStorage.getItem("user");
+    if (!userStr) return {};
+    const user = JSON.parse(userStr);
+    const email = String(user.email || "").trim();
+    const name =
+      `${user.firstName || ""} ${user.lastName || ""}`.trim() ||
+      String(user.name || "").trim() ||
+      email;
+    if (!email && !name) return {};
+    return {
+      raisedBy: name && email ? `${name} (${email})` : name || email,
+      raisedByName: name || email,
+      raisedByEmail: email.toLowerCase(),
+    };
+  } catch {
+    return {};
+  }
+}
+
 function isActiveFindingFieldValue(field: string, value: unknown): boolean {
   const normalized = String(value ?? "").trim();
   if (!normalized || normalized === "C") return false;
@@ -195,13 +222,32 @@ function stampFindingCreator(
   field: string,
   value: unknown,
   existing?: Record<string, any>,
-): { createdByUserId?: number; status?: "Opened" } {
-  if (!isActiveFindingFieldValue(field, value) || existing?.createdByUserId) {
-    return {};
+): {
+  createdByUserId?: number;
+  status?: "Opened";
+  raisedBy?: string;
+  raisedByName?: string;
+  raisedByEmail?: string;
+} {
+  if (!isActiveFindingFieldValue(field, value)) return {};
+  const stamp: {
+    createdByUserId?: number;
+    status?: "Opened";
+    raisedBy?: string;
+    raisedByName?: string;
+    raisedByEmail?: string;
+  } = {};
+  if (!existing?.createdByUserId) {
+    const userId = getLoggedInUserId();
+    if (userId) {
+      stamp.createdByUserId = userId;
+      stamp.status = "Opened";
+    }
   }
-  const userId = getLoggedInUserId();
-  if (!userId) return {};
-  return { createdByUserId: userId, status: "Opened" };
+  if (!String(existing?.raisedByEmail || "").trim()) {
+    Object.assign(stamp, getLoggedInUserRaisedBy());
+  }
+  return stamp;
 }
 
 const AuditExecute = () => {
@@ -796,14 +842,24 @@ const AuditExecute = () => {
       const findingRef =
         questionText?.trim() ||
         `Checklist item ${checklistIndex + 1}`;
+      const meRaised = getLoggedInUserRaisedBy();
       const raisedByName =
         row?.raisedByName?.trim() ||
         row?.raisedBy?.trim() ||
+        meRaised.raisedByName ||
         "";
+      const raisedByEmail =
+        row?.raisedByEmail?.trim() || meRaised.raisedByEmail || "";
+      const raisedBy =
+        row?.raisedBy?.trim() ||
+        meRaised.raisedBy ||
+        (raisedByName && raisedByEmail
+          ? `${raisedByName} (${raisedByEmail})`
+          : raisedByName || raisedByEmail);
       const findingType =
-        row?.findings === "0"
-          ? "Minor"
-          : row?.findings === "1"
+        row?.findings === "0" || row?.findings === "NC" || row?.findings === "Min" || row?.findings === "Maj"
+          ? "NC"
+          : row?.findings === "1" || row?.findings === "OFI"
             ? "OFI"
             : undefined;
 
@@ -816,16 +872,16 @@ const AuditExecute = () => {
             findingRef,
             findingType,
             raisedByName,
-            kind: "nonconformance",
+            kind: findingType === "OFI" ? "ofi" : "nonconformance",
             assignment: {
               source: "checklist",
               key: String(checklistIndex),
             },
             rowPatch: {
               findings: row?.findings || "",
-              raisedBy: row?.raisedBy || "",
-              raisedByName: row?.raisedByName || "",
-              raisedByEmail: row?.raisedByEmail || "",
+              raisedBy: raisedBy || "",
+              raisedByName: raisedByName || "",
+              raisedByEmail: raisedByEmail || "",
               targetDate: row?.targetDate || "",
               details: row?.details || "",
             },
@@ -1210,7 +1266,16 @@ const AuditExecute = () => {
             ref: item?.clause
               ? `Clause ${item.clause}`
               : `Item ${Number(idx) + 1}`,
-            type: type === "Min" ? "Minor" : type === "Maj" ? "Major" : type,
+            type:
+              type === "Min"
+                ? "Minor"
+                : type === "Maj"
+                  ? "Major"
+                  : type === "0" || type === "NC"
+                    ? "NC"
+                    : type === "1"
+                      ? "OFI"
+                      : type,
             description: data.description || "",
             actionBy: data.actionBy || "",
             closeDate: data.closeDate || "",
@@ -2938,7 +3003,7 @@ const AuditExecute = () => {
                 clauseData[clause.id] || ({} as ClauseChecklistContent);
               const type = currentData.findingType;
 
-              if (focusFindings && !['OFI', 'Minor', 'Major'].includes(type as string)) {
+              if (focusFindings && !['OFI', 'Minor', 'Major', 'NC'].includes(type as string)) {
                 return null;
               }
 
@@ -3633,7 +3698,7 @@ const AuditExecute = () => {
             {processAudits.map((audit, index) => {
               const type = audit.findingType;
 
-              if (focusFindings && !['OFI', 'Minor', 'Major'].includes(type as string)) {
+              if (focusFindings && !['OFI', 'Minor', 'Major', 'NC'].includes(type as string)) {
                 return null;
               }
 
@@ -4424,7 +4489,7 @@ const AuditExecute = () => {
 
                       if (
                         focusFindings &&
-                        !["OFI", "Min", "Maj", "C", "2", "1", "0", "Yes", "No"].includes(type as string)
+                        !["OFI", "Min", "Maj", "NC", "C", "2", "1", "0", "Yes", "No"].includes(type as string)
                       ) {
                         return null;
                       }
@@ -4476,9 +4541,13 @@ const AuditExecute = () => {
                                   type="button"
                                   title={opt.label}
                                   disabled={isAuditeeReadOnly}
-                                  onClick={() =>
-                                    handleChecklistChange(index, "findings", qfsScore === opt.val ? "" : opt.val)
-                                  }
+                                  onClick={() => {
+                                    const next =
+                                      qfsScore === opt.val
+                                        ? ""
+                                        : qfsFindingsValueForScore(opt.val, qfsMode);
+                                    handleChecklistChange(index, "findings", next);
+                                  }}
                                   className={cn(
                                     "mx-auto flex h-8 w-8 items-center justify-center rounded border-2 text-sm font-bold transition-all",
                                     qfsScore === opt.val
@@ -4564,9 +4633,13 @@ const AuditExecute = () => {
                                   type="button"
                                   title={opt.label}
                                   disabled={isAuditeeReadOnly}
-                                  onClick={() =>
-                                    handleChecklistChange(index, "findings", eoshScore === opt.val ? "" : opt.val)
-                                  }
+                                  onClick={() => {
+                                    const next =
+                                      eoshScore === opt.val
+                                        ? ""
+                                        : eoshFindingsValueForScore(opt.val);
+                                    handleChecklistChange(index, "findings", next);
+                                  }}
                                   className={cn(
                                     "mx-auto flex h-8 w-8 items-center justify-center rounded border-2 text-sm font-bold transition-all",
                                     eoshScore === opt.val

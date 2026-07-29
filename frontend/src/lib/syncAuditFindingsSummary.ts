@@ -29,8 +29,11 @@ export type NonConformanceRow = {
 function normalizeFindingType(raw: string | undefined): "OFI" | "Min" | "Maj" | "C" | null {
     if (!raw) return null;
     const t = raw.trim();
-    if (t === "C" || t === "Compliant") return "C";
+    if (t === "C" || t === "Compliant" || t === "2") return "C";
+    // Semantic codes (EOSH / QFS store these on column select).
+    // Do NOT map raw "1" here — on 2-col QFS modules "1" means Compliance.
     if (t === "OFI") return "OFI";
+    if (t === "NC" || t === "0") return "Min";
     if (t === "Min" || t === "Minor") return "Min";
     if (t === "Maj" || t === "Major") return "Maj";
     return null;

@@ -30,6 +30,7 @@ import {
     eoshHeaderCellClass,
     eoshHeaderStyle,
     eoshScoreFromFindings,
+    eoshFindingsValueForScore,
     eoshChecklistShowsIntentColumn,
     getEoshCapabilityBannerCopy,
     isEoshScoredCapabilityChecklist,
@@ -45,6 +46,7 @@ import {
     qfsHeaderCellClass,
     qfsHeaderStyle,
     qfsScoreFromFindings,
+    qfsFindingsValueForScore,
     qfsScoreOptions,
     usesQfsKoreScoredChecklistLayout,
 } from "@/lib/qfsKoreChecklistUi";
@@ -1641,7 +1643,13 @@ const ExecuteAuditTemplate = () => {
                                                                 type="button"
                                                                 title={opt.label}
                                                                 disabled={templateViewOnly}
-                                                                onClick={() => handleChecklistChange(index, "findings", qfsScore === opt.val ? "" : opt.val)}
+                                                                onClick={() => {
+                                                                    const next =
+                                                                        qfsScore === opt.val
+                                                                            ? ""
+                                                                            : qfsFindingsValueForScore(opt.val, qfsMode);
+                                                                    handleChecklistChange(index, "findings", next);
+                                                                }}
                                                                 className={cn(
                                                                     "mx-auto flex h-8 w-8 items-center justify-center rounded border-2 text-sm font-bold transition-all",
                                                                     qfsScore === opt.val ? "border-slate-800 bg-slate-800 text-white" : "border-slate-300 bg-white text-transparent hover:border-slate-500",
@@ -1698,7 +1706,13 @@ const ExecuteAuditTemplate = () => {
                                                                 type="button"
                                                                 title={opt.label}
                                                                 disabled={templateViewOnly}
-                                                                onClick={() => handleChecklistChange(index, "findings", eoshScore === opt.val ? "" : opt.val)}
+                                                                onClick={() => {
+                                                                    const next =
+                                                                        eoshScore === opt.val
+                                                                            ? ""
+                                                                            : eoshFindingsValueForScore(opt.val);
+                                                                    handleChecklistChange(index, "findings", next);
+                                                                }}
                                                                 className={cn(
                                                                     "mx-auto flex h-8 w-8 items-center justify-center rounded border-2 text-sm font-bold transition-all",
                                                                     eoshScore === opt.val ? "border-slate-800 bg-slate-800 text-white" : "border-slate-300 bg-white text-transparent hover:border-slate-500",

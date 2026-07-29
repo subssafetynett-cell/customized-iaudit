@@ -194,12 +194,10 @@ export function formatChecklistFindingLabel(findings?: string | null): string {
     if (!raw) return "";
     if (raw === "2" || raw === "C") return "2 — Compliance";
     if (raw === "1" || raw === "OFI") return "1 — Exceptions / OFI";
-    if (raw === "0" || raw === "Min" || raw === "Maj") {
-        return raw === "Maj" || raw === "Min"
-            ? raw === "Maj"
-                ? "0 — Major"
-                : "0 — Minor"
-            : "0 — Non-Compliance";
+    if (raw === "0" || raw === "NC" || raw === "Min" || raw === "Maj" || raw === "Minor" || raw === "Major") {
+        if (raw === "Maj" || raw === "Major") return "0 — Major";
+        if (raw === "Min" || raw === "Minor") return "0 — Minor";
+        return "0 — Non-Compliance (NC)";
     }
     return raw;
 }
