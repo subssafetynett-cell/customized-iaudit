@@ -17,17 +17,19 @@ function initPdfWorker(): Promise<void> {
             throw new Error("[reportEvidenceImages] PDF.js worker URL is missing or invalid");
         }
 
+        // Prefer setting workerSrc directly. HEAD probes fail on some hosts/CDNs and
+        // previously aborted the entire PDF/Word export when any PDF evidence existed.
+        pdfjs.GlobalWorkerOptions.workerSrc = workerSrc;
         try {
-            const probe = await fetch(workerSrc, { method: "HEAD", cache: "force-cache" });
+            const probe = await fetch(workerSrc, { method: "GET", cache: "force-cache" });
             if (!probe.ok) {
-                throw new Error(`PDF.js worker not reachable (HTTP ${probe.status})`);
+                console.warn(
+                    `[reportEvidenceImages] PDF.js worker probe HTTP ${probe.status} — continuing anyway`,
+                );
             }
         } catch (err) {
-            const detail = err instanceof Error ? err.message : String(err);
-            throw new Error(`[reportEvidenceImages] PDF.js worker failed to load: ${detail}`);
+            console.warn("[reportEvidenceImages] PDF.js worker probe failed — continuing anyway", err);
         }
-
-        pdfjs.GlobalWorkerOptions.workerSrc = workerSrc;
     })();
 }
 
@@ -65,6 +67,10 @@ export type PreparedReportImage = {
 function loadImage(src: string): Promise<HTMLImageElement> {
     return new Promise((resolve, reject) => {
         const img = new Image();
+        // Required for remote (Cloudinary) URLs so canvas.toDataURL is not tainted.
+        if (/^https?:\/\//i.test(src)) {
+            img.crossOrigin = "anonymous";
+        }
         img.onload = () => resolve(img);
         img.onerror = () => reject(new Error("Could not load image for report"));
         img.src = src;
@@ -77,8 +83,35 @@ function estimateDataUrlBytes(dataUrl: string): number {
 }
 
 export function dataUrlToUint8Array(dataUrl: string): Uint8Array {
-    const base64 = dataUrl.includes(",") ? dataUrl.split(",")[1] : dataUrl;
+    if (!dataUrl || typeof dataUrl !== "string") {
+        throw new Error("Missing image data");
+    }
+    if (!dataUrl.includes("base64,")) {
+        throw new Error("Expected a base64 data URL for embedding");
+    }
+    const base64 = dataUrl.split("base64,")[1] || "";
     return Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+}
+
+/** Turn Cloudinary/http(s) evidence into a data URL so PDF/Word embedding always works. */
+export async function resolveEvidenceToDataUrl(data: string): Promise<string> {
+    const raw = String(data || "").trim();
+    if (!raw) throw new Error("Empty evidence data");
+    if (raw.startsWith("data:")) return raw;
+    if (!/^https?:\/\//i.test(raw)) {
+        throw new Error("Unsupported evidence data format");
+    }
+    const res = await fetch(raw, { mode: "cors", credentials: "omit", cache: "force-cache" });
+    if (!res.ok) {
+        throw new Error(`Could not download evidence file (HTTP ${res.status})`);
+    }
+    const blob = await res.blob();
+    return await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ""));
+        reader.onerror = () => reject(reader.error ?? new Error("Failed to read evidence file"));
+        reader.readAsDataURL(blob);
+    });
 }
 
 function scaleToMaxDim(
@@ -98,7 +131,9 @@ async function renderCompressedJpeg(
     maxDim: number,
     quality: number
 ): Promise<PreparedReportImage> {
-    const img = await loadImage(dataUrl);
+    // Prefer fetching remote URLs into a data URL first — avoids tainted-canvas SecurityError.
+    const resolved = await resolveEvidenceToDataUrl(dataUrl);
+    const img = await loadImage(resolved);
     const { width, height } = scaleToMaxDim(img.width, img.height, maxDim);
     const canvas = document.createElement("canvas");
     canvas.width = width;
@@ -108,14 +143,24 @@ async function renderCompressedJpeg(
     ctx.fillStyle = "#ffffff";
     ctx.fillRect(0, 0, width, height);
     ctx.drawImage(img, 0, 0, width, height);
-    const out = canvas.toDataURL("image/jpeg", quality);
+    let out: string;
+    try {
+        out = canvas.toDataURL("image/jpeg", quality);
+    } catch (err) {
+        // Fallback: use the resolved source directly if canvas export is blocked.
+        if (resolved.startsWith("data:image/")) {
+            out = resolved;
+        } else {
+            throw err instanceof Error ? err : new Error("Could not encode image for report");
+        }
+    }
     return {
         name: "",
         context: "",
         dataUrl: out,
-        format: "JPEG",
-        widthPx: width,
-        heightPx: height,
+        format: out.startsWith("data:image/png") ? "PNG" : "JPEG",
+        widthPx: width || img.width || 1,
+        heightPx: height || img.height || 1,
     };
 }
 
@@ -175,7 +220,8 @@ async function renderPdfPagesAsJpegs(
     quality: number = 0.88,
 ): Promise<PreparedReportImage[]> {
     await ensurePdfWorker();
-    const bytes = dataUrlToUint8Array(pdfDataUrl);
+    const resolved = await resolveEvidenceToDataUrl(pdfDataUrl);
+    const bytes = dataUrlToUint8Array(resolved);
     const pdf = await pdfjs.getDocument({ data: bytes }).promise;
     const pageCount = Math.min(pdf.numPages, Math.max(1, maxPages));
     const out: PreparedReportImage[] = [];
@@ -230,13 +276,18 @@ async function buildVisualsFromSources(
 
     for (const src of sources) {
         if (src.type.startsWith("image/")) {
-            const item = await renderCompressedJpeg(src.data, maxDim, quality);
-            results.push({
-                ...item,
-                name: src.name,
-                context: src.context,
-                description: src.description,
-            });
+            try {
+                const item = await renderCompressedJpeg(src.data, maxDim, quality);
+                results.push({
+                    ...item,
+                    name: src.name,
+                    context: src.context,
+                    description: src.description,
+                });
+            } catch (error) {
+                // Never abort the whole report for one bad/remote image.
+                console.warn("Report image embed skipped", src.name, error);
+            }
             continue;
         }
 

@@ -1808,18 +1808,48 @@ const AuditExecute = () => {
     }
   };
 
-  const exportToPDF = async () => {
-    await generateAuditReportPdf({ ...plan, auditData: buildAuditDataPayload() });
-  };
+    const exportToPDF = async () => {
+        try {
+            toast.loading("Generating PDF report…", { id: "audit-export" });
+            await generateAuditReportPdf({ ...plan, auditData: buildAuditDataPayload() });
+            toast.success("PDF report downloaded", { id: "audit-export" });
+        } catch (error) {
+            console.error("PDF export error:", error);
+            toast.error(
+                error instanceof Error ? error.message : "Failed to generate PDF report",
+                { id: "audit-export" },
+            );
+        }
+    };
 
 
-  const exportToExcel = async () => {
-    await downloadAuditReport({ ...plan, auditData: buildAuditDataPayload() }, "excel");
-  };
+    const exportToExcel = async () => {
+        try {
+            toast.loading("Generating Excel report…", { id: "audit-export" });
+            await downloadAuditReport({ ...plan, auditData: buildAuditDataPayload() }, "excel");
+            toast.success("Excel report downloaded", { id: "audit-export" });
+        } catch (error) {
+            console.error("Excel export error:", error);
+            toast.error(
+                error instanceof Error ? error.message : "Failed to generate Excel report",
+                { id: "audit-export" },
+            );
+        }
+    };
 
-  const exportToWord = async () => {
-    await generateAuditReportDocx({ ...plan, auditData: buildAuditDataPayload() });
-  };
+    const exportToWord = async () => {
+        try {
+            toast.loading("Generating Word report…", { id: "audit-export" });
+            await generateAuditReportDocx({ ...plan, auditData: buildAuditDataPayload() });
+            toast.success("Word report downloaded", { id: "audit-export" });
+        } catch (error) {
+            console.error("Word export error:", error);
+            toast.error(
+                error instanceof Error ? error.message : "Failed to generate Word report",
+                { id: "audit-export" },
+            );
+        }
+    };
 
 
   return (

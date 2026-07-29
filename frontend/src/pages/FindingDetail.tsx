@@ -326,6 +326,26 @@ export default function FindingDetail() {
                                 {nc.ncNumber}
                             </Badge>
                         ) : null}
+                        {canRespond && !showResponseForm ? (
+                            <Button
+                                type="button"
+                                size="sm"
+                                className="gap-1.5 bg-[#213847] hover:bg-[#213847]/90 text-white"
+                                onClick={openResponseForm}
+                            >
+                                {isEditingExistingResponse ? (
+                                    <>
+                                        <Pencil className="h-4 w-4" />
+                                        Edit response
+                                    </>
+                                ) : (
+                                    <>
+                                        <MessageSquareReply className="h-4 w-4" />
+                                        Respond findings
+                                    </>
+                                )}
+                            </Button>
+                        ) : null}
                         {canDownloadResponse ? (
                             <Button
                                 type="button"
@@ -578,7 +598,7 @@ export default function FindingDetail() {
                                 ) : (
                                     <>
                                         <MessageSquareReply className="h-4 w-4" />
-                                        Respond to finding
+                                        Respond findings
                                     </>
                                 )}
                             </Button>

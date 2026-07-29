@@ -313,7 +313,12 @@ function resetPasswordVerifyRateLimit(req, res, next) {
     next();
 }
 
-/** @returns {{ token: string, sessionExpiresAt: string }} ISO time when the DB session row expires */
+/**
+ * Create a new opaque session for this login.
+ * Does NOT revoke other active sessions — multiple browsers/devices may stay logged in concurrently.
+ * Only globally expired rows are cleaned up.
+ * @returns {{ token: string, sessionExpiresAt: string }} ISO time when the DB session row expires
+ */
 async function createSessionTokenForUser(userId) {
     await prisma.session.deleteMany({
         where: { expiresAt: { lt: new Date() } }
@@ -338,7 +343,11 @@ async function createSessionTokenForUser(userId) {
     return { token, sessionExpiresAt: expiresAt.toISOString() };
 }
 
-/** Remove all server sessions for a user (e.g. after password change or account lock). */
+/**
+ * Revoke every server session for a user.
+ * Intentionally global — used after password change/reset or account deactivation only.
+ * Normal logout must NOT call this (it would kick other concurrent devices).
+ */
 async function invalidateAllUserSessions(userId) {
     const uid = Number.parseInt(String(userId), 10);
     if (!Number.isInteger(uid) || uid < 1) return 0;
@@ -3160,33 +3169,43 @@ app.get('/sites', authenticateToken, checkTrialExpiration, async (req, res) => {
 
     const pagination = parsePaginationQuery(req.query, { defaultLimit: 50 });
     const search = String(req.query.search || '').trim();
-    const siteSelect = {
-        id: true,
-        name: true,
-        description: true,
-        siteType: true,
-        status: true,
-        address: true,
-        city: true,
-        state: true,
-        country: true,
-        postalCode: true,
-        companyId: true,
-        userId: true,
-        contactName: true,
-        contactPosition: true,
-        contactNumber: true,
-        email: true,
-        createdAt: true,
-        updatedAt: true,
-        company: {
-            select: {
-                id: true,
-                name: true,
-                userId: true,
-            },
-        },
-    };
+    // Audit Active List only needs names for filter chips — skip address/company payload.
+    const minimal =
+        req.query.minimal === '1' ||
+        req.query.minimal === 'true' ||
+        String(req.query.fields || '').toLowerCase() === 'minimal';
+    const siteSelect = minimal
+        ? {
+              id: true,
+              name: true,
+          }
+        : {
+              id: true,
+              name: true,
+              description: true,
+              siteType: true,
+              status: true,
+              address: true,
+              city: true,
+              state: true,
+              country: true,
+              postalCode: true,
+              companyId: true,
+              userId: true,
+              contactName: true,
+              contactPosition: true,
+              contactNumber: true,
+              email: true,
+              createdAt: true,
+              updatedAt: true,
+              company: {
+                  select: {
+                      id: true,
+                      name: true,
+                      userId: true,
+                  },
+              },
+          };
 
     try {
         const searchWhere = search
@@ -4663,15 +4682,18 @@ async function handleResetPassword(req, res) {
 app.post('/auth/forgot-password', sendOtpIpRateLimit, handleForgotPassword);
 app.post('/auth/reset-password', resetPasswordVerifyRateLimit, handleResetPassword);
 
-/** Invalidate every server session for this user (all devices/browsers). */
+/** Log out the current browser/device only — other concurrent sessions stay active. */
 async function handleLogout(req, res) {
     try {
-        const userId = Number.parseInt(String(req.user?.id), 10);
-        if (!Number.isInteger(userId) || userId < 1) {
-            return res.status(401).json({ error: 'Invalid session. Please log in again.' });
+        const token =
+            (typeof req.sessionToken === 'string' && req.sessionToken) ||
+            getSessionTokenFromRequest(req);
+        if (!token) {
+            clearSessionCookie(res);
+            return res.status(204).send();
         }
-        const { count } = await prisma.session.deleteMany({ where: { userId } });
-        console.log(`[AUTH] Logout: removed ${count} session(s) for user ${userId}`);
+        const { count } = await prisma.session.deleteMany({ where: { token } });
+        console.log(`[AUTH] Logout: removed ${count} session(s) for current device`);
         clearSessionCookie(res);
         res.status(204).send();
     } catch (error) {
@@ -6709,6 +6731,8 @@ app.get('/audit-plans', authenticateToken, checkTrialExpiration, async (req, res
         const listWhere =
             andFilters.length > 0 ? { AND: [whereClause, ...andFilters] } : whereClause;
 
+        // List view (Audit Active List) only needs table columns + progress flags.
+        // findingsData / auditors / auditData are omitted unless includeData=true.
         const planSelect = {
             id: true,
             executionId: true,
@@ -6722,22 +6746,25 @@ app.get('/audit-plans', authenticateToken, checkTrialExpiration, async (req, res
             auditProgramId: true,
             userId: true,
             leadAuditorId: true,
-            // Heavy auditData only when explicitly requested. findingsData is small overrides.
-            findingsData: true,
-            ...(includeData ? { auditData: true } : {}),
+            ...(includeData
+                ? {
+                      findingsData: true,
+                      auditData: true,
+                      auditors: {
+                          select: {
+                              id: true,
+                              firstName: true,
+                              lastName: true,
+                          },
+                      },
+                  }
+                : {}),
             leadAuditor: {
                 select: {
                     id: true,
                     firstName: true,
-                    lastName: true
-                }
-            },
-            auditors: {
-                select: {
-                    id: true,
-                    firstName: true,
-                    lastName: true
-                }
+                    lastName: true,
+                },
             },
             auditProgram: {
                 select: {
@@ -6747,30 +6774,41 @@ app.get('/audit-plans', authenticateToken, checkTrialExpiration, async (req, res
                     site: {
                         select: {
                             id: true,
-                            name: true
-                        }
-                    }
-                }
-            }
+                            name: true,
+                        },
+                    },
+                },
+            },
         };
 
-        const plans = await prisma.auditPlan.findMany({
+        const listStartedAt = performance.now();
+        const findManyArgs = {
             where: listWhere,
             orderBy: { createdAt: 'desc' },
             select: planSelect,
             ...(pagination.paginate
                 ? { skip: pagination.skip, take: pagination.limit }
                 : {}),
-        });
-        const total = pagination.paginate
-            ? await prisma.auditPlan.count({ where: listWhere })
-            : plans.length;
+        };
 
-        // Pull only progress / completed flags from Postgres JSON (avoids shipping full auditData to Node when includeData=false).
+        // Run page query + count in parallel (was sequential: findMany then count).
+        const [plans, total] = pagination.paginate
+            ? await Promise.all([
+                  prisma.auditPlan.findMany(findManyArgs),
+                  prisma.auditPlan.count({ where: listWhere }),
+              ])
+            : [await prisma.auditPlan.findMany(findManyArgs), 0];
+        const findMs = performance.now() - listStartedAt;
+        const resolvedTotal = pagination.paginate ? total : plans.length;
+
+        // Pull only progress / completed flags from Postgres JSON (avoids shipping full auditData).
+        // Skip when includeData=true — progress is derived from the selected auditData blob.
         const planIds = plans.map((p) => p.id).filter((id) => Number.isInteger(id) && id > 0);
         /** @type {Map<number, { progress: number, auditCompleted: boolean }>} */
         const progressById = new Map();
-        if (planIds.length > 0) {
+        let progressMs = 0;
+        if (!includeData && planIds.length > 0) {
+            const progressStartedAt = performance.now();
             try {
                 const metaResult = await pool.query(
                     `SELECT
@@ -6794,6 +6832,7 @@ app.get('/audit-plans', authenticateToken, checkTrialExpiration, async (req, res
             } catch (metaErr) {
                 console.warn('[audit-plans] progress meta query failed:', metaErr?.message || metaErr);
             }
+            progressMs = performance.now() - progressStartedAt;
         }
 
         const optimizedPlans = plans.map((plan) => {
@@ -6824,7 +6863,6 @@ app.get('/audit-plans', authenticateToken, checkTrialExpiration, async (req, res
             if (!includeData) {
                 return {
                     ...plan,
-                    findingsData: stripHeavyAuditListPayload(plan.findingsData),
                     progress,
                     auditCompleted,
                 };
@@ -6840,6 +6878,13 @@ app.get('/audit-plans', authenticateToken, checkTrialExpiration, async (req, res
             };
         });
 
+        const totalMs = performance.now() - listStartedAt;
+        res.setHeader(
+            'Server-Timing',
+            `db;desc="find+count";dur=${findMs.toFixed(1)}, progress;dur=${progressMs.toFixed(1)}, total;dur=${totalMs.toFixed(1)}`,
+        );
+        res.setHeader('X-Response-Time', `${totalMs.toFixed(1)}ms`);
+
         if (!pagination.paginate) {
             return res.json(optimizedPlans);
         }
@@ -6847,7 +6892,7 @@ app.get('/audit-plans', authenticateToken, checkTrialExpiration, async (req, res
             paginatedResponse(optimizedPlans, {
                 page: pagination.page,
                 limit: pagination.limit,
-                total,
+                total: resolvedTotal,
             }),
         );
     } catch (error) {

@@ -87,7 +87,23 @@ export async function parseApiJson<T = unknown>(response: Response): Promise<T> 
 }
 
 /** Coalesce identical in-flight GETs so React Strict Mode / dual mounts don't double-fetch. */
-const inflightGetRequests = new Map<string, Promise<Response>>();
+type CoalescedGetPayload = {
+    status: number;
+    statusText: string;
+    headers: Headers;
+    body: ArrayBuffer;
+};
+
+const inflightGetBodies = new Map<string, Promise<CoalescedGetPayload>>();
+
+function responseFromCoalescedPayload(payload: CoalescedGetPayload): Response {
+    // Copy the buffer so each waiter can read independently.
+    return new Response(payload.body.slice(0), {
+        status: payload.status,
+        statusText: payload.statusText,
+        headers: payload.headers,
+    });
+}
 
 export async function apiFetch(endpoint: string, options: ApiFetchOptions = {}) {
     const { skipSessionLogout = false, ...fetchOptions } = options;
@@ -108,14 +124,13 @@ export async function apiFetch(endpoint: string, options: ApiFetchOptions = {}) 
     const coalesceKey = canCoalesce ? `${method}:${url}` : "";
 
     if (canCoalesce) {
-        const existing = inflightGetRequests.get(coalesceKey);
+        const existing = inflightGetBodies.get(coalesceKey);
         if (existing) {
-            const shared = await existing;
-            return shared.clone();
+            return responseFromCoalescedPayload(await existing);
         }
     }
 
-    const run = (async () => {
+    const run = (async (): Promise<Response | CoalescedGetPayload> => {
         let response: Response;
         try {
             response = await fetch(url, {
@@ -139,18 +154,30 @@ export async function apiFetch(endpoint: string, options: ApiFetchOptions = {}) 
             console.warn(`[apiFetch] 401 for ${endpoint} (session left intact)`);
         }
 
+        if (canCoalesce) {
+            // Buffer once — Response.clone() on multi‑MB audit plans often fails and
+            // breaks PDF/Word/Excel downloads when two callers share the same GET.
+            const body = await response.arrayBuffer();
+            return {
+                status: response.status,
+                statusText: response.statusText,
+                headers: new Headers(response.headers),
+                body,
+            } satisfies CoalescedGetPayload;
+        }
+
         return response;
     })();
 
     if (canCoalesce) {
-        inflightGetRequests.set(coalesceKey, run);
+        const bodyPromise = run as Promise<CoalescedGetPayload>;
+        inflightGetBodies.set(coalesceKey, bodyPromise);
         try {
-            const response = await run;
-            return response.clone();
+            return responseFromCoalescedPayload(await bodyPromise);
         } finally {
-            inflightGetRequests.delete(coalesceKey);
+            inflightGetBodies.delete(coalesceKey);
         }
     }
 
-    return run;
+    return run as Promise<Response>;
 }

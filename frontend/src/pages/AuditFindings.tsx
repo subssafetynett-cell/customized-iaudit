@@ -11,7 +11,7 @@ import {
     TableRow,
 } from "@/components/ui/table";
 import { Input } from "@/components/ui/input";
-import { AlertTriangle, RefreshCw, SearchX, Search, Upload, Eye, Download, FileText } from "lucide-react";
+import { AlertTriangle, RefreshCw, SearchX, Search, Upload, Eye, Download, FileText, MessageSquareReply } from "lucide-react";
 import {
     DropdownMenu,
     DropdownMenuContent,
@@ -205,8 +205,6 @@ export default function AuditFindings() {
     const [loading, setLoading] = useState(true);
     const [viewerEmail, setViewerEmail] = useState("");
     const [viewerId, setViewerId] = useState<number | null>(null);
-    const [viewerSeesAll, setViewerSeesAll] = useState(true);
-    const [isAuditeeViewer, setIsAuditeeViewer] = useState(false);
     const [activeFilter, setActiveFilter] = useState<FilterType>("All");
     const [statusFilter, setStatusFilter] = useState<StatusFilter>("All");
     const [ownershipTab, setOwnershipTab] = useState<OwnershipTab>(() =>
@@ -232,8 +230,6 @@ export default function AuditFindings() {
             const isAuditee = isAuditeeRole(user.role);
             setViewerEmail(userEmail);
             setViewerId(Number.isInteger(parsedViewerId) && parsedViewerId > 0 ? parsedViewerId : null);
-            setViewerSeesAll(canViewAllOrgFindings(user.role));
-            setIsAuditeeViewer(isAuditee);
             console.log("Fetching findings for user:", user.email, "UID:", user.id || user._id);
 
             const isSuperAdmin = user.role === 'superadmin';
@@ -749,7 +745,9 @@ export default function AuditFindings() {
                                         <TableHead className="text-white font-bold w-[10%]">Type</TableHead>
                                         <TableHead className="text-white font-bold w-[12%]">Status</TableHead>
                                         <TableHead className="text-white font-bold w-[14%]">Action By</TableHead>
-                                        <TableHead className="text-white font-bold w-16 text-center">View</TableHead>
+                                        <TableHead className="text-white font-bold min-w-[160px] text-right pr-4">
+                                            Actions
+                                        </TableHead>
                                     </TableRow>
                                 </TableHeader>
                                 <TableBody>
@@ -760,6 +758,11 @@ export default function AuditFindings() {
                                             finding,
                                             viewerEmail,
                                         );
+                                        const canRespondFromList =
+                                            ownershipTab === "assigned" &&
+                                            assignedToMe &&
+                                            isNc &&
+                                            finding.status !== "Closed";
                                         return (
                                             <TableRow
                                                 key={`${finding.auditId}-${finding.id}-${idx}`}
@@ -846,39 +849,54 @@ export default function AuditFindings() {
                                                         );
                                                     })()}
                                                 </TableCell>
-                                                <TableCell className="text-center py-3">
-                                                    <Button
-                                                        variant="ghost"
-                                                        size="sm"
-                                                        title={
-                                                            isNc && assignedToMe
-                                                                ? "View finding details"
-                                                                : isAuditeeViewer
-                                                                  ? "View audit (read-only)"
-                                                                  : viewerSeesAll
-                                                                    ? "Open in audit"
-                                                                    : "Complete finding"
-                                                        }
-                                                        onClick={() =>
-                                                            navigate(
-                                                                {
-                                                                    pathname: `/audit-findings/${finding.auditId}/${encodeURIComponent(finding.id)}`,
-                                                                    search:
-                                                                        isNc && assignedToMe
-                                                                            ? "?respond=1"
-                                                                            : "",
-                                                                },
-                                                                {
-                                                                    state: {
-                                                                        returnTab: ownershipTab,
+                                                <TableCell className="py-3 pr-4">
+                                                    <div className="flex flex-wrap items-center justify-end gap-2">
+                                                        <Button
+                                                            variant="outline"
+                                                            size="sm"
+                                                            title="View finding details"
+                                                            onClick={() =>
+                                                                navigate(
+                                                                    {
+                                                                        pathname: `/audit-findings/${finding.auditId}/${encodeURIComponent(finding.id)}`,
+                                                                        search: "",
                                                                     },
-                                                                },
-                                                            )
-                                                        }
-                                                        className="h-8 w-8 p-0 text-slate-400 hover:text-[#213847]"
-                                                    >
-                                                        <Eye className="w-4 h-4" />
-                                                    </Button>
+                                                                    {
+                                                                        state: {
+                                                                            returnTab: ownershipTab,
+                                                                        },
+                                                                    },
+                                                                )
+                                                            }
+                                                            className="h-8 gap-1.5 border-slate-200 text-slate-700 hover:text-[#213847]"
+                                                        >
+                                                            <Eye className="w-3.5 h-3.5" />
+                                                            Details
+                                                        </Button>
+                                                        {canRespondFromList ? (
+                                                            <Button
+                                                                size="sm"
+                                                                title="Respond to this finding"
+                                                                onClick={() =>
+                                                                    navigate(
+                                                                        {
+                                                                            pathname: `/audit-findings/${finding.auditId}/${encodeURIComponent(finding.id)}`,
+                                                                            search: "?respond=1",
+                                                                        },
+                                                                        {
+                                                                            state: {
+                                                                                returnTab: "assigned",
+                                                                            },
+                                                                        },
+                                                                    )
+                                                                }
+                                                                className="h-8 gap-1.5 bg-[#213847] hover:bg-[#213847]/90 text-white"
+                                                            >
+                                                                <MessageSquareReply className="w-3.5 h-3.5" />
+                                                                Respond findings
+                                                            </Button>
+                                                        ) : null}
+                                                    </div>
                                                 </TableCell>
                                             </TableRow>
                                         );
