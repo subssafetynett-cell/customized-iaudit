@@ -2777,14 +2777,34 @@ async function actorHasFullOrgAuditVisibility(actorId) {
     return actorCanManageOrgUsers(id);
 }
 
-// Basic health check endpoint (includes DB — avoids marking server healthy when Prisma is broken)
+// Track startup state for health checks — server starts accepting immediately,
+// but /health reports degraded until bootstrap (migrations, seeding) completes.
+let bootstrapComplete = false;
+let dbHealthy = false;
+const startedAt = Date.now();
+
 app.get('/health', async (req, res) => {
     try {
         await prisma.$queryRaw`SELECT 1`;
-        res.status(200).json({ status: 'ok', database: 'connected' });
+        dbHealthy = true;
+        res.status(200).json({
+            status: 'ok',
+            database: 'connected',
+            uptime: Math.floor((Date.now() - startedAt) / 1000),
+            bootstrapComplete,
+            timestamp: new Date().toISOString(),
+        });
     } catch (error) {
+        dbHealthy = false;
         console.error('[health] Database check failed:', error.message);
-        res.status(503).json({ status: 'degraded', database: 'unavailable', error: error.message });
+        res.status(503).json({
+            status: 'degraded',
+            database: 'unavailable',
+            uptime: Math.floor((Date.now() - startedAt) / 1000),
+            bootstrapComplete,
+            timestamp: new Date().toISOString(),
+            error: error.message,
+        });
     }
 });
 app.get('/api/health', (req, res) => {
@@ -8571,6 +8591,13 @@ app.post('/subscription/upgrade-request', authenticateToken, async (req, res) =>
     }
 });
 
+// =====================================================================
+// STARTUP — listen FIRST, then run migrations/seeds in the background.
+// This eliminates the 502 window: the port is open within ~1 second,
+// and /health returns 503 (database: unavailable) until bootstrap
+// finishes — Coolify/Docker waits for a healthy check before routing.
+// =====================================================================
+
 async function ensureDatabaseSchemaPatches() {
     try {
         await pool.query(
@@ -8599,32 +8626,147 @@ async function ensureLegacySiteUserIdsCleared() {
     }
 }
 
-Promise.all([ensureDatabaseSchemaPatches(), ensureSuperAdminUser(), ensureLegacySiteUserIdsCleared()])
-    .then(([, user]) => {
-        console.log(`[bootstrap] Super admin ready: ${user.email}`);
-    })
-    .catch((err) => {
+/** Wait for Postgres to accept connections (retries with backoff). */
+async function waitForDatabase(maxRetries = 15, initialDelayMs = 1000) {
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            await pool.query('SELECT 1');
+            console.log(`[bootstrap] ✔ Database connected (attempt ${attempt})`);
+            dbHealthy = true;
+            return;
+        } catch (err) {
+            const delay = Math.min(initialDelayMs * attempt, 10000);
+            console.warn(
+                `[bootstrap] Database not ready (attempt ${attempt}/${maxRetries}): ${err.message} — retrying in ${delay}ms`,
+            );
+            await new Promise((r) => setTimeout(r, delay));
+        }
+    }
+    throw new Error('Database did not become available after retries');
+}
+
+/** Run migrations via prisma migrate deploy (same as the old entrypoint). */
+async function runMigrations() {
+    const { spawnSync } = await import('node:child_process');
+    const { dirname, resolve } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const serverRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+
+    console.log('[bootstrap] Applying database migrations…');
+    const result = spawnSync('npx', ['prisma', 'migrate', 'deploy'], {
+        cwd: serverRoot,
+        stdio: 'pipe',
+        encoding: 'utf-8',
+        env: { ...process.env },
+        shell: true,
+    });
+    if (result.stdout) process.stdout.write(result.stdout);
+    if (result.stderr) process.stderr.write(result.stderr);
+
+    if (result.status === 0) {
+        console.log('[bootstrap] ✔ Migrations applied');
+        return;
+    }
+    const output = `${result.stdout || ''}\n${result.stderr || ''}`;
+    if (/P3005/.test(output)) {
+        console.warn('[bootstrap] Database needs baselining (P3005) — attempting…');
+        const { baselineExistingDatabase } = await import(
+            '../scripts/baseline-migrations.js'
+        );
+        baselineExistingDatabase(process.env.DATABASE_URL);
+        console.log('[bootstrap] ✔ Baseline applied');
+        return;
+    }
+    console.error(`[bootstrap] Migration exited with code ${result.status}`);
+}
+
+async function runBootstrap() {
+    try {
+        await waitForDatabase();
+        await runMigrations();
+        await Promise.all([
+            ensureDatabaseSchemaPatches(),
+            ensureSuperAdminUser().then((user) => {
+                console.log(`[bootstrap] ✔ Super admin ready: ${user.email}`);
+            }),
+            ensureLegacySiteUserIdsCleared(),
+        ]);
+        bootstrapComplete = true;
+        console.log('[bootstrap] ✔ All startup tasks complete');
+    } catch (err) {
         console.error('[bootstrap] Startup bootstrap failed:', err);
-    })
-    .finally(() => {
-        app.listen(PORT, '0.0.0.0', () => {
-            console.log(`Server is running on port ${PORT}`);
-        });
+        // Don't crash — health endpoint will report degraded, Coolify won't route traffic yet.
+    }
+}
+
+// 1. Open the port immediately (eliminates the 502 window).
+const server = app.listen(PORT, '0.0.0.0', () => {
+    console.log(`✔ Server listening on 0.0.0.0:${PORT}`);
+    console.log(`✔ Environment: ${process.env.NODE_ENV || 'development'}`);
+    console.log(`✔ Health endpoint ready: /health`);
+});
+
+// Keep-alive / header timeouts must exceed the reverse proxy's (nginx 120s).
+server.keepAliveTimeout = 65000;
+server.headersTimeout = 66000;
+
+// 2. Run DB migrations, seeds, patches in the background.
+runBootstrap();
+
+// =====================================================================
+// GRACEFUL SHUTDOWN — drain connections before exiting so the old
+// container doesn't hold the port while the new one starts.
+// =====================================================================
+let shuttingDown = false;
+
+const gracefulShutdown = async (signal) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`\n${signal} received — shutting down gracefully…`);
+
+    // Stop accepting new connections.
+    server.close(() => {
+        console.log('✔ HTTP server closed (no new connections)');
     });
 
-// --- Graceful Shutdown Logic ---
-const gracefulShutdown = async (signal) => {
-    console.log(`${signal} received. Shutting down gracefully...`);
+    // Give in-flight requests a few seconds to finish.
+    const forceExitTimer = setTimeout(() => {
+        console.error('Shutdown timed out — forcing exit');
+        process.exit(1);
+    }, 15000);
+    forceExitTimer.unref();
+
     try {
         await prisma.$disconnect();
-        console.log('Prisma disconnected.');
-        process.exit(0);
+        console.log('✔ Prisma disconnected');
     } catch (err) {
-        console.error('Error during shutdown:', err);
-        process.exit(1);
+        console.error('Prisma disconnect error:', err.message);
     }
+
+    try {
+        await pool.end();
+        console.log('✔ pg Pool closed');
+    } catch (err) {
+        console.error('pg Pool close error:', err.message);
+    }
+
+    clearTimeout(forceExitTimer);
+    process.exit(0);
 };
 
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGHUP', () => gracefulShutdown('SIGHUP'));
+
+// =====================================================================
+// GLOBAL ERROR HANDLERS — prevent silent crashes that cause 502.
+// =====================================================================
+process.on('uncaughtException', (err) => {
+    console.error('[FATAL] Uncaught exception:', err);
+    gracefulShutdown('uncaughtException');
+});
+
+process.on('unhandledRejection', (reason) => {
+    console.error('[WARN] Unhandled promise rejection:', reason);
+    // Don't crash — log and continue. Most rejections are non-fatal.
+});
