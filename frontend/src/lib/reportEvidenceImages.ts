@@ -74,6 +74,30 @@ function loadImage(src: string): Promise<HTMLImageElement> {
     });
 }
 
+async function fetchAsDataUrl(url: string): Promise<string> {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`Failed to fetch evidence (${res.status})`);
+    const blob = await res.blob();
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result ?? ""));
+        reader.onerror = () => reject(reader.error ?? new Error("Failed to read evidence"));
+        reader.readAsDataURL(blob);
+    });
+}
+
+async function resolveEvidenceSourceData(src: string, type: string): Promise<string> {
+    if (src.startsWith("data:")) return src;
+    if (/^https?:\/\//i.test(src)) {
+        if (type.startsWith("image/")) {
+            // Canvas compression can load HTTPS directly (with CORS).
+            return src;
+        }
+        return fetchAsDataUrl(src);
+    }
+    return src;
+}
+
 function estimateDataUrlBytes(dataUrl: string): number {
     const base64 = dataUrl.includes(",") ? dataUrl.split(",")[1] : dataUrl;
     return Math.ceil((base64.length * 3) / 4);
@@ -245,19 +269,25 @@ async function buildVisualsFromSources(
 
     for (const src of sources) {
         if (src.type.startsWith("image/")) {
-            const item = await renderCompressedJpeg(src.data, maxDim, quality);
-            results.push({
-                ...item,
-                name: src.name,
-                context: src.context,
-                description: src.description,
-            });
+            try {
+                const imageSrc = await resolveEvidenceSourceData(src.data, src.type);
+                const item = await renderCompressedJpeg(imageSrc, maxDim, quality);
+                results.push({
+                    ...item,
+                    name: src.name,
+                    context: src.context,
+                    description: src.description,
+                });
+            } catch (error) {
+                console.warn("Report image render failed", src.name, error);
+            }
             continue;
         }
 
         if (src.type === "application/pdf") {
             try {
-                const pages = await renderPdfPagesAsJpegs(src.data, REPORT_PDF_MAX_PAGES_PER_FILE, maxDim, quality);
+                const pdfSrc = await resolveEvidenceSourceData(src.data, src.type);
+                const pages = await renderPdfPagesAsJpegs(pdfSrc, REPORT_PDF_MAX_PAGES_PER_FILE, maxDim, quality);
                 pages.forEach((page, index) => {
                     const pageLabel =
                         pages.length > 1 ? `${src.name} (page ${index + 1})` : src.name;

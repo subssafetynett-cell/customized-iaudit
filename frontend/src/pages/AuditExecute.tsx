@@ -1481,7 +1481,12 @@ const AuditExecute = () => {
   };
 
   const handleClauseFileUpload = async (clause: string, files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    const uploadToast = toast.loading(
+      files.length === 1 ? "Uploading evidence…" : `Uploading ${files.length} files…`,
+    );
     const { accepted, rejected } = await processAuditEvidenceFileList(files, { planId: id });
+    toast.dismiss(uploadToast);
     reportRejectedEvidence(rejected, accepted.length);
     if (accepted.length === 0) return;
 
@@ -1519,7 +1524,12 @@ const AuditExecute = () => {
   };
 
   const handleGenericFileUpload = async (key: string, files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    const uploadToast = toast.loading(
+      files.length === 1 ? "Uploading evidence…" : `Uploading ${files.length} files…`,
+    );
     const { accepted, rejected } = await processAuditEvidenceFileList(files, { planId: id });
+    toast.dismiss(uploadToast);
     reportRejectedEvidence(rejected, accepted.length);
     if (accepted.length === 0) return;
 
