@@ -29,10 +29,10 @@ services:
             process.exit(r.ok && b.database === 'connected' ? 0 : 1);
           })
           .catch(() => process.exit(1))
-      interval: 10s
-      timeout: 10s
-      retries: 18
-      start_period: 300s
+      interval: 5s
+      timeout: 5s
+      retries: 36
+      start_period: 10s
     networks:
       - app
 

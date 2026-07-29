@@ -18,6 +18,11 @@ if (databaseUrl) {
 const { PrismaClient } = pkgPrisma;
 
 const pool = new Pool(buildPgPoolConfig());
+
+pool.on('error', (err) => {
+    console.error('[pg Pool] Idle client error (will reconnect):', err.message);
+});
+
 const adapter = new PrismaPg(pool);
 const prisma = new PrismaClient({ adapter });
 
