@@ -85,22 +85,36 @@ export async function notifyUsers(
     );
     if (!recipients.length) return [];
 
-    const created = [];
-    for (const recipientUserId of recipients) {
-        const row = await createNotification(db, {
-            recipientUserId,
-            nonconformanceId,
-            linkPath,
-            type,
-            title,
-            message,
-        });
-        if (row) created.push(row);
-    }
-    return created;
+    const ncRaw = nonconformanceId != null ? Number(nonconformanceId) : null;
+    const ncId = Number.isInteger(ncRaw) && ncRaw > 0 ? ncRaw : null;
+    const path =
+        linkPath != null && String(linkPath).trim()
+            ? String(linkPath).trim().slice(0, 500)
+            : null;
+    const typeStr = String(type || '').slice(0, 80);
+    const titleStr = String(title || '').slice(0, 200);
+    const messageStr = String(message || '').slice(0, 1000);
+
+    // Parallel creates (createMany cannot return rows on all providers; keep create for IDs).
+    const rows = await Promise.all(
+        recipients.map((recipientUserId) =>
+            db.notification.create({
+                data: {
+                    recipientUserId,
+                    nonconformanceId: ncId,
+                    linkPath: path,
+                    type: typeStr,
+                    title: titleStr,
+                    message: messageStr,
+                    isRead: false,
+                },
+            }),
+        ),
+    );
+    return rows.filter(Boolean);
 }
 
-export async function listNotificationsForUser({ actorId, limit = 50, page }) {
+export async function listNotificationsForUser({ actorId, limit = 50, page, pageSize }) {
     const actor = Number(actorId);
     if (!Number.isInteger(actor) || actor < 1) {
         const err = new Error('Invalid user');
@@ -108,7 +122,7 @@ export async function listNotificationsForUser({ actorId, limit = 50, page }) {
         throw err;
     }
 
-    const take = Math.min(Math.max(Number(limit) || 50, 1), 200);
+    const take = Math.min(Math.max(Number(pageSize ?? limit) || 50, 1), 200);
     const pageNum = Number.parseInt(String(page ?? ''), 10);
     const paginate = Number.isFinite(pageNum) && pageNum >= 1;
     const skip = paginate ? (pageNum - 1) * take : 0;
@@ -134,8 +148,10 @@ export async function listNotificationsForUser({ actorId, limit = 50, page }) {
     const totalCount = total ?? items.length;
     const totalPages = totalCount === 0 ? 0 : Math.ceil(totalCount / take);
     return {
+        data: items,
         items,
         page: pageNum,
+        pageSize: take,
         limit: take,
         total: totalCount,
         totalPages,

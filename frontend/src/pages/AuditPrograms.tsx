@@ -598,9 +598,15 @@ const AuditPrograms = () => {
                 const sitesData = sitesRes.ok ? await sitesRes.json() : [];
                 const companiesData = companiesRes.ok ? await companiesRes.json() : [];
                 let usersData = usersRes.ok ? await usersRes.json() : [];
-                if (usersData && !Array.isArray(usersData) && Array.isArray(usersData.items)) {
-                    usersData = usersData.items;
-                }
+                const unwrapList = (payload: unknown) =>
+                    Array.isArray(payload)
+                        ? payload
+                        : Array.isArray((payload as { data?: unknown })?.data)
+                          ? (payload as { data: unknown[] }).data
+                          : Array.isArray((payload as { items?: unknown })?.items)
+                            ? (payload as { items: unknown[] }).items
+                            : [];
+                usersData = unwrapList(usersData);
 
                 if (user && user.id) {
                     if (Array.isArray(usersData)) {
@@ -612,12 +618,8 @@ const AuditPrograms = () => {
                     }
                 }
 
-                let sitesList = Array.isArray(sitesData) ? sitesData : [];
-                const companiesList = Array.isArray(companiesData)
-                    ? companiesData
-                    : Array.isArray(companiesData?.items)
-                      ? companiesData.items
-                      : [];
+                let sitesList = unwrapList(sitesData) as any[];
+                const companiesList = unwrapList(companiesData) as any[];
                 if (sitesList.length === 0 && companiesList.length > 0) {
                     sitesList = sitesFromCompanies(companiesList);
                 }

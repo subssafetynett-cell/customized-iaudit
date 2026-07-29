@@ -180,38 +180,21 @@ export default function Nonconformances() {
     const [loading, setLoading] = useState(true);
     const [statusFilter, setStatusFilter] = useState<StatusCardKey>("all");
 
-    const viewerKey = useMemo(() => {
-        if (!user) return "";
-        const id = user.id != null ? String(user.id) : "";
-        const email = String(user.email ?? "").toLowerCase().trim();
-        const role = String(user.role ?? "").toLowerCase().trim();
-        return `${id}|${email}|${role}`;
-    }, [user?.id, user?.email, user?.role]);
-
     const loadFindings = useCallback(async () => {
         setLoading(true);
         try {
-            const stored =
-                user ??
-                (() => {
-                    try {
-                        return JSON.parse(localStorage.getItem("user") || "null");
-                    } catch {
-                        return null;
-                    }
-                })();
-            if (!stored) {
+            if (!user) {
                 setFindings([]);
                 return;
             }
-            const role = typeof stored.role === "string" ? stored.role : undefined;
+            const role = typeof user.role === "string" ? user.role : undefined;
             const isSuperAdmin = String(role ?? "").toLowerCase() === "superadmin";
             const isAuditee = isAuditeeRole(role);
             const seesAll = canViewAllOrgFindings(role);
-            const userEmail = String(stored.email ?? "")
+            const userEmail = String(user.email ?? "")
                 .toLowerCase()
                 .trim();
-            const parsedViewerId = stored.id != null ? Number(stored.id) : NaN;
+            const parsedViewerId = user.id != null ? Number(user.id) : NaN;
             const viewerId =
                 Number.isInteger(parsedViewerId) && parsedViewerId > 0
                     ? parsedViewerId
@@ -290,9 +273,7 @@ export default function Nonconformances() {
         } finally {
             setLoading(false);
         }
-        // Only re-bind when identity fields change — not on every status-poll user object.
-        // eslint-disable-next-line react-hooks/exhaustive-deps -- viewerKey captures id/email/role
-    }, [viewerKey]);
+    }, [user]);
 
     useEffect(() => {
         void loadFindings();

@@ -194,64 +194,23 @@ const SAFE_PDF_DATA_RE = /^data:application\/pdf;base64,[A-Za-z0-9+/=]+$/i;
 const AUDIT_EVIDENCE_IMAGE_MAX = 8_000_000;
 const AUDIT_EVIDENCE_PDF_MAX = 15_000_000;
 
-const SAFE_EVIDENCE_URL_RE = /^https?:\/\/[^\s<>"']{1,2000}$/i;
-
-/** Prefer hosted URLs (Cloudinary); keep legacy data-URLs for older audits. */
-function sanitizeEvidenceDataField(rawData, type) {
-    const data = typeof rawData === 'string' ? rawData.trim() : '';
-    if (!data) return null;
-    if (SAFE_EVIDENCE_URL_RE.test(data) && data.length <= 2048) {
-        return data;
-    }
-    if (type.startsWith('image/')) {
-        return sanitizeLogoField(data, AUDIT_EVIDENCE_IMAGE_MAX) || null;
-    }
-    if (type === 'application/pdf') {
-        if (!SAFE_PDF_DATA_RE.test(data) || data.length > AUDIT_EVIDENCE_PDF_MAX) return null;
-        return data;
-    }
-    return null;
-}
-
-/** Single audit evidence attachment (hosted URL, PNG/JPEG data URL, or PDF). */
+/** Single audit evidence attachment (PNG/JPEG data URL or PDF). */
 export function sanitizeAuditEvidenceMediaItem(item) {
     if (!item || typeof item !== 'object') return null;
     const name = sanitizePlainText(item.name, 255) || 'file';
-    let type = typeof item.type === 'string' ? item.type.toLowerCase() : '';
+    const type = typeof item.type === 'string' ? item.type.toLowerCase() : '';
     const rawData = typeof item.data === 'string' ? item.data.trim() : '';
 
-    if (!type && SAFE_EVIDENCE_URL_RE.test(rawData)) {
-        if (/\.pdf(\?|$)/i.test(rawData) || /\/raw\//i.test(rawData)) type = 'application/pdf';
-        else type = 'image/jpeg';
-    }
-
     if (type.startsWith('image/')) {
-        const data = sanitizeEvidenceDataField(rawData, type);
+        const data = sanitizeLogoField(rawData, AUDIT_EVIDENCE_IMAGE_MAX);
         if (!data) return null;
-        const mime = data.startsWith('data:image/png')
-            ? 'image/png'
-            : data.startsWith('data:image/jpeg')
-              ? 'image/jpeg'
-              : type.startsWith('image/')
-                ? type
-                : 'image/jpeg';
-        const description =
-            typeof item.description === 'string'
-                ? sanitizePlainText(item.description, 500) || undefined
-                : undefined;
-        return description ? { name, type: mime, data, description } : { name, type: mime, data };
+        const mime = data.startsWith('data:image/png') ? 'image/png' : 'image/jpeg';
+        return { name, type: mime, data };
     }
 
     if (type === 'application/pdf') {
-        const data = sanitizeEvidenceDataField(rawData, type);
-        if (!data) return null;
-        const description =
-            typeof item.description === 'string'
-                ? sanitizePlainText(item.description, 500) || undefined
-                : undefined;
-        return description
-            ? { name, data, type: 'application/pdf', description }
-            : { name, data, type: 'application/pdf' };
+        if (!SAFE_PDF_DATA_RE.test(rawData) || rawData.length > AUDIT_EVIDENCE_PDF_MAX) return null;
+        return { name, type: 'application/pdf', data: rawData };
     }
 
     return null;

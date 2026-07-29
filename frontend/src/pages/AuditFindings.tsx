@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { apiFetch } from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -329,20 +329,21 @@ export default function AuditFindings() {
         fetchFindings();
     }, []);
 
-    const ownershipFindings = findings.filter((f) =>
+    const ownershipFindings = useMemo(() => findings.filter((f) =>
         ownershipTab === "assigned"
             ? isFindingAssignedToMe(f, viewerEmail)
             : isFindingRaisedByMe(f, viewerEmail, viewerId),
-    );
+    ), [findings, ownershipTab, viewerEmail, viewerId]);
 
-    const assignedCount = findings.filter((f) =>
+    const assignedCount = useMemo(() => findings.filter((f) =>
         isFindingAssignedToMe(f, viewerEmail),
-    ).length;
-    const raisedCount = findings.filter((f) =>
+    ).length, [findings, viewerEmail]);
+    const raisedCount = useMemo(() => findings.filter((f) =>
         isFindingRaisedByMe(f, viewerEmail, viewerId),
-    ).length;
+    ).length, [findings, viewerEmail, viewerId]);
 
-    const searchedFindings = ownershipFindings.filter((f) => {
+    const searchedFindings = useMemo(() => ownershipFindings.filter((f) => {
+        if (!searchQuery) return true;
         const query = searchQuery.toLowerCase();
         const haystack = [
             f.auditName,
@@ -368,15 +369,16 @@ export default function AuditFindings() {
             .join(" ")
             .toLowerCase();
         return haystack.includes(query);
-    });
+    }), [ownershipFindings, searchQuery]);
 
-    const filteredByType = activeFilter === "All"
+    const filteredByType = useMemo(() => activeFilter === "All"
         ? searchedFindings
-        : searchedFindings.filter((f) => f.type === activeFilter);
+        : searchedFindings.filter((f) => f.type === activeFilter),
+    [searchedFindings, activeFilter]);
 
-    const filtered = filteredByType.filter((f) =>
+    const filtered = useMemo(() => filteredByType.filter((f) =>
         findingMatchesStatusFilter(f, statusFilter),
-    );
+    ), [filteredByType, statusFilter]);
 
     const countOf = (type: FindingType) =>
         searchedFindings.filter((f) => f.type === type).length;

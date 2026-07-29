@@ -65,37 +65,10 @@ export type PreparedReportImage = {
 function loadImage(src: string): Promise<HTMLImageElement> {
     return new Promise((resolve, reject) => {
         const img = new Image();
-        if (/^https?:\/\//i.test(src)) {
-            img.crossOrigin = "anonymous";
-        }
         img.onload = () => resolve(img);
         img.onerror = () => reject(new Error("Could not load image for report"));
         img.src = src;
     });
-}
-
-async function fetchAsDataUrl(url: string): Promise<string> {
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`Failed to fetch evidence (${res.status})`);
-    const blob = await res.blob();
-    return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(String(reader.result ?? ""));
-        reader.onerror = () => reject(reader.error ?? new Error("Failed to read evidence"));
-        reader.readAsDataURL(blob);
-    });
-}
-
-async function resolveEvidenceSourceData(src: string, type: string): Promise<string> {
-    if (src.startsWith("data:")) return src;
-    if (/^https?:\/\//i.test(src)) {
-        if (type.startsWith("image/")) {
-            // Canvas compression can load HTTPS directly (with CORS).
-            return src;
-        }
-        return fetchAsDataUrl(src);
-    }
-    return src;
 }
 
 function estimateDataUrlBytes(dataUrl: string): number {
@@ -105,72 +78,7 @@ function estimateDataUrlBytes(dataUrl: string): number {
 
 export function dataUrlToUint8Array(dataUrl: string): Uint8Array {
     const base64 = dataUrl.includes(",") ? dataUrl.split(",")[1] : dataUrl;
-    const binary = atob(base64);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-    return bytes;
-}
-
-async function evidenceBytesFromSrc(src: string): Promise<Uint8Array> {
-    if (/^https?:\/\//i.test(src)) {
-        const res = await fetch(src, { credentials: "omit", mode: "cors" });
-        if (!res.ok) throw new Error(`Could not fetch evidence PDF (${res.status})`);
-        return new Uint8Array(await res.arrayBuffer());
-    }
-    return dataUrlToUint8Array(src);
-}
-
-async function renderPdfPagesAsJpegs(
-    pdfSrc: string,
-    maxPages: number = REPORT_PDF_MAX_PAGES_PER_FILE,
-    maxDim: number = 1400,
-    quality: number = 0.88,
-): Promise<PreparedReportImage[]> {
-    await ensurePdfWorker();
-    const bytes = await evidenceBytesFromSrc(pdfSrc);
-    const pdf = await pdfjs.getDocument({ data: bytes }).promise;
-    const pageCount = Math.min(pdf.numPages, Math.max(1, maxPages));
-    const out: PreparedReportImage[] = [];
-    const skippedPages: number[] = [];
-
-    for (let pageNum = 1; pageNum <= pageCount; pageNum++) {
-        const page = await pdf.getPage(pageNum);
-        const baseViewport = page.getViewport({ scale: 1 });
-        const scale = maxDim / Math.max(baseViewport.width, baseViewport.height);
-        const viewport = page.getViewport({ scale });
-        const canvas = document.createElement("canvas");
-        canvas.width = Math.max(1, Math.round(viewport.width));
-        canvas.height = Math.max(1, Math.round(viewport.height));
-        const ctx = canvas.getContext("2d");
-        if (!ctx) {
-            skippedPages.push(pageNum);
-            console.error(
-                `[reportEvidenceImages] PDF page ${pageNum} skipped: canvas 2d context unavailable`,
-            );
-            continue;
-        }
-
-        ctx.fillStyle = "#ffffff";
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-        await page.render({ canvasContext: ctx, viewport }).promise;
-
-        out.push({
-            name: "",
-            context: "",
-            dataUrl: canvas.toDataURL("image/jpeg", quality),
-            format: "JPEG",
-            widthPx: canvas.width,
-            heightPx: canvas.height,
-        });
-    }
-
-    if (skippedPages.length > 0) {
-        throw new Error(
-            `PDF evidence render incomplete: omitted page(s) ${skippedPages.join(", ")} (canvas context unavailable)`,
-        );
-    }
-
-    return out;
+    return Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
 }
 
 function scaleToMaxDim(
@@ -260,6 +168,59 @@ export function collectReportEvidenceSources(
     return collectReportEvidenceFileList(auditData);
 }
 
+async function renderPdfPagesAsJpegs(
+    pdfDataUrl: string,
+    maxPages: number = REPORT_PDF_MAX_PAGES_PER_FILE,
+    maxDim: number = 1400,
+    quality: number = 0.88,
+): Promise<PreparedReportImage[]> {
+    await ensurePdfWorker();
+    const bytes = dataUrlToUint8Array(pdfDataUrl);
+    const pdf = await pdfjs.getDocument({ data: bytes }).promise;
+    const pageCount = Math.min(pdf.numPages, Math.max(1, maxPages));
+    const out: PreparedReportImage[] = [];
+    const skippedPages: number[] = [];
+
+    for (let pageNum = 1; pageNum <= pageCount; pageNum++) {
+        const page = await pdf.getPage(pageNum);
+        const baseViewport = page.getViewport({ scale: 1 });
+        const scale = maxDim / Math.max(baseViewport.width, baseViewport.height);
+        const viewport = page.getViewport({ scale });
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, Math.round(viewport.width));
+        canvas.height = Math.max(1, Math.round(viewport.height));
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+            skippedPages.push(pageNum);
+            console.error(
+                `[reportEvidenceImages] PDF page ${pageNum} skipped: canvas 2d context unavailable`,
+            );
+            continue;
+        }
+
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        await page.render({ canvasContext: ctx, viewport }).promise;
+
+        out.push({
+            name: "",
+            context: "",
+            dataUrl: canvas.toDataURL("image/jpeg", quality),
+            format: "JPEG",
+            widthPx: canvas.width,
+            heightPx: canvas.height,
+        });
+    }
+
+    if (skippedPages.length > 0) {
+        throw new Error(
+            `PDF evidence render incomplete: omitted page(s) ${skippedPages.join(", ")} (canvas context unavailable)`,
+        );
+    }
+
+    return out;
+}
+
 async function buildVisualsFromSources(
     sources: ReportEvidenceSource[],
     maxDim: number,
@@ -269,25 +230,19 @@ async function buildVisualsFromSources(
 
     for (const src of sources) {
         if (src.type.startsWith("image/")) {
-            try {
-                const imageSrc = await resolveEvidenceSourceData(src.data, src.type);
-                const item = await renderCompressedJpeg(imageSrc, maxDim, quality);
-                results.push({
-                    ...item,
-                    name: src.name,
-                    context: src.context,
-                    description: src.description,
-                });
-            } catch (error) {
-                console.warn("Report image render failed", src.name, error);
-            }
+            const item = await renderCompressedJpeg(src.data, maxDim, quality);
+            results.push({
+                ...item,
+                name: src.name,
+                context: src.context,
+                description: src.description,
+            });
             continue;
         }
 
         if (src.type === "application/pdf") {
             try {
-                const pdfSrc = await resolveEvidenceSourceData(src.data, src.type);
-                const pages = await renderPdfPagesAsJpegs(pdfSrc, REPORT_PDF_MAX_PAGES_PER_FILE, maxDim, quality);
+                const pages = await renderPdfPagesAsJpegs(src.data, REPORT_PDF_MAX_PAGES_PER_FILE, maxDim, quality);
                 pages.forEach((page, index) => {
                     const pageLabel =
                         pages.length > 1 ? `${src.name} (page ${index + 1})` : src.name;

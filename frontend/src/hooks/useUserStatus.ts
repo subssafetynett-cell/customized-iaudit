@@ -66,37 +66,8 @@ export function useUserStatus() {
                 };
                 // Drop status-only flags that are not part of the user profile
                 delete (updatedUser as { exists?: boolean }).exists;
-
-                const watchKeys = [
-                    "role",
-                    "isActive",
-                    "email",
-                    "firstName",
-                    "lastName",
-                    "trialStartDate",
-                    "trialEndDate",
-                    "subscriptionStatus",
-                    "subscriptionPlan",
-                    "planStartDate",
-                    "planExpiryDate",
-                    "nextBillingDate",
-                    "stripePriceId",
-                    "renewalType",
-                    "autopayConsent",
-                    "onboardingCompleted",
-                ] as const;
-                const changed = watchKeys.some((key) => {
-                    const prev = storedUserData[key];
-                    const next = (updatedUser as Record<string, unknown>)[key];
-                    return String(prev ?? "") !== String(next ?? "");
-                });
-
-                // Only notify listeners when profile/billing fields actually changed —
-                // otherwise every 15s poll re-renders pages that depend on useStoredUser().
-                if (changed) {
-                    localStorage.setItem("user", JSON.stringify(updatedUser));
-                    dispatchUserUpdated();
-                }
+                localStorage.setItem("user", JSON.stringify(updatedUser));
+                dispatchUserUpdated();
             }
         } catch {
             // Network error: do not force logout to avoid disrupting offline usage

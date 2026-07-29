@@ -2,6 +2,10 @@
  * Shared list pagination helpers for Express list routes.
  * When `page` is present in the query, callers should return a paginated envelope.
  * When absent, keep legacy array responses for dashboards / older clients.
+ *
+ * Envelope shape (primary):
+ *   { data, page, pageSize, total, totalPages }
+ * Also includes `items` / `limit` aliases for older clients.
  */
 
 /**
@@ -17,7 +21,8 @@ export function parsePaginationQuery(query, opts = {}) {
         rawPage !== null &&
         String(rawPage).trim() !== '';
 
-    let limit = Number.parseInt(String(query?.limit ?? defaultLimit), 10);
+    const rawSize = query?.pageSize ?? query?.limit ?? defaultLimit;
+    let limit = Number.parseInt(String(rawSize), 10);
     if (!Number.isFinite(limit) || limit < 1) limit = defaultLimit;
     limit = Math.min(maxLimit, Math.max(1, limit));
 
@@ -25,23 +30,29 @@ export function parsePaginationQuery(query, opts = {}) {
     if (!Number.isFinite(page) || page < 1) page = 1;
 
     const skip = (page - 1) * limit;
-    return { page, limit, skip, paginate: hasPage };
+    return { page, limit, pageSize: limit, skip, paginate: hasPage };
 }
 
 /**
  * @template T
  * @param {T[]} items
- * @param {{ page: number, limit: number, total: number }} meta
+ * @param {{ page: number, limit?: number, pageSize?: number, total: number }} meta
  */
 export function paginatedResponse(items, meta) {
     const total = Math.max(0, Number(meta.total) || 0);
-    const limit = Math.max(1, Number(meta.limit) || 8);
+    const pageSize = Math.max(
+        1,
+        Number(meta.pageSize ?? meta.limit) || 8,
+    );
     const page = Math.max(1, Number(meta.page) || 1);
-    const totalPages = total === 0 ? 0 : Math.ceil(total / limit);
+    const totalPages = total === 0 ? 0 : Math.ceil(total / pageSize);
+    const data = Array.isArray(items) ? items : [];
     return {
-        items,
+        data,
+        items: data,
         page,
-        limit,
+        pageSize,
+        limit: pageSize,
         total,
         totalPages,
     };
@@ -61,6 +72,7 @@ export function paginateArray(allItems, pagination) {
     return paginatedResponse(items, {
         page: pagination.page,
         limit: pagination.limit,
+        pageSize: pagination.limit,
         total,
     });
 }

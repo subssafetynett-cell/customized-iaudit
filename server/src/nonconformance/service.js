@@ -325,34 +325,36 @@ export async function raiseNonconformance({
         throw err;
     }
 
-    const assigneeUser = await prisma.user.findUnique({
-        where: { id: assignee },
-        select: { id: true, isActive: true, email: true, firstName: true, lastName: true },
-    });
+    let reviewer = reviewerId != null ? Number(reviewerId) : actor;
+    if (!Number.isInteger(reviewer) || reviewer < 1) {
+        reviewer = plan.leadAuditorId || actor;
+    }
+
+    const [assigneeUser, reviewerUser, actorUser] = await Promise.all([
+        prisma.user.findUnique({
+            where: { id: assignee },
+            select: { id: true, isActive: true, email: true, firstName: true, lastName: true },
+        }),
+        prisma.user.findUnique({
+            where: { id: reviewer },
+            select: { id: true },
+        }),
+        prisma.user.findUnique({
+            where: { id: actor },
+            select: { firstName: true, lastName: true, email: true },
+        }),
+    ]);
     if (!assigneeUser) {
         const err = new Error('Assignee user not found');
         err.code = 'ASSIGNEE_NOT_FOUND';
         throw err;
     }
-
-    let reviewer = reviewerId != null ? Number(reviewerId) : actor;
-    if (!Number.isInteger(reviewer) || reviewer < 1) {
-        reviewer = plan.leadAuditorId || actor;
-    }
-    const reviewerUser = await prisma.user.findUnique({
-        where: { id: reviewer },
-        select: { id: true },
-    });
     if (!reviewerUser) {
         const err = new Error('Reviewer user not found');
         err.code = 'REVIEWER_NOT_FOUND';
         throw err;
     }
 
-    const actorUser = await prisma.user.findUnique({
-        where: { id: actor },
-        select: { firstName: true, lastName: true, email: true },
-    });
     const raisedByName =
         `${actorUser?.firstName || ''} ${actorUser?.lastName || ''}`.trim() ||
         actorUser?.email ||
@@ -476,6 +478,7 @@ export async function listNonconformances({
     canAccessPlan,
     page,
     limit,
+    pageSize,
 }) {
     const actor = Number(actorId);
     const where = {};
@@ -531,7 +534,7 @@ export async function listNonconformances({
 
     const pageNum = Number.parseInt(String(page ?? ''), 10);
     const paginate = Number.isFinite(pageNum) && pageNum >= 1;
-    let take = Number.parseInt(String(limit ?? (paginate ? 10 : 200)), 10);
+    let take = Number.parseInt(String(pageSize ?? limit ?? (paginate ? 10 : 200)), 10);
     if (!Number.isFinite(take) || take < 1) take = paginate ? 10 : 200;
     take = Math.min(paginate ? 100 : 200, take);
     const skip = paginate ? (pageNum - 1) * take : 0;
@@ -574,8 +577,10 @@ export async function listNonconformances({
     const items = rows.map(serializeNonconformance);
     const totalPages = total === 0 ? 0 : Math.ceil(total / take);
     return {
+        data: items,
         items,
         page: pageNum,
+        pageSize: take,
         limit: take,
         total,
         totalPages,

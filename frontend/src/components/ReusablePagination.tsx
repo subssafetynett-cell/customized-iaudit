@@ -12,7 +12,7 @@ interface ReusablePaginationProps {
     className?: string;
 }
 
-const ReusablePagination: React.FC<ReusablePaginationProps> = ({
+const ReusablePagination: React.FC<ReusablePaginationProps> = React.memo(({
     currentPage,
     totalPages,
     totalItems,
@@ -125,6 +125,8 @@ const ReusablePagination: React.FC<ReusablePaginationProps> = ({
             </div>
         </div>
     );
-};
+});
+
+ReusablePagination.displayName = "ReusablePagination";
 
 export default ReusablePagination;
