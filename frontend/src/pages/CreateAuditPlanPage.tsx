@@ -518,6 +518,12 @@ const CreateAuditPlanPage = () => {
         setIsSaving(true);
         try {
             const user = JSON.parse(localStorage.getItem('user') || '{}');
+            const parsedLead =
+                leadAuditorId !== '' ? Number.parseInt(String(leadAuditorId), 10) : null;
+            const parsedAuditor =
+                selectedAuditorId !== ''
+                    ? Number.parseInt(String(selectedAuditorId), 10)
+                    : null;
             const payload = {
                 auditProgramId: isEditMode
                     ? plan.auditProgramId
@@ -530,10 +536,14 @@ const CreateAuditPlanPage = () => {
                 scope: auditScope,
                 objective: auditObjective,
                 criteria: auditCriteria,
-                leadAuditorId,
-                auditorIds: selectedAuditorId ? [selectedAuditorId] : [],
+                leadAuditorId:
+                    Number.isInteger(parsedLead) && parsedLead > 0 ? parsedLead : null,
+                auditorIds:
+                    Number.isInteger(parsedAuditor) && parsedAuditor > 0
+                        ? [parsedAuditor]
+                        : [],
                 itinerary,
-                userId: user.id
+                userId: user.id != null ? Number(user.id) : undefined,
             };
 
             const updating = persistedPlanId != null;
