@@ -94,6 +94,9 @@ const AuditList = () => {
     const [typeFilter, setTypeFilter] = useState<AuditTypeFilter>("all");
     const [selectedSite, setSelectedSite] = useState("all");
     const [loading, setLoading] = useState(true);
+    /** True while refetching after filters/page change — keep prior rows visible. */
+    const [refreshing, setRefreshing] = useState(false);
+    const hasLoadedOnceRef = React.useRef(false);
     /** e.g. "42-pdf" while generating a report for plan 42 */
     const [downloadingKey, setDownloadingKey] = useState<string | null>(null);
     const navigate = useNavigate();
@@ -158,8 +161,10 @@ const AuditList = () => {
     }, [debouncedSearch, selectedSite, typeFilter]);
 
     const fetchPlans = async () => {
+        const isInitial = !hasLoadedOnceRef.current;
         try {
-            setLoading(true);
+            if (isInitial) setLoading(true);
+            else setRefreshing(true);
             const qs = buildPageQuery({
                 page: currentPage,
                 limit: itemsPerPage,
@@ -173,6 +178,7 @@ const AuditList = () => {
             const parsed = parsePaginatedResponse<any>(data, currentPage, itemsPerPage);
             setAuditPlans(parsed.items);
             setTotalItems(parsed.total);
+            hasLoadedOnceRef.current = true;
         } catch (error) {
             console.error("Failed to fetch audit plans:", error);
             toast.error("Failed to load audit plans");
@@ -180,6 +186,7 @@ const AuditList = () => {
             setTotalItems(0);
         } finally {
             setLoading(false);
+            setRefreshing(false);
         }
     };
 
@@ -192,10 +199,16 @@ const AuditList = () => {
         let cancelled = false;
         (async () => {
             try {
-                const res = await apiFetch("/sites");
+                // Names only — full site rows are unnecessary for filter chips.
+                const res = await apiFetch("/sites?minimal=1");
                 if (!res.ok || cancelled) return;
                 const data = await res.json();
-                const names = (Array.isArray(data) ? data : [])
+                const rows = Array.isArray(data)
+                    ? data
+                    : Array.isArray((data as { data?: unknown })?.data)
+                      ? (data as { data: unknown[] }).data
+                      : [];
+                const names = rows
                     .map((s: any) => String(s?.name || "").trim())
                     .filter(Boolean);
                 if (!cancelled) {
@@ -242,7 +255,18 @@ const AuditList = () => {
 
         try {
             const res = await apiFetch(`/audit-plans/${planStub.id}`);
-            if (!res.ok) throw new Error("Could not load audit data for this report.");
+            if (!res.ok) {
+                let detail = "";
+                try {
+                    const errBody = await res.json();
+                    detail = String(errBody?.error || "");
+                } catch {
+                    /* ignore */
+                }
+                throw new Error(
+                    detail || `Could not load audit data for this report (HTTP ${res.status}).`,
+                );
+            }
             const plan = await res.json();
 
             toast.loading(`Generating ${formatLabels[format]} report…`, { id: toastId });
@@ -401,17 +425,21 @@ const AuditList = () => {
                             </TableHeader>
                             <TableBody>
                                 {loading ? (
-                                    <TableRow>
-                                        <TableCell colSpan={7} className="h-48 text-center">
-                                            <div className="flex flex-col items-center justify-center gap-3">
-                                                <div className="w-8 h-8 border-2 border-emerald-200 border-t-emerald-600 rounded-full animate-spin" />
-                                                <p className="text-sm font-medium text-slate-500">Loading audit plans...</p>
-                                            </div>
-                                        </TableCell>
-                                    </TableRow>
+                                    Array.from({ length: itemsPerPage }).map((_, i) => (
+                                        <TableRow key={`skel-${i}`} className="border-b border-slate-100">
+                                            {Array.from({ length: 7 }).map((__, j) => (
+                                                <TableCell key={j} className="py-5">
+                                                    <div
+                                                        className="h-4 rounded bg-slate-100 animate-pulse"
+                                                        style={{ width: j === 6 ? "72px" : j === 0 ? "70%" : "55%", marginLeft: j === 6 ? "auto" : undefined }}
+                                                    />
+                                                </TableCell>
+                                            ))}
+                                        </TableRow>
+                                    ))
                                 ) : filteredPlans.length === 0 ? (
                                     <TableRow>
-                                        <TableCell colSpan={6} className="h-48 text-center text-slate-500 font-medium">
+                                        <TableCell colSpan={7} className="h-48 text-center text-slate-500 font-medium">
                                             No audit plans found matching your criteria.
                                         </TableCell>
                                     </TableRow>
@@ -425,6 +453,7 @@ const AuditList = () => {
                                                 key={plan.id}
                                                 className={cn(
                                                     "cursor-pointer hover:bg-slate-50/80 transition-colors border-b border-slate-100 last:border-0 group",
+                                                    refreshing && "opacity-60",
                                                     auditExecuteTourActive &&
                                                         auditExecuteTourStep === 2 &&
                                                         isTourTargetRow &&

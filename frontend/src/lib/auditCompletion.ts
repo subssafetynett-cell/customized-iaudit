@@ -40,6 +40,10 @@ export function parseAuditData(
 
 /** Assessment progress stored on the plan (0–100). */
 export function getAuditAssessmentProgress(plan: AuditPlanLike): number {
+    // List APIs expose progress at the top level without shipping auditData.
+    if (typeof plan?.progress === "number" && Number.isFinite(plan.progress)) {
+        return Math.min(100, Math.max(0, Math.round(plan.progress)));
+    }
     const data = parseAuditData(plan);
     const progress = Number(data?.progress ?? 0);
     return Number.isFinite(progress) ? Math.min(100, Math.max(0, Math.round(progress))) : 0;
@@ -81,6 +85,11 @@ export function computeAuditCompletionStatus(
 export function isAuditPlanCompleted(plan: AuditPlanLike & { id: number }): boolean {
     if (plan.auditCompleted === true) {
         return true;
+    }
+    // List payloads send progress/auditCompleted without auditData/findingsData.
+    // Do not recompute completion from empty findings (would false-complete open NCs).
+    if (plan.auditData == null && plan.findingsData == null) {
+        return false;
     }
     return computeAuditCompletionStatus(plan).auditCompleted;
 }

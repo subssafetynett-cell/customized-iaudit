@@ -19,8 +19,10 @@ function isSessionExpired(): boolean {
     return Date.now() >= t;
 }
 
-async function confirmSessionWithServer(): Promise<boolean> {
-    if (!hasClientAuthSession()) return false;
+type SessionCheckResult = "ok" | "invalid" | "unknown";
+
+async function confirmSessionWithServer(): Promise<SessionCheckResult> {
+    if (!hasClientAuthSession()) return "invalid";
     try {
         const res = await fetch(resolveApiUrl("/auth/session"), {
             credentials: "include",
@@ -34,39 +36,37 @@ async function confirmSessionWithServer(): Promise<boolean> {
                     new CustomEvent(SESSION_EXPIRY_UPDATED_EVENT, { detail: data.sessionExpiresAt }),
                 );
             }
-            return true;
+            return "ok";
         }
+        // Only treat definitive auth failures as logout — never network/proxy blips.
+        if (res.status === 401 || res.status === 403) return "invalid";
+        return "unknown";
     } catch {
         // Network blip — don't treat as logout
-        return true;
+        return "unknown";
     }
-    return false;
 }
 
-async function logoutIfExpired() {
+async function logoutIfSessionInvalid() {
     if (!hasClientAuthSession()) return;
-    if (!isSessionExpired()) return;
 
-    // Client clock said expired — only logout when the server also rejects the session.
-    // Network errors / temporary 5xx must not bounce sidebar navigation to /auth.
-    const stillValid = await confirmSessionWithServer();
-    if (stillValid) return;
-
-    // Double-check: if the cookie is missing but local profile remains, keep the UI
-    // session and let an explicit logout or next successful auth call reconcile.
-    try {
-        const res = await fetch(resolveApiUrl("/auth/session"), { credentials: "include" });
-        if (res.status >= 500 || res.status === 0) return;
-        if (res.ok) return;
-    } catch {
-        return;
+    const clientExpired = isSessionExpired();
+    // When the client clock has not expired yet, still periodically confirm the
+    // cookie is valid so a revoked session (e.g. password reset) does not leave
+    // a zombie UI. Concurrent logins on other devices never revoke this cookie.
+    const result = await confirmSessionWithServer();
+    if (result === "ok" || result === "unknown") return;
+    if (!clientExpired && result === "invalid") {
+        // Double-check before forcing logout (avoid single flaky 401).
+        const again = await confirmSessionWithServer();
+        if (again !== "invalid") return;
     }
     clearSessionAndRedirectToLogin();
 }
 
 /**
- * Logs the user out when the server-issued session expiry time is reached.
- * Before logging out, confirms with the server to avoid false positives from stale client clocks.
+ * Keeps the UI in sync with the server session cookie.
+ * Concurrent logins on other browsers keep separate cookies/DB rows and are not affected.
  */
 export function useSessionExpiry() {
     useEffect(() => {
@@ -84,27 +84,28 @@ export function useSessionExpiry() {
             if (!Number.isFinite(t)) return;
             const ms = t - Date.now();
             if (ms <= 0) {
-                void logoutIfExpired();
+                void logoutIfSessionInvalid();
                 return;
             }
             exactTimer = setTimeout(() => {
-                void logoutIfExpired();
+                void logoutIfSessionInvalid();
             }, ms);
         };
 
-        void logoutIfExpired();
+        void logoutIfSessionInvalid();
 
         const poll = setInterval(() => {
-            void logoutIfExpired();
+            void logoutIfSessionInvalid();
         }, POLL_MS);
 
         const onVisible = () => {
             if (document.visibilityState === "visible") {
-                void logoutIfExpired();
+                void logoutIfSessionInvalid();
             }
         };
         document.addEventListener("visibilitychange", onVisible);
 
+        // Same-browser tabs only (localStorage is per-origin, not shared across browsers).
         const onStorage = (e: StorageEvent) => {
             if (e.key !== "user" && e.key !== SESSION_EXPIRES_AT_KEY) return;
             if (!hasClientAuthSession()) {

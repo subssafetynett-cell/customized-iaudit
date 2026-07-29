@@ -113,8 +113,48 @@ type PdfPageLayout = {
 let activePdfPageLayout: PdfPageLayout | null = null;
 
 export function getAuditData(plan: { auditData?: unknown }) {
-    if (!plan.auditData) return {};
-    return typeof plan.auditData === "string" ? JSON.parse(plan.auditData) : (plan.auditData as Record<string, unknown>);
+    if (!plan?.auditData) return {};
+    try {
+        if (typeof plan.auditData === "string") {
+            const parsed = JSON.parse(plan.auditData);
+            return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
+        }
+        if (typeof plan.auditData === "object") {
+            return plan.auditData as Record<string, unknown>;
+        }
+    } catch (err) {
+        console.warn("[auditReportExport] Failed to parse auditData", err);
+    }
+    return {};
+}
+
+function safeFormatDate(value: unknown, pattern: string, fallback = "—"): string {
+    if (value == null || value === "") return fallback;
+    const d = value instanceof Date ? value : new Date(String(value));
+    if (!Number.isFinite(d.getTime())) return fallback;
+    try {
+        return format(d, pattern);
+    } catch {
+        return fallback;
+    }
+}
+
+/** docx ImageRun media type from a data URL / mime. */
+function docxImageTypeFromDataUrl(dataUrl: string): "png" | "jpg" | "gif" | "bmp" {
+    const lower = dataUrl.slice(0, 64).toLowerCase();
+    if (lower.includes("image/png")) return "png";
+    if (lower.includes("image/gif")) return "gif";
+    if (lower.includes("image/bmp")) return "bmp";
+    return "jpg";
+}
+
+function docxImageRun(data: Uint8Array | ArrayBuffer, width: number, height: number, dataUrlHint = "") {
+    const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
+    return new ImageRun({
+        type: docxImageTypeFromDataUrl(dataUrlHint) || "png",
+        data: bytes,
+        transformation: { width, height },
+    });
 }
 
 export function auditReportBaseName(plan: { auditName?: string; id?: number }) {
@@ -162,9 +202,14 @@ async function resolveSelectedDepartmentsText(plan: Record<string, any>): Promis
     try {
         const res = await apiFetch("/companies");
         if (!res.ok) return "";
-        const companies = await res.json();
+        const companiesPayload = await res.json();
+        const companies = Array.isArray(companiesPayload)
+            ? companiesPayload
+            : Array.isArray(companiesPayload?.data)
+              ? companiesPayload.data
+              : [];
         const formatted = formatDepartmentNames(
-            resolveDepartmentsFromProgram(plan.auditProgram, Array.isArray(companies) ? companies : []),
+            resolveDepartmentsFromProgram(plan.auditProgram, companies),
         );
         return formatted === "N/A" ? "" : formatted;
     } catch {
@@ -194,8 +239,10 @@ async function buildReportContext(plan: Record<string, any>): Promise<ReportCont
               .join(", ")
         : plan.auditees || "";
 
-    const planAuditDate = plan.date ? format(new Date(plan.date), "dd/MM/yy") : "—";
-    const planIssueDate = plan.date ? format(new Date(plan.date), "dd/MM/yy") : format(new Date(), "dd/MM/yy");
+    const planAuditDate = safeFormatDate(plan.date, "dd/MM/yy");
+    const planIssueDate = plan.date
+        ? safeFormatDate(plan.date, "dd/MM/yy")
+        : safeFormatDate(new Date(), "dd/MM/yy");
 
     const keyPersonnel = (form?.keyPersonnel || [])
         .filter((p) => p.name?.trim() || p.position?.trim() || p.department?.trim())
@@ -561,7 +608,7 @@ async function appendClauseEvidenceToDocx(
                 }
                 children.push(
                     new Paragraph({
-                        children: [new ImageRun({ data: buffer, transformation: { width: w, height: h } })],
+                        children: [docxImageRun(buffer, w, h, img.dataUrl)],
                         spacing: { after: 200 },
                     }),
                 );
@@ -1554,12 +1601,12 @@ function buildAcknowledgementSectionDocx(ctx: ReportContext): (Paragraph | DocxT
         if (signature.startsWith("data:image/")) {
             try {
                 const buffer = dataUrlToUint8Array(signature);
-                children.push(
-                    new Paragraph({
-                        children: [new ImageRun({ data: buffer, transformation: { width: 120, height: 45 } })],
-                        spacing: { after: 80 },
-                    }),
-                );
+                    children.push(
+                        new Paragraph({
+                            children: [docxImageRun(buffer, 120, 45, signature)],
+                            spacing: { after: 80 },
+                        }),
+                    );
             } catch {
                 children.push(new Paragraph({ text: "[Invalid Image]", spacing: { after: 80 } }));
             }
@@ -1694,7 +1741,7 @@ function buildSzlDocxHeaderRows(
     }
 
     const logoParagraphs: Paragraph[] = logoBuffer
-        ? [new Paragraph({ children: [new ImageRun({ data: logoBuffer, transformation: { width: 180, height: 103 } })] })]
+        ? [new Paragraph({ children: [docxImageRun(logoBuffer, 180, 103, "data:image/png")] })]
         : [new Paragraph("")];
     const showIssueDate = isFieldVisible(form, "issueDate");
 
@@ -2162,7 +2209,7 @@ export async function generateAuditReportDocx(plan: Record<string, any>) {
                     }
                     children.push(
                         new Paragraph({
-                            children: [new ImageRun({ data: buffer, transformation: { width: w, height: h } })],
+                            children: [docxImageRun(buffer, w, h, img.dataUrl)],
                             spacing: { after: 240 },
                         }),
                     );
