@@ -1562,24 +1562,47 @@ async function collectOrgMemberUserIds(actorId) {
 }
 
 async function actorCanAccessTargetUser(actorId, targetUserId) {
-    if (actorId === targetUserId) return true;
+    const a = Number(actorId);
+    const t = Number(targetUserId);
+    if (!Number.isInteger(a) || a < 1 || !Number.isInteger(t) || t < 1) return false;
+    if (a === t) return true;
     const [actor, target] = await Promise.all([
-        prisma.user.findUnique({ where: { id: actorId }, select: { role: true, creatorId: true } }),
-        prisma.user.findUnique({ where: { id: targetUserId }, select: { id: true, creatorId: true } })
+        prisma.user.findUnique({ where: { id: a }, select: { role: true, creatorId: true } }),
+        prisma.user.findUnique({ where: { id: t }, select: { id: true, creatorId: true } }),
     ]);
     if (!actor || !target) return false;
-    if (actor.role === 'superadmin') return true;
-    // Account root (creatorId null): may manage anyone in the same org tree (e.g. users created by subordinates).
-    const actorRootId = await getOrgRootUserId(actorId);
-    if (actorRootId != null && actorId === actorRootId) {
-        const targetRootId = await getOrgRootUserId(targetUserId);
-        if (actorRootId === targetRootId) return true;
+    const role = normalizeUserRole(actor.role);
+    if (role === 'superadmin') return true;
+
+    const [actorRootId, targetRootId] = await Promise.all([
+        getOrgRootUserId(a),
+        getOrgRootUserId(t),
+    ]);
+    // Same-org account root or org admin may manage anyone in the org tree.
+    if (actorRootId != null && targetRootId != null && actorRootId === targetRootId) {
+        if (a === actorRootId) return true;
+        if (role === 'admin') return true;
+        if (actor.creatorId == null && role !== 'auditee') return true;
     }
-    const actorOrgRoot = actor.creatorId != null ? actor.creatorId : actorId;
-    if (target.id === actorOrgRoot) return true;
-    if (target.creatorId === actorOrgRoot) return true;
-    if (target.creatorId === actorId) return true;
+
+    const actorOrgRoot = actor.creatorId != null ? Number(actor.creatorId) : a;
+    if (Number(target.id) === actorOrgRoot) return true;
+    if (target.creatorId != null && Number(target.creatorId) === actorOrgRoot) return true;
+    if (target.creatorId != null && Number(target.creatorId) === a) return true;
     return false;
+}
+
+/** True when actor and target belong to the same organization tree. */
+async function actorInSameOrgAs(actorId, targetUserId) {
+    const a = Number(actorId);
+    const t = Number(targetUserId);
+    if (!Number.isInteger(a) || a < 1 || !Number.isInteger(t) || t < 1) return false;
+    if (a === t) return true;
+    const [actorRoot, targetRoot] = await Promise.all([
+        getOrgRootUserId(a),
+        getOrgRootUserId(t),
+    ]);
+    return actorRoot != null && targetRoot != null && actorRoot === targetRoot;
 }
 
 /**
@@ -1650,8 +1673,8 @@ async function actorCanAccessAuditProgram(actorId, program) {
         return auditeeCanAccessSiteId(actorIdNum, program.siteId);
     }
 
-    if (program.userId === actorIdNum) return true;
-    if (program.leadAuditorId === actorIdNum) return true;
+    if (Number(program.userId) === actorIdNum) return true;
+    if (Number(program.leadAuditorId) === actorIdNum) return true;
     if (Array.isArray(program.auditors) && program.auditors.some((a) => Number(a.id) === actorIdNum)) {
         return true;
     }
@@ -1659,6 +1682,24 @@ async function actorCanAccessAuditProgram(actorId, program) {
     if (await actorHasFullOrgAuditVisibility(actorIdNum)) {
         if (program.userId != null && (await actorCanAccessTargetUser(actorIdNum, program.userId))) {
             return true;
+        }
+        // Program belongs to same org as actor (company owner org tree).
+        if (program.siteId != null) {
+            const site = program.site?.companyId != null
+                ? { companyId: program.site.companyId }
+                : await prisma.site.findUnique({
+                    where: { id: Number(program.siteId) },
+                    select: { companyId: true },
+                });
+            if (site?.companyId != null) {
+                const company = await prisma.company.findUnique({
+                    where: { id: Number(site.companyId) },
+                    select: { userId: true },
+                });
+                if (company?.userId != null && (await actorInSameOrgAs(actorIdNum, company.userId))) {
+                    return true;
+                }
+            }
         }
     }
 
@@ -1742,15 +1783,15 @@ async function actorCanAccessAuditPlan(actorId, plan) {
         return false;
     }
 
-    if (plan.userId === actorIdNum) return true;
-    if (plan.leadAuditorId === actorIdNum) return true;
+    if (Number(plan.userId) === actorIdNum) return true;
+    if (Number(plan.leadAuditorId) === actorIdNum) return true;
     if (Array.isArray(plan.auditors) && plan.auditors.some((a) => Number(a.id) === actorIdNum)) {
         return true;
     }
 
     if (plan.auditProgram) {
-        if (plan.auditProgram.userId === actorIdNum) return true;
-        if (plan.auditProgram.leadAuditorId === actorIdNum) return true;
+        if (Number(plan.auditProgram.userId) === actorIdNum) return true;
+        if (Number(plan.auditProgram.leadAuditorId) === actorIdNum) return true;
         if (
             Array.isArray(plan.auditProgram.auditors) &&
             plan.auditProgram.auditors.some((a) => Number(a.id) === actorIdNum)
@@ -2210,7 +2251,7 @@ async function validateAuditProgramAssignments(actorId, { siteId, leadAuditorId,
     };
 }
 
-/** Active non-auditee users in the company owner's team (same company as a site/program). */
+/** Active non-auditee users in the company owner's organization (full org tree). */
 async function companyAuditorUserIdSet(companyId) {
     const parsedCompanyId = Number.parseInt(String(companyId), 10);
     if (!Number.isInteger(parsedCompanyId) || parsedCompanyId < 1) {
@@ -2223,7 +2264,10 @@ async function companyAuditorUserIdSet(companyId) {
     if (!company?.userId) {
         return new Set();
     }
-    const memberIds = await collectOrgSubtreeUserIds(company.userId);
+    // Use the org root of the company owner so peer admins / teammates are included,
+    // not only the owner's direct invite subtree (which caused intermittent 403 on save).
+    const ownerRootId = (await getOrgRootUserId(company.userId)) ?? Number(company.userId);
+    const memberIds = await collectOrgSubtreeUserIds(ownerRootId);
     if (memberIds.length === 0) {
         return new Set();
     }
@@ -2235,11 +2279,15 @@ async function companyAuditorUserIdSet(companyId) {
         },
         select: { id: true },
     });
-    return new Set(users.map((u) => u.id));
+    return new Set(users.map((u) => Number(u.id)));
 }
 
 /** Reject auditor ids outside the audit program's company (403 on tampered ids). */
-async function assertCompanyAuditorUserIds(companyId, userIds, { allowEmpty = true } = {}) {
+async function assertCompanyAuditorUserIds(
+    companyId,
+    userIds,
+    { allowEmpty = true, grandfatherIds = [] } = {},
+) {
     const normalized = parsePositiveIntIds(userIds);
     if (normalized.length === 0) {
         return allowEmpty
@@ -2247,8 +2295,16 @@ async function assertCompanyAuditorUserIds(companyId, userIds, { allowEmpty = tr
             : { ok: false, status: 400, error: 'Auditor user id is required' };
     }
     const allowed = await companyAuditorUserIdSet(companyId);
-    if (normalized.some((id) => !allowed.has(id))) {
-        return { ok: false, status: 403, error: 'Forbidden' };
+    for (const id of parsePositiveIntIds(grandfatherIds)) {
+        allowed.add(id);
+    }
+    const rejected = normalized.filter((id) => !allowed.has(id));
+    if (rejected.length > 0) {
+        return {
+            ok: false,
+            status: 403,
+            error: 'One or more selected auditors are not allowed for this company',
+        };
     }
     return { ok: true, ids: normalized };
 }
@@ -2268,7 +2324,10 @@ async function resolveAuditProgramCompanyId(program) {
     return site?.companyId ?? null;
 }
 
-async function validateAuditPlanAuditorAssignments(actorId, { companyId, leadAuditorId, auditorIds }) {
+async function validateAuditPlanAuditorAssignments(
+    actorId,
+    { companyId, leadAuditorId, auditorIds, grandfatherIds = [] },
+) {
     const parsedCompanyId = Number.parseInt(String(companyId), 10);
     if (!Number.isInteger(parsedCompanyId) || parsedCompanyId < 1) {
         return { ok: false, status: 400, error: 'Invalid company for audit plan' };
@@ -2278,22 +2337,26 @@ async function validateAuditPlanAuditorAssignments(actorId, { companyId, leadAud
         select: { userId: true },
     });
     if (!company?.userId) {
-        return { ok: false, status: 403, error: 'Forbidden' };
+        return { ok: false, status: 403, error: 'You do not have access to this company' };
     }
-    if (!(await actorCanAccessTargetUser(actorId, company.userId))) {
-        return { ok: false, status: 403, error: 'Forbidden' };
+    // Same-org check (not shallow creator-only) — peer admins must be able to save plans.
+    if (!(await actorInSameOrgAs(actorId, company.userId))) {
+        return { ok: false, status: 403, error: 'You do not have access to this company' };
     }
+
+    const existingIds = parsePositiveIntIds(grandfatherIds);
 
     if (leadAuditorId != null && leadAuditorId !== '') {
         const leadCheck = await assertCompanyAuditorUserIds(
             parsedCompanyId,
             [leadAuditorId],
-            { allowEmpty: false },
+            { allowEmpty: false, grandfatherIds: existingIds },
         );
         if (!leadCheck.ok) return leadCheck;
     }
     const auditorCheck = await assertCompanyAuditorUserIds(parsedCompanyId, auditorIds ?? [], {
         allowEmpty: true,
+        grandfatherIds: existingIds,
     });
     if (!auditorCheck.ok) return auditorCheck;
     const parsedLead =
@@ -6846,13 +6909,13 @@ app.post('/audit-plans', authenticateToken, checkTrialExpiration, async (req, re
         });
         if (!program) return res.status(404).json({ error: 'Audit program not found' });
         if (!(await actorCanAccessAuditProgram(req.user.id, program))) {
-            return res.status(403).json({ error: 'Forbidden' });
+            return res.status(403).json({ error: 'You do not have permission to create an audit plan for this program' });
         }
 
-        const actorId = req.user.id;
+        const actorId = Number(req.user.id);
         const planOwnerId = userId != null ? Number.parseInt(String(userId), 10) : actorId;
-        if (Number.isNaN(planOwnerId) || !(await actorCanAccessTargetUser(actorId, planOwnerId))) {
-            return res.status(403).json({ error: 'Forbidden' });
+        if (!Number.isInteger(planOwnerId) || planOwnerId < 1 || !(await actorCanAccessTargetUser(actorId, planOwnerId))) {
+            return res.status(403).json({ error: 'You do not have permission to create an audit plan for this user' });
         }
 
         const programCompanyId = await resolveAuditProgramCompanyId(program);
@@ -6921,7 +6984,7 @@ app.put('/audit-plans/:id', authenticateToken, checkTrialExpiration, async (req,
         });
         if (!existing) return res.status(404).json({ error: 'Audit plan not found' });
         if (!(await actorCanAccessAuditPlan(req.user.id, existing))) {
-            return res.status(403).json({ error: 'Forbidden' });
+            return res.status(403).json({ error: 'You do not have permission to update this audit plan' });
         }
         if (await actorIsAuditee(Number(req.user.id))) {
             return res.status(403).json({
@@ -6939,10 +7002,17 @@ app.put('/audit-plans/:id', authenticateToken, checkTrialExpiration, async (req,
                 auditorIds !== undefined
                     ? auditorIds
                     : existing.auditors.map((a) => a.id);
+            // Keep currently assigned auditors allowed even if they became inactive,
+            // so saving an existing plan does not randomly return 403.
+            const grandfatherIds = [
+                existing.leadAuditorId,
+                ...existing.auditors.map((a) => a.id),
+            ];
             validatedAuditors = await validateAuditPlanAuditorAssignments(actorId, {
                 companyId: programCompanyId,
                 leadAuditorId: effectiveLeadAuditorId,
                 auditorIds: effectiveAuditorIds,
+                grandfatherIds,
             });
             if (!validatedAuditors.ok) {
                 return res.status(validatedAuditors.status).json({ error: validatedAuditors.error });

@@ -2,6 +2,7 @@ import { EOSH_EXCEL_MODULE_TEMPLATES } from "./eoshExcelModuleTemplates";
 import { QFS_KORE_EXCEL_MODULE_TEMPLATES } from "./qfsKoreExcelModuleTemplates";
 import { ISO_14001_MANAGEMENT_SYSTEM_CHECKLIST } from "./iso14001ManagementSystemChecklist";
 import { ISO_9001_MANAGEMENT_SYSTEM_CHECKLIST } from "./iso9001ManagementSystemChecklist";
+import { ISO_22000_FSSC_MANAGEMENT_SYSTEM_CHECKLIST } from "./iso22000FsscManagementSystemChecklist";
 
 export type {
     AuditStandard,
@@ -266,6 +267,7 @@ export function getAuditExecuteSectionLabels(
 export const auditTemplates: AuditTemplate[] = [
     ISO_9001_MANAGEMENT_SYSTEM_CHECKLIST,
     ISO_14001_MANAGEMENT_SYSTEM_CHECKLIST,
+    ISO_22000_FSSC_MANAGEMENT_SYSTEM_CHECKLIST,
     {
         id: "iso-45001-management-system-checklist",
         title: "Management System: ISO 45001:2018 Audit Checklist",
