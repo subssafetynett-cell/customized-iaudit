@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo } from "react";
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { apiFetch } from "@/lib/api";
+import { useCompanyStore } from "@/hooks/useCompanyStore";
 import { usersEligibleAsAuditors, formatUserDisplayName, mergeAuditorUserOptions } from "@/lib/userRoles";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -155,7 +156,8 @@ const CreateAuditPlanPage = () => {
 
     // Auditor Selection State
     const [users, setUsers] = useState<any[]>([]);
-    const [companies, setCompanies] = useState<any[]>([]);
+    const { companies: storeCompanies } = useCompanyStore();
+    const companies = storeCompanies as any[];
     const [seedAuditors, setSeedAuditors] = useState<any[]>([]);
     const [leadAuditorId, setLeadAuditorId] = useState<string>("");
     const [selectedAuditorId, setSelectedAuditorId] = useState<string>(""); // For single select in this UI version
@@ -238,20 +240,7 @@ const CreateAuditPlanPage = () => {
         fetchUsers();
     }, []);
 
-    useEffect(() => {
-        const fetchCompanies = async () => {
-            try {
-                const response = await apiFetch("/companies");
-                if (response.ok) {
-                    const data = await response.json();
-                    setCompanies(Array.isArray(data) ? data : []);
-                }
-            } catch (error) {
-                console.error("Failed to fetch companies", error);
-            }
-        };
-        fetchCompanies();
-    }, []);
+    // Companies come from useCompanyStore (shared singleton, no duplicate fetch).
 
     // Safety check for missing state — only redirect when there is no usable state at all
     useEffect(() => {

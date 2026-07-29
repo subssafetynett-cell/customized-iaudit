@@ -290,7 +290,7 @@ async function tryCloudinaryUpload(file: File): Promise<string | null> {
     try {
         const formData = new FormData();
         formData.append("file", file);
-        const resp = await apiFetch("/audit-evidence/upload", {
+        const resp = await apiFetch("/uploads/audit-evidence", {
             method: "POST",
             body: formData,
         });

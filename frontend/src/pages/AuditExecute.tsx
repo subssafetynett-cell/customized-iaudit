@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useParams, useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { apiFetch } from "@/lib/api";
+import { useCompanyStore } from "@/hooks/useCompanyStore";
 import {
   ArrowLeft,
   Edit,
@@ -246,7 +247,8 @@ const AuditExecute = () => {
 
   // State for the loaded plan
   const [currentPlan, setCurrentPlan] = useState<any>(location.state?.plan);
-  const [companies, setCompanies] = useState<any[]>([]);
+  const { companies: storeCompanies } = useCompanyStore();
+  const companies = storeCompanies as any[];
   // Avoid flashing "not found" before /audit-plans/:id returns (direct URL / refresh).
   const [isLoadingPlan, setIsLoadingPlan] = useState(
     () => Boolean(id) && !location.state?.plan,
@@ -711,20 +713,7 @@ const AuditExecute = () => {
     fetchPlanDetails();
   }, [id]);
 
-  useEffect(() => {
-    const fetchCompanies = async () => {
-      try {
-        const res = await apiFetch("/companies");
-        if (res.ok) {
-          const data = await res.json();
-          setCompanies(Array.isArray(data) ? data : []);
-        }
-      } catch (error) {
-        console.error("Failed to fetch companies for departments:", error);
-      }
-    };
-    fetchCompanies();
-  }, []);
+  // Companies come from useCompanyStore (shared singleton, no duplicate fetch).
 
   useEffect(() => {
     let cancelled = false;

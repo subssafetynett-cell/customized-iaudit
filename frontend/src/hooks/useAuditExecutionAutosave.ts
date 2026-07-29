@@ -56,7 +56,7 @@ export function useAuditExecutionAutosave({
         if (timerRef.current) clearTimeout(timerRef.current);
         timerRef.current = setTimeout(() => {
             void saveNow();
-        }, 2000);
+        }, 5000);
         return () => {
             if (timerRef.current) clearTimeout(timerRef.current);
         };
