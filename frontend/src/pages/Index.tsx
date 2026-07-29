@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { useCompanyStore } from "@/hooks/useCompanyStore";
 import { apiFetch } from "@/lib/api";
@@ -176,38 +176,34 @@ const Index = () => {
     let cancelled = false;
     const fetchData = async () => {
       try {
-        // Light list first (no multi‑MB auditData) so the dashboard paints quickly.
-        const [usersRes, plansRes, programsRes] = await Promise.all([
+        // Single plans fetch with includeData — avoids a second full list round-trip for charts.
+        const [usersRes, plansRes, programsRes, saResult, gaResult] = await Promise.all([
           apiFetch(`/users`),
-          apiFetch(`/audit-plans?scope=org`),
+          apiFetch(`/audit-plans?scope=org&includeData=true`),
           apiFetch(`/audit-programs?scope=org`),
+          fetchSelfAssessmentsPersisted(),
+          fetchGapAnalysesPersisted(),
         ]);
 
         if (cancelled) return;
-        if (usersRes.ok) setUsers(await usersRes.json());
-        if (plansRes.ok) setAuditPlans(await plansRes.json());
-        if (programsRes.ok) setAuditPrograms(await programsRes.json());
-
-        const { assessments } = await fetchSelfAssessmentsPersisted();
-        if (!cancelled) setSelfAssessments(assessments);
-
-        const { analyses } = await fetchGapAnalysesPersisted();
-        if (!cancelled) setGapAnalyses(analyses);
+        const asArray = (payload: unknown) =>
+          Array.isArray(payload)
+            ? payload
+            : Array.isArray((payload as { data?: unknown })?.data)
+              ? ((payload as { data: unknown[] }).data)
+              : Array.isArray((payload as { items?: unknown })?.items)
+                ? ((payload as { items: unknown[] }).items)
+                : [];
+        if (usersRes.ok) setUsers(asArray(await usersRes.json()));
+        if (plansRes.ok) setAuditPlans(asArray(await plansRes.json()));
+        if (programsRes.ok) setAuditPrograms(asArray(await programsRes.json()));
+        setSelfAssessments(saResult.assessments);
+        setGapAnalyses(gaResult.analyses);
       } catch (error) {
         console.error("Failed to fetch dashboard data:", error);
         toast.error("Failed to load dashboard statistics");
       } finally {
         if (!cancelled) setLoading(false);
-      }
-
-      // Enrich with slim auditData (evidence stripped server-side) for findings charts only.
-      try {
-        const heavyRes = await apiFetch(`/audit-plans?scope=org&includeData=true`);
-        if (!cancelled && heavyRes.ok) {
-          setAuditPlans(await heavyRes.json());
-        }
-      } catch (error) {
-        console.warn("Failed to enrich dashboard findings:", error);
       }
     };
 
@@ -217,119 +213,87 @@ const Index = () => {
     };
   }, []);
 
-  // Self Assessment Score distribution logic
-  // High (>=76%): Score >= 38
-  // Medium (48-75%): Score 24-37
-  // Low (<48%): Score < 24
-  const saHigh = selfAssessments.filter(a => a.score >= 38).length;
-  const saMedium = selfAssessments.filter(a => a.score >= 24 && a.score < 38).length;
-  const saLow = selfAssessments.filter(a => a.score < 24).length;
-  const totalSA = selfAssessments.length;
+  const saDistribution = useMemo(() => {
+    const saHigh = selfAssessments.filter(a => a.score >= 38).length;
+    const saMedium = selfAssessments.filter(a => a.score >= 24 && a.score < 38).length;
+    const saLow = selfAssessments.filter(a => a.score < 24).length;
+    const totalSA = selfAssessments.length;
+    return [
+      { name: 'High (≥76%)', value: saHigh, color: '#10B981', percentage: totalSA > 0 ? `${Math.round((saHigh / totalSA) * 100)}%` : "0%" },
+      { name: 'Medium (48-75%)', value: saMedium, color: '#FBBF24', percentage: totalSA > 0 ? `${Math.round((saMedium / totalSA) * 100)}%` : "0%" },
+      { name: 'Low (<48%)', value: saLow, color: '#EF4444', percentage: totalSA > 0 ? `${Math.round((saLow / totalSA) * 100)}%` : "0%" },
+    ];
+  }, [selfAssessments]);
 
-  const saDistribution = [
-    { name: 'High (≥76%)', value: saHigh, color: '#10B981', percentage: totalSA > 0 ? `${Math.round((saHigh / totalSA) * 100)}%` : "0%" },
-    { name: 'Medium (48-75%)', value: saMedium, color: '#FBBF24', percentage: totalSA > 0 ? `${Math.round((saMedium / totalSA) * 100)}%` : "0%" },
-    { name: 'Low (<48%)', value: saLow, color: '#EF4444', percentage: totalSA > 0 ? `${Math.round((saLow / totalSA) * 100)}%` : "0%" },
-  ];
+  const gapDistribution = useMemo(() => {
+    const gapScore = (a: any) => {
+      const total = a.questions?.length || 0;
+      const comply = a.questions?.filter((q: any) => q.finding === 'Comply').length || 0;
+      return total > 0 ? (comply / total) * 100 : 0;
+    };
+    const gapCompliant = gapAnalyses.filter(a => gapScore(a) >= 70).length;
+    const gapPartial = gapAnalyses.filter(a => { const s = gapScore(a); return s >= 40 && s < 70; }).length;
+    const gapNonCompliant = gapAnalyses.filter(a => gapScore(a) < 40).length;
+    const totalGap = gapAnalyses.length;
+    return [
+      { name: 'Compliant (≥70%)', value: gapCompliant, color: '#10B981', percentage: totalGap > 0 ? `${Math.round((gapCompliant / totalGap) * 100)}%` : "0%" },
+      { name: 'Partial (40-69%)', value: gapPartial, color: '#F59E0B', percentage: totalGap > 0 ? `${Math.round((gapPartial / totalGap) * 100)}%` : "0%" },
+      { name: 'Non-Compliant (<40%)', value: gapNonCompliant, color: '#EF4444', percentage: totalGap > 0 ? `${Math.round((gapNonCompliant / totalGap) * 100)}%` : "0%" },
+    ];
+  }, [gapAnalyses]);
 
-  // Gap Analysis Score distribution logic (0-100 score in GapAnalysis.tsx)
-  const gapCompliant = gapAnalyses.filter(a => {
-    const total = a.questions?.length || 0;
-    const comply = a.questions?.filter((q: any) => q.finding === 'Comply').length || 0;
-    const score = total > 0 ? (comply / total) * 100 : 0;
-    return score >= 70;
-  }).length;
-
-  const gapPartial = gapAnalyses.filter(a => {
-    const total = a.questions?.length || 0;
-    const comply = a.questions?.filter((q: any) => q.finding === 'Comply').length || 0;
-    const score = total > 0 ? (comply / total) * 100 : 0;
-    return score >= 40 && score < 70;
-  }).length;
-
-  const gapNonCompliant = gapAnalyses.filter(a => {
-    const total = a.questions?.length || 0;
-    const comply = a.questions?.filter((q: any) => q.finding === 'Comply').length || 0;
-    const score = total > 0 ? (comply / total) * 100 : 0;
-    return score < 40;
-  }).length;
-
-  const totalGap = gapAnalyses.length;
-
-  const gapDistribution = [
-    { name: 'Compliant (≥70%)', value: gapCompliant, color: '#10B981', percentage: totalGap > 0 ? `${Math.round((gapCompliant / totalGap) * 100)}%` : "0%" },
-    { name: 'Partial (40-69%)', value: gapPartial, color: '#F59E0B', percentage: totalGap > 0 ? `${Math.round((gapPartial / totalGap) * 100)}%` : "0%" },
-    { name: 'Non-Compliant (<40%)', value: gapNonCompliant, color: '#EF4444', percentage: totalGap > 0 ? `${Math.round((gapNonCompliant / totalGap) * 100)}%` : "0%" },
-  ];
-
-  // Findings across all audits (same extraction as Audit Findings page)
-  const allFindings = auditPlans.flatMap((plan) =>
-    plan.auditData && plan.id ? getMergedPlanFindings(plan) : [],
+  const allFindings = useMemo(() =>
+    auditPlans.flatMap((plan) =>
+      plan.auditData && plan.id ? getMergedPlanFindings(plan) : [],
+    ),
+    [auditPlans],
   );
 
-  const totalOfi = allFindings.filter((f) => f.type === "OFI").length;
-  const totalMinor = allFindings.filter((f) => f.type === "Minor").length;
-  const totalMajor = allFindings.filter((f) => f.type === "Major").length;
-  const totalFindings = totalOfi + totalMinor + totalMajor;
-
-  const findingDistribution = [
-    {
-      name: "OFI",
-      value: totalOfi,
-      color: "#FCD34D",
-      percentage:
-        totalFindings > 0 ? `${Math.round((totalOfi / totalFindings) * 100)}%` : "0%",
-    },
-    {
-      name: "Minor N/C",
-      value: totalMinor,
-      color: "#F97316",
-      percentage:
-        totalFindings > 0 ? `${Math.round((totalMinor / totalFindings) * 100)}%` : "0%",
-    },
-    {
-      name: "Major N/C",
-      value: totalMajor,
-      color: "#E11D48",
-      percentage:
-        totalFindings > 0 ? `${Math.round((totalMajor / totalFindings) * 100)}%` : "0%",
-    },
-  ];
-
-  const findingPieData = findingDistribution.filter((item) => item.value > 0);
+  const { findingDistribution, findingPieData } = useMemo(() => {
+    const totalOfi = allFindings.filter((f) => f.type === "OFI").length;
+    const totalMinor = allFindings.filter((f) => f.type === "Minor").length;
+    const totalMajor = allFindings.filter((f) => f.type === "Major").length;
+    const totalFindings = totalOfi + totalMinor + totalMajor;
+    const dist = [
+      { name: "OFI", value: totalOfi, color: "#FCD34D", percentage: totalFindings > 0 ? `${Math.round((totalOfi / totalFindings) * 100)}%` : "0%" },
+      { name: "Minor N/C", value: totalMinor, color: "#F97316", percentage: totalFindings > 0 ? `${Math.round((totalMinor / totalFindings) * 100)}%` : "0%" },
+      { name: "Major N/C", value: totalMajor, color: "#E11D48", percentage: totalFindings > 0 ? `${Math.round((totalMajor / totalFindings) * 100)}%` : "0%" },
+    ];
+    return { findingDistribution: dist, findingPieData: dist.filter((item) => item.value > 0) };
+  }, [allFindings]);
 
   const getProgress = (plan: { id: number; auditData?: unknown; progress?: number }) =>
     plan.progress ?? getAuditAssessmentProgress(plan);
 
-  // Upcoming audits: soonest scheduled first, excluding completed
-  const upcomingAudits = [...auditPlans]
-    .filter((p) => !isAuditPlanCompleted(p))
-    .sort((a, b) => {
-      const aTime = a.date ? new Date(a.date).getTime() : Number.MAX_SAFE_INTEGER;
-      const bTime = b.date ? new Date(b.date).getTime() : Number.MAX_SAFE_INTEGER;
-      if (aTime !== bTime) return aTime - bTime;
-      return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
-    })
-    .slice(0, 5);
+  const upcomingAudits = useMemo(() =>
+    [...auditPlans]
+      .filter((p) => !isAuditPlanCompleted(p))
+      .sort((a, b) => {
+        const aTime = a.date ? new Date(a.date).getTime() : Number.MAX_SAFE_INTEGER;
+        const bTime = b.date ? new Date(b.date).getTime() : Number.MAX_SAFE_INTEGER;
+        if (aTime !== bTime) return aTime - bTime;
+        return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+      })
+      .slice(0, 5),
+    [auditPlans],
+  );
 
-  const completedAudits = [...auditPlans]
-    .filter((p) => isAuditPlanCompleted(p))
-    .sort((a, b) => {
-      const parseCompletedAt = (plan: (typeof auditPlans)[0]) => {
-        try {
-          const data =
-            typeof plan.auditData === "string"
-              ? JSON.parse(plan.auditData)
-              : plan.auditData;
-          if (data?.completedAt) return new Date(data.completedAt).getTime();
-        } catch {
-          /* ignore */
-        }
-        return new Date(plan.updatedAt).getTime();
-      };
-      return parseCompletedAt(b) - parseCompletedAt(a);
-    })
-    .slice(0, 5);
+  const completedAudits = useMemo(() =>
+    [...auditPlans]
+      .filter((p) => isAuditPlanCompleted(p))
+      .sort((a, b) => {
+        const parseCompletedAt = (plan: (typeof auditPlans)[0]) => {
+          try {
+            const data = typeof plan.auditData === "string" ? JSON.parse(plan.auditData) : plan.auditData;
+            if (data?.completedAt) return new Date(data.completedAt).getTime();
+          } catch { /* ignore */ }
+          return new Date(plan.updatedAt).getTime();
+        };
+        return parseCompletedAt(b) - parseCompletedAt(a);
+      })
+      .slice(0, 5),
+    [auditPlans],
+  );
 
   const stats = [
     {

@@ -1481,12 +1481,7 @@ const AuditExecute = () => {
   };
 
   const handleClauseFileUpload = async (clause: string, files: FileList | null) => {
-    if (!files || files.length === 0) return;
-    const uploadToast = toast.loading(
-      files.length === 1 ? "Uploading evidence…" : `Uploading ${files.length} files…`,
-    );
-    const { accepted, rejected } = await processAuditEvidenceFileList(files, { planId: id });
-    toast.dismiss(uploadToast);
+    const { accepted, rejected } = await processAuditEvidenceFileList(files);
     reportRejectedEvidence(rejected, accepted.length);
     if (accepted.length === 0) return;
 
@@ -1524,12 +1519,7 @@ const AuditExecute = () => {
   };
 
   const handleGenericFileUpload = async (key: string, files: FileList | null) => {
-    if (!files || files.length === 0) return;
-    const uploadToast = toast.loading(
-      files.length === 1 ? "Uploading evidence…" : `Uploading ${files.length} files…`,
-    );
-    const { accepted, rejected } = await processAuditEvidenceFileList(files, { planId: id });
-    toast.dismiss(uploadToast);
+    const { accepted, rejected } = await processAuditEvidenceFileList(files);
     reportRejectedEvidence(rejected, accepted.length);
     if (accepted.length === 0) return;
 
@@ -1763,10 +1753,7 @@ const AuditExecute = () => {
         body: JSON.stringify({ auditData }),
       });
 
-      // Clear loading as soon as status is known — do not wait on / parse a large body.
       if (res.ok) {
-        // Drain body in background so the connection can close; ignore contents.
-        void res.text().catch(() => "");
         const savedPayload = buildAuditDataPayload();
         if (savedPayload.auditCompleted) {
           toast.success("Audit completed — all clauses assessed and findings closed.", { id: toastId });

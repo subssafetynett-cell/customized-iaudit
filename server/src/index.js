@@ -1,5 +1,6 @@
 import express from 'express';
 import cors from 'cors';
+import compression from 'compression';
 import { loadServerEnv } from './loadEnv.js';
 import nodemailer from 'nodemailer';
 import crypto from 'node:crypto';
@@ -491,6 +492,8 @@ const CORS_ALLOWED_ORIGINS = new Set([
     'http://localhost:8082',
     'http://localhost:8083',
 ]);
+
+app.use(compression({ threshold: 1024 }));
 
 app.use(cors({
     origin(origin, callback) {
@@ -2851,10 +2854,45 @@ app.get('/companies', authenticateToken, checkTrialExpiration, async (req, res) 
             }
         }
 
+        // List responses only need fields used by company/site/department tables and forms.
         const companyInclude = {
             sites: {
-                include: { departments: true }
-            }
+                select: {
+                    id: true,
+                    name: true,
+                    description: true,
+                    siteType: true,
+                    status: true,
+                    address: true,
+                    city: true,
+                    state: true,
+                    country: true,
+                    postalCode: true,
+                    latitude: true,
+                    longitude: true,
+                    contactName: true,
+                    contactPosition: true,
+                    contactNumber: true,
+                    email: true,
+                    companyId: true,
+                    userId: true,
+                    createdAt: true,
+                    updatedAt: true,
+                    departments: {
+                        select: {
+                            id: true,
+                            name: true,
+                            description: true,
+                            siteId: true,
+                            code: true,
+                            manager: true,
+                            status: true,
+                            createdAt: true,
+                            updatedAt: true,
+                        },
+                    },
+                },
+            },
         };
 
         const searchWhere = search
@@ -3037,31 +3075,91 @@ app.get('/sites', authenticateToken, checkTrialExpiration, async (req, res) => {
         return res.json([]);
     }
 
+    const pagination = parsePaginationQuery(req.query, { defaultLimit: 50 });
+    const search = String(req.query.search || '').trim();
+    const siteSelect = {
+        id: true,
+        name: true,
+        description: true,
+        siteType: true,
+        status: true,
+        address: true,
+        city: true,
+        state: true,
+        country: true,
+        postalCode: true,
+        companyId: true,
+        userId: true,
+        contactName: true,
+        contactPosition: true,
+        contactNumber: true,
+        email: true,
+        createdAt: true,
+        updatedAt: true,
+        company: {
+            select: {
+                id: true,
+                name: true,
+                userId: true,
+            },
+        },
+    };
+
     try {
+        const searchWhere = search
+            ? { name: { contains: search, mode: 'insensitive' } }
+            : {};
+
+        const sendSites = async (where) => {
+            const fullWhere = { ...where, ...searchWhere };
+            if (!pagination.paginate) {
+                const sites = await prisma.site.findMany({
+                    where: fullWhere,
+                    select: siteSelect,
+                    orderBy: [{ name: 'asc' }],
+                });
+                return res.json(sites);
+            }
+            const [total, sites] = await Promise.all([
+                prisma.site.count({ where: fullWhere }),
+                prisma.site.findMany({
+                    where: fullWhere,
+                    select: siteSelect,
+                    orderBy: [{ name: 'asc' }],
+                    skip: pagination.skip,
+                    take: pagination.limit,
+                }),
+            ]);
+            return res.json(
+                paginatedResponse(sites, {
+                    page: pagination.page,
+                    pageSize: pagination.limit,
+                    total,
+                }),
+            );
+        };
+
         if (await actorIsAuditee(actorId)) {
-            const sites = await prisma.site.findMany({
-                where: { userId: actorId },
-                include: { company: true },
-                orderBy: [{ name: 'asc' }],
-            });
-            return res.json(sites);
+            return await sendSites({ userId: actorId });
         }
 
         const orgRootId = await getOrgRootUserId(actorId);
         const ownerUserIds =
             orgRootId != null ? await collectOrgSubtreeUserIds(orgRootId) : [actorId];
         if (ownerUserIds.length === 0) {
-            return res.json([]);
+            if (!pagination.paginate) return res.json([]);
+            return res.json(
+                paginatedResponse([], {
+                    page: pagination.page,
+                    pageSize: pagination.limit,
+                    total: 0,
+                }),
+            );
         }
 
-        const sites = await prisma.site.findMany({
-            where: {
-                company: { userId: { in: ownerUserIds } },
-            },
-            include: { company: true },
-            orderBy: [{ name: 'asc' }],
+        return await sendSites({
+            company: { userId: { in: ownerUserIds } },
         });
-        res.json(sites);
     } catch (error) {
         console.error('Failed to fetch sites:', error);
         res.status(500).json({ error: 'Failed to fetch sites' });
@@ -4631,10 +4729,40 @@ app.get('/super-admin/companies', authenticateToken, async (req, res) => {
         if (!pagination.paginate) {
             const companies = await prisma.company.findMany({
                 where,
-                include: {
+                select: {
+                    id: true,
+                    name: true,
+                    logo: true,
+                    industry: true,
+                    contactNumber: true,
+                    description: true,
+                    streetAddress: true,
+                    city: true,
+                    state: true,
+                    country: true,
+                    postalCode: true,
+                    isoStandards: true,
+                    userId: true,
+                    createdAt: true,
+                    updatedAt: true,
                     sites: {
-                        include: { departments: true }
-                    }
+                        select: {
+                            id: true,
+                            name: true,
+                            siteType: true,
+                            status: true,
+                            city: true,
+                            companyId: true,
+                            departments: {
+                                select: {
+                                    id: true,
+                                    name: true,
+                                    siteId: true,
+                                    status: true,
+                                },
+                            },
+                        },
+                    },
                 },
                 orderBy: { id: 'asc' }
             });
@@ -4645,10 +4773,40 @@ app.get('/super-admin/companies', authenticateToken, async (req, res) => {
             prisma.company.count({ where }),
             prisma.company.findMany({
                 where,
-                include: {
+                select: {
+                    id: true,
+                    name: true,
+                    logo: true,
+                    industry: true,
+                    contactNumber: true,
+                    description: true,
+                    streetAddress: true,
+                    city: true,
+                    state: true,
+                    country: true,
+                    postalCode: true,
+                    isoStandards: true,
+                    userId: true,
+                    createdAt: true,
+                    updatedAt: true,
                     sites: {
-                        include: { departments: true }
-                    }
+                        select: {
+                            id: true,
+                            name: true,
+                            siteType: true,
+                            status: true,
+                            city: true,
+                            companyId: true,
+                            departments: {
+                                select: {
+                                    id: true,
+                                    name: true,
+                                    siteId: true,
+                                    status: true,
+                                },
+                            },
+                        },
+                    },
                 },
                 orderBy: { id: 'asc' },
                 skip: pagination.skip,
@@ -4658,7 +4816,7 @@ app.get('/super-admin/companies', authenticateToken, async (req, res) => {
         res.json(
             paginatedResponse(companies, {
                 page: pagination.page,
-                limit: pagination.limit,
+                pageSize: pagination.limit,
                 total,
             }),
         );
@@ -4721,30 +4879,28 @@ app.get('/users', authenticateToken, async (req, res) => {
             filterCreatorId = c;
         }
 
-        let allowedIds;
+        /** When scope=all, skip the expensive "fetch all IDs then filter" round-trip. */
+        let whereBase = {};
         if (scopeAll) {
-            const all = await prisma.user.findMany({ select: { id: true } });
-            allowedIds = all.map((u) => u.id);
+            if (filterCreatorId != null) {
+                whereBase = { creatorId: filterCreatorId };
+            }
         } else {
-            allowedIds = await collectOrgMemberUserIds(actorId);
-        }
-
-        if (allowedIds.length === 0) {
-            if (!pagination.paginate) return res.json([]);
-            return res.json(
-                paginatedResponse([], {
-                    page: pagination.page,
-                    limit: pagination.limit,
-                    total: 0,
-                }),
-            );
-        }
-
-        const whereBase = {
-            id: { in: allowedIds },
-        };
-        if (filterCreatorId != null) {
-            whereBase.creatorId = filterCreatorId;
+            const allowedIds = await collectOrgMemberUserIds(actorId);
+            if (allowedIds.length === 0) {
+                if (!pagination.paginate) return res.json([]);
+                return res.json(
+                    paginatedResponse([], {
+                        page: pagination.page,
+                        pageSize: pagination.limit,
+                        total: 0,
+                    }),
+                );
+            }
+            whereBase = {
+                id: { in: allowedIds },
+                ...(filterCreatorId != null ? { creatorId: filterCreatorId } : {}),
+            };
         }
         if (search) {
             whereBase.OR = [
@@ -6383,11 +6539,11 @@ app.get('/audit-plans', authenticateToken, checkTrialExpiration, async (req, res
                 userId === 'null';
 
             if (useOrgScope) {
-                if (!(await actorCanReadOrgAssessmentStore(actorId, await resolveActorOrgRootId(actorId)))) {
+                const orgRootId = await resolveActorOrgRootId(actorId);
+                if (!(await actorCanReadOrgAssessmentStore(actorId, orgRootId))) {
                     return res.status(403).json({ error: 'Forbidden' });
                 }
                 if (await actorHasFullOrgAuditVisibility(actorId)) {
-                    const orgRootId = await resolveActorOrgRootId(actorId);
                     const subtreeIds = await collectOrgSubtreeUserIds(orgRootId);
                     whereClause.OR = buildOrgSubtreePlanVisibilityOr(subtreeIds);
                 } else {

@@ -94,9 +94,10 @@ export async function apiFetch(endpoint: string, options: ApiFetchOptions = {}) 
     const method = String(fetchOptions.method || "GET").toUpperCase();
     const hadSession = hasClientAuthSession();
 
-    const headers: Record<string, string> = {
-        "Content-Type": "application/json",
-    };
+    const isFormData = typeof FormData !== "undefined" && fetchOptions.body instanceof FormData;
+    const headers: Record<string, string> = isFormData
+        ? {}
+        : { "Content-Type": "application/json" };
     const extra = fetchOptions.headers;
     if (extra && typeof extra === "object" && !Array.isArray(extra) && !(extra instanceof Headers)) {
         Object.assign(headers, extra as Record<string, string>);

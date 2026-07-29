@@ -70,6 +70,8 @@ model Department {
   manager     String?
   status      String?  @default("Active")
   site        Site     @relation(fields: [siteId], references: [id])
+
+  @@index([siteId])
 }
 
 model User {
@@ -142,6 +144,10 @@ model User {
   orgSelfAssessmentStore     OrgSelfAssessmentStore?     @relation("OrgSelfAssessmentStore")
   userGapAnalysisStore       UserGapAnalysisStore?
   userSelfAssessmentStore    UserSelfAssessmentStore?
+
+  @@index([creatorId])
+  @@index([role])
+  @@index([createdAt])
 }
 
 /// Organization-wide gap analysis history and in-progress draft (shared by all org members).
@@ -254,6 +260,9 @@ model AuditProgram {
   auditors      User[]      @relation("AuditorPrograms")
   @@index([userId])
   @@index([siteId])
+  @@index([leadAuditorId])
+  @@index([createdAt])
+  @@index([status])
 }
 
 model AuditPlan {
@@ -284,6 +293,8 @@ model AuditPlan {
   @@unique([auditProgramId, executionId])
   @@index([userId])
   @@index([auditProgramId])
+  @@index([leadAuditorId])
+  @@index([createdAt])
 }
 
 /// Formal nonconformance raised from a Minor/Major audit finding (finding lives in AuditPlan JSON).

@@ -21,12 +21,6 @@ function isImageMedia(file: AuditEvidenceMedia): boolean {
     if (type.startsWith("image/")) return true;
     const data = String(file.data || "");
     if (data.startsWith("data:image/")) return true;
-    if (/^https?:\/\//i.test(data) && /\.(png|jpe?g|webp|gif)(\?|$)/i.test(data)) return true;
-    if (/^https?:\/\//i.test(data) && type.startsWith("image/")) return true;
-    // Cloudinary image delivery URLs often have /image/upload/
-    if (/^https?:\/\/res\.cloudinary\.com\//i.test(data) && !/\/raw\//i.test(data) && !/\.pdf(\?|$)/i.test(data)) {
-        return true;
-    }
     return /\.(png|jpe?g|webp|gif)$/i.test(file.name || "");
 }
 

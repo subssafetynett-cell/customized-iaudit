@@ -36,6 +36,7 @@ export function createNotificationsRouter({
             const result = await listNotificationsForUser({
                 actorId: req.user.id,
                 limit: req.query.limit,
+                pageSize: req.query.pageSize,
                 page: req.query.page,
             });
             return res.json(result);

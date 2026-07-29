@@ -1,8 +1,12 @@
 /** Shared client helpers for server-paginated list APIs. */
 
 export type PaginatedResult<T> = {
+    data: T[];
+    /** @deprecated Prefer `data`; kept for older call sites. */
     items: T[];
     page: number;
+    pageSize: number;
+    /** @deprecated Prefer `pageSize`; kept for older call sites. */
     limit: number;
     total: number;
     totalPages: number;
@@ -10,15 +14,19 @@ export type PaginatedResult<T> = {
 
 export function buildPageQuery(params: {
     page: number;
-    limit: number;
+    pageSize?: number;
+    limit?: number;
     search?: string;
     [key: string]: string | number | boolean | undefined | null;
 }): string {
     const sp = new URLSearchParams();
+    const pageSize = Math.max(1, Number(params.pageSize ?? params.limit) || 8);
     sp.set("page", String(Math.max(1, params.page || 1)));
-    sp.set("limit", String(Math.max(1, params.limit || 8)));
+    sp.set("pageSize", String(pageSize));
+    // Also send `limit` so older servers still accept the size.
+    sp.set("limit", String(pageSize));
     for (const [key, value] of Object.entries(params)) {
-        if (key === "page" || key === "limit") continue;
+        if (key === "page" || key === "limit" || key === "pageSize") continue;
         if (value === undefined || value === null || value === "") continue;
         sp.set(key, String(value));
     }
@@ -32,48 +40,57 @@ export function buildPageQuery(params: {
 export function parsePaginatedResponse<T>(
     data: unknown,
     fallbackPage = 1,
-    fallbackLimit = 8,
+    fallbackPageSize = 8,
 ): PaginatedResult<T> {
     if (Array.isArray(data)) {
+        const total = data.length;
+        const pageSize = fallbackPageSize;
         return {
+            data: data as T[],
             items: data as T[],
             page: fallbackPage,
-            limit: fallbackLimit,
-            total: data.length,
-            totalPages: data.length === 0 ? 0 : Math.ceil(data.length / fallbackLimit),
+            pageSize,
+            limit: pageSize,
+            total,
+            totalPages: total === 0 ? 0 : Math.ceil(total / pageSize),
         };
     }
     if (data && typeof data === "object") {
         const obj = data as Record<string, unknown>;
-        const items = Array.isArray(obj.items)
-            ? (obj.items as T[])
-            : Array.isArray(obj.data)
-              ? (obj.data as T[])
+        const rows = Array.isArray(obj.data)
+            ? (obj.data as T[])
+            : Array.isArray(obj.items)
+              ? (obj.items as T[])
               : [];
         const total = Number(obj.total);
         const page = Number(obj.page);
-        const limit = Number(obj.limit);
-        const safeLimit = Number.isFinite(limit) && limit > 0 ? limit : fallbackLimit;
-        const safeTotal = Number.isFinite(total) && total >= 0 ? total : items.length;
+        const size = Number(obj.pageSize ?? obj.limit);
+        const safePageSize =
+            Number.isFinite(size) && size > 0 ? size : fallbackPageSize;
+        const safeTotal = Number.isFinite(total) && total >= 0 ? total : rows.length;
         const safePage = Number.isFinite(page) && page > 0 ? page : fallbackPage;
         const totalPages =
             obj.totalPages != null && Number.isFinite(Number(obj.totalPages))
                 ? Number(obj.totalPages)
                 : safeTotal === 0
                   ? 0
-                  : Math.ceil(safeTotal / safeLimit);
+                  : Math.ceil(safeTotal / safePageSize);
         return {
-            items,
+            data: rows,
+            items: rows,
             page: safePage,
-            limit: safeLimit,
+            pageSize: safePageSize,
+            limit: safePageSize,
             total: safeTotal,
             totalPages,
         };
     }
     return {
+        data: [],
         items: [],
         page: fallbackPage,
-        limit: fallbackLimit,
+        pageSize: fallbackPageSize,
+        limit: fallbackPageSize,
         total: 0,
         totalPages: 0,
     };

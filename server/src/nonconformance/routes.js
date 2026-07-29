@@ -90,6 +90,7 @@ export function createNonconformanceRouter({
                 assigneeId: req.query.assigneeId,
                 page: req.query.page,
                 limit: req.query.limit,
+                pageSize: req.query.pageSize,
                 canAccessPlan: actorCanAccessAuditPlan,
             });
             return res.json(result);

@@ -1,3 +1,5 @@
+import { apiFetch } from "./api";
+
 /** Gap Analysis & audit evidence uploads — PNG and JPEG only. */
 
 /** Max raw file size before base64 encoding (~5 MiB). */
@@ -74,8 +76,64 @@ export type EvidenceImageValidationResult =
     | { ok: true; dataUrl: string }
     | { ok: false; error: string };
 
+const COMPRESS_MAX_DIMENSION = 1280;
+const COMPRESS_JPEG_QUALITY = 0.7;
+const COMPRESS_TARGET_BYTES = 400_000;
+
 /**
- * Validates file type (extension + MIME + magic bytes) and returns a safe data URL.
+ * Resize and compress an image to keep evidence small.
+ * Converts PNGs with photos to JPEG; keeps small images as-is.
+ */
+async function compressEvidenceImage(
+    dataUrl: string,
+    originalMime: string,
+): Promise<{ dataUrl: string; mime: string }> {
+    return new Promise((resolve) => {
+        const img = new Image();
+        img.onload = () => {
+            let { width, height } = img;
+            if (
+                width <= COMPRESS_MAX_DIMENSION &&
+                height <= COMPRESS_MAX_DIMENSION &&
+                dataUrl.length <= COMPRESS_TARGET_BYTES * 1.4
+            ) {
+                resolve({ dataUrl, mime: originalMime });
+                return;
+            }
+
+            if (width > COMPRESS_MAX_DIMENSION || height > COMPRESS_MAX_DIMENSION) {
+                if (width > height) {
+                    height = Math.round((height * COMPRESS_MAX_DIMENSION) / width);
+                    width = COMPRESS_MAX_DIMENSION;
+                } else {
+                    width = Math.round((width * COMPRESS_MAX_DIMENSION) / height);
+                    height = COMPRESS_MAX_DIMENSION;
+                }
+            }
+
+            const canvas = document.createElement("canvas");
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext("2d")!;
+            ctx.drawImage(img, 0, 0, width, height);
+
+            const jpegUrl = canvas.toDataURL("image/jpeg", COMPRESS_JPEG_QUALITY);
+            if (originalMime === "image/png") {
+                const pngUrl = canvas.toDataURL("image/png");
+                if (pngUrl.length < jpegUrl.length && pngUrl.length <= COMPRESS_TARGET_BYTES * 1.4) {
+                    resolve({ dataUrl: pngUrl, mime: "image/png" });
+                    return;
+                }
+            }
+            resolve({ dataUrl: jpegUrl, mime: "image/jpeg" });
+        };
+        img.onerror = () => resolve({ dataUrl, mime: originalMime });
+        img.src = dataUrl;
+    });
+}
+
+/**
+ * Validates file type (extension + MIME + magic bytes), compresses, and returns a safe data URL.
  */
 export async function readValidatedEvidenceImageFile(
     file: File
@@ -111,7 +169,7 @@ export async function readValidatedEvidenceImageFile(
         };
     }
 
-    const dataUrl = await new Promise<string>((resolve, reject) => {
+    let dataUrl = await new Promise<string>((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = () => resolve(String(reader.result ?? ""));
         reader.onerror = () => reject(reader.error ?? new Error("Failed to read file"));
@@ -121,6 +179,9 @@ export async function readValidatedEvidenceImageFile(
     if (!isSafeEvidenceImageDataUrl(dataUrl)) {
         return { ok: false, error: EVIDENCE_IMAGE_ERROR_MESSAGE };
     }
+
+    const compressed = await compressEvidenceImage(dataUrl, mime);
+    dataUrl = compressed.dataUrl;
 
     if (dataUrl.length > AUDIT_EVIDENCE_IMAGE_DATA_URL_MAX) {
         return {
@@ -223,7 +284,27 @@ async function readValidatedPdfFile(file: File): Promise<EvidenceImageValidation
 }
 
 /**
+ * Try uploading a file to Cloudinary via the server. Returns the URL on success, null on failure.
+ */
+async function tryCloudinaryUpload(file: File): Promise<string | null> {
+    try {
+        const formData = new FormData();
+        formData.append("file", file);
+        const resp = await apiFetch("/audit-evidence/upload", {
+            method: "POST",
+            body: formData,
+        });
+        if (!resp.ok) return null;
+        const json = await resp.json();
+        return json.url || null;
+    } catch {
+        return null;
+    }
+}
+
+/**
  * Validate a single audit evidence file (photo or PDF).
+ * Tries Cloudinary upload first; falls back to base64 inline data.
  */
 export async function readValidatedAuditEvidenceFile(
     file: File
@@ -231,6 +312,20 @@ export async function readValidatedAuditEvidenceFile(
     | { ok: true; media: AuditEvidenceMedia }
     | { ok: false; error: string }
 > {
+    // Try Cloudinary first for any supported file
+    if (isLikelyImageFile(file) || isLikelyPdfFile(file)) {
+        const cloudinaryUrl = await tryCloudinaryUpload(file);
+        if (cloudinaryUrl) {
+            const mime = isLikelyImageFile(file)
+                ? (normalizeMime(file.type || "") || "image/jpeg")
+                : "application/pdf";
+            return {
+                ok: true,
+                media: { name: file.name, data: cloudinaryUrl, type: mime },
+            };
+        }
+    }
+
     if (isLikelyImageFile(file)) {
         const imageResult = await readValidatedEvidenceImageFile(file);
         if (imageResult.ok === false) {
@@ -268,10 +363,9 @@ export type AuditEvidenceBatchResult = {
     rejected: { fileName: string; error: string }[];
 };
 
-/** Process multiple files; uploads to Cloudinary when possible, else embeds data URL. */
+/** Process multiple files; skips invalid ones and reports each failure. */
 export async function processAuditEvidenceFileList(
-    files: FileList | null,
-    options?: { planId?: string | number },
+    files: FileList | null
 ): Promise<AuditEvidenceBatchResult> {
     if (!files || files.length === 0) {
         return { accepted: [], rejected: [] };
@@ -283,45 +377,20 @@ export async function processAuditEvidenceFileList(
         const result = await readValidatedAuditEvidenceFile(file);
         if (result.ok === false) {
             rejected.push({ fileName: file.name, error: result.error });
-            continue;
-        }
-
-        try {
-            const { uploadAuditEvidenceFile } = await import("@/lib/uploadAuditEvidence");
-            const uploaded = await uploadAuditEvidenceFile(file, { planId: options?.planId });
-            accepted.push({
-                name: uploaded.name || result.media.name,
-                data: uploaded.url,
-                type: uploaded.type || result.media.type,
-                description: result.media.description,
-            });
-        } catch (err) {
-            const code = (err as { code?: string })?.code;
-            // Fall back to embedded data URL when Cloudinary is unavailable (local/dev).
-            if (code === "CLOUDINARY_NOT_CONFIGURED") {
-                accepted.push(result.media);
-            } else {
-                const message =
-                    err instanceof Error && err.message
-                        ? err.message
-                        : "Could not upload evidence to storage.";
-                // Prefer hosted storage; only embed tiny failures as rejection.
-                rejected.push({ fileName: file.name, error: message });
-            }
+        } else {
+            accepted.push(result.media);
         }
     }
     return { accepted, rejected };
 }
 
 const SAFE_PDF_DATA_RE = /^data:application\/pdf;base64,[A-Za-z0-9+/=]+$/i;
-const SAFE_EVIDENCE_URL_RE = /^https?:\/\/[^\s<>"']{1,2000}$/i;
 
-export function isHostedEvidenceUrl(value: string | undefined | null): boolean {
-    if (!value || typeof value !== "string") return false;
-    return SAFE_EVIDENCE_URL_RE.test(value.trim()) && value.trim().length <= 2048;
+function isCloudinaryUrl(data: string): boolean {
+    return data.startsWith("https://res.cloudinary.com/") || data.startsWith("http://res.cloudinary.com/");
 }
 
-/** Strip invalid media before save/autosave. Accepts data URLs or hosted HTTPS URLs. */
+/** Strip invalid media before save/autosave. */
 export function sanitizeAuditEvidenceMedia(
     media: AuditEvidenceMedia | null | undefined
 ): AuditEvidenceMedia | null {
@@ -330,41 +399,30 @@ export function sanitizeAuditEvidenceMedia(
         typeof media.name === "string" && media.name.trim()
             ? media.name.trim().slice(0, 255)
             : "file";
-    let type = typeof media.type === "string" ? media.type.toLowerCase() : "";
+    const type = typeof media.type === "string" ? media.type.toLowerCase() : "";
     const data = typeof media.data === "string" ? media.data.trim() : "";
-    if (!data) return null;
 
-    if (!type && isHostedEvidenceUrl(data)) {
-        if (/\.pdf(\?|$)/i.test(data) || /\/raw\//i.test(data)) type = "application/pdf";
-        else type = "image/jpeg";
+    if (isCloudinaryUrl(data)) {
+        const description = normalizeEvidenceDescription(media.description);
+        return description ? { name, data, type, description } : { name, data, type };
     }
 
     if (type.startsWith("image/")) {
-        if (isHostedEvidenceUrl(data)) {
-            const description = normalizeEvidenceDescription(media.description);
-            return description
-                ? { name, data, type: type.startsWith("image/") ? type : "image/jpeg", description }
-                : { name, data, type: type.startsWith("image/") ? type : "image/jpeg" };
-        }
         const safe = sanitizeEvidenceImageDataUrl(data);
         if (!safe) return null;
         const mime = safe.startsWith("data:image/png") ? "image/png" : "image/jpeg";
         const description = normalizeEvidenceDescription(media.description);
         return description ? { name, data: safe, type: mime, description } : { name, data: safe, type: mime };
     }
-    if (type === "application/pdf") {
-        if (isHostedEvidenceUrl(data)) {
-            const description = normalizeEvidenceDescription(media.description);
-            return description
-                ? { name, data, type: "application/pdf", description }
-                : { name, data, type: "application/pdf" };
-        }
-        if (SAFE_PDF_DATA_RE.test(data) && data.length <= AUDIT_EVIDENCE_PDF_DATA_URL_MAX) {
-            const description = normalizeEvidenceDescription(media.description);
-            return description
-                ? { name, data, type: "application/pdf", description }
-                : { name, data, type: "application/pdf" };
-        }
+    if (
+        type === "application/pdf" &&
+        SAFE_PDF_DATA_RE.test(data) &&
+        data.length <= AUDIT_EVIDENCE_PDF_DATA_URL_MAX
+    ) {
+        const description = normalizeEvidenceDescription(media.description);
+        return description
+            ? { name, data, type: "application/pdf", description }
+            : { name, data, type: "application/pdf" };
     }
     return null;
 }
