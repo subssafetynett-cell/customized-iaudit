@@ -213,19 +213,22 @@ const Index = () => {
     };
   }, []);
 
-  const saDistribution = useMemo(() => {
+  const { saDistribution, totalSA } = useMemo(() => {
     const saHigh = selfAssessments.filter(a => a.score >= 38).length;
     const saMedium = selfAssessments.filter(a => a.score >= 24 && a.score < 38).length;
     const saLow = selfAssessments.filter(a => a.score < 24).length;
     const totalSA = selfAssessments.length;
-    return [
-      { name: 'High (≥76%)', value: saHigh, color: '#10B981', percentage: totalSA > 0 ? `${Math.round((saHigh / totalSA) * 100)}%` : "0%" },
-      { name: 'Medium (48-75%)', value: saMedium, color: '#FBBF24', percentage: totalSA > 0 ? `${Math.round((saMedium / totalSA) * 100)}%` : "0%" },
-      { name: 'Low (<48%)', value: saLow, color: '#EF4444', percentage: totalSA > 0 ? `${Math.round((saLow / totalSA) * 100)}%` : "0%" },
-    ];
+    return {
+      totalSA,
+      saDistribution: [
+        { name: 'High (≥76%)', value: saHigh, color: '#10B981', percentage: totalSA > 0 ? `${Math.round((saHigh / totalSA) * 100)}%` : "0%" },
+        { name: 'Medium (48-75%)', value: saMedium, color: '#FBBF24', percentage: totalSA > 0 ? `${Math.round((saMedium / totalSA) * 100)}%` : "0%" },
+        { name: 'Low (<48%)', value: saLow, color: '#EF4444', percentage: totalSA > 0 ? `${Math.round((saLow / totalSA) * 100)}%` : "0%" },
+      ],
+    };
   }, [selfAssessments]);
 
-  const gapDistribution = useMemo(() => {
+  const { gapDistribution, totalGap } = useMemo(() => {
     const gapScore = (a: any) => {
       const total = a.questions?.length || 0;
       const comply = a.questions?.filter((q: any) => q.finding === 'Comply').length || 0;
@@ -235,11 +238,14 @@ const Index = () => {
     const gapPartial = gapAnalyses.filter(a => { const s = gapScore(a); return s >= 40 && s < 70; }).length;
     const gapNonCompliant = gapAnalyses.filter(a => gapScore(a) < 40).length;
     const totalGap = gapAnalyses.length;
-    return [
-      { name: 'Compliant (≥70%)', value: gapCompliant, color: '#10B981', percentage: totalGap > 0 ? `${Math.round((gapCompliant / totalGap) * 100)}%` : "0%" },
-      { name: 'Partial (40-69%)', value: gapPartial, color: '#F59E0B', percentage: totalGap > 0 ? `${Math.round((gapPartial / totalGap) * 100)}%` : "0%" },
-      { name: 'Non-Compliant (<40%)', value: gapNonCompliant, color: '#EF4444', percentage: totalGap > 0 ? `${Math.round((gapNonCompliant / totalGap) * 100)}%` : "0%" },
-    ];
+    return {
+      totalGap,
+      gapDistribution: [
+        { name: 'Compliant (≥70%)', value: gapCompliant, color: '#10B981', percentage: totalGap > 0 ? `${Math.round((gapCompliant / totalGap) * 100)}%` : "0%" },
+        { name: 'Partial (40-69%)', value: gapPartial, color: '#F59E0B', percentage: totalGap > 0 ? `${Math.round((gapPartial / totalGap) * 100)}%` : "0%" },
+        { name: 'Non-Compliant (<40%)', value: gapNonCompliant, color: '#EF4444', percentage: totalGap > 0 ? `${Math.round((gapNonCompliant / totalGap) * 100)}%` : "0%" },
+      ],
+    };
   }, [gapAnalyses]);
 
   const allFindings = useMemo(() =>
