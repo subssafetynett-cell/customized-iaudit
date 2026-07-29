@@ -71,5 +71,7 @@ export interface AuditTemplate {
     isTripleMapping?: boolean;
     alwaysAvailableInPlan?: boolean;
     module?: string;
+    /** Checklist response scale. Default is C / OFI / Min / Maj. */
+    findingScale?: "yes-no";
     content: SectionContent[] | ChecklistContent[] | ClauseChecklistContent[] | ProcessAuditContent[];
 }

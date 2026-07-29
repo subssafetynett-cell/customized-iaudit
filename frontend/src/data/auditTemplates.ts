@@ -72,6 +72,13 @@ export function findAuditTemplates(
         .filter((t): t is AuditTemplate => Boolean(t));
 }
 
+/** True when the checklist uses Yes/No answers instead of C / OFI / Min / Maj. */
+export function usesYesNoChecklistFindings(
+    template?: Pick<AuditTemplate, "findingScale"> | null,
+): boolean {
+    return template?.findingScale === "yes-no";
+}
+
 /**
  * When the audit program uses EOSH/QFS modules, lock the plan to the modules
  * scheduled for this execution (month). Returns null for ISO programs (free picker).
