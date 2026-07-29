@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { useSearchParams, useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -16,6 +16,7 @@ import {
     AlertTriangle,
     Users as UsersIcon,
     MapPin,
+    Loader2,
 } from "lucide-react";
 import { TourStepPopover } from "@/components/TourStepPopover";
 import { ONBOARDING_TOTAL_STEPS } from "@/lib/onboardingTour";
@@ -122,10 +123,10 @@ function UsersPage() {
         setCurrentPage(1);
     }, [searchQuery, roleFilter, statusFilter]);
 
-    // Debounced search for server requests
+    // Debounced search for server requests (≤200ms perceived search)
     const [debouncedSearch, setDebouncedSearch] = useState(searchQuery);
     useEffect(() => {
-        const t = window.setTimeout(() => setDebouncedSearch(searchQuery), 300);
+        const t = window.setTimeout(() => setDebouncedSearch(searchQuery), 150);
         return () => window.clearTimeout(t);
     }, [searchQuery]);
 
@@ -138,6 +139,7 @@ function UsersPage() {
     // Deletion States
     const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
     const [userToDelete, setUserToDelete] = useState<any>(null);
+    const [isDeleting, setIsDeleting] = useState(false);
     const [loggedInUserId, setLoggedInUserId] = useState<number | string | null>(null);
     const { user: storedUser, setUser: setStoredUser } = useStoredUser();
     const clientCanManageUsers = canManageOrgUsers(
@@ -216,13 +218,71 @@ function UsersPage() {
         } catch {
             setLoggedInUserId(null);
         }
-        void refetchCompanies();
+        // useCompanyStore already loads companies on mount — do not force a cache-busting refetch here.
     }, []);
 
+    const hasLoadedUsersRef = useRef(false);
+
+    const fetchUsers = useCallback(async (opts?: { silent?: boolean }) => {
+        const silent = Boolean(opts?.silent);
+        try {
+            if (!silent) setIsLoading(true);
+            const qs = buildPageQuery({
+                page: currentPage,
+                limit: itemsPerPage,
+                search: debouncedSearch || undefined,
+                role: roleFilter !== "all" ? roleFilter : undefined,
+                status: statusFilter !== "all" ? statusFilter : undefined,
+            });
+            const response = await apiFetch(`/users${qs}`);
+            if (response.ok) {
+                const responseData = await response.json();
+                const parsed = parsePaginatedResponse<any>(
+                    responseData,
+                    currentPage,
+                    itemsPerPage,
+                );
+                const data = [...parsed.items];
+                setTotalItems(parsed.total);
+
+                // Add the currently logged-in user to the list if they aren't already there
+                let loggedInUser: { id?: number } | null = null;
+                try {
+                    loggedInUser = JSON.parse(localStorage.getItem("user") || "null");
+                } catch {
+                    loggedInUser = null;
+                }
+                if (loggedInUser?.id != null) {
+                    const selfFromApi = data.find(
+                        (u: any) => String(u.id) === String(loggedInUser!.id),
+                    );
+                    if (selfFromApi) {
+                        setStoredUser({ ...loggedInUser, ...selfFromApi });
+                    } else if (currentPage === 1 && !debouncedSearch && roleFilter === "all" && statusFilter === "all") {
+                        data.unshift(loggedInUser as any);
+                    }
+                }
+
+                setUsers(data);
+                hasLoadedUsersRef.current = true;
+            }
+        } catch (error) {
+            console.error("Failed to fetch users:", error);
+            toast.error("Failed to load users");
+        } finally {
+            setIsLoading(false);
+        }
+    }, [
+        currentPage,
+        debouncedSearch,
+        roleFilter,
+        statusFilter,
+        setStoredUser,
+    ]);
+
     useEffect(() => {
-        void fetchUsers();
-        // eslint-disable-next-line react-hooks/exhaustive-deps -- refetch when server list params change
-    }, [currentPage, debouncedSearch, roleFilter, statusFilter]);
+        void fetchUsers({ silent: hasLoadedUsersRef.current });
+    }, [fetchUsers]);
 
     const auditeeUserIds = useMemo(() => {
         const ids = new Set<number>();
@@ -313,55 +373,6 @@ function UsersPage() {
         }
     }, [searchParams]);
 
-    const fetchUsers = async () => {
-        try {
-            setIsLoading(true);
-            const qs = buildPageQuery({
-                page: currentPage,
-                limit: itemsPerPage,
-                search: debouncedSearch || undefined,
-                role: roleFilter !== "all" ? roleFilter : undefined,
-                status: statusFilter !== "all" ? statusFilter : undefined,
-            });
-            const response = await apiFetch(`/users${qs}`);
-            if (response.ok) {
-                const responseData = await response.json();
-                const parsed = parsePaginatedResponse<any>(
-                    responseData,
-                    currentPage,
-                    itemsPerPage,
-                );
-                const data = [...parsed.items];
-                setTotalItems(parsed.total);
-
-                // Add the currently logged-in user to the list if they aren't already there
-                let loggedInUser: { id?: number } | null = null;
-                try {
-                    loggedInUser = JSON.parse(localStorage.getItem("user") || "null");
-                } catch {
-                    loggedInUser = null;
-                }
-                if (loggedInUser?.id != null) {
-                    const selfFromApi = data.find(
-                        (u: any) => String(u.id) === String(loggedInUser!.id),
-                    );
-                    if (selfFromApi) {
-                        setStoredUser({ ...loggedInUser, ...selfFromApi });
-                    } else if (currentPage === 1 && !debouncedSearch && roleFilter === "all" && statusFilter === "all") {
-                        data.unshift(loggedInUser as any);
-                    }
-                }
-
-                setUsers(data);
-            }
-        } catch (error) {
-            console.error("Failed to fetch users:", error);
-            toast.error("Failed to load users");
-        } finally {
-            setIsLoading(false);
-        }
-    };
-
     const handleAddUser = async (userData: any) => {
         try {
             const endpoint = modalMode === "create" ? `/users` : `/users/${selectedUser.id}`;
@@ -378,8 +389,22 @@ function UsersPage() {
             if (response.ok) {
                 const updatedUser = await response.json();
                 if (modalMode === "create") {
-                    void fetchUsers();
-                    void refetchCompanies();
+                    // Optimistic insert — avoid full list reload.
+                    setUsers((prev) => {
+                        if (prev.some((u) => String(u.id) === String(updatedUser.id))) {
+                            return prev.map((u) =>
+                                String(u.id) === String(updatedUser.id) ? { ...u, ...updatedUser } : u,
+                            );
+                        }
+                        return [updatedUser, ...prev].slice(0, itemsPerPage);
+                    });
+                    setTotalItems((n) => n + 1);
+                    if (
+                        isAuditeeRole(updatedUser.role) ||
+                        Array.isArray(updatedUser.siteIds)
+                    ) {
+                        void refetchCompanies();
+                    }
                     if (updatedUser.emailVerificationPending) {
                         toast.success(
                             updatedUser.verificationEmailSent
@@ -393,8 +418,19 @@ function UsersPage() {
                         toast.success("User created successfully!");
                     }
                 } else {
-                    setUsers(users.map(u => u.id === updatedUser.id ? { ...u, ...updatedUser } : u));
-                    void refetchCompanies();
+                    setUsers((prev) =>
+                        prev.map((u) =>
+                            u.id === updatedUser.id ? { ...u, ...updatedUser } : u,
+                        ),
+                    );
+                    if (
+                        isAuditeeRole(updatedUser.role) ||
+                        Array.isArray(updatedUser.siteIds) ||
+                        userData?.siteIds != null ||
+                        userData?.siteId != null
+                    ) {
+                        void refetchCompanies();
+                    }
                     if (updatedUser.id === user.id) {
                         localStorage.setItem('user', JSON.stringify(updatedUser));
                     }
@@ -433,7 +469,11 @@ function UsersPage() {
 
             if (response.ok) {
                 const updatedUser = await response.json();
-                setUsers(users.map(u => u.id === updatedUser.id ? { ...u, ...updatedUser } : u));
+                setUsers((prev) =>
+                    prev.map((u) =>
+                        u.id === updatedUser.id ? { ...u, ...updatedUser } : u,
+                    ),
+                );
 
                 // Also update local storage if it's the current user
                 const loggedInUser = JSON.parse(localStorage.getItem('user') || '{}');
@@ -469,28 +509,50 @@ function UsersPage() {
     };
 
     const handleDeleteUser = async () => {
-        if (!userToDelete) return;
+        if (!userToDelete || isDeleting) return;
         if (!canManageUsers) {
             toast.error("Only administrators can delete users.");
             return;
         }
 
+        const deleted = userToDelete;
+        const deletedId = deleted.id;
+
+        setIsDeleting(true);
+
+        // Remove from the list immediately — don't wait on the network / full refetch.
+        setUsers((prev) => prev.filter((u) => String(u.id) !== String(deletedId)));
+        setTotalItems((n) => Math.max(0, n - 1));
+        setDeleteDialogOpen(false);
+        setUserToDelete(null);
+        toast.success("User deleted successfully");
+
         try {
-            const response = await apiFetch(`/users/${userToDelete.id}`, {
+            const response = await apiFetch(`/users/${deletedId}`, {
                 method: "DELETE",
             });
-            if (response.ok) {
-                void fetchUsers();
-                toast.success("User deleted successfully");
-            } else {
-                toast.error("Failed to delete user");
+            if (!response.ok && response.status !== 204) {
+                const err = await response.json().catch(() => ({}));
+                // Roll back optimistic remove
+                setUsers((prev) => {
+                    if (prev.some((u) => String(u.id) === String(deletedId))) return prev;
+                    return [...prev, deleted];
+                });
+                setTotalItems((n) => n + 1);
+                toast.error(
+                    typeof err.error === "string" ? err.error : "Failed to delete user",
+                );
             }
         } catch (error) {
             console.error("Error deleting user:", error);
-            toast.error("An error occurred");
+            setUsers((prev) => {
+                if (prev.some((u) => String(u.id) === String(deletedId))) return prev;
+                return [...prev, deleted];
+            });
+            setTotalItems((n) => n + 1);
+            toast.error("An error occurred while deleting the user");
         } finally {
-            setDeleteDialogOpen(false);
-            setUserToDelete(null);
+            setIsDeleting(false);
         }
     };
 
@@ -909,10 +971,21 @@ function UsersPage() {
                     <AlertDialogFooter className="sm:justify-center gap-2 mt-4">
                         <AlertDialogCancel className="mt-0">Cancel</AlertDialogCancel>
                         <AlertDialogAction
-                            onClick={handleDeleteUser}
+                            onClick={(e) => {
+                                e.preventDefault();
+                                void handleDeleteUser();
+                            }}
+                            disabled={isDeleting}
                             className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
                         >
-                            Delete User
+                            {isDeleting ? (
+                                <>
+                                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                                    Deleting…
+                                </>
+                            ) : (
+                                "Delete User"
+                            )}
                         </AlertDialogAction>
                     </AlertDialogFooter>
                 </AlertDialogContent>

@@ -154,6 +154,8 @@ export default function FindingDetail() {
         email: typeof user?.email === "string" ? user.email : null,
     };
     const isNc = finding ? isNcFindingType(finding.type) : false;
+    const isOfi = finding?.type === "OFI";
+    const isRespondableType = isNc || isOfi;
     const isFindingAssignee = finding
         ? isFindingAssignedToViewer(finding, viewerEmail)
         : false;
@@ -185,18 +187,21 @@ export default function FindingDetail() {
         canUserRespondToNc(nc, respondUser) ||
         Boolean(nc && isFindingAssignee && ncStatusAllowsResponse && !findingClosed) ||
         Boolean(nc && isNcAssigneeIdentity && ncStatusAllowsResponse && !findingClosed);
-    // Assigned Minor/Major findings can use the CAPA form when not closed,
+    // Assigned NC/OFI findings can use the CAPA form when not closed,
     // even if the formal NC row failed to load or id formats differ.
     const canRespondViaFinding =
         isFindingAssignee &&
-        isNc &&
+        isRespondableType &&
         !findingClosed &&
         !ncClosed &&
         (!nc || ncStatusAllowsResponse);
     const canRespond =
         !findingClosed && !ncClosed && (canRespondViaNc || canRespondViaFinding);
     const showRespondCta =
-        Boolean(finding) && isAssignee && (isNc || Boolean(nc)) && !showResponseForm;
+        Boolean(finding) &&
+        isAssignee &&
+        isRespondableType &&
+        !showResponseForm;
 
     // If ?respond=1 was set but the user cannot respond, fall back to the CTA banner.
     useEffect(() => {
@@ -221,7 +226,15 @@ export default function FindingDetail() {
         (isAssignee || isRaisedByMe) &&
         (hasAssigneeResponse(finding!) || (nc?.responses?.length ?? 0) > 0);
 
-    const typeConfig = finding ? TYPE_CONFIG[finding.type] : null;
+    const typeConfig = finding
+        ? TYPE_CONFIG[
+              finding.type === "OFI"
+                  ? "OFI"
+                  : isNcFindingType(finding.type)
+                    ? "NC"
+                    : finding.type
+          ]
+        : null;
     const raisedByDisplay = useMemo(() => {
         if (!finding) return "—";
         const raw =

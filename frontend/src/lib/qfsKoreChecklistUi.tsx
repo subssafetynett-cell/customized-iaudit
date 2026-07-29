@@ -93,15 +93,48 @@ export function qfsScoreFromFindings(
 ): QfsScore {
   if (scoreMode === "compliance-exception-noncompliance") {
     if (findings === "2" || findings === "C") return "2";
-    if (findings === "1") return "1";
-    if (findings === "0" || findings === "Min" || findings === "Maj") return "0";
+    if (findings === "1" || findings === "OFI") return "1";
+    if (
+      findings === "0" ||
+      findings === "NC" ||
+      findings === "Min" ||
+      findings === "Maj" ||
+      findings === "Minor" ||
+      findings === "Major"
+    ) {
+      return "0";
+    }
     return "";
   }
-  if (findings === "1" || findings === "C") return "1";
-  if (findings === "0" || findings === "Min" || findings === "Maj") return "0";
-  // Treat EOSH-style "2" as compliance if somehow present on 2-col modules
-  if (findings === "2") return "1";
+  if (findings === "1" || findings === "C" || findings === "2") return "1";
+  if (
+    findings === "0" ||
+    findings === "NC" ||
+    findings === "Min" ||
+    findings === "Maj" ||
+    findings === "Minor" ||
+    findings === "Major"
+  ) {
+    return "0";
+  }
   return "";
+}
+
+/**
+ * Persist QFS column selection as semantic finding codes.
+ * Non Compliance → "NC"; Meet with Exceptions (3-col) → "OFI".
+ */
+export function qfsFindingsValueForScore(
+  score: "2" | "1" | "0",
+  scoreMode: QfsScoreMode = "compliance-noncompliance",
+): string {
+  if (scoreMode === "compliance-exception-noncompliance") {
+    if (score === "2") return "2";
+    if (score === "1") return "OFI";
+    return "NC";
+  }
+  if (score === "1") return "1";
+  return "NC";
 }
 
 export function qfsScoreOptions(scoreMode: QfsScoreMode) {

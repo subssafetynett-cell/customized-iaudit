@@ -14,7 +14,8 @@ import {
     isQfsKoreScoredChecklist,
 } from "@/lib/qfsKoreChecklistUi";
 
-export type FindingType = "OFI" | "Minor" | "Major";
+export type FindingType = "OFI" | "Minor" | "Major" | "NC";
+
 export type FindingStatus =
     | "Opened"
     | "Closed"
@@ -39,7 +40,7 @@ export type FindingCapaHistoryEntry = {
 };
 
 export function isNcFindingType(type: FindingType): boolean {
-    return type === "Minor" || type === "Major";
+    return type === "Minor" || type === "Major" || type === "NC";
 }
 
 export interface Finding {
@@ -156,6 +157,12 @@ export const TYPE_CONFIG: Record<
         bg: "bg-amber-100",
         text: "text-amber-800",
         ring: "ring-amber-300",
+    },
+    NC: {
+        label: "NC",
+        bg: "bg-red-100",
+        text: "text-red-800",
+        ring: "ring-red-300",
     },
     Minor: {
         label: "Minor N/C",
@@ -527,20 +534,19 @@ export function extractFindings(plan: {
         ) {
             return null;
         }
-        // EOSH / QFS scored checklists: 0 = Non Compliance, 1 = Meet with Exceptions
-        if (normalized === "0") return "Minor";
+        // EOSH scored checklists: 1 / OFI = Meet with Exceptions, 0 / NC = Non Compliance
+        if (normalized === "0" || normalized === "nc") return "NC";
         if (normalized === "1") return "OFI";
         if (normalized.includes("ofi") || normalized.includes("opportunity")) return "OFI";
         if (normalized === "min" || normalized.includes("minor")) return "Minor";
         if (normalized === "maj" || normalized.includes("major")) return "Major";
         if (
-            normalized === "nc" ||
             normalized.includes("non-conformance") ||
             normalized.includes("nonconformance") ||
             normalized.includes("non compliance") ||
             normalized.includes("non-compliance")
         ) {
-            return "Minor";
+            return "NC";
         }
         return null;
     };
@@ -891,7 +897,7 @@ export function extractFindings(plan: {
         });
     }
 
-    const SEVERITY: Record<FindingType, number> = { OFI: 1, Minor: 2, Major: 3 };
+    const SEVERITY: Record<FindingType, number> = { OFI: 1, NC: 2, Minor: 2, Major: 3 };
     const seen = new Map<string, Finding>();
     results.forEach((f) => {
         const key = `${f.auditId}::${f.id}::${f.clauseRef}`;

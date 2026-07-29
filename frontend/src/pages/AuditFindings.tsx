@@ -11,7 +11,7 @@ import {
     TableRow,
 } from "@/components/ui/table";
 import { Input } from "@/components/ui/input";
-import { AlertTriangle, RefreshCw, SearchX, Search, Upload, Eye, Download, FileText, MessageSquareReply } from "lucide-react";
+import { AlertTriangle, RefreshCw, SearchX, Search, Upload, Eye, Download, FileText } from "lucide-react";
 import {
     DropdownMenu,
     DropdownMenuContent,
@@ -21,7 +21,6 @@ import {
 import {
     extractFindings,
     findingActionByDisplay,
-    isNcFindingType,
     mergeFindingWithOverrides,
     TYPE_CONFIG,
     type Finding,
@@ -112,10 +111,12 @@ type OwnershipTab = "assigned" | "raised";
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-type FilterType = "All" | FindingType;
+/** Findings page only surfaces OFI vs NC (Minor/Major roll up into NC). */
+type FindingsUiType = "OFI" | "NC";
+type FilterType = "All" | FindingsUiType;
 type StatusFilter = "All" | FindingStatus;
 
-const FILTERS: FilterType[] = ["All", "OFI", "Minor", "Major"];
+const FILTERS: FilterType[] = ["All", "OFI", "NC"];
 
 const STATUS_FILTERS: StatusFilter[] = [
     "All",
@@ -128,11 +129,14 @@ const STATUS_FILTERS: StatusFilter[] = [
 const FILTER_STYLE: Record<FilterType, string> = {
     All: "bg-slate-800 text-white hover:bg-slate-700",
     OFI: "bg-amber-500 text-white hover:bg-amber-600",
-    Minor: "bg-orange-600 text-white hover:bg-orange-700",
-    Major: "bg-red-600 text-white hover:bg-red-700",
+    NC: "bg-red-600 text-white hover:bg-red-700",
 };
 
 const FILTER_INACTIVE = "bg-white text-slate-600 border border-slate-200 hover:bg-slate-50";
+
+function toFindingsUiType(type: FindingType): FindingsUiType {
+    return type === "OFI" ? "OFI" : "NC";
+}
 
 function findingMatchesStatusFilter(finding: Finding, statusFilter: StatusFilter): boolean {
     if (statusFilter === "All") return true;
@@ -230,7 +234,6 @@ export default function AuditFindings() {
             const isAuditee = isAuditeeRole(user.role);
             setViewerEmail(userEmail);
             setViewerId(Number.isInteger(parsedViewerId) && parsedViewerId > 0 ? parsedViewerId : null);
-            console.log("Fetching findings for user:", user.email, "UID:", user.id || user._id);
 
             const isSuperAdmin = user.role === 'superadmin';
             const seesAll = canViewAllOrgFindings(user.role);
@@ -272,19 +275,12 @@ export default function AuditFindings() {
             }
 
             const plans = Array.from(planById.values());
-            console.log("Retrieved plans count:", plans.length);
-            if (plans.length > 0) {
-                console.log("SAMPLE PLAN 0 auditData:", plans[0].auditName, plans[0].auditData);
-            }
 
             const all: Finding[] = [];
 
             if (Array.isArray(plans)) {
                 plans.forEach((plan) => {
                     const baseFindings = extractFindings(plan);
-                    if (baseFindings.length > 0) {
-                        console.log(`Extracted ${baseFindings.length} findings from Plan #${plan.id} (${plan.auditName})`);
-                    }
                     const overrides = plan.findingsData
                         ? typeof plan.findingsData === "string"
                             ? JSON.parse(plan.findingsData)
@@ -367,17 +363,17 @@ export default function AuditFindings() {
         return haystack.includes(query);
     }), [ownershipFindings, searchQuery]);
 
-    const filteredByType = useMemo(() => activeFilter === "All"
-        ? searchedFindings
-        : searchedFindings.filter((f) => f.type === activeFilter),
-    [searchedFindings, activeFilter]);
+    const filteredByType = useMemo(() => {
+        if (activeFilter === "All") return searchedFindings;
+        return searchedFindings.filter((f) => toFindingsUiType(f.type) === activeFilter);
+    }, [searchedFindings, activeFilter]);
 
     const filtered = useMemo(() => filteredByType.filter((f) =>
         findingMatchesStatusFilter(f, statusFilter),
     ), [filteredByType, statusFilter]);
 
-    const countOf = (type: FindingType) =>
-        searchedFindings.filter((f) => f.type === type).length;
+    const countOf = (type: FindingsUiType) =>
+        searchedFindings.filter((f) => toFindingsUiType(f.type) === type).length;
 
     const totalPages = Math.max(1, Math.ceil(filtered.length / itemsPerPage));
     const paginatedFindings = filtered.slice(
@@ -408,7 +404,7 @@ export default function AuditFindings() {
             i + 1,
             f.auditName,
             f.clauseRef,
-            f.type,
+            toFindingsUiType(f.type),
             f.details,
             f.status,
             findingActionByDisplay(f)
@@ -446,7 +442,7 @@ export default function AuditFindings() {
         const worksheet = XLSX.utils.json_to_sheet(filtered.map(f => ({
             "Audit Name": f.auditName,
             "Clause": f.clauseRef,
-            "Type": f.type,
+            "Type": toFindingsUiType(f.type),
             "Finding Details": f.details,
             "Status": f.status,
             "Action By": findingActionByDisplay(f),
@@ -464,7 +460,7 @@ export default function AuditFindings() {
             children: [
                 new DocxTableCell({ children: [new Paragraph(f.auditName)] }),
                 new DocxTableCell({ children: [new Paragraph(f.clauseRef)] }),
-                new DocxTableCell({ children: [new Paragraph(f.type)] }),
+                new DocxTableCell({ children: [new Paragraph(toFindingsUiType(f.type))] }),
                 new DocxTableCell({ children: [new Paragraph(f.details)] }),
                 new DocxTableCell({ children: [new Paragraph(f.status)] }),
                 new DocxTableCell({ children: [new Paragraph(findingActionByDisplay(f) || "—")] }),
@@ -592,13 +588,12 @@ export default function AuditFindings() {
                 <div
                     id="tour-step-findings-summary"
                     className={cn(
-                        "grid grid-cols-3 gap-4",
+                        "grid grid-cols-2 gap-4",
                         tourFindingsHighlight(2),
                     )}
                 >
-                    {(["OFI", "Minor", "Major"] as const).map((type) => {
-                        const label = type === "OFI" ? "OFI" : type === "Minor" ? "Minor N/C" : "Major N/C";
-                        const accent = type === "OFI" ? "amber" : type === "Minor" ? "orange" : "red";
+                    {(["OFI", "NC"] as const).map((type) => {
+                        const accent = type === "OFI" ? "amber" : "red";
                         return (
                             <button
                                 key={type}
@@ -606,7 +601,7 @@ export default function AuditFindings() {
                                 className={`rounded-xl border p-5 text-left transition-all shadow-sm cursor-pointer
                     ${activeFilter === type ? `border-${accent}-400 ring-2 ring-${accent}-200 bg-${accent}-50` : "border-slate-200 bg-white hover:bg-slate-50"}`}
                             >
-                                <span className={`text-xs font-bold uppercase tracking-widest text-${accent}-600`}>{label}</span>
+                                <span className={`text-xs font-bold uppercase tracking-widest text-${accent}-600`}>{type}</span>
                                 <div className={`text-4xl font-extrabold mt-1 text-${accent}-600`}>{countOf(type)}</div>
                                 <div className="text-xs text-slate-500 mt-1">findings</div>
                             </button>
@@ -628,10 +623,9 @@ export default function AuditFindings() {
                                 onClick={() => setActiveFilter(f)}
                                 className={`px-4 py-1.5 rounded-full text-sm font-semibold transition-all shadow-sm ${activeFilter === f ? FILTER_STYLE[f] : FILTER_INACTIVE}`}
                             >
-                                {f === "All" ? `All (${searchedFindings.length})` :
-                                    f === "Minor" ? `Minor N/C (${countOf(f)})` :
-                                        f === "Major" ? `Major N/C (${countOf(f)})` :
-                                            `OFI (${countOf(f)})`}
+                                {f === "All"
+                                    ? `All (${searchedFindings.length})`
+                                    : `${f} (${countOf(f)})`}
                             </button>
                         ))}
                     </div>
@@ -744,7 +738,9 @@ export default function AuditFindings() {
                                         <TableHead className="text-white font-bold w-[14%]">Clause / Item</TableHead>
                                         <TableHead className="text-white font-bold w-[10%]">Type</TableHead>
                                         <TableHead className="text-white font-bold w-[12%]">Status</TableHead>
-                                        <TableHead className="text-white font-bold w-[14%]">Action By</TableHead>
+                                                <TableHead className="text-white font-bold w-[14%]">
+                                                    {ownershipTab === "assigned" ? "Raised By" : "Assigned To"}
+                                                </TableHead>
                                         <TableHead className="text-white font-bold min-w-[160px] text-right pr-4">
                                             Actions
                                         </TableHead>
@@ -752,17 +748,8 @@ export default function AuditFindings() {
                                 </TableHeader>
                                 <TableBody>
                                     {paginatedFindings.map((finding, idx) => {
-                                        const cfg = TYPE_CONFIG[finding.type];
-                                        const isNc = isNcFindingType(finding.type);
-                                        const assignedToMe = isFindingAssignedToMe(
-                                            finding,
-                                            viewerEmail,
-                                        );
-                                        const canRespondFromList =
-                                            ownershipTab === "assigned" &&
-                                            assignedToMe &&
-                                            isNc &&
-                                            finding.status !== "Closed";
+                                        const uiType = toFindingsUiType(finding.type);
+                                        const cfg = TYPE_CONFIG[uiType];
                                         return (
                                             <TableRow
                                                 key={`${finding.auditId}-${finding.id}-${idx}`}
@@ -834,9 +821,13 @@ export default function AuditFindings() {
                                                 <TableCell className="text-slate-600 text-sm font-medium py-3">
                                                     {(() => {
                                                         const raw =
-                                                            finding.raisedByName?.trim() ||
-                                                            finding.raisedBy?.trim() ||
-                                                            findingActionByDisplay(finding);
+                                                            ownershipTab === "assigned"
+                                                                ? finding.raisedByName?.trim() ||
+                                                                  finding.raisedBy?.trim() ||
+                                                                  findingActionByDisplay(finding)
+                                                                : finding.assignToName?.trim() ||
+                                                                  finding.assignTo?.trim() ||
+                                                                  "";
                                                         const name = raw
                                                             .replace(/\s*\([^)]*@[^)]*\)\s*$/, "")
                                                             .trim();
@@ -854,7 +845,7 @@ export default function AuditFindings() {
                                                         <Button
                                                             variant="outline"
                                                             size="sm"
-                                                            title="View finding details"
+                                                            title="View finding"
                                                             onClick={() =>
                                                                 navigate(
                                                                     {
@@ -871,31 +862,8 @@ export default function AuditFindings() {
                                                             className="h-8 gap-1.5 border-slate-200 text-slate-700 hover:text-[#213847]"
                                                         >
                                                             <Eye className="w-3.5 h-3.5" />
-                                                            Details
+                                                            View
                                                         </Button>
-                                                        {canRespondFromList ? (
-                                                            <Button
-                                                                size="sm"
-                                                                title="Respond to this finding"
-                                                                onClick={() =>
-                                                                    navigate(
-                                                                        {
-                                                                            pathname: `/audit-findings/${finding.auditId}/${encodeURIComponent(finding.id)}`,
-                                                                            search: "?respond=1",
-                                                                        },
-                                                                        {
-                                                                            state: {
-                                                                                returnTab: "assigned",
-                                                                            },
-                                                                        },
-                                                                    )
-                                                                }
-                                                                className="h-8 gap-1.5 bg-[#213847] hover:bg-[#213847]/90 text-white"
-                                                            >
-                                                                <MessageSquareReply className="w-3.5 h-3.5" />
-                                                                Respond findings
-                                                            </Button>
-                                                        ) : null}
                                                     </div>
                                                 </TableCell>
                                             </TableRow>

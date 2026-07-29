@@ -26,14 +26,13 @@ function mapSeverity(raw) {
     ) {
         return null;
     }
-    // EOSH / QFS scored checklists: 0 = Non Compliance, 1 = Meet with Exceptions
-    if (normalized === '0') return 'Minor';
+    // EOSH scored checklists: 0 / NC = Non Compliance, 1 / OFI = Meet with Exceptions
+    if (normalized === '0' || normalized === 'nc') return 'Minor';
     if (normalized === '1') return 'OFI';
     if (normalized.includes('ofi') || normalized.includes('opportunity')) return 'OFI';
     if (normalized === 'min' || normalized.includes('minor')) return 'Minor';
     if (normalized === 'maj' || normalized.includes('major')) return 'Major';
     if (
-        normalized === 'nc' ||
         normalized.includes('non-conformance') ||
         normalized.includes('nonconformance') ||
         normalized.includes('non compliance') ||

@@ -240,25 +240,37 @@ export default function SuperAdmin() {
     const handleDeleteUser = async () => {
         if (!selectedUser) return;
 
+        const deleted = selectedUser;
+        const deletedId = deleted.id;
+
+        // Optimistic remove — UI updates immediately.
+        setUsers((prev) => prev.filter((u) => String(u.id) !== String(deletedId)));
+        setShowDeleteDialog(false);
+        setSelectedUser(null);
+        toast.success(`${deleted.firstName} ${deleted.lastName} was deleted successfully`);
+
         try {
             setIsDeleting(true);
-            const response = await apiFetch(`/users/${selectedUser.id}`, {
+            const response = await apiFetch(`/users/${deletedId}`, {
                 method: "DELETE",
             });
 
-            if (response.ok) {
-                void fetchUsers();
-                toast.success(`${selectedUser.firstName} ${selectedUser.lastName} was deleted successfully`);
-                setShowDeleteDialog(false);
-                setSelectedUser(null);
-            } else {
+            if (!response.ok && response.status !== 204) {
                 const err = await response.json().catch(() => ({}));
+                setUsers((prev) => {
+                    if (prev.some((u) => String(u.id) === String(deletedId))) return prev;
+                    return [...prev, deleted];
+                });
                 toast.error(
-                    typeof err.error === "string" ? err.error : "Failed to delete user"
+                    typeof err.error === "string" ? err.error : "Failed to delete user",
                 );
             }
         } catch (error) {
             console.error("Error deleting user:", error);
+            setUsers((prev) => {
+                if (prev.some((u) => String(u.id) === String(deletedId))) return prev;
+                return [...prev, deleted];
+            });
             toast.error("An error occurred while deleting the user");
         } finally {
             setIsDeleting(false);

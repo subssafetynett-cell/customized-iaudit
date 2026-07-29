@@ -1502,25 +1502,51 @@ const assessmentReportEmailLastSent = new Map();
 
 const ORG_ROOT_WALK_MAX_DEPTH = 32;
 
+/** Short-lived caches for org tree lookups — Users page hits these on every list load. */
+const ORG_LOOKUP_CACHE_TTL_MS = 45_000;
+const orgRootIdCache = new Map();
+const orgSubtreeIdsCache = new Map();
+const orgMemberIdsCache = new Map();
+
+function invalidateOrgLookupCaches() {
+    orgRootIdCache.clear();
+    orgSubtreeIdsCache.clear();
+    orgMemberIdsCache.clear();
+}
+
 /** Walk creatorId chain to the account root (user with creatorId null). */
 async function getOrgRootUserId(userId) {
-    let currentId = userId;
-    for (let depth = 0; depth < ORG_ROOT_WALK_MAX_DEPTH; depth++) {
-        const row = await prisma.user.findUnique({
-            where: { id: currentId },
-            select: { id: true, creatorId: true }
-        });
-        if (!row) return null;
-        if (row.creatorId == null) return row.id;
-        currentId = row.creatorId;
+    const id = Number(userId);
+    if (!Number.isInteger(id) || id < 1) return null;
+    const cached = orgRootIdCache.get(id);
+    if (cached && cached.expiresAt > Date.now()) {
+        return cached.rootId;
     }
-    return null;
+
+    const rows = await prisma.$queryRaw`
+        WITH RECURSIVE ancestor AS (
+            SELECT id, "creatorId" FROM "User" WHERE id = ${id}
+            UNION ALL
+            SELECT u.id, u."creatorId" FROM "User" u
+            INNER JOIN ancestor a ON u.id = a."creatorId"
+        )
+        SELECT id FROM ancestor WHERE "creatorId" IS NULL
+        LIMIT 1
+    `;
+    const rootId = rows?.[0]?.id != null ? Number(rows[0].id) : null;
+    const resolved = Number.isInteger(rootId) && rootId > 0 ? rootId : null;
+    orgRootIdCache.set(id, { rootId: resolved, expiresAt: Date.now() + ORG_LOOKUP_CACHE_TTL_MS });
+    return resolved;
 }
 
 /** All user ids in the same org (account root + every user created under that tree). */
 async function collectOrgSubtreeUserIds(orgRootId) {
     if (orgRootId == null || !Number.isInteger(orgRootId) || orgRootId < 1) {
         return [];
+    }
+    const cached = orgSubtreeIdsCache.get(orgRootId);
+    if (cached && cached.expiresAt > Date.now()) {
+        return cached.ids;
     }
     const rows = await prisma.$queryRaw`
         WITH RECURSIVE subtree AS (
@@ -1531,7 +1557,12 @@ async function collectOrgSubtreeUserIds(orgRootId) {
         )
         SELECT id FROM subtree
     `;
-    return rows.map((r) => Number(r.id));
+    const ids = rows.map((r) => Number(r.id)).filter((n) => Number.isInteger(n) && n > 0);
+    orgSubtreeIdsCache.set(orgRootId, {
+        ids,
+        expiresAt: Date.now() + ORG_LOOKUP_CACHE_TTL_MS,
+    });
+    return ids;
 }
 
 /**
@@ -1541,6 +1572,11 @@ async function collectOrgSubtreeUserIds(orgRootId) {
 async function collectOrgMemberUserIds(actorId) {
     const id = Number(actorId);
     if (!Number.isInteger(id) || id < 1) return [];
+
+    const cached = orgMemberIdsCache.get(id);
+    if (cached && cached.expiresAt > Date.now()) {
+        return cached.ids;
+    }
 
     const rows = await prisma.$queryRaw`
         WITH RECURSIVE ancestor AS (
@@ -1561,13 +1597,18 @@ async function collectOrgMemberUserIds(actorId) {
         )
         SELECT id FROM subtree
     `;
-    const memberIds = rows.map((r) => Number(r.id)).filter((n) => Number.isInteger(n) && n > 0);
-    if (memberIds.length > 0) return memberIds;
+    let memberIds = rows.map((r) => Number(r.id)).filter((n) => Number.isInteger(n) && n > 0);
+    if (memberIds.length === 0) {
+        const orgRootId = await resolveActorOrgRootId(id);
+        const fromRoot = await collectOrgSubtreeUserIds(orgRootId);
+        memberIds = fromRoot.length > 0 ? fromRoot : [id];
+    }
 
-    const orgRootId = await resolveActorOrgRootId(id);
-    const fromRoot = await collectOrgSubtreeUserIds(orgRootId);
-    if (fromRoot.length > 0) return fromRoot;
-    return [id];
+    orgMemberIdsCache.set(id, {
+        ids: memberIds,
+        expiresAt: Date.now() + ORG_LOOKUP_CACHE_TTL_MS,
+    });
+    return memberIds;
 }
 
 async function actorCanAccessTargetUser(actorId, targetUserId) {
@@ -3393,16 +3434,40 @@ app.delete('/sites/:id', authenticateToken, checkTrialExpiration, async (req, re
         return res.status(access.status).json({ error: access.error });
     }
     try {
-        await prisma.site.delete({
-            where: { id: access.siteId }
+        const siteId = access.siteId;
+
+        await prisma.$transaction(async (tx) => {
+            const programs = await tx.auditProgram.findMany({
+                where: { siteId },
+                select: { id: true },
+            });
+            const programIds = programs.map((p) => p.id);
+
+            if (programIds.length > 0) {
+                // Nonconformances cascade from AuditPlan (onDelete: Cascade).
+                await tx.auditPlan.deleteMany({
+                    where: { auditProgramId: { in: programIds } },
+                });
+                await tx.auditProgram.deleteMany({
+                    where: { id: { in: programIds } },
+                });
+            }
+
+            await tx.department.deleteMany({ where: { siteId } });
+
+            await tx.site.delete({ where: { id: siteId } });
         });
+
         res.status(204).send();
     } catch (error) {
         if (error?.code === 'P2025') {
             return res.status(404).json({ error: 'Site not found' });
         }
         console.error('Error deleting site:', error);
-        res.status(500).json({ error: 'Failed to delete site' });
+        res.status(500).json({
+            error: 'Failed to delete site',
+            details: error?.message || String(error),
+        });
     }
 });
 
@@ -4122,13 +4187,38 @@ async function sendOtpToEmailAddressUnderLock(normalizedEmail, purpose, options 
     };
 
         let emailTransmitted = false;
-        try {
+        const deliverMail = async () => {
             if (devConsoleOnly) {
                 console.log('\n====================================================================');
                 console.log(`[DEV OTP] ${purpose} for ${normalizedEmail}: ${otp}`);
                 console.log(`          Expires in ${ttlMinutes} minutes (SMTP not configured).`);
                 console.log('====================================================================\n');
+                return true;
+            }
+            await transporter.sendMail(mailOptions);
+            console.log(`OTP successfully sent to ${normalizedEmail}`);
+            return true;
+        };
+
+        try {
+            if (options.backgroundDelivery === true) {
+                // Persist OTP first, then deliver mail off the request path (invite UX ≤1s).
                 emailTransmitted = true;
+                setImmediate(() => {
+                    void deliverMail().catch(async (emailError) => {
+                        console.error('Background invite email failed:', emailError.message);
+                        if (allowDevConsoleOtp()) {
+                            console.log('\n====================================================================');
+                            console.log(`[DEV OTP] ${purpose} for ${normalizedEmail}: ${otp}`);
+                            console.log(`          Expires in ${ttlMinutes} minutes (email send failed; use code above).`);
+                            console.log('====================================================================\n');
+                            return;
+                        }
+                        // Keep OTP so Resend verification still works; do not delete on background failure.
+                    });
+                });
+            } else if (devConsoleOnly) {
+                emailTransmitted = await deliverMail();
             } else {
                 await transporter.sendMail(mailOptions);
                 emailTransmitted = true;
@@ -4954,6 +5044,7 @@ app.get('/users', authenticateToken, async (req, res) => {
     if (!Number.isInteger(actorId) || actorId < 1) {
         return res.status(401).json({ error: 'Invalid session. Please log in again.' });
     }
+    const t0 = Date.now();
     try {
         const viewer = await prisma.user.findUnique({
             where: { id: actorId },
@@ -5002,12 +5093,15 @@ app.get('/users', authenticateToken, async (req, res) => {
 
         /** When scope=all, skip the expensive "fetch all IDs then filter" round-trip. */
         let whereBase = {};
+        let orgLookupMs = 0;
         if (scopeAll) {
             if (filterCreatorId != null) {
                 whereBase = { creatorId: filterCreatorId };
             }
         } else {
+            const orgT0 = Date.now();
             const allowedIds = await collectOrgMemberUserIds(actorId);
+            orgLookupMs = Date.now() - orgT0;
             if (allowedIds.length === 0) {
                 if (!pagination.paginate) return res.json([]);
                 return res.json(
@@ -5091,13 +5185,19 @@ app.get('/users', authenticateToken, async (req, res) => {
             });
         };
 
+        const dbT0 = Date.now();
         if (!pagination.paginate) {
             const users = await prisma.user.findMany({
                 where: whereBase,
                 select: userSelect,
                 orderBy: [{ createdAt: 'desc' }, { id: 'desc' }]
             });
-            return res.json(await attachAuditeeSites(users));
+            const payload = await attachAuditeeSites(users);
+            res.setHeader(
+                'Server-Timing',
+                `org;dur=${orgLookupMs},db;dur=${Date.now() - dbT0},total;dur=${Date.now() - t0}`,
+            );
+            return res.json(payload);
         }
 
         const [total, users] = await Promise.all([
@@ -5111,8 +5211,13 @@ app.get('/users', authenticateToken, async (req, res) => {
             }),
         ]);
 
+        const payload = await attachAuditeeSites(users);
+        res.setHeader(
+            'Server-Timing',
+            `org;dur=${orgLookupMs},db;dur=${Date.now() - dbT0},total;dur=${Date.now() - t0}`,
+        );
         res.json(
-            paginatedResponse(await attachAuditeeSites(users), {
+            paginatedResponse(payload, {
                 page: pagination.page,
                 limit: pagination.limit,
                 total,
@@ -5442,10 +5547,11 @@ app.post('/users/invite-auditee', authenticateToken, async (req, res) => {
     if (!parsedSiteIds) {
         return res.status(400).json({ error: 'At least one valid site is required' });
     }
-    for (const sid of parsedSiteIds) {
-        if (!(await actorCanAssignAuditeeToSite(creatorId, sid))) {
-            return res.status(403).json({ error: 'You cannot assign an auditee to one or more selected sites' });
-        }
+    const siteAccess = await Promise.all(
+        parsedSiteIds.map((sid) => actorCanAssignAuditeeToSite(creatorId, sid)),
+    );
+    if (siteAccess.some((ok) => !ok)) {
+        return res.status(403).json({ error: 'You cannot assign an auditee to one or more selected sites' });
     }
 
     const defaults = defaultAuditeeNamesFromEmail(emailNorm);
@@ -5499,11 +5605,16 @@ app.post('/users/invite-auditee', authenticateToken, async (req, res) => {
             return created;
         });
 
+        invalidateOrgLookupCaches();
+
         let verificationEmailSent = false;
         let welcomeEmailSent = false;
-        const inviteEmailOptions = sendWelcomeEmail !== false
-            ? { welcomeCredentials: { firstName: fn, lastName: ln, password } }
-            : {};
+        const inviteEmailOptions = {
+            backgroundDelivery: true,
+            ...(sendWelcomeEmail !== false
+                ? { welcomeCredentials: { firstName: fn, lastName: ln, password } }
+                : {}),
+        };
         try {
             const { emailTransmitted } = await sendOtpToEmailAddress(
                 emailNorm,
@@ -5597,8 +5708,11 @@ app.patch('/users/:id/auditee-site', authenticateToken, async (req, res) => {
 app.post('/users', authenticateToken, async (req, res) => {
     const { firstName, lastName, email, mobile, role, customRoleName, password, sendWelcomeEmail, siteId, siteIds: rawSiteIds } = req.body;
     const creatorId = req.user.id;
-    const canManageUsers = await actorCanManageOrgUsers(creatorId);
-    if (!(await actorCanInviteOrgUser(creatorId))) {
+    const [canManageUsers, canInvite] = await Promise.all([
+        actorCanManageOrgUsers(creatorId),
+        actorCanInviteOrgUser(creatorId),
+    ]);
+    if (!canInvite) {
         return res.status(403).json({
             error: 'Forbidden',
             message: 'You do not have permission to invite users.'
@@ -5662,10 +5776,11 @@ app.post('/users', authenticateToken, async (req, res) => {
             if (!parsedSiteIds) {
                 return res.status(400).json({ error: 'At least one valid site is required' });
             }
-            for (const sid of parsedSiteIds) {
-                if (!(await actorCanAssignAuditeeToSite(creatorId, sid))) {
-                    return res.status(403).json({ error: 'You cannot assign an auditee to one or more selected sites' });
-                }
+            const siteAccess = await Promise.all(
+                parsedSiteIds.map((sid) => actorCanAssignAuditeeToSite(creatorId, sid)),
+            );
+            if (siteAccess.some((ok) => !ok)) {
+                return res.status(403).json({ error: 'You cannot assign an auditee to one or more selected sites' });
             }
         }
 
@@ -5723,11 +5838,17 @@ app.post('/users', authenticateToken, async (req, res) => {
             return created;
         });
 
+        invalidateOrgLookupCaches();
+
+        // Respond after DB commit; deliver invite email in the background.
         let verificationEmailSent = false;
         let welcomeEmailSent = false;
-        const inviteEmailOptions = sendWelcomeEmail !== false
-            ? { welcomeCredentials: { firstName: fn, lastName: ln, password } }
-            : {};
+        const inviteEmailOptions = {
+            backgroundDelivery: true,
+            ...(sendWelcomeEmail !== false
+                ? { welcomeCredentials: { firstName: fn, lastName: ln, password } }
+                : {}),
+        };
         try {
             const { emailTransmitted } = await sendOtpToEmailAddress(
                 emailNorm,
@@ -5862,17 +5983,18 @@ app.put('/users/:id', authenticateToken, async (req, res) => {
     const { firstName, lastName, email, mobile, role, customRoleName, isActive, password, onboardingCompleted, emailChangeOtp, siteId, siteIds: rawSiteIds } = req.body;
     const actorId = Number(req.user.id);
     try {
-        if (!(await actorCanAccessTargetUser(actorId, targetId))) {
+        const [canAccess, canManageUsers, canManageAuditee, targetUser] = await Promise.all([
+            actorCanAccessTargetUser(actorId, targetId),
+            actorCanManageOrgUsers(actorId),
+            actorCanManageAuditee(actorId, targetId),
+            prisma.user.findUnique({
+                where: { id: targetId },
+                select: { email: true, role: true },
+            }),
+        ]);
+        if (!canAccess) {
             return res.status(403).json({ error: 'Forbidden' });
         }
-
-        const canManageUsers = await actorCanManageOrgUsers(actorId);
-        const canManageAuditee = await actorCanManageAuditee(actorId, targetId);
-
-        const targetUser = await prisma.user.findUnique({
-            where: { id: targetId },
-            select: { email: true, role: true }
-        });
         if (!targetUser) {
             return res.status(404).json({ error: 'User not found' });
         }
@@ -6048,10 +6170,11 @@ app.put('/users/:id', authenticateToken, async (req, res) => {
                     message: 'Only company administrators and lead auditors can assign the auditee role.',
                 });
             }
-            for (const sid of parsedSiteIds) {
-                if (!(await actorCanAssignAuditeeToSite(actorId, sid))) {
-                    return res.status(403).json({ error: 'You cannot assign an auditee to one or more selected sites' });
-                }
+            const siteAccess = await Promise.all(
+                parsedSiteIds.map((sid) => actorCanAssignAuditeeToSite(actorId, sid)),
+            );
+            if (siteAccess.some((ok) => !ok)) {
+                return res.status(403).json({ error: 'You cannot assign an auditee to one or more selected sites' });
             }
         }
 
@@ -6093,14 +6216,18 @@ app.put('/users/:id', authenticateToken, async (req, res) => {
             return updated;
         });
 
+        invalidateOrgLookupCaches();
+
         if (passwordWillChange) {
             const revoked = await invalidateAllUserSessions(targetId);
             console.log(`[AUTH] Password changed for user ${targetId}; revoked ${revoked} session(s)`);
-            await sendPasswordChangedNotificationEmail({
-                toEmail: user.email,
-                firstName: user.firstName,
-                lastName: user.lastName,
-                changedBySelf: targetId === actorId,
+            setImmediate(() => {
+                void sendPasswordChangedNotificationEmail({
+                    toEmail: user.email,
+                    firstName: user.firstName,
+                    lastName: user.lastName,
+                    changedBySelf: targetId === actorId,
+                });
             });
         }
 
@@ -6156,42 +6283,65 @@ app.delete('/users/:id', authenticateToken, async (req, res) => {
         return res.status(400).json({ error: 'Invalid user id' });
     }
     const actorId = Number(req.user.id);
-    try {
-        // Enforce org-hierarchy access (prevents deleting users outside actor's org subtree).
-        // `actorCanAccessTargetUser` already allows the superadmin role.
-        if (!(await actorCanAccessTargetUser(actorId, targetId))) {
-            return res.status(403).json({ error: 'Forbidden' });
-        }
-        const canDeleteAuditee = await actorCanManageAuditee(actorId, targetId);
-        const canManageOrgUsers = await actorCanManageOrgUsers(actorId);
-        // Auditee deletion is stricter; other user roles fall back to org-user permissions.
-        if (!(canDeleteAuditee || canManageOrgUsers)) {
-            return res.status(403).json({
-                error: 'Forbidden',
-                message: 'You cannot delete this user.',
-            });
-        }
-        if (targetId === actorId) {
-            return res.status(400).json({
-                error: 'You cannot delete your own account while signed in. Sign out or use another admin account.'
-            });
-        }
-
-        const ownerGuard = await assertActorMayModifyProtectedCompanyOwner(actorId, targetId);
-        if (!ownerGuard.ok) {
-            return res.status(ownerGuard.status).json({ error: ownerGuard.error });
-        }
-
-        const target = await prisma.user.findUnique({
-            where: { id: targetId },
-            select: { role: true }
+    if (targetId === actorId) {
+        return res.status(400).json({
+            error: 'You cannot delete your own account while signed in. Sign out or use another admin account.',
         });
-        if (target && normalizeUserRole(target.role) === 'superadmin') {
+    }
+
+    try {
+        // Single round-trip for actor + target — avoid repeated role/org lookups.
+        const [actor, target] = await Promise.all([
+            prisma.user.findUnique({
+                where: { id: actorId },
+                select: { id: true, role: true, creatorId: true },
+            }),
+            prisma.user.findUnique({
+                where: { id: targetId },
+                select: { id: true, role: true, creatorId: true, email: true },
+            }),
+        ]);
+        if (!actor) {
+            return res.status(401).json({ error: 'Unauthorized' });
+        }
+        if (!target) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+        if (normalizeUserRole(target.role) === 'superadmin') {
             return res.status(403).json({ error: 'Forbidden' });
         }
 
+        const actorRole = normalizeUserRole(actor.role);
+        const isSuperAdmin = actorRole === 'superadmin';
+        const canManageOrg =
+            isSuperAdmin ||
+            actorRole === 'admin' ||
+            (actor.creatorId == null && actorRole !== 'auditee');
+
+        if (!isSuperAdmin) {
+            if (!(await actorCanAccessTargetUser(actorId, targetId))) {
+                return res.status(403).json({ error: 'Forbidden' });
+            }
+            const targetIsAuditee = normalizeUserRole(target.role) === 'auditee';
+            if (!canManageOrg) {
+                // Non-admins may only delete auditees they can manage.
+                if (!targetIsAuditee || !(await actorCanManageAuditee(actorId, targetId))) {
+                    return res.status(403).json({
+                        error: 'Forbidden',
+                        message: 'You cannot delete this user.',
+                    });
+                }
+            }
+
+            const ownerGuard = await assertActorMayModifyProtectedCompanyOwner(actorId, targetId);
+            if (!ownerGuard.ok) {
+                return res.status(ownerGuard.status).json({ error: ownerGuard.error });
+            }
+        }
+
+        // Respond as soon as the DB work finishes — no extra lookups after delete.
         await deleteUserCompletely(targetId);
-        console.log(`[AUTH] User ${targetId} deleted by actor ${actorId}`);
+        invalidateOrgLookupCaches();
         res.status(204).send();
     } catch (error) {
         if (error.code === 'USER_NOT_FOUND') {
@@ -6203,7 +6353,7 @@ app.delete('/users/:id', authenticateToken, async (req, res) => {
         console.error('Error deleting user:', error);
         res.status(500).json({
             error: 'Failed to delete user',
-            message: error.message
+            message: error.message,
         });
     }
 });
@@ -7153,28 +7303,72 @@ app.get('/assigned-audit-findings', authenticateToken, checkTrialExpiration, asy
         const isAuditee = await actorIsAuditee(actorId);
         const auditeeSiteIds = isAuditee ? await getAuditeeAssignedSiteIds(actorId) : null;
 
+        // Formal NC rows assigned to this user (may not be auditor on the plan).
+        const ncAssigned = await prisma.nonconformance.findMany({
+            where: { assigneeId: actorId },
+            select: { auditPlanId: true },
+            distinct: ['auditPlanId'],
+            take: 200,
+        });
+        const ncPlanIds = ncAssigned
+            .map((row) => Number(row.auditPlanId))
+            .filter((id) => Number.isInteger(id) && id > 0);
+
+        // Informal OFI/NC assignments store assignToEmail inside auditData JSON.
+        // Match those plan ids without requiring auditor membership on the plan.
+        let informalAssigneePlanIds = [];
+        try {
+            const likePattern = `%"assignToEmail":"${actorEmail.replace(/"/g, '')}"%`;
+            const informalRows = await prisma.$queryRawUnsafe(
+                `SELECT id FROM "AuditPlan"
+                 WHERE "auditData" IS NOT NULL
+                   AND LOWER("auditData"::text) LIKE LOWER($1)
+                 ORDER BY "updatedAt" DESC
+                 LIMIT 150`,
+                likePattern,
+            );
+            informalAssigneePlanIds = (Array.isArray(informalRows) ? informalRows : [])
+                .map((row) => Number(row.id))
+                .filter((id) => Number.isInteger(id) && id > 0);
+        } catch (scanErr) {
+            console.warn('[ASSIGNED-FINDINGS] Informal assignee scan skipped:', scanErr?.message || scanErr);
+        }
+
+        const assigneePlanIds = [...new Set([...ncPlanIds, ...informalAssigneePlanIds])];
+
         /** Limit scan to plans the actor can already see — never all org rows with auditData. */
         let visibilityWhere = { auditData: { not: null } };
         if (isAuditee && auditeeSiteIds) {
             visibilityWhere = {
                 auditData: { not: null },
-                auditProgram: {
-                    is: auditeeSiteIds.length > 0
-                        ? { siteId: { in: auditeeSiteIds } }
-                        : { siteId: -1 },
-                },
+                OR: [
+                    {
+                        auditProgram: {
+                            is: auditeeSiteIds.length > 0
+                                ? { siteId: { in: auditeeSiteIds } }
+                                : { siteId: -1 },
+                        },
+                    },
+                    ...(assigneePlanIds.length ? [{ id: { in: assigneePlanIds } }] : []),
+                ],
             };
         } else if (await actorHasFullOrgAuditVisibility(actorId)) {
             const orgRootId = await resolveActorOrgRootId(actorId);
             const subtreeIds = await collectOrgSubtreeUserIds(orgRootId);
             visibilityWhere = {
                 auditData: { not: null },
-                OR: buildOrgSubtreePlanVisibilityOr(subtreeIds),
+                OR: [
+                    ...buildOrgSubtreePlanVisibilityOr(subtreeIds),
+                    ...(assigneePlanIds.length ? [{ id: { in: assigneePlanIds } }] : []),
+                ],
             };
         } else {
             visibilityWhere = {
                 auditData: { not: null },
-                OR: buildAssignedAuditPlanVisibilityOr(actorId),
+                OR: [
+                    ...buildAssignedAuditPlanVisibilityOr(actorId),
+                    ...(assigneePlanIds.length ? [{ id: { in: assigneePlanIds } }] : []),
+                ],
             };
         }
 
@@ -7187,10 +7381,13 @@ app.get('/assigned-audit-findings', authenticateToken, checkTrialExpiration, asy
 
         const assignedPlans = plans
             .filter((plan) => {
+                const planId = Number(plan.id);
                 if (!collectAssigneeEmailsFromAuditData(plan.auditData).has(actorEmail)) {
-                    return false;
+                    // Formal NC assignee or informal scan hit — keep even if JSON parse differs.
+                    if (!assigneePlanIds.includes(planId)) return false;
                 }
                 if (isAuditee && auditeeSiteIds) {
+                    if (assigneePlanIds.includes(planId)) return true;
                     const siteId = plan.auditProgram?.siteId;
                     return siteId != null && auditeeSiteIds.includes(Number(siteId));
                 }
