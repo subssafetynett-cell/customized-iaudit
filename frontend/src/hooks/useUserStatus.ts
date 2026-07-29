@@ -7,7 +7,7 @@ import {
 } from "@/lib/api";
 import { dispatchUserUpdated } from "@/lib/trialUtils";
 
-const CHECK_INTERVAL_MS = 15000; // Check every 15 seconds
+const CHECK_INTERVAL_MS = 60000; // Check every 60 seconds
 
 /**
  * Hook that periodically verifies the currently logged-in user's status.

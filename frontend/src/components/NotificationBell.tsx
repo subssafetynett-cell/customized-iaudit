@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
     AlertTriangle,
@@ -61,8 +61,10 @@ export function NotificationBell({ className }: Props) {
     const [open, setOpen] = useState(false);
     const [loading, setLoading] = useState(false);
     const [items, setItems] = useState<AppNotification[]>([]);
+    const lastFetchedRef = useRef(0);
 
-    const load = useCallback(async () => {
+    const load = useCallback(async (skipIfRecent = false) => {
+        if (skipIfRecent && Date.now() - lastFetchedRef.current < 10000) return;
         if (!hasClientAuthSession()) {
             setItems([]);
             return;
@@ -71,6 +73,7 @@ export function NotificationBell({ className }: Props) {
             setLoading(true);
             const data = await listNotifications();
             setItems(data);
+            lastFetchedRef.current = Date.now();
         } catch (err) {
             console.error(err);
         } finally {
@@ -87,7 +90,7 @@ export function NotificationBell({ className }: Props) {
     }, [load]);
 
     useEffect(() => {
-        if (open) void load();
+        if (open) void load(true);
     }, [open, load]);
 
     const unreadCount = useMemo(
