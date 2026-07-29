@@ -586,7 +586,6 @@ function UsersPage() {
                                     <TableHead className="text-white">Name</TableHead>
                                     <TableHead className="text-white">Email</TableHead>
                                     <TableHead className="text-white">Role</TableHead>
-                                    <TableHead className="text-white">Sites</TableHead>
                                     <TableHead className="text-white">Status</TableHead>
                                     <TableHead className="text-white">Created At</TableHead>
                                     <TableHead className="text-right text-white">Action</TableHead>
@@ -595,13 +594,13 @@ function UsersPage() {
                             <TableBody>
                                 {isLoading ? (
                                     <TableRow>
-                                        <TableCell colSpan={8} className="h-24 text-center">
+                                        <TableCell colSpan={7} className="h-24 text-center">
                                             Loading users...
                                         </TableCell>
                                     </TableRow>
                                 ) : paginatedUsers.length === 0 ? (
                                     <TableRow>
-                                        <TableCell colSpan={8} className="h-64 text-center">
+                                        <TableCell colSpan={7} className="h-64 text-center">
                                             <div className="flex flex-col items-center justify-center py-10">
                                                 <UsersIcon className="h-10 w-10 text-muted-foreground/40 mb-3" />
                                                 <p className="text-sm text-muted-foreground mb-4">No users found</p>
@@ -638,22 +637,6 @@ function UsersPage() {
                                                     <Shield className="h-3 w-3" />
                                                     {formatUserRoleLabel(user.role, user.customRoleName)}
                                                 </Badge>
-                                            </TableCell>
-                                            <TableCell>
-                                                {isAuditeeRole(user.role) ? (
-                                                    <span className="text-xs text-[#213847]/80 flex items-start gap-1 font-medium max-w-[220px]">
-                                                        <MapPin className="h-3 w-3 mt-0.5 shrink-0" />
-                                                        <span className="line-clamp-2">
-                                                            {user.siteLabel ||
-                                                                (Array.isArray(user.siteLabels)
-                                                                    ? user.siteLabels.join(", ")
-                                                                    : null) ||
-                                                                "—"}
-                                                        </span>
-                                                    </span>
-                                                ) : (
-                                                    <span className="text-xs text-muted-foreground">—</span>
-                                                )}
                                             </TableCell>
                                             <TableCell>
                                                 {!user.emailVerifiedAt ? (
