@@ -2137,6 +2137,16 @@ async function actorCanAssignAuditeeToSite(actorId, siteId) {
     return allowed.has(parsed);
 }
 
+/** Batch site-assignment check (one org lookup instead of N). */
+async function actorCanAssignAuditeeToAllSites(actorId, siteIds) {
+    const ids = (Array.isArray(siteIds) ? siteIds : [])
+        .map((id) => Number.parseInt(String(id), 10))
+        .filter((n) => Number.isInteger(n) && n >= 1);
+    if (ids.length === 0) return false;
+    const allowed = await siteIdsInActorOrg(actorId);
+    return ids.every((id) => allowed.has(id));
+}
+
 /** PSZL-010: site must exist and belong to the actor's organization before mutate. */
 async function assertActorCanManageSite(actorId, siteId) {
     const parsed = Number.parseInt(String(siteId), 10);
@@ -3506,7 +3516,7 @@ app.put('/sites/:id', authenticateToken, checkTrialExpiration, async (req, res) 
     }
 });
 
-// Delete a site
+// Delete a site (and related departments / audit programs that block the FK)
 app.delete('/sites/:id', authenticateToken, checkTrialExpiration, async (req, res) => {
     const { id } = req.params;
     const actorId = Number(req.user.id);
@@ -3982,6 +3992,24 @@ function assertSmtpConfiguredForOtp() {
 /** Local dev: log OTP to server console when SMTP is not configured (signup still works). */
 function allowDevConsoleOtp() {
     return process.env.NODE_ENV !== 'production' && process.env.ALLOW_DEV_OTP_CONSOLE !== 'false';
+}
+
+/**
+ * Send invite/welcome OTP email after the HTTP response so the UI is not blocked by SMTP latency.
+ */
+function queueInviteOnboardingEmail(normalizedEmail, inviteEmailOptions = {}) {
+    void sendOtpToEmailAddress(normalizedEmail, 'user_invite', inviteEmailOptions)
+        .then((result) => {
+            console.log(
+                `[invite] Onboarding email to ${normalizedEmail}: transmitted=${result?.emailTransmitted === true}`,
+            );
+        })
+        .catch((otpErr) => {
+            console.error(
+                `[invite] Failed to send onboarding email to ${normalizedEmail}:`,
+                otpErr?.message || otpErr,
+            );
+        });
 }
 
 /** normalizedEmail: lowercased + trimmed. purpose: signup | email_change | password_reset | user_invite */
@@ -5682,13 +5710,12 @@ app.post('/users/invite-auditee', authenticateToken, async (req, res) => {
                     throw err;
                 }
             }
-            for (const site of sites) {
-                if (site.userId != null) {
-                    await tx.site.update({
-                        where: { id: site.id },
-                        data: { userId: null },
-                    });
-                }
+            const occupiedIds = sites.filter((s) => s.userId != null).map((s) => s.id);
+            if (occupiedIds.length > 0) {
+                await tx.site.updateMany({
+                    where: { id: { in: occupiedIds } },
+                    data: { userId: null },
+                });
             }
 
             const created = await tx.user.create({
@@ -5734,8 +5761,9 @@ app.post('/users/invite-auditee', authenticateToken, async (req, res) => {
             siteLabels,
             siteId: parsedSiteIds[0] ?? null,
             emailVerificationPending: true,
-            verificationEmailSent: sendWelcomeEmail !== false,
-            welcomeEmailSent: sendWelcomeEmail !== false,
+            verificationEmailSent: emailWillSend,
+            welcomeEmailSent: Boolean(sendWelcomeEmail !== false && emailWillSend),
+            emailQueued: true,
         });
     } catch (error) {
         console.error('Error inviting auditee:', error);
@@ -5918,13 +5946,12 @@ app.post('/users', authenticateToken, async (req, res) => {
                         throw err;
                     }
                 }
-                for (const site of sites) {
-                    if (site.userId != null) {
-                        await tx.site.update({
-                            where: { id: site.id },
-                            data: { userId: null },
-                        });
-                    }
+                const occupiedIds = sites.filter((s) => s.userId != null).map((s) => s.id);
+                if (occupiedIds.length > 0) {
+                    await tx.site.updateMany({
+                        where: { id: { in: occupiedIds } },
+                        data: { userId: null },
+                    });
                 }
             }
 
@@ -5977,8 +6004,9 @@ app.post('/users', authenticateToken, async (req, res) => {
         const responseBody = {
             ...userWithoutPassword,
             emailVerificationPending: true,
-            verificationEmailSent,
-            welcomeEmailSent
+            verificationEmailSent: emailWillSend,
+            welcomeEmailSent: Boolean(sendWelcomeEmail !== false && emailWillSend),
+            emailQueued: true,
         };
         if (roleNorm === 'auditee' && parsedSiteIds) {
             const siteLabels = await formatAuditeeSiteLabels(parsedSiteIds);

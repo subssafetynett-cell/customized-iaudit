@@ -870,9 +870,15 @@ const CompaniesPage = () => {
             onConfirm={async () => {
               if (siteToDelete) {
                 setIsDeleting(true);
-                await deleteSite(selectedCompany.id, siteToDelete.id);
-                setIsDeleting(false);
-                setSiteToDelete(null);
+                try {
+                  await deleteSite(selectedCompany.id, siteToDelete.id);
+                  toast.success("Site deleted");
+                  setSiteToDelete(null);
+                } catch (err) {
+                  toast.error(err instanceof Error ? err.message : "Failed to delete site");
+                } finally {
+                  setIsDeleting(false);
+                }
               }
             }}
             isLoading={isDeleting}

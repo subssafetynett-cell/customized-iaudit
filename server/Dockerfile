@@ -30,7 +30,7 @@ COPY --from=builder /app/generated ./generated
 COPY --from=builder /app/src ./src
 COPY --from=builder /app/scripts ./scripts
 COPY docker-entrypoint.sh ./docker-entrypoint.sh
-RUN chmod +x docker-entrypoint.sh
+RUN sed -i 's/\r$//' docker-entrypoint.sh && chmod +x docker-entrypoint.sh
 
 ENV NODE_ENV=production
 ENV RUNNING_IN_DOCKER=1

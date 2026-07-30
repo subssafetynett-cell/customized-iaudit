@@ -123,7 +123,7 @@ export function InviteAuditeeModal({
                 );
             }
 
-            if (data.verificationEmailSent) {
+            if (data.verificationEmailSent || data.emailQueued) {
                 toast.success(
                     "Invite sent. The auditee will receive login credentials and a verification code by email.",
                     { duration: 8000 },
