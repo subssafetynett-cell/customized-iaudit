@@ -12,6 +12,8 @@ export type AuditPlanLike = {
     findingsData?: unknown;
     auditCompleted?: boolean;
     progress?: number;
+    /** Backend lifecycle: PLANNED | IN_PROGRESS | COMPLETED */
+    status?: string;
 };
 
 export type AuditCompletionStatus = {
@@ -97,7 +99,14 @@ export function isAuditPlanCompleted(plan: AuditPlanLike & { id: number }): bool
 export function getAuditPlanStatusLabel(
     plan: AuditPlanLike & { id: number },
 ): "Completed" | "In Progress" | "Planned" {
-    if (isAuditPlanCompleted(plan)) return "Completed";
-    if (getAuditAssessmentProgress(plan) > 0 || parseAuditData(plan)) return "In Progress";
+    const raw = String(plan.status ?? "").trim().toUpperCase();
+    if (raw === "PLANNED") return "Planned";
+    if (raw === "IN_PROGRESS" || raw === "IN PROGRESS") return "In Progress";
+    if (raw === "COMPLETED") return "Completed";
+
+    // Fallback for older payloads without status: answer progress only.
+    const progress = getAuditAssessmentProgress(plan);
+    if (progress >= 100) return "Completed";
+    if (progress > 0) return "In Progress";
     return "Planned";
 }

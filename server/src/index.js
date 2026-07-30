@@ -8,6 +8,14 @@ import {
     applyFindingAssignmentToAuditData,
 } from './audit/findingAssignment.js';
 import {
+    AUDIT_LIFECYCLE,
+    lifecycleStatusFromAuditData,
+} from './audit/lifecycleStatus.js';
+import {
+    collectAssigneeEmailsFromAuditData,
+    loadFindingsInboxPlans,
+} from './audit/findingsInbox.js';
+import {
     sendNcAssignmentEmail,
     sendFindingResponseEmail,
 } from './mail/smtp.js';
@@ -1502,25 +1510,51 @@ const assessmentReportEmailLastSent = new Map();
 
 const ORG_ROOT_WALK_MAX_DEPTH = 32;
 
+/** Short-lived caches for org tree lookups — Users page hits these on every list load. */
+const ORG_LOOKUP_CACHE_TTL_MS = 45_000;
+const orgRootIdCache = new Map();
+const orgSubtreeIdsCache = new Map();
+const orgMemberIdsCache = new Map();
+
+function invalidateOrgLookupCaches() {
+    orgRootIdCache.clear();
+    orgSubtreeIdsCache.clear();
+    orgMemberIdsCache.clear();
+}
+
 /** Walk creatorId chain to the account root (user with creatorId null). */
 async function getOrgRootUserId(userId) {
-    let currentId = userId;
-    for (let depth = 0; depth < ORG_ROOT_WALK_MAX_DEPTH; depth++) {
-        const row = await prisma.user.findUnique({
-            where: { id: currentId },
-            select: { id: true, creatorId: true }
-        });
-        if (!row) return null;
-        if (row.creatorId == null) return row.id;
-        currentId = row.creatorId;
+    const id = Number(userId);
+    if (!Number.isInteger(id) || id < 1) return null;
+    const cached = orgRootIdCache.get(id);
+    if (cached && cached.expiresAt > Date.now()) {
+        return cached.rootId;
     }
-    return null;
+
+    const rows = await prisma.$queryRaw`
+        WITH RECURSIVE ancestor AS (
+            SELECT id, "creatorId" FROM "User" WHERE id = ${id}
+            UNION ALL
+            SELECT u.id, u."creatorId" FROM "User" u
+            INNER JOIN ancestor a ON u.id = a."creatorId"
+        )
+        SELECT id FROM ancestor WHERE "creatorId" IS NULL
+        LIMIT 1
+    `;
+    const rootId = rows?.[0]?.id != null ? Number(rows[0].id) : null;
+    const resolved = Number.isInteger(rootId) && rootId > 0 ? rootId : null;
+    orgRootIdCache.set(id, { rootId: resolved, expiresAt: Date.now() + ORG_LOOKUP_CACHE_TTL_MS });
+    return resolved;
 }
 
 /** All user ids in the same org (account root + every user created under that tree). */
 async function collectOrgSubtreeUserIds(orgRootId) {
     if (orgRootId == null || !Number.isInteger(orgRootId) || orgRootId < 1) {
         return [];
+    }
+    const cached = orgSubtreeIdsCache.get(orgRootId);
+    if (cached && cached.expiresAt > Date.now()) {
+        return cached.ids;
     }
     const rows = await prisma.$queryRaw`
         WITH RECURSIVE subtree AS (
@@ -1531,7 +1565,12 @@ async function collectOrgSubtreeUserIds(orgRootId) {
         )
         SELECT id FROM subtree
     `;
-    return rows.map((r) => Number(r.id));
+    const ids = rows.map((r) => Number(r.id)).filter((n) => Number.isInteger(n) && n > 0);
+    orgSubtreeIdsCache.set(orgRootId, {
+        ids,
+        expiresAt: Date.now() + ORG_LOOKUP_CACHE_TTL_MS,
+    });
+    return ids;
 }
 
 /**
@@ -1541,6 +1580,11 @@ async function collectOrgSubtreeUserIds(orgRootId) {
 async function collectOrgMemberUserIds(actorId) {
     const id = Number(actorId);
     if (!Number.isInteger(id) || id < 1) return [];
+
+    const cached = orgMemberIdsCache.get(id);
+    if (cached && cached.expiresAt > Date.now()) {
+        return cached.ids;
+    }
 
     const rows = await prisma.$queryRaw`
         WITH RECURSIVE ancestor AS (
@@ -1561,13 +1605,18 @@ async function collectOrgMemberUserIds(actorId) {
         )
         SELECT id FROM subtree
     `;
-    const memberIds = rows.map((r) => Number(r.id)).filter((n) => Number.isInteger(n) && n > 0);
-    if (memberIds.length > 0) return memberIds;
+    let memberIds = rows.map((r) => Number(r.id)).filter((n) => Number.isInteger(n) && n > 0);
+    if (memberIds.length === 0) {
+        const orgRootId = await resolveActorOrgRootId(id);
+        const fromRoot = await collectOrgSubtreeUserIds(orgRootId);
+        memberIds = fromRoot.length > 0 ? fromRoot : [id];
+    }
 
-    const orgRootId = await resolveActorOrgRootId(id);
-    const fromRoot = await collectOrgSubtreeUserIds(orgRootId);
-    if (fromRoot.length > 0) return fromRoot;
-    return [id];
+    orgMemberIdsCache.set(id, {
+        ids: memberIds,
+        expiresAt: Date.now() + ORG_LOOKUP_CACHE_TTL_MS,
+    });
+    return memberIds;
 }
 
 async function actorCanAccessTargetUser(actorId, targetUserId) {
@@ -1715,38 +1764,6 @@ async function actorCanAccessAuditProgram(actorId, program) {
     return false;
 }
 
-/** Collect all assignToEmail values nested anywhere in saved audit execution JSON. */
-function collectAssigneeEmailsFromAuditData(auditData) {
-    const emails = new Set();
-    if (auditData == null) return emails;
-
-    let data = auditData;
-    if (typeof data === 'string') {
-        try {
-            data = JSON.parse(data);
-        } catch {
-            return emails;
-        }
-    }
-    if (!data || typeof data !== 'object') return emails;
-
-    const visit = (node) => {
-        if (node == null) return;
-        if (Array.isArray(node)) {
-            node.forEach(visit);
-            return;
-        }
-        if (typeof node !== 'object') return;
-        if (typeof node.assignToEmail === 'string') {
-            const normalized = node.assignToEmail.toLowerCase().trim();
-            if (normalized) emails.add(normalized);
-        }
-        Object.values(node).forEach(visit);
-    };
-    visit(data);
-    return emails;
-}
-
 async function actorIsFindingAssignee(actorId, plan) {
     if (!plan?.auditData) return false;
     const actor = await prisma.user.findUnique({
@@ -1757,28 +1774,6 @@ async function actorIsFindingAssignee(actorId, plan) {
     const actorEmail = actor.email.toLowerCase().trim();
     return collectAssigneeEmailsFromAuditData(plan.auditData).has(actorEmail);
 }
-
-const ASSIGNED_FINDINGS_PLAN_SELECT = {
-    id: true,
-    executionId: true,
-    auditType: true,
-    auditName: true,
-    date: true,
-    location: true,
-    createdAt: true,
-    updatedAt: true,
-    templateId: true,
-    auditProgramId: true,
-    userId: true,
-    leadAuditorId: true,
-    auditData: true,
-    findingsData: true,
-    auditProgram: {
-        select: {
-            siteId: true,
-        },
-    },
-};
 
 async function actorCanAccessAuditPlan(actorId, plan) {
     if (!plan) return false;
@@ -2859,41 +2854,102 @@ async function actorHasFullOrgAuditVisibility(actorId) {
     return actorCanManageOrgUsers(id);
 }
 
-// Track startup state for health checks — server starts accepting immediately,
-// but /health reports degraded until bootstrap (migrations, seeding) completes.
+// Track startup state for health checks — server listens immediately;
+// /health is readiness (DB + bounded probe). /live is process liveness only.
 let bootstrapComplete = false;
 let dbHealthy = false;
 const startedAt = Date.now();
+const APP_VERSION = process.env.APP_VERSION || process.env.npm_package_version || '1.0.0';
+const HEALTH_DB_TIMEOUT_MS = Number.parseInt(process.env.HEALTH_DB_TIMEOUT_MS || '2000', 10);
 
+function withTimeout(promise, ms, label) {
+    let timer;
+    return Promise.race([
+        promise.finally(() => clearTimeout(timer)),
+        new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+        }),
+    ]);
+}
+
+async function probeDatabase() {
+    await withTimeout(prisma.$queryRaw`SELECT 1`, HEALTH_DB_TIMEOUT_MS, 'health DB probe');
+}
+
+function healthPayload(extra = {}) {
+    return {
+        status: extra.status || 'ok',
+        database: extra.database || 'unknown',
+        uptime: Math.floor((Date.now() - startedAt) / 1000),
+        version: APP_VERSION,
+        bootstrapComplete,
+        timestamp: new Date().toISOString(),
+        ...extra,
+    };
+}
+
+/** Liveness — process is up; never touches the DB (safe for proxies during migrate). */
+app.get('/live', (req, res) => {
+    res.status(200).json(healthPayload({ status: 'ok', database: 'skipped' }));
+});
+
+/**
+ * Readiness — DB must answer within HEALTH_DB_TIMEOUT_MS.
+ * Bounded timeout prevents pool exhaustion from hanging probes → Traefik 504.
+ */
 app.get('/health', async (req, res) => {
     try {
-        await prisma.$queryRaw`SELECT 1`;
+        await probeDatabase();
         dbHealthy = true;
-        res.status(200).json({
-            status: 'ok',
+        const ready = bootstrapComplete;
+        res.status(ready ? 200 : 503).json(healthPayload({
+            status: ready ? 'ok' : 'starting',
             database: 'connected',
-            uptime: Math.floor((Date.now() - startedAt) / 1000),
-            bootstrapComplete,
-            timestamp: new Date().toISOString(),
-        });
+        }));
     } catch (error) {
         dbHealthy = false;
         console.error('[health] Database check failed:', error.message);
-        res.status(503).json({
+        res.status(503).json(healthPayload({
             status: 'degraded',
             database: 'unavailable',
-            uptime: Math.floor((Date.now() - startedAt) / 1000),
-            bootstrapComplete,
-            timestamp: new Date().toISOString(),
             error: error.message,
-        });
+        }));
     }
 });
-app.get('/api/health', (req, res) => {
-    res.status(200).json({ status: 'ok' });
+
+app.get('/api/health', async (req, res) => {
+    try {
+        await probeDatabase();
+        dbHealthy = true;
+        res.status(bootstrapComplete ? 200 : 503).json(healthPayload({
+            status: bootstrapComplete ? 'ok' : 'starting',
+            database: 'connected',
+        }));
+    } catch (error) {
+        dbHealthy = false;
+        res.status(503).json(healthPayload({
+            status: 'degraded',
+            database: 'unavailable',
+            error: error.message,
+        }));
+    }
 });
-mountedApiRouter.get('/health', (req, res) => {
-    res.status(200).json({ status: 'ok' });
+mountedApiRouter.get('/health', async (req, res) => {
+    try {
+        await probeDatabase();
+        dbHealthy = true;
+        res.status(bootstrapComplete ? 200 : 503).json(healthPayload({
+            status: bootstrapComplete ? 'ok' : 'starting',
+            database: 'connected',
+        }));
+    } catch (error) {
+        dbHealthy = false;
+        res.status(503).json(healthPayload({
+            status: 'degraded',
+            database: 'unavailable',
+            error: error.message,
+        }));
+    }
 });
 
 // Root route to prevent 404
@@ -3404,32 +3460,39 @@ app.delete('/sites/:id', authenticateToken, checkTrialExpiration, async (req, re
     }
     try {
         const siteId = access.siteId;
-        await prisma.$transaction(async (tx) => {
-            await tx.department.deleteMany({ where: { siteId } });
 
+        await prisma.$transaction(async (tx) => {
             const programs = await tx.auditProgram.findMany({
                 where: { siteId },
                 select: { id: true },
             });
             const programIds = programs.map((p) => p.id);
+
             if (programIds.length > 0) {
                 // Nonconformances cascade from AuditPlan (onDelete: Cascade).
-                // Prisma clears implicit M2M join rows when plans/programs are deleted.
                 await tx.auditPlan.deleteMany({
                     where: { auditProgramId: { in: programIds } },
                 });
-                await tx.auditProgram.deleteMany({ where: { id: { in: programIds } } });
+                await tx.auditProgram.deleteMany({
+                    where: { id: { in: programIds } },
+                });
             }
 
+            await tx.department.deleteMany({ where: { siteId } });
+
             await tx.site.delete({ where: { id: siteId } });
-        }, { maxWait: 10_000, timeout: 30_000 });
+        });
+
         res.status(204).send();
     } catch (error) {
         if (error?.code === 'P2025') {
             return res.status(404).json({ error: 'Site not found' });
         }
         console.error('Error deleting site:', error);
-        res.status(500).json({ error: 'Failed to delete site' });
+        res.status(500).json({
+            error: 'Failed to delete site',
+            details: error?.message || String(error),
+        });
     }
 });
 
@@ -4167,13 +4230,38 @@ async function sendOtpToEmailAddressUnderLock(normalizedEmail, purpose, options 
     };
 
         let emailTransmitted = false;
-        try {
+        const deliverMail = async () => {
             if (devConsoleOnly) {
                 console.log('\n====================================================================');
                 console.log(`[DEV OTP] ${purpose} for ${normalizedEmail}: ${otp}`);
                 console.log(`          Expires in ${ttlMinutes} minutes (SMTP not configured).`);
                 console.log('====================================================================\n');
+                return true;
+            }
+            await transporter.sendMail(mailOptions);
+            console.log(`OTP successfully sent to ${normalizedEmail}`);
+            return true;
+        };
+
+        try {
+            if (options.backgroundDelivery === true) {
+                // Persist OTP first, then deliver mail off the request path (invite UX ≤1s).
                 emailTransmitted = true;
+                setImmediate(() => {
+                    void deliverMail().catch(async (emailError) => {
+                        console.error('Background invite email failed:', emailError.message);
+                        if (allowDevConsoleOtp()) {
+                            console.log('\n====================================================================');
+                            console.log(`[DEV OTP] ${purpose} for ${normalizedEmail}: ${otp}`);
+                            console.log(`          Expires in ${ttlMinutes} minutes (email send failed; use code above).`);
+                            console.log('====================================================================\n');
+                            return;
+                        }
+                        // Keep OTP so Resend verification still works; do not delete on background failure.
+                    });
+                });
+            } else if (devConsoleOnly) {
+                emailTransmitted = await deliverMail();
             } else {
                 await transporter.sendMail(mailOptions);
                 emailTransmitted = true;
@@ -4999,6 +5087,7 @@ app.get('/users', authenticateToken, async (req, res) => {
     if (!Number.isInteger(actorId) || actorId < 1) {
         return res.status(401).json({ error: 'Invalid session. Please log in again.' });
     }
+    const t0 = Date.now();
     try {
         const viewer = await prisma.user.findUnique({
             where: { id: actorId },
@@ -5047,12 +5136,15 @@ app.get('/users', authenticateToken, async (req, res) => {
 
         /** When scope=all, skip the expensive "fetch all IDs then filter" round-trip. */
         let whereBase = {};
+        let orgLookupMs = 0;
         if (scopeAll) {
             if (filterCreatorId != null) {
                 whereBase = { creatorId: filterCreatorId };
             }
         } else {
+            const orgT0 = Date.now();
             const allowedIds = await collectOrgMemberUserIds(actorId);
+            orgLookupMs = Date.now() - orgT0;
             if (allowedIds.length === 0) {
                 if (!pagination.paginate) return res.json([]);
                 return res.json(
@@ -5136,13 +5228,19 @@ app.get('/users', authenticateToken, async (req, res) => {
             });
         };
 
+        const dbT0 = Date.now();
         if (!pagination.paginate) {
             const users = await prisma.user.findMany({
                 where: whereBase,
                 select: userSelect,
                 orderBy: [{ createdAt: 'desc' }, { id: 'desc' }]
             });
-            return res.json(await attachAuditeeSites(users));
+            const payload = await attachAuditeeSites(users);
+            res.setHeader(
+                'Server-Timing',
+                `org;dur=${orgLookupMs},db;dur=${Date.now() - dbT0},total;dur=${Date.now() - t0}`,
+            );
+            return res.json(payload);
         }
 
         const [total, users] = await Promise.all([
@@ -5156,8 +5254,13 @@ app.get('/users', authenticateToken, async (req, res) => {
             }),
         ]);
 
+        const payload = await attachAuditeeSites(users);
+        res.setHeader(
+            'Server-Timing',
+            `org;dur=${orgLookupMs},db;dur=${Date.now() - dbT0},total;dur=${Date.now() - t0}`,
+        );
         res.json(
-            paginatedResponse(await attachAuditeeSites(users), {
+            paginatedResponse(payload, {
                 page: pagination.page,
                 limit: pagination.limit,
                 total,
@@ -5487,7 +5590,10 @@ app.post('/users/invite-auditee', authenticateToken, async (req, res) => {
     if (!parsedSiteIds) {
         return res.status(400).json({ error: 'At least one valid site is required' });
     }
-    if (!(await actorCanAssignAuditeeToAllSites(creatorId, parsedSiteIds))) {
+    const siteAccess = await Promise.all(
+        parsedSiteIds.map((sid) => actorCanAssignAuditeeToSite(creatorId, sid)),
+    );
+    if (siteAccess.some((ok) => !ok)) {
         return res.status(403).json({ error: 'You cannot assign an auditee to one or more selected sites' });
     }
 
@@ -5541,11 +5647,27 @@ app.post('/users/invite-auditee', authenticateToken, async (req, res) => {
             return created;
         });
 
-        const inviteEmailOptions = sendWelcomeEmail !== false
-            ? { welcomeCredentials: { firstName: fn, lastName: ln, password } }
-            : {};
-        const emailWillSend = isSmtpConfigured() || allowDevConsoleOtp();
-        queueInviteOnboardingEmail(emailNorm, inviteEmailOptions);
+        invalidateOrgLookupCaches();
+
+        let verificationEmailSent = false;
+        let welcomeEmailSent = false;
+        const inviteEmailOptions = {
+            backgroundDelivery: true,
+            ...(sendWelcomeEmail !== false
+                ? { welcomeCredentials: { firstName: fn, lastName: ln, password } }
+                : {}),
+        };
+        try {
+            const { emailTransmitted } = await sendOtpToEmailAddress(
+                emailNorm,
+                'user_invite',
+                inviteEmailOptions,
+            );
+            verificationEmailSent = emailTransmitted === true;
+            welcomeEmailSent = Boolean(sendWelcomeEmail !== false && verificationEmailSent);
+        } catch (otpErr) {
+            console.error('Failed to send auditee invite email:', otpErr);
+        }
 
         const siteLabels = await formatAuditeeSiteLabels(parsedSiteIds);
         const { password: _, ...userWithoutPassword } = user;
@@ -5629,8 +5751,11 @@ app.patch('/users/:id/auditee-site', authenticateToken, async (req, res) => {
 app.post('/users', authenticateToken, async (req, res) => {
     const { firstName, lastName, email, mobile, role, customRoleName, password, sendWelcomeEmail, siteId, siteIds: rawSiteIds } = req.body;
     const creatorId = req.user.id;
-    const canManageUsers = await actorCanManageOrgUsers(creatorId);
-    if (!(await actorCanInviteOrgUser(creatorId))) {
+    const [canManageUsers, canInvite] = await Promise.all([
+        actorCanManageOrgUsers(creatorId),
+        actorCanInviteOrgUser(creatorId),
+    ]);
+    if (!canInvite) {
         return res.status(403).json({
             error: 'Forbidden',
             message: 'You do not have permission to invite users.'
@@ -5694,7 +5819,10 @@ app.post('/users', authenticateToken, async (req, res) => {
             if (!parsedSiteIds) {
                 return res.status(400).json({ error: 'At least one valid site is required' });
             }
-            if (!(await actorCanAssignAuditeeToAllSites(creatorId, parsedSiteIds))) {
+            const siteAccess = await Promise.all(
+                parsedSiteIds.map((sid) => actorCanAssignAuditeeToSite(creatorId, sid)),
+            );
+            if (siteAccess.some((ok) => !ok)) {
                 return res.status(403).json({ error: 'You cannot assign an auditee to one or more selected sites' });
             }
         }
@@ -5752,12 +5880,28 @@ app.post('/users', authenticateToken, async (req, res) => {
             return created;
         });
 
-        const inviteEmailOptions = sendWelcomeEmail !== false
-            ? { welcomeCredentials: { firstName: fn, lastName: ln, password } }
-            : {};
-        const emailWillSend = isSmtpConfigured() || allowDevConsoleOtp();
-        // Do not await SMTP — it was blocking the UI on "Processing..." for many seconds.
-        queueInviteOnboardingEmail(emailNorm, inviteEmailOptions);
+        invalidateOrgLookupCaches();
+
+        // Respond after DB commit; deliver invite email in the background.
+        let verificationEmailSent = false;
+        let welcomeEmailSent = false;
+        const inviteEmailOptions = {
+            backgroundDelivery: true,
+            ...(sendWelcomeEmail !== false
+                ? { welcomeCredentials: { firstName: fn, lastName: ln, password } }
+                : {}),
+        };
+        try {
+            const { emailTransmitted } = await sendOtpToEmailAddress(
+                emailNorm,
+                'user_invite',
+                inviteEmailOptions
+            );
+            verificationEmailSent = emailTransmitted === true;
+            welcomeEmailSent = Boolean(sendWelcomeEmail !== false && verificationEmailSent);
+        } catch (otpErr) {
+            console.error('Failed to send invite onboarding email:', otpErr);
+        }
 
         const { password: _, ...userWithoutPassword } = user;
         const responseBody = {
@@ -5882,17 +6026,18 @@ app.put('/users/:id', authenticateToken, async (req, res) => {
     const { firstName, lastName, email, mobile, role, customRoleName, isActive, password, onboardingCompleted, emailChangeOtp, siteId, siteIds: rawSiteIds } = req.body;
     const actorId = Number(req.user.id);
     try {
-        if (!(await actorCanAccessTargetUser(actorId, targetId))) {
+        const [canAccess, canManageUsers, canManageAuditee, targetUser] = await Promise.all([
+            actorCanAccessTargetUser(actorId, targetId),
+            actorCanManageOrgUsers(actorId),
+            actorCanManageAuditee(actorId, targetId),
+            prisma.user.findUnique({
+                where: { id: targetId },
+                select: { email: true, role: true },
+            }),
+        ]);
+        if (!canAccess) {
             return res.status(403).json({ error: 'Forbidden' });
         }
-
-        const canManageUsers = await actorCanManageOrgUsers(actorId);
-        const canManageAuditee = await actorCanManageAuditee(actorId, targetId);
-
-        const targetUser = await prisma.user.findUnique({
-            where: { id: targetId },
-            select: { email: true, role: true }
-        });
         if (!targetUser) {
             return res.status(404).json({ error: 'User not found' });
         }
@@ -6068,10 +6213,11 @@ app.put('/users/:id', authenticateToken, async (req, res) => {
                     message: 'Only company administrators and lead auditors can assign the auditee role.',
                 });
             }
-            for (const sid of parsedSiteIds) {
-                if (!(await actorCanAssignAuditeeToSite(actorId, sid))) {
-                    return res.status(403).json({ error: 'You cannot assign an auditee to one or more selected sites' });
-                }
+            const siteAccess = await Promise.all(
+                parsedSiteIds.map((sid) => actorCanAssignAuditeeToSite(actorId, sid)),
+            );
+            if (siteAccess.some((ok) => !ok)) {
+                return res.status(403).json({ error: 'You cannot assign an auditee to one or more selected sites' });
             }
         }
 
@@ -6113,14 +6259,18 @@ app.put('/users/:id', authenticateToken, async (req, res) => {
             return updated;
         });
 
+        invalidateOrgLookupCaches();
+
         if (passwordWillChange) {
             const revoked = await invalidateAllUserSessions(targetId);
             console.log(`[AUTH] Password changed for user ${targetId}; revoked ${revoked} session(s)`);
-            await sendPasswordChangedNotificationEmail({
-                toEmail: user.email,
-                firstName: user.firstName,
-                lastName: user.lastName,
-                changedBySelf: targetId === actorId,
+            setImmediate(() => {
+                void sendPasswordChangedNotificationEmail({
+                    toEmail: user.email,
+                    firstName: user.firstName,
+                    lastName: user.lastName,
+                    changedBySelf: targetId === actorId,
+                });
             });
         }
 
@@ -6176,42 +6326,65 @@ app.delete('/users/:id', authenticateToken, async (req, res) => {
         return res.status(400).json({ error: 'Invalid user id' });
     }
     const actorId = Number(req.user.id);
-    try {
-        // Enforce org-hierarchy access (prevents deleting users outside actor's org subtree).
-        // `actorCanAccessTargetUser` already allows the superadmin role.
-        if (!(await actorCanAccessTargetUser(actorId, targetId))) {
-            return res.status(403).json({ error: 'Forbidden' });
-        }
-        const canDeleteAuditee = await actorCanManageAuditee(actorId, targetId);
-        const canManageOrgUsers = await actorCanManageOrgUsers(actorId);
-        // Auditee deletion is stricter; other user roles fall back to org-user permissions.
-        if (!(canDeleteAuditee || canManageOrgUsers)) {
-            return res.status(403).json({
-                error: 'Forbidden',
-                message: 'You cannot delete this user.',
-            });
-        }
-        if (targetId === actorId) {
-            return res.status(400).json({
-                error: 'You cannot delete your own account while signed in. Sign out or use another admin account.'
-            });
-        }
-
-        const ownerGuard = await assertActorMayModifyProtectedCompanyOwner(actorId, targetId);
-        if (!ownerGuard.ok) {
-            return res.status(ownerGuard.status).json({ error: ownerGuard.error });
-        }
-
-        const target = await prisma.user.findUnique({
-            where: { id: targetId },
-            select: { role: true }
+    if (targetId === actorId) {
+        return res.status(400).json({
+            error: 'You cannot delete your own account while signed in. Sign out or use another admin account.',
         });
-        if (target && normalizeUserRole(target.role) === 'superadmin') {
+    }
+
+    try {
+        // Single round-trip for actor + target — avoid repeated role/org lookups.
+        const [actor, target] = await Promise.all([
+            prisma.user.findUnique({
+                where: { id: actorId },
+                select: { id: true, role: true, creatorId: true },
+            }),
+            prisma.user.findUnique({
+                where: { id: targetId },
+                select: { id: true, role: true, creatorId: true, email: true },
+            }),
+        ]);
+        if (!actor) {
+            return res.status(401).json({ error: 'Unauthorized' });
+        }
+        if (!target) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+        if (normalizeUserRole(target.role) === 'superadmin') {
             return res.status(403).json({ error: 'Forbidden' });
         }
 
+        const actorRole = normalizeUserRole(actor.role);
+        const isSuperAdmin = actorRole === 'superadmin';
+        const canManageOrg =
+            isSuperAdmin ||
+            actorRole === 'admin' ||
+            (actor.creatorId == null && actorRole !== 'auditee');
+
+        if (!isSuperAdmin) {
+            if (!(await actorCanAccessTargetUser(actorId, targetId))) {
+                return res.status(403).json({ error: 'Forbidden' });
+            }
+            const targetIsAuditee = normalizeUserRole(target.role) === 'auditee';
+            if (!canManageOrg) {
+                // Non-admins may only delete auditees they can manage.
+                if (!targetIsAuditee || !(await actorCanManageAuditee(actorId, targetId))) {
+                    return res.status(403).json({
+                        error: 'Forbidden',
+                        message: 'You cannot delete this user.',
+                    });
+                }
+            }
+
+            const ownerGuard = await assertActorMayModifyProtectedCompanyOwner(actorId, targetId);
+            if (!ownerGuard.ok) {
+                return res.status(ownerGuard.status).json({ error: ownerGuard.error });
+            }
+        }
+
+        // Respond as soon as the DB work finishes — no extra lookups after delete.
         await deleteUserCompletely(targetId);
-        console.log(`[AUTH] User ${targetId} deleted by actor ${actorId}`);
+        invalidateOrgLookupCaches();
         res.status(204).send();
     } catch (error) {
         if (error.code === 'USER_NOT_FOUND') {
@@ -6223,7 +6396,7 @@ app.delete('/users/:id', authenticateToken, async (req, res) => {
         console.error('Error deleting user:', error);
         res.status(500).json({
             error: 'Failed to delete user',
-            message: error.message
+            message: error.message,
         });
     }
 });
@@ -6722,6 +6895,7 @@ app.get('/audit-plans', authenticateToken, checkTrialExpiration, async (req, res
         const pagination = parsePaginationQuery(req.query, { defaultLimit: 8 });
         const search = String(req.query.search || '').trim();
         const siteName = String(req.query.site || req.query.siteName || '').trim();
+        const siteIdFilter = String(req.query.siteId || '').trim();
         const typeFilter = String(req.query.type || '').trim().toLowerCase();
 
         const andFilters = [];
@@ -6733,6 +6907,14 @@ app.get('/audit-plans', authenticateToken, checkTrialExpiration, async (req, res
                     { location: { contains: search, mode: 'insensitive' } },
                 ],
             });
+        }
+        if (siteIdFilter && siteIdFilter !== 'all') {
+            const siteIdNum = Number.parseInt(siteIdFilter, 10);
+            if (!Number.isNaN(siteIdNum) && siteIdNum > 0) {
+                andFilters.push({
+                    auditProgram: { is: { siteId: siteIdNum } },
+                });
+            }
         }
         if (siteName && siteName !== 'all') {
             andFilters.push({
@@ -6782,6 +6964,7 @@ app.get('/audit-plans', authenticateToken, checkTrialExpiration, async (req, res
             auditProgramId: true,
             userId: true,
             leadAuditorId: true,
+            status: true,
             ...(includeData
                 ? {
                       findingsData: true,
@@ -6937,29 +7120,105 @@ app.get('/audit-plans', authenticateToken, checkTrialExpiration, async (req, res
     }
 });
 
-// Get single Audit Plan (Full Details)
+// Get single Audit Plan (Full Details) — slim selects (no deep company/auditor dumps)
 app.get('/audit-plans/:id', authenticateToken, checkTrialExpiration, async (req, res) => {
     const { id } = req.params;
+    const planId = Number.parseInt(id, 10);
+    if (!Number.isInteger(planId) || planId < 1) {
+        return res.status(400).json({ error: 'Invalid audit plan id' });
+    }
     try {
+        const startedAt = performance.now();
         const plan = await prisma.auditPlan.findUnique({
-            where: { id: Number.parseInt(id) },
-            include: {
-                leadAuditor: true,
-                auditors: true,
+            where: { id: planId },
+            select: {
+                id: true,
+                executionId: true,
+                auditType: true,
+                auditName: true,
+                templateId: true,
+                date: true,
+                location: true,
+                scope: true,
+                objective: true,
+                criteria: true,
+                leadAuditorId: true,
+                auditProgramId: true,
+                userId: true,
+                status: true,
+                itinerary: true,
+                auditData: true,
+                findingsData: true,
+                createdAt: true,
+                updatedAt: true,
+                leadAuditor: {
+                    select: {
+                        id: true,
+                        firstName: true,
+                        lastName: true,
+                        email: true,
+                    },
+                },
+                auditors: {
+                    select: {
+                        id: true,
+                        firstName: true,
+                        lastName: true,
+                        email: true,
+                    },
+                },
                 auditProgram: {
-                    include: {
-                        site: { include: { company: true } },
-                        auditors: true,
-                        leadAuditor: true
-                    }
-                }
-            }
+                    select: {
+                        id: true,
+                        name: true,
+                        frequency: true,
+                        duration: true,
+                        createdAt: true,
+                        scheduleData: true,
+                        siteId: true,
+                        userId: true,
+                        leadAuditorId: true,
+                        site: {
+                            select: {
+                                id: true,
+                                name: true,
+                                companyId: true,
+                                company: {
+                                    select: {
+                                        id: true,
+                                        name: true,
+                                    },
+                                },
+                            },
+                        },
+                        leadAuditor: {
+                            select: {
+                                id: true,
+                                firstName: true,
+                                lastName: true,
+                            },
+                        },
+                        auditors: {
+                            select: {
+                                id: true,
+                                firstName: true,
+                                lastName: true,
+                            },
+                        },
+                    },
+                },
+            },
         });
         if (!plan) return res.status(404).json({ error: 'Audit plan not found' });
         if (!(await actorCanAccessAuditPlan(req.user.id, plan))) {
             return res.status(403).json({ error: 'Forbidden' });
         }
-        res.json(plan);
+        const ms = performance.now() - startedAt;
+        res.setHeader('Server-Timing', `db;dur=${ms.toFixed(1)}`);
+        res.setHeader('X-Response-Time', `${ms.toFixed(1)}ms`);
+        // Alias site onto plan for execute UI that reads plan.site
+        const site = plan.auditProgram?.site || null;
+        res.json({ ...plan, site });
     } catch (error) {
         console.error('Failed to fetch audit plan details:', error);
         res.status(500).json({ error: 'Failed to fetch audit plan details' });
@@ -7026,7 +7285,8 @@ app.post('/audit-plans', authenticateToken, checkTrialExpiration, async (req, re
                     connect: auditorCheck.auditorIds.map((id) => ({ id })),
                 },
                 itinerary: itinerary || [],
-                userId: planOwnerId
+                userId: planOwnerId,
+                status: AUDIT_LIFECYCLE.PLANNED,
             }
         });
         res.status(201).json(plan);
@@ -7128,10 +7388,16 @@ app.put('/audit-plans/:id', authenticateToken, checkTrialExpiration, async (req,
         // Do not echo multi‑MB auditData back to the client — Save Audit only needs ack + progress.
         let progress = 0;
         let auditCompleted = false;
+        let lifecycleStatus = existing.status || AUDIT_LIFECYCLE.PLANNED;
         if (updateData.auditData && typeof updateData.auditData === 'object') {
             const p = Number(updateData.auditData.progress);
             if (Number.isFinite(p)) progress = Math.min(100, Math.max(0, Math.round(p)));
             auditCompleted = updateData.auditData.auditCompleted === true;
+            lifecycleStatus = lifecycleStatusFromAuditData(updateData.auditData);
+            updateData.status = lifecycleStatus;
+        } else if (updateData.auditData === null) {
+            lifecycleStatus = AUDIT_LIFECYCLE.PLANNED;
+            updateData.status = lifecycleStatus;
         }
 
         const plan = await prisma.auditPlan.update({
@@ -7144,12 +7410,14 @@ app.put('/audit-plans/:id', authenticateToken, checkTrialExpiration, async (req,
                 executionId: true,
                 templateId: true,
                 auditProgramId: true,
+                status: true,
             },
         });
         res.status(200).json({
             ...plan,
             progress,
             auditCompleted,
+            status: plan.status || lifecycleStatus,
             saved: true,
         });
     } catch (error) {
@@ -7158,75 +7426,81 @@ app.put('/audit-plans/:id', authenticateToken, checkTrialExpiration, async (req,
     }
 });
 
-app.get('/assigned-audit-findings', authenticateToken, checkTrialExpiration, async (req, res) => {
+async function handleFindingsInboxRequest(req, res) {
     const actorId = Number(req.user?.id);
+    const rawOwnership = String(req.query.ownership || req.query.type || 'assigned')
+        .toLowerCase()
+        .trim();
+    const ownership =
+        rawOwnership === 'raised'
+            ? 'raised'
+            : rawOwnership === 'visible' || rawOwnership === 'dashboard'
+              ? 'visible'
+              : 'assigned';
+
     try {
-        const actor = await prisma.user.findUnique({
-            where: { id: actorId },
-            select: { email: true },
-        });
-        if (!actor?.email) {
-            return res.json([]);
-        }
-
-        const actorEmail = actor.email.toLowerCase().trim();
-        const isAuditee = await actorIsAuditee(actorId);
-        const auditeeSiteIds = isAuditee ? await getAuditeeAssignedSiteIds(actorId) : null;
-
-        /** Limit scan to plans the actor can already see — never all org rows with auditData. */
-        let visibilityWhere = { auditData: { not: null } };
-        if (isAuditee && auditeeSiteIds) {
-            visibilityWhere = {
-                auditData: { not: null },
-                auditProgram: {
-                    is: auditeeSiteIds.length > 0
-                        ? { siteId: { in: auditeeSiteIds } }
-                        : { siteId: -1 },
-                },
-            };
-        } else if (await actorHasFullOrgAuditVisibility(actorId)) {
-            const orgRootId = await resolveActorOrgRootId(actorId);
-            const subtreeIds = await collectOrgSubtreeUserIds(orgRootId);
-            visibilityWhere = {
-                auditData: { not: null },
-                OR: buildOrgSubtreePlanVisibilityOr(subtreeIds),
-            };
-        } else {
-            visibilityWhere = {
-                auditData: { not: null },
-                OR: buildAssignedAuditPlanVisibilityOr(actorId),
-            };
-        }
-
-        const plans = await prisma.auditPlan.findMany({
-            where: visibilityWhere,
-            select: ASSIGNED_FINDINGS_PLAN_SELECT,
-            orderBy: { updatedAt: 'desc' },
-            take: 200,
-        });
-
-        const assignedPlans = plans
-            .filter((plan) => {
-                if (!collectAssigneeEmailsFromAuditData(plan.auditData).has(actorEmail)) {
-                    return false;
-                }
-                if (isAuditee && auditeeSiteIds) {
-                    const siteId = plan.auditProgram?.siteId;
-                    return siteId != null && auditeeSiteIds.includes(Number(siteId));
-                }
-                return true;
-            })
-            .map((plan) => ({
-                ...plan,
-                auditData: stripHeavyAuditListPayload(plan.auditData),
-                findingsData: stripHeavyAuditListPayload(plan.findingsData),
-            }));
-
-        res.json(assignedPlans);
+        const plans = await loadFindingsInboxPlans(
+            {
+                actorIsAuditee,
+                getAuditeeAssignedSiteIds,
+                actorHasFullOrgAuditVisibility,
+                resolveActorOrgRootId,
+                collectOrgSubtreeUserIds,
+                buildOrgSubtreePlanVisibilityOr,
+                buildAssignedAuditPlanVisibilityOr,
+            },
+            actorId,
+            ownership,
+        );
+        res.json(plans);
     } catch (error) {
-        console.error('Failed to fetch assigned audit findings:', error);
-        res.status(500).json({ error: 'Failed to fetch assigned findings' });
+        console.error('Failed to fetch findings inbox:', error);
+        res.status(500).json({ error: 'Failed to fetch findings' });
     }
+}
+
+/** Ownership-scoped findings inbox: ?ownership=assigned|raised|visible (alias: ?type=). */
+app.get('/audit-findings', authenticateToken, checkTrialExpiration, handleFindingsInboxRequest);
+
+/**
+ * Recent findings for dashboard widgets.
+ * Returns slim plan rows (same shape as /audit-findings); clients extract and slice.
+ * Query: ?limit=5 (max 20).
+ */
+app.get('/audit-findings/recent', authenticateToken, checkTrialExpiration, async (req, res) => {
+    const actorId = Number(req.user?.id);
+    const limitRaw = Number.parseInt(String(req.query.limit ?? '5'), 10);
+    const limit = Number.isFinite(limitRaw)
+        ? Math.min(20, Math.max(1, limitRaw))
+        : 5;
+    try {
+        const plans = await loadFindingsInboxPlans(
+            {
+                actorIsAuditee,
+                getAuditeeAssignedSiteIds,
+                actorHasFullOrgAuditVisibility,
+                resolveActorOrgRootId,
+                collectOrgSubtreeUserIds,
+                buildOrgSubtreePlanVisibilityOr,
+                buildAssignedAuditPlanVisibilityOr,
+            },
+            actorId,
+            'visible',
+        );
+        // Newest plans first already; cap payload for the recent widget.
+        res.json(plans.slice(0, Math.max(limit, 8)));
+    } catch (error) {
+        console.error('Failed to fetch recent findings:', error);
+        res.status(500).json({ error: 'Failed to fetch recent findings' });
+    }
+});
+
+app.get('/assigned-audit-findings', authenticateToken, checkTrialExpiration, async (req, res) => {
+    // Backward compatible: defaults to assigned; accepts ?ownership= / ?type=
+    if (!req.query.ownership && !req.query.type) {
+        req.query.ownership = 'assigned';
+    }
+    return handleFindingsInboxRequest(req, res);
 });
 
 app.post('/audit-plans/:id/notify-finding-assignment', authenticateToken, checkTrialExpiration, async (req, res) => {
@@ -8743,10 +9017,8 @@ app.post('/subscription/upgrade-request', authenticateToken, async (req, res) =>
 });
 
 // =====================================================================
-// STARTUP — listen FIRST, then run migrations/seeds in the background.
-// This eliminates the 502 window: the port is open within ~1 second,
-// and /health returns 503 (database: unavailable) until bootstrap
-// finishes — Coolify/Docker waits for a healthy check before routing.
+// STARTUP — listen FIRST, then bootstrap in the background WITHOUT
+// blocking the event loop (async migrate — never spawnSync).
 // =====================================================================
 
 async function ensureDatabaseSchemaPatches() {
@@ -8777,16 +9049,16 @@ async function ensureLegacySiteUserIdsCleared() {
     }
 }
 
-/** Wait for Postgres to accept connections (retries with backoff). */
-async function waitForDatabase(maxRetries = 15, initialDelayMs = 1000) {
+/** Wait for Postgres to accept connections (retries with exponential backoff). */
+async function waitForDatabase(maxRetries = 20, initialDelayMs = 500) {
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
-            await pool.query('SELECT 1');
+            await withTimeout(pool.query('SELECT 1'), 5000, 'startup DB connect');
             console.log(`[bootstrap] ✔ Database connected (attempt ${attempt})`);
             dbHealthy = true;
             return;
         } catch (err) {
-            const delay = Math.min(initialDelayMs * attempt, 10000);
+            const delay = Math.min(initialDelayMs * 2 ** (attempt - 1), 10000);
             console.warn(
                 `[bootstrap] Database not ready (attempt ${attempt}/${maxRetries}): ${err.message} — retrying in ${delay}ms`,
             );
@@ -8796,30 +9068,18 @@ async function waitForDatabase(maxRetries = 15, initialDelayMs = 1000) {
     throw new Error('Database did not become available after retries');
 }
 
-/** Run migrations via prisma migrate deploy (same as the old entrypoint). */
+/** Async migrate deploy — must NOT use spawnSync (blocks event loop → 504). */
 async function runMigrations() {
-    const { spawnSync } = await import('node:child_process');
-    const { dirname, resolve } = await import('node:path');
-    const { fileURLToPath } = await import('node:url');
-    const serverRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+    const { runPrismaMigrateDeploy } = await import('./runMigrateAsync.js');
 
-    console.log('[bootstrap] Applying database migrations…');
-    const result = spawnSync('npx', ['prisma', 'migrate', 'deploy'], {
-        cwd: serverRoot,
-        stdio: 'pipe',
-        encoding: 'utf-8',
-        env: { ...process.env },
-        shell: true,
-    });
-    if (result.stdout) process.stdout.write(result.stdout);
-    if (result.stderr) process.stderr.write(result.stderr);
+    console.log('[bootstrap] Applying database migrations (async, non-blocking)…');
+    const result = await runPrismaMigrateDeploy(process.env.DATABASE_URL);
 
     if (result.status === 0) {
         console.log('[bootstrap] ✔ Migrations applied');
         return;
     }
-    const output = `${result.stdout || ''}\n${result.stderr || ''}`;
-    if (/P3005/.test(output)) {
+    if (/P3005/.test(result.output)) {
         console.warn('[bootstrap] Database needs baselining (P3005) — attempting…');
         const { baselineExistingDatabase } = await import(
             '../scripts/baseline-migrations.js'
@@ -8832,8 +9092,11 @@ async function runMigrations() {
 }
 
 async function runBootstrap() {
+    const t0 = Date.now();
     try {
+        console.log('[bootstrap] Starting…');
         await waitForDatabase();
+        console.log('[bootstrap] ✔ Prisma / pg pool ready');
         await runMigrations();
         await Promise.all([
             ensureDatabaseSchemaPatches(),
@@ -8843,30 +9106,35 @@ async function runBootstrap() {
             ensureLegacySiteUserIdsCleared(),
         ]);
         bootstrapComplete = true;
-        console.log('[bootstrap] ✔ All startup tasks complete');
+        console.log(`[bootstrap] ✔ All startup tasks complete in ${Date.now() - t0}ms`);
+        console.log('[bootstrap] ✔ Container ready for traffic');
     } catch (err) {
         console.error('[bootstrap] Startup bootstrap failed:', err);
-        // Don't crash — health endpoint will report degraded, Coolify won't route traffic yet.
+        // Don't crash — /health stays 503 until DB recovers; /live stays 200.
     }
 }
 
-// 1. Open the port immediately (eliminates the 502 window).
+console.log('[start] Server starting…');
+console.log(`[start] NODE_ENV=${process.env.NODE_ENV || 'development'} PORT=${PORT}`);
+
+// 1. Open the port immediately (eliminates the connection-refused 502 window).
 const server = app.listen(PORT, '0.0.0.0', () => {
-    console.log(`✔ Server listening on 0.0.0.0:${PORT}`);
-    console.log(`✔ Environment: ${process.env.NODE_ENV || 'development'}`);
-    console.log(`✔ Health endpoint ready: /health`);
+    console.log(`[start] ✔ Listening on 0.0.0.0:${PORT}`);
+    console.log('[start] ✔ Routes registered');
+    console.log('[start] ✔ Health endpoints ready: /live /health /api/health');
 });
 
-// Keep-alive / header timeouts must exceed the reverse proxy's (nginx 120s).
-server.keepAliveTimeout = 65000;
-server.headersTimeout = 66000;
+// Keep-alive MUST exceed reverse-proxy idle/read timeouts (nginx proxy_* = 120s).
+// If Node closes idle sockets first, nginx reuses a dead connection → intermittent 502.
+server.keepAliveTimeout = 130000;
+server.headersTimeout = 131000;
+server.requestTimeout = 0;
 
-// 2. Run DB migrations, seeds, patches in the background.
+// 2. Migrations / seeds in background without freezing HTTP.
 runBootstrap();
 
 // =====================================================================
-// GRACEFUL SHUTDOWN — drain connections before exiting so the old
-// container doesn't hold the port while the new one starts.
+// GRACEFUL SHUTDOWN — drain HTTP before closing pools.
 // =====================================================================
 let shuttingDown = false;
 
@@ -8875,43 +9143,42 @@ const gracefulShutdown = async (signal) => {
     shuttingDown = true;
     console.log(`\n${signal} received — shutting down gracefully…`);
 
-    // Stop accepting new connections.
-    server.close(() => {
-        console.log('✔ HTTP server closed (no new connections)');
-    });
-
-    // Give in-flight requests a few seconds to finish.
     const forceExitTimer = setTimeout(() => {
-        console.error('Shutdown timed out — forcing exit');
+        console.error('[shutdown] Timed out — forcing exit');
         process.exit(1);
     }, 15000);
     forceExitTimer.unref();
 
+    await new Promise((resolveClose) => {
+        server.close((err) => {
+            if (err) console.error('[shutdown] server.close error:', err.message);
+            else console.log('[shutdown] ✔ HTTP server closed');
+            resolveClose();
+        });
+    });
+
     try {
         await prisma.$disconnect();
-        console.log('✔ Prisma disconnected');
+        console.log('[shutdown] ✔ Prisma disconnected');
     } catch (err) {
-        console.error('Prisma disconnect error:', err.message);
+        console.error('[shutdown] Prisma disconnect error:', err.message);
     }
 
     try {
         await pool.end();
-        console.log('✔ pg Pool closed');
+        console.log('[shutdown] ✔ pg Pool closed');
     } catch (err) {
-        console.error('pg Pool close error:', err.message);
+        console.error('[shutdown] pg Pool close error:', err.message);
     }
 
     clearTimeout(forceExitTimer);
-    process.exit(0);
+    process.exit(signal === 'uncaughtException' ? 1 : 0);
 };
 
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGHUP', () => gracefulShutdown('SIGHUP'));
 
-// =====================================================================
-// GLOBAL ERROR HANDLERS — prevent silent crashes that cause 502.
-// =====================================================================
 process.on('uncaughtException', (err) => {
     console.error('[FATAL] Uncaught exception:', err);
     gracefulShutdown('uncaughtException');
@@ -8919,5 +9186,4 @@ process.on('uncaughtException', (err) => {
 
 process.on('unhandledRejection', (reason) => {
     console.error('[WARN] Unhandled promise rejection:', reason);
-    // Don't crash — log and continue. Most rejections are non-fatal.
 });

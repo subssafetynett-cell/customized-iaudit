@@ -27,12 +27,15 @@ export function buildPgPoolConfig() {
     const connectionString = process.env.DATABASE_URL;
     const config = {
         connectionString,
+        // Fail fast under pressure so /health and requests don't hang → proxy 504.
         connectionTimeoutMillis: Number.parseInt(
-            process.env.PG_CONNECTION_TIMEOUT_MS || "30000",
+            process.env.PG_CONNECTION_TIMEOUT_MS || "5000",
             10,
         ),
+        // Keep pool modest on small Hostinger VPS / shared Postgres max_connections.
         max: Number.parseInt(process.env.PG_POOL_MAX || "10", 10),
         idleTimeoutMillis: Number.parseInt(process.env.PG_IDLE_TIMEOUT_MS || "10000", 10),
+        allowExitOnIdle: false,
     };
 
     if (shouldUsePgSsl(connectionString)) {

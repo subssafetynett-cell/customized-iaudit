@@ -148,6 +148,7 @@ model User {
   @@index([creatorId])
   @@index([role])
   @@index([createdAt])
+  @@index([isActive, createdAt])
 }
 
 /// Organization-wide gap analysis history and in-progress draft (shared by all org members).
@@ -284,6 +285,8 @@ model AuditPlan {
   auditData      Json?
   userId         Int?
   findingsData   Json?
+  /// Answer-progress lifecycle: PLANNED | IN_PROGRESS | COMPLETED
+  status         String       @default("PLANNED")
   auditProgram   AuditProgram @relation(fields: [auditProgramId], references: [id])
   leadAuditor    User?        @relation("PlanLeadAuditor", fields: [leadAuditorId], references: [id])
   user           User?        @relation("UserAuditPlans", fields: [userId], references: [id])
@@ -295,6 +298,8 @@ model AuditPlan {
   @@index([auditProgramId])
   @@index([leadAuditorId])
   @@index([createdAt])
+  @@index([updatedAt])
+  @@index([status])
 }
 
 /// Formal nonconformance raised from a Minor/Major audit finding (finding lives in AuditPlan JSON).

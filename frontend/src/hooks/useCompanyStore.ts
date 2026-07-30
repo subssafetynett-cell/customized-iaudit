@@ -282,18 +282,36 @@ export function useCompanyStore() {
     }
   };
   const deleteSite = async (companyId: string, siteId: string) => {
-    const response = await apiFetch(`/sites/${siteId}`, {
-      method: "DELETE",
-    });
-    if (!response.ok) {
-      let message = "Failed to delete site";
-      try {
-        const body = await response.json();
-        if (body?.error) message = String(body.error);
-      } catch {
-        /* ignore parse errors */
+    try {
+      const response = await apiFetch(`/sites/${siteId}`, {
+        method: "DELETE",
+      });
+      if (response.ok || response.status === 204) {
+        globalCompanies = globalCompanies.map((c) =>
+          c.id === companyId
+            ? {
+                ...c,
+                sites: c.sites.filter((s) => String(s.id) !== String(siteId)),
+              }
+            : c
+        );
+        notify();
+        toast.success("Site deleted");
+        return { success: true as const };
       }
-      throw new Error(message);
+      let message = `Failed to delete site (Status: ${response.status})`;
+      try {
+        const errBody = await response.json();
+        if (errBody?.error) message = String(errBody.error);
+      } catch {
+        /* ignore */
+      }
+      toast.error(message);
+      return { success: false as const, error: message };
+    } catch (error) {
+      console.error("Failed to delete site:", error);
+      toast.error("Network error while deleting site");
+      return { success: false as const, error: "Network error while deleting site" };
     }
     globalCompanies = globalCompanies.map((c) =>
       c.id === companyId ? { ...c, sites: c.sites.filter((s) => s.id !== siteId) } : c

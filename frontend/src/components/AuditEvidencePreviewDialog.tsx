@@ -6,7 +6,10 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Download } from "lucide-react";
-import type { AuditEvidenceMedia } from "@/lib/evidenceImageUpload";
+import {
+    evidenceMediaDisplayUrl,
+    type AuditEvidenceMedia,
+} from "@/lib/evidenceImageUpload";
 import {
     downloadAuditEvidenceMedia,
     isPreviewableAuditEvidence,
@@ -21,6 +24,7 @@ type Props = {
 export function AuditEvidencePreviewDialog({ media, open, onOpenChange }: Props) {
     const isImage = media?.type.startsWith("image/") ?? false;
     const isPdf = media?.type === "application/pdf";
+    const src = media ? evidenceMediaDisplayUrl(media) : "";
 
     return (
         <Dialog open={open} onOpenChange={onOpenChange}>
@@ -30,16 +34,16 @@ export function AuditEvidencePreviewDialog({ media, open, onOpenChange }: Props)
                 </DialogHeader>
 
                 <div className="flex-1 min-h-0 overflow-auto rounded-lg border border-slate-200 bg-slate-50">
-                    {media && isImage && (
+                    {media && isImage && src && (
                         <img
-                            src={media.data}
+                            src={src}
                             alt={media.name}
                             className="max-w-full h-auto mx-auto block"
                         />
                     )}
-                    {media && isPdf && (
+                    {media && isPdf && src && (
                         <iframe
-                            src={media.data}
+                            src={src}
                             title={media.name}
                             className="w-full h-[70vh] min-h-[420px] bg-white"
                         />

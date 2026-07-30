@@ -106,8 +106,28 @@ export function usesEoshScoredChecklistLayout(
 export function eoshScoreFromFindings(findings?: string | null): "2" | "1" | "0" | "" {
   if (findings === "2" || findings === "C") return "2";
   if (findings === "1" || findings === "OFI") return "1";
-  if (findings === "0" || findings === "Min" || findings === "Maj") return "0";
+  if (
+    findings === "0" ||
+    findings === "NC" ||
+    findings === "Min" ||
+    findings === "Maj" ||
+    findings === "Minor" ||
+    findings === "Major"
+  ) {
+    return "0";
+  }
   return "";
+}
+
+/**
+ * Persist EOSH column selection as semantic finding codes:
+ * Compliance → "2", Meet with Exceptions → "OFI", Non Compliance → "NC".
+ * (Scoring still uses {@link eoshScoreFromFindings}.)
+ */
+export function eoshFindingsValueForScore(score: "2" | "1" | "0"): string {
+  if (score === "2") return "2";
+  if (score === "1") return "OFI";
+  return "NC";
 }
 
 export const eoshHeaderCellClass =

@@ -19,10 +19,14 @@ import {
     AlertDialogHeader,
     AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import {
-    MoreVertical, FileText, Trash2, Calendar, Search, Download, MapPin, Loader2
-} from "lucide-react";
 import { Input } from "@/components/ui/input";
+import {
+    Select,
+    SelectContent,
+    SelectItem,
+    SelectTrigger,
+    SelectValue,
+} from "@/components/ui/select";
 import { toast } from "sonner";
 import { format } from "date-fns";
 import { downloadAuditReport, type AuditReportFormat } from "@/utils/auditReportExport";
@@ -45,7 +49,9 @@ import {
     parseAuditPlanTemplateIds,
 } from "@/data/auditTemplates";
 import { resolveAuditModuleDisplayName } from "@/lib/auditFindings";
-
+import {
+    MoreVertical, FileText, Trash2, Calendar, Search, Download, Loader2
+} from "lucide-react";
 /** Subtitle under Audit column: module name(s) or ISO Standards. */
 function resolveAuditListTypeLabel(plan: {
     templateId?: string | null;
@@ -368,6 +374,30 @@ const AuditList = () => {
                                 </button>
                             ))}
                         </div>
+                        <Select value={selectedSite} onValueChange={setSelectedSite}>
+                            <SelectTrigger
+                                className="w-full sm:w-[180px] h-12 rounded-2xl border-slate-200 bg-white shadow-sm hover:border-slate-300 focus:ring-[#213847]/40"
+                                aria-label="Filter by site"
+                            >
+                                <SelectValue placeholder="All Sites" />
+                            </SelectTrigger>
+                            <SelectContent className="rounded-xl border-slate-200 shadow-lg max-h-72">
+                                <SelectItem value="all" className="rounded-lg cursor-pointer">
+                                    All Sites
+                                </SelectItem>
+                                {uniqueSites
+                                    .filter((site) => site !== "all")
+                                    .map((site) => (
+                                        <SelectItem
+                                            key={site}
+                                            value={site}
+                                            className="rounded-lg cursor-pointer"
+                                        >
+                                            {site}
+                                        </SelectItem>
+                                    ))}
+                            </SelectContent>
+                        </Select>
                         <div className="relative">
                             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
                             <Input
@@ -379,29 +409,6 @@ const AuditList = () => {
                         </div>
                     </div>
                 </div>
-
-                {uniqueSites.length > 2 && (
-                    <div className="flex flex-col gap-3 animate-in slide-in-from-top-2 duration-300">
-                        <div className="flex items-center gap-2">
-                            <MapPin className="w-4 h-4 text-[#213847]" />
-                            <span className="text-sm font-bold text-[#213847]">Select Site</span>
-                        </div>
-                        <div className="flex flex-wrap gap-2">
-                            {uniqueSites.map((site) => (
-                                <button
-                                    key={site}
-                                    onClick={() => setSelectedSite(site)}
-                                    className={`px-4 py-2 rounded-xl text-sm font-semibold transition-all duration-200 border ${selectedSite === site
-                                        ? "bg-[#213847] text-white border-[#213847] shadow-md"
-                                        : "bg-white text-slate-600 border-slate-200 hover:border-[#213847]/30 hover:bg-slate-50"
-                                        }`}
-                                >
-                                    {site === "all" ? "All Sites" : site}
-                                </button>
-                            ))}
-                        </div>
-                    </div>
-                )}
 
                 <div className="w-full relative z-10 space-y-6">
                     <div

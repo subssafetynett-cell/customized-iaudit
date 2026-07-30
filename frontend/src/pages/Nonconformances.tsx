@@ -1,12 +1,12 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState, memo } from "react";
 import { useNavigate } from "react-router-dom";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
     AlertTriangle,
     CheckCircle2,
     CircleDot,
     Clock3,
     LayoutList,
-    Loader2,
     RefreshCw,
     ShieldAlert,
 } from "lucide-react";
@@ -26,17 +26,23 @@ import {
 } from "recharts";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { apiFetch } from "@/lib/api";
 import {
-    extractFindings,
-    mergeFindingWithOverrides,
     TYPE_CONFIG,
     type Finding,
     type FindingStatus,
     type FindingType,
 } from "@/lib/auditFindings";
+import {
+    FINDINGS_INBOX_GC_MS,
+    FINDINGS_INBOX_STALE_MS,
+    fetchFindingsInboxPlans,
+    fetchRecentFindingsPlans,
+    findingsDashboardQueryKey,
+    findingsFromInboxPlans,
+    findingsRecentQueryKey,
+    mergeFindingsById,
+} from "@/lib/auditFindingsInbox";
 import { useStoredUser } from "@/hooks/useStoredUser";
-import { isAuditeeRole } from "@/lib/userRoles";
 import { cn } from "@/lib/utils";
 
 function canViewAllOrgFindings(role?: string) {
@@ -162,6 +168,7 @@ const STATUS_CARDS: {
 
 const TYPE_COLORS: Record<FindingType, string> = {
     OFI: "#F59E0B",
+    NC: "#DC2626",
     Minor: "#EA580C",
     Major: "#DC2626",
 };
@@ -173,111 +180,297 @@ const STATUS_COLORS: Record<string, string> = {
     Closed: "#059669",
 };
 
+const RECENT_LIMIT = 5;
+
+function SkeletonBlock({ className }: { className?: string }) {
+    return <div className={cn("animate-pulse rounded bg-slate-100", className)} />;
+}
+
+const StatusCardsGrid = memo(function StatusCardsGrid({
+    statusCounts,
+    statusFilter,
+    onFilter,
+    loading,
+}: {
+    statusCounts: Record<StatusCardKey, number>;
+    statusFilter: StatusCardKey;
+    onFilter: (key: StatusCardKey) => void;
+    loading: boolean;
+}) {
+    return (
+        <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-5 gap-3">
+            {STATUS_CARDS.map((item) => {
+                const Icon = item.icon;
+                const isActive = statusFilter === item.key;
+                return (
+                    <button
+                        key={item.key}
+                        type="button"
+                        onClick={() => onFilter(item.key)}
+                        className={cn(
+                            "rounded-xl border p-4 text-left transition-all shadow-sm",
+                            isActive
+                                ? item.active
+                                : "border-slate-200 bg-white hover:bg-slate-50",
+                        )}
+                    >
+                        <div className="flex items-start justify-between gap-2">
+                            <span
+                                className={cn(
+                                    "text-[11px] font-bold uppercase tracking-widest",
+                                    item.text,
+                                )}
+                            >
+                                {item.label}
+                            </span>
+                            <span
+                                className={cn(
+                                    "rounded-lg p-1.5 shrink-0",
+                                    item.iconWrap,
+                                )}
+                            >
+                                <Icon className="h-3.5 w-3.5" />
+                            </span>
+                        </div>
+                        <div
+                            className={cn(
+                                "text-3xl font-extrabold mt-2 tabular-nums",
+                                item.text,
+                            )}
+                        >
+                            {loading ? (
+                                <SkeletonBlock className="h-8 w-16 mt-1" />
+                            ) : (
+                                statusCounts[item.key]
+                            )}
+                        </div>
+                        <div className="text-xs text-slate-500 mt-1 leading-snug">
+                            {item.hint}
+                        </div>
+                    </button>
+                );
+            })}
+        </div>
+    );
+});
+
+const TypeCardsGrid = memo(function TypeCardsGrid({
+    typeCounts,
+    total,
+    loading,
+}: {
+    typeCounts: Record<FindingType, number>;
+    total: number;
+    loading: boolean;
+}) {
+    return (
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            {(["OFI", "NC", "Minor", "Major"] as FindingType[]).map((type) => {
+                const cfg = TYPE_CONFIG[type];
+                return (
+                    <div
+                        key={type}
+                        className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm"
+                    >
+                        <div className="flex items-center justify-between">
+                            <span
+                                className={cn(
+                                    "inline-flex px-2.5 py-1 rounded-full text-xs font-bold ring-1",
+                                    cfg.bg,
+                                    cfg.text,
+                                    cfg.ring,
+                                )}
+                            >
+                                {cfg.label}
+                            </span>
+                            <ShieldAlert
+                                className="h-4 w-4"
+                                style={{ color: TYPE_COLORS[type] }}
+                            />
+                        </div>
+                        <p className="text-3xl font-extrabold mt-3 tabular-nums text-[#213847]">
+                            {loading ? (
+                                <SkeletonBlock className="h-8 w-16" />
+                            ) : (
+                                typeCounts[type]
+                            )}
+                        </p>
+                        <p className="text-xs text-slate-500 mt-1">
+                            {loading
+                                ? "Loading…"
+                                : total > 0
+                                  ? `${Math.round((typeCounts[type] / total) * 100)}% of findings`
+                                  : "No findings yet"}
+                        </p>
+                    </div>
+                );
+            })}
+        </div>
+    );
+});
+
+const RecentFindingsList = memo(function RecentFindingsList({
+    items,
+    loading,
+    statusFilter,
+    onViewAll,
+    onOpen,
+}: {
+    items: Finding[];
+    loading: boolean;
+    statusFilter: StatusCardKey;
+    onViewAll: () => void;
+    onOpen: (f: Finding) => void;
+}) {
+    return (
+        <Card className="border-none shadow-sm rounded-xl bg-white p-6">
+            <div className="flex items-center justify-between mb-4">
+                <div>
+                    <h2 className="text-lg font-bold text-[#111827]">
+                        Recent findings
+                    </h2>
+                    <p className="text-xs text-[#9CA3AF]">
+                        {statusFilter === "all"
+                            ? "Latest findings in your view"
+                            : `Showing ${statusFilter} findings`}
+                    </p>
+                </div>
+                <Button
+                    variant="ghost"
+                    size="sm"
+                    className="text-xs font-semibold text-emerald-700"
+                    onClick={onViewAll}
+                >
+                    View all
+                </Button>
+            </div>
+            {loading ? (
+                <ul className="divide-y divide-slate-100 space-y-0">
+                    {Array.from({ length: RECENT_LIMIT }).map((_, i) => (
+                        <li key={i} className="py-3 flex items-start gap-3">
+                            <SkeletonBlock className="h-5 w-12 rounded-full" />
+                            <div className="flex-1 space-y-2">
+                                <SkeletonBlock className="h-4 w-3/4" />
+                                <SkeletonBlock className="h-3 w-1/2" />
+                            </div>
+                        </li>
+                    ))}
+                </ul>
+            ) : items.length === 0 ? (
+                <p className="text-sm text-slate-500 py-6 text-center">
+                    No recent findings
+                </p>
+            ) : (
+                <ul className="divide-y divide-slate-100">
+                    {items.map((f) => {
+                        const cfg = TYPE_CONFIG[f.type];
+                        return (
+                            <li key={`${f.auditId}-${f.id}`}>
+                                <button
+                                    type="button"
+                                    className="w-full text-left py-3 flex items-start gap-3 hover:bg-slate-50 rounded-lg px-2 -mx-2 transition-colors"
+                                    onClick={() => onOpen(f)}
+                                >
+                                    <span
+                                        className={cn(
+                                            "mt-0.5 shrink-0 inline-flex px-2 py-0.5 rounded-full text-[10px] font-bold ring-1",
+                                            cfg.bg,
+                                            cfg.text,
+                                            cfg.ring,
+                                        )}
+                                    >
+                                        {cfg.label}
+                                    </span>
+                                    <div className="min-w-0 flex-1">
+                                        <p className="text-sm font-semibold text-slate-800 truncate">
+                                            {f.clauseRef || f.description || f.id}
+                                        </p>
+                                        <p className="text-xs text-slate-500 truncate mt-0.5">
+                                            {f.auditName}
+                                            {f.moduleName ? ` · ${f.moduleName}` : ""}
+                                            {" · "}
+                                            {normalizeStatusBucket(f.status)}
+                                        </p>
+                                    </div>
+                                </button>
+                            </li>
+                        );
+                    })}
+                </ul>
+            )}
+        </Card>
+    );
+});
+
 export default function Nonconformances() {
     const navigate = useNavigate();
+    const queryClient = useQueryClient();
     const { user } = useStoredUser();
-    const [findings, setFindings] = useState<Finding[]>([]);
-    const [loading, setLoading] = useState(true);
     const [statusFilter, setStatusFilter] = useState<StatusCardKey>("all");
 
-    const loadFindings = useCallback(async () => {
-        setLoading(true);
-        try {
-            if (!user) {
-                setFindings([]);
-                return;
+    const role = typeof user?.role === "string" ? user.role : undefined;
+    const isSuperAdmin = String(role ?? "").toLowerCase() === "superadmin";
+    const seesAll = canViewAllOrgFindings(role) || isSuperAdmin;
+    const userEmail = String(user?.email ?? "")
+        .toLowerCase()
+        .trim();
+    const parsedViewerId = user?.id != null ? Number(user.id) : NaN;
+    const viewerId =
+        Number.isInteger(parsedViewerId) && parsedViewerId > 0
+            ? parsedViewerId
+            : null;
+
+    const summaryQuery = useQuery({
+        queryKey: [...findingsDashboardQueryKey, seesAll ? "all" : "mine", userEmail],
+        enabled: Boolean(user),
+        staleTime: FINDINGS_INBOX_STALE_MS,
+        gcTime: FINDINGS_INBOX_GC_MS,
+        refetchOnWindowFocus: false,
+        queryFn: async () => {
+            if (seesAll) {
+                const plans = await fetchFindingsInboxPlans("visible");
+                return findingsFromInboxPlans(plans);
             }
-            const role = typeof user.role === "string" ? user.role : undefined;
-            const isSuperAdmin = String(role ?? "").toLowerCase() === "superadmin";
-            const isAuditee = isAuditeeRole(role);
-            const seesAll = canViewAllOrgFindings(role);
-            const userEmail = String(user.email ?? "")
-                .toLowerCase()
-                .trim();
-            const parsedViewerId = user.id != null ? Number(user.id) : NaN;
-            const viewerId =
-                Number.isInteger(parsedViewerId) && parsedViewerId > 0
-                    ? parsedViewerId
-                    : null;
+            const [assignedPlans, raisedPlans] = await Promise.all([
+                fetchFindingsInboxPlans("assigned"),
+                fetchFindingsInboxPlans("raised"),
+            ]);
+            const assigned = findingsFromInboxPlans(assignedPlans).filter((f) =>
+                isFindingAssignedToMe(f, userEmail),
+            );
+            const raised = findingsFromInboxPlans(raisedPlans).filter((f) =>
+                isFindingRaisedByMe(f, userEmail, viewerId),
+            );
+            return mergeFindingsById([assigned, raised]);
+        },
+    });
 
-            const planById = new Map<number, unknown>();
-            const addPlans = (rows: unknown) => {
-                if (!Array.isArray(rows)) return;
-                for (const plan of rows) {
-                    if (plan && typeof plan === "object" && "id" in plan) {
-                        const id = Number((plan as { id: unknown }).id);
-                        if (Number.isInteger(id) && id > 0) planById.set(id, plan);
-                    }
-                }
-            };
-
-            if (isSuperAdmin) {
-                const res = await apiFetch(`/audit-plans?scope=all&includeData=true`);
-                if (res.ok) addPlans(await res.json());
-            } else if (isAuditee) {
-                const [plansRes, assignedRes] = await Promise.all([
-                    apiFetch(`/audit-plans?includeData=true`),
-                    apiFetch(`/assigned-audit-findings`),
-                ]);
-                if (plansRes.ok) addPlans(await plansRes.json());
-                if (assignedRes.ok) addPlans(await assignedRes.json());
-            } else {
-                const requests: Promise<Response>[] = [
-                    apiFetch(`/assigned-audit-findings`),
-                ];
-                if (seesAll) {
-                    requests.push(apiFetch(`/audit-plans?scope=org&includeData=true`));
-                }
-                const responses = await Promise.all(requests);
-                for (const res of responses) {
-                    if (res.ok) addPlans(await res.json());
-                }
-            }
-
-            const all: Finding[] = [];
-            for (const plan of planById.values()) {
-                const p = plan as {
-                    id: number;
-                    auditName?: string;
-                    auditData?: unknown;
-                    templateId?: string;
-                    findingsData?: unknown;
-                };
-                const base = extractFindings(p);
-                const overrides =
-                    p.findingsData == null
-                        ? {}
-                        : typeof p.findingsData === "string"
-                          ? JSON.parse(p.findingsData)
-                          : (p.findingsData as Record<string, Partial<Finding>>);
-                all.push(
-                    ...base.map((f) => mergeFindingWithOverrides(f, overrides)),
+    const recentQuery = useQuery({
+        queryKey: findingsRecentQueryKey(RECENT_LIMIT),
+        enabled: Boolean(user),
+        staleTime: FINDINGS_INBOX_STALE_MS,
+        gcTime: FINDINGS_INBOX_GC_MS,
+        refetchOnWindowFocus: false,
+        queryFn: async () => {
+            const plans = await fetchRecentFindingsPlans(RECENT_LIMIT);
+            let list = findingsFromInboxPlans(plans);
+            if (!seesAll) {
+                list = list.filter(
+                    (f) =>
+                        isFindingAssignedToMe(f, userEmail) ||
+                        isFindingRaisedByMe(f, userEmail, viewerId),
                 );
             }
+            return list.slice(0, RECENT_LIMIT);
+        },
+    });
 
-            const visible =
-                seesAll || isSuperAdmin
-                    ? all
-                    : all.filter(
-                          (f) =>
-                              isFindingAssignedToMe(f, userEmail) ||
-                              isFindingRaisedByMe(f, userEmail, viewerId),
-                      );
-            setFindings(visible);
-        } catch (err) {
-            console.error(err);
-            toast.error(
-                err instanceof Error ? err.message : "Failed to load findings",
-            );
-            setFindings([]);
-        } finally {
-            setLoading(false);
-        }
-    }, [user]);
-
-    useEffect(() => {
-        void loadFindings();
-    }, [loadFindings]);
+    const findings = summaryQuery.data ?? [];
+    const summaryLoading =
+        summaryQuery.isLoading || (summaryQuery.isFetching && !summaryQuery.data);
+    const recentLoading =
+        recentQuery.isLoading || (recentQuery.isFetching && !recentQuery.data);
+    const chartsLoading = summaryLoading;
 
     const statusCounts = useMemo(() => {
         const counts: Record<StatusCardKey, number> = {
@@ -297,7 +490,7 @@ export default function Nonconformances() {
     }, [findings]);
 
     const typeCounts = useMemo(() => {
-        const counts: Record<FindingType, number> = { OFI: 0, Minor: 0, Major: 0 };
+        const counts: Record<FindingType, number> = { OFI: 0, NC: 0, Minor: 0, Major: 0 };
         for (const f of findings) {
             if (f.type in counts) counts[f.type] += 1;
         }
@@ -307,7 +500,7 @@ export default function Nonconformances() {
     const total = findings.length;
 
     const typeDistribution = useMemo(() => {
-        return (["OFI", "Minor", "Major"] as FindingType[]).map((type) => ({
+        return (["OFI", "NC", "Minor", "Major"] as FindingType[]).map((type) => ({
             name: TYPE_CONFIG[type].label,
             value: typeCounts[type],
             color: TYPE_COLORS[type],
@@ -348,19 +541,56 @@ export default function Nonconformances() {
             .slice(0, 8);
     }, [findings]);
 
-    const filteredPreview = useMemo(() => {
+    const filteredRecent = useMemo(() => {
+        const source = recentQuery.data ?? [];
         const list =
             statusFilter === "all"
-                ? findings
-                : findings.filter(
+                ? source
+                : source.filter(
                       (f) => normalizeStatusBucket(f.status) === statusFilter,
                   );
-        return list.slice(0, 8);
-    }, [findings, statusFilter]);
+        // Prefer filtered summary list when status filter active so counts stay consistent
+        if (statusFilter !== "all" && findings.length > 0) {
+            return findings
+                .filter((f) => normalizeStatusBucket(f.status) === statusFilter)
+                .slice(0, RECENT_LIMIT);
+        }
+        return list.slice(0, RECENT_LIMIT);
+    }, [recentQuery.data, statusFilter, findings]);
 
-    const goToFindings = () => {
+    const goToFindings = useCallback(() => {
         navigate("/audit-findings");
-    };
+    }, [navigate]);
+
+    const openFinding = useCallback(
+        (f: Finding) => {
+            navigate(
+                `/audit-findings/${f.auditId}/${encodeURIComponent(f.id)}`,
+            );
+        },
+        [navigate],
+    );
+
+    const handleFilter = useCallback((key: StatusCardKey) => {
+        setStatusFilter(key);
+    }, []);
+
+    const refresh = useCallback(async () => {
+        try {
+            await Promise.all([
+                queryClient.invalidateQueries({ queryKey: findingsDashboardQueryKey }),
+                queryClient.invalidateQueries({
+                    queryKey: ["findings-dashboard", "recent"],
+                }),
+            ]);
+        } catch (err) {
+            toast.error(
+                err instanceof Error ? err.message : "Failed to refresh findings",
+            );
+        }
+    }, [queryClient]);
+
+    const refreshing = summaryQuery.isFetching || recentQuery.isFetching;
 
     return (
         <div className="h-full bg-slate-50/60 overflow-auto">
@@ -389,111 +619,32 @@ export default function Nonconformances() {
                             type="button"
                             variant="outline"
                             size="sm"
-                            onClick={() => void loadFindings()}
-                            disabled={loading}
+                            onClick={() => void refresh()}
+                            disabled={refreshing}
                             className="gap-1.5 rounded-xl h-11 px-5 border-slate-200"
                         >
                             <RefreshCw
-                                className={cn("h-4 w-4", loading && "animate-spin")}
+                                className={cn("h-4 w-4", refreshing && "animate-spin")}
                             />
                             Refresh
                         </Button>
                     </div>
                 </div>
 
-                <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-5 gap-3">
-                    {STATUS_CARDS.map((item) => {
-                        const Icon = item.icon;
-                        const isActive = statusFilter === item.key;
-                        return (
-                            <button
-                                key={item.key}
-                                type="button"
-                                onClick={() => setStatusFilter(item.key)}
-                                className={cn(
-                                    "rounded-xl border p-4 text-left transition-all shadow-sm",
-                                    isActive
-                                        ? item.active
-                                        : "border-slate-200 bg-white hover:bg-slate-50",
-                                )}
-                            >
-                                <div className="flex items-start justify-between gap-2">
-                                    <span
-                                        className={cn(
-                                            "text-[11px] font-bold uppercase tracking-widest",
-                                            item.text,
-                                        )}
-                                    >
-                                        {item.label}
-                                    </span>
-                                    <span
-                                        className={cn(
-                                            "rounded-lg p-1.5 shrink-0",
-                                            item.iconWrap,
-                                        )}
-                                    >
-                                        <Icon className="h-3.5 w-3.5" />
-                                    </span>
-                                </div>
-                                <div
-                                    className={cn(
-                                        "text-3xl font-extrabold mt-2 tabular-nums",
-                                        item.text,
-                                    )}
-                                >
-                                    {loading ? "—" : statusCounts[item.key]}
-                                </div>
-                                <div className="text-xs text-slate-500 mt-1 leading-snug">
-                                    {item.hint}
-                                </div>
-                            </button>
-                        );
-                    })}
-                </div>
+                <StatusCardsGrid
+                    statusCounts={statusCounts}
+                    statusFilter={statusFilter}
+                    onFilter={handleFilter}
+                    loading={summaryLoading}
+                />
 
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                    {(["OFI", "Minor", "Major"] as FindingType[]).map((type) => {
-                        const cfg = TYPE_CONFIG[type];
-                        return (
-                            <div
-                                key={type}
-                                className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm"
-                            >
-                                <div className="flex items-center justify-between">
-                                    <span
-                                        className={cn(
-                                            "inline-flex px-2.5 py-1 rounded-full text-xs font-bold ring-1",
-                                            cfg.bg,
-                                            cfg.text,
-                                            cfg.ring,
-                                        )}
-                                    >
-                                        {cfg.label}
-                                    </span>
-                                    <ShieldAlert
-                                        className="h-4 w-4"
-                                        style={{ color: TYPE_COLORS[type] }}
-                                    />
-                                </div>
-                                <p className="text-3xl font-extrabold mt-3 tabular-nums text-[#213847]">
-                                    {loading ? "—" : typeCounts[type]}
-                                </p>
-                                <p className="text-xs text-slate-500 mt-1">
-                                    {total > 0
-                                        ? `${Math.round((typeCounts[type] / total) * 100)}% of findings`
-                                        : "No findings yet"}
-                                </p>
-                            </div>
-                        );
-                    })}
-                </div>
+                <TypeCardsGrid
+                    typeCounts={typeCounts}
+                    total={total}
+                    loading={summaryLoading}
+                />
 
-                {loading ? (
-                    <div className="flex items-center justify-center gap-2 py-20 text-slate-500">
-                        <Loader2 className="h-5 w-5 animate-spin" />
-                        Loading findings dashboard…
-                    </div>
-                ) : total === 0 ? (
+                {!summaryLoading && total === 0 ? (
                     <Card className="border-slate-200 shadow-sm rounded-xl bg-white p-12">
                         <div className="flex flex-col items-center text-center gap-3">
                             <div className="w-14 h-14 rounded-full bg-slate-50 flex items-center justify-center text-slate-300">
@@ -529,86 +680,100 @@ export default function Nonconformances() {
                                     </p>
                                 </div>
                                 <div className="h-[220px] w-full">
-                                    <ResponsiveContainer width="100%" height="100%">
-                                        <PieChart>
-                                            <Pie
-                                                data={typePieData}
-                                                cx="50%"
-                                                cy="50%"
-                                                innerRadius={58}
-                                                outerRadius={82}
-                                                paddingAngle={typePieData.length > 1 ? 4 : 0}
-                                                dataKey="value"
-                                                stroke="none"
-                                            >
-                                                {typePieData.map((entry, index) => (
-                                                    <Cell
-                                                        key={`type-${index}`}
-                                                        fill={entry.color}
+                                    {chartsLoading ? (
+                                        <div className="h-full flex items-center justify-center">
+                                            <SkeletonBlock className="h-40 w-40 rounded-full" />
+                                        </div>
+                                    ) : typePieData.length === 0 ? (
+                                        <p className="text-sm text-slate-500 h-full flex items-center justify-center">
+                                            No chart data
+                                        </p>
+                                    ) : (
+                                        <ResponsiveContainer width="100%" height="100%">
+                                            <PieChart>
+                                                <Pie
+                                                    data={typePieData}
+                                                    cx="50%"
+                                                    cy="50%"
+                                                    innerRadius={58}
+                                                    outerRadius={82}
+                                                    paddingAngle={typePieData.length > 1 ? 4 : 0}
+                                                    dataKey="value"
+                                                    stroke="none"
+                                                >
+                                                    {typePieData.map((entry, index) => (
+                                                        <Cell
+                                                            key={`type-${index}`}
+                                                            fill={entry.color}
+                                                        />
+                                                    ))}
+                                                    <Label
+                                                        content={({ viewBox }) => {
+                                                            const { cx, cy } = viewBox as {
+                                                                cx?: number;
+                                                                cy?: number;
+                                                            };
+                                                            if (cx == null || cy == null) return null;
+                                                            return (
+                                                                <text
+                                                                    x={cx}
+                                                                    y={cy}
+                                                                    textAnchor="middle"
+                                                                    dominantBaseline="central"
+                                                                >
+                                                                    <tspan
+                                                                        x={cx}
+                                                                        dy="-0.5em"
+                                                                        className="fill-slate-400 text-[10px] font-semibold"
+                                                                    >
+                                                                        Total
+                                                                    </tspan>
+                                                                    <tspan
+                                                                        x={cx}
+                                                                        dy="1.4em"
+                                                                        className="fill-[#111827] text-2xl font-black"
+                                                                    >
+                                                                        {total}
+                                                                    </tspan>
+                                                                </text>
+                                                            );
+                                                        }}
                                                     />
-                                                ))}
-                                                <Label
-                                                    content={({ viewBox }) => {
-                                                        const { cx, cy } = viewBox as {
-                                                            cx?: number;
-                                                            cy?: number;
-                                                        };
-                                                        if (cx == null || cy == null) return null;
-                                                        return (
-                                                            <text
-                                                                x={cx}
-                                                                y={cy}
-                                                                textAnchor="middle"
-                                                                dominantBaseline="central"
-                                                            >
-                                                                <tspan
-                                                                    x={cx}
-                                                                    dy="-0.5em"
-                                                                    className="fill-slate-400 text-[10px] font-semibold"
-                                                                >
-                                                                    Total
-                                                                </tspan>
-                                                                <tspan
-                                                                    x={cx}
-                                                                    dy="1.4em"
-                                                                    className="fill-[#111827] text-2xl font-black"
-                                                                >
-                                                                    {total}
-                                                                </tspan>
-                                                            </text>
-                                                        );
-                                                    }}
-                                                />
-                                            </Pie>
-                                            <RechartsTooltip />
-                                        </PieChart>
-                                    </ResponsiveContainer>
+                                                </Pie>
+                                                <RechartsTooltip />
+                                            </PieChart>
+                                        </ResponsiveContainer>
+                                    )}
                                 </div>
                                 <div className="w-full space-y-3 mt-2">
-                                    {typeDistribution.map((item) => (
-                                        <div
-                                            key={item.name}
-                                            className="flex items-center justify-between"
-                                        >
-                                            <div className="flex items-center gap-2.5">
-                                                <div
-                                                    className="w-2.5 h-2.5 rounded-full"
-                                                    style={{ backgroundColor: item.color }}
-                                                />
-                                                <span className="text-xs font-bold text-[#6B7280]">
-                                                    {item.name}
-                                                </span>
-                                            </div>
-                                            <div className="flex items-center gap-3">
-                                                <span className="text-xs font-black text-[#111827]">
-                                                    {item.value}
-                                                </span>
-                                                <span className="text-[10px] font-bold text-[#9CA3AF] w-10 text-right">
-                                                    {item.percentage}
-                                                </span>
-                                            </div>
-                                        </div>
-                                    ))}
+                                    {chartsLoading
+                                        ? Array.from({ length: 4 }).map((_, i) => (
+                                              <SkeletonBlock key={i} className="h-4 w-full" />
+                                          ))
+                                        : typeDistribution.map((item) => (
+                                              <div
+                                                  key={item.name}
+                                                  className="flex items-center justify-between"
+                                              >
+                                                  <div className="flex items-center gap-2.5">
+                                                      <div
+                                                          className="w-2.5 h-2.5 rounded-full"
+                                                          style={{ backgroundColor: item.color }}
+                                                      />
+                                                      <span className="text-xs font-bold text-[#6B7280]">
+                                                          {item.name}
+                                                      </span>
+                                                  </div>
+                                                  <div className="flex items-center gap-3">
+                                                      <span className="text-xs font-black text-[#111827]">
+                                                          {item.value}
+                                                      </span>
+                                                      <span className="text-[10px] font-bold text-[#9CA3AF] w-10 text-right">
+                                                          {item.percentage}
+                                                      </span>
+                                                  </div>
+                                              </div>
+                                          ))}
                                 </div>
                             </Card>
 
@@ -622,49 +787,63 @@ export default function Nonconformances() {
                                     </p>
                                 </div>
                                 <div className="h-[220px] w-full">
-                                    <ResponsiveContainer width="100%" height="100%">
-                                        <PieChart>
-                                            <Pie
-                                                data={statusPieData}
-                                                cx="50%"
-                                                cy="50%"
-                                                innerRadius={58}
-                                                outerRadius={82}
-                                                paddingAngle={statusPieData.length > 1 ? 4 : 0}
-                                                dataKey="value"
-                                                stroke="none"
-                                            >
-                                                {statusPieData.map((entry, index) => (
-                                                    <Cell
-                                                        key={`status-${index}`}
-                                                        fill={entry.color}
-                                                    />
-                                                ))}
-                                            </Pie>
-                                            <RechartsTooltip />
-                                        </PieChart>
-                                    </ResponsiveContainer>
+                                    {chartsLoading ? (
+                                        <div className="h-full flex items-center justify-center">
+                                            <SkeletonBlock className="h-40 w-40 rounded-full" />
+                                        </div>
+                                    ) : statusPieData.length === 0 ? (
+                                        <p className="text-sm text-slate-500 h-full flex items-center justify-center">
+                                            No chart data
+                                        </p>
+                                    ) : (
+                                        <ResponsiveContainer width="100%" height="100%">
+                                            <PieChart>
+                                                <Pie
+                                                    data={statusPieData}
+                                                    cx="50%"
+                                                    cy="50%"
+                                                    innerRadius={58}
+                                                    outerRadius={82}
+                                                    paddingAngle={statusPieData.length > 1 ? 4 : 0}
+                                                    dataKey="value"
+                                                    stroke="none"
+                                                >
+                                                    {statusPieData.map((entry, index) => (
+                                                        <Cell
+                                                            key={`status-${index}`}
+                                                            fill={entry.color}
+                                                        />
+                                                    ))}
+                                                </Pie>
+                                                <RechartsTooltip />
+                                            </PieChart>
+                                        </ResponsiveContainer>
+                                    )}
                                 </div>
                                 <div className="grid grid-cols-2 gap-3 mt-2">
-                                    {statusDistribution.map((item) => (
-                                        <div
-                                            key={item.name}
-                                            className="flex items-center justify-between rounded-lg border border-slate-100 px-3 py-2"
-                                        >
-                                            <div className="flex items-center gap-2">
-                                                <div
-                                                    className="w-2.5 h-2.5 rounded-full"
-                                                    style={{ backgroundColor: item.color }}
-                                                />
-                                                <span className="text-xs font-bold text-slate-600">
-                                                    {item.name}
-                                                </span>
-                                            </div>
-                                            <span className="text-xs font-black text-[#111827]">
-                                                {item.value}
-                                            </span>
-                                        </div>
-                                    ))}
+                                    {chartsLoading
+                                        ? Array.from({ length: 4 }).map((_, i) => (
+                                              <SkeletonBlock key={i} className="h-10 w-full" />
+                                          ))
+                                        : statusDistribution.map((item) => (
+                                              <div
+                                                  key={item.name}
+                                                  className="flex items-center justify-between rounded-lg border border-slate-100 px-3 py-2"
+                                              >
+                                                  <div className="flex items-center gap-2">
+                                                      <div
+                                                          className="w-2.5 h-2.5 rounded-full"
+                                                          style={{ backgroundColor: item.color }}
+                                                      />
+                                                      <span className="text-xs font-bold text-slate-600">
+                                                          {item.name}
+                                                      </span>
+                                                  </div>
+                                                  <span className="text-xs font-black text-[#111827]">
+                                                      {item.value}
+                                                  </span>
+                                              </div>
+                                          ))}
                                 </div>
                             </Card>
                         </div>
@@ -678,7 +857,9 @@ export default function Nonconformances() {
                                     Top audits with the most findings
                                 </p>
                             </div>
-                            {topAudits.length === 0 ? (
+                            {chartsLoading ? (
+                                <SkeletonBlock className="h-[280px] w-full" />
+                            ) : topAudits.length === 0 ? (
                                 <p className="text-sm text-slate-500">No audit data</p>
                             ) : (
                                 <div className="h-[280px] w-full">
@@ -712,68 +893,15 @@ export default function Nonconformances() {
                             )}
                         </Card>
 
-                        <Card className="border-none shadow-sm rounded-xl bg-white p-6">
-                            <div className="flex items-center justify-between mb-4">
-                                <div>
-                                    <h2 className="text-lg font-bold text-[#111827]">
-                                        Recent findings
-                                    </h2>
-                                    <p className="text-xs text-[#9CA3AF]">
-                                        {statusFilter === "all"
-                                            ? "Latest findings in your view"
-                                            : `Showing ${statusFilter} findings`}
-                                    </p>
-                                </div>
-                                <Button
-                                    variant="ghost"
-                                    size="sm"
-                                    className="text-xs font-semibold text-emerald-700"
-                                    onClick={() => navigate("/audit-findings")}
-                                >
-                                    View all
-                                </Button>
-                            </div>
-                            <ul className="divide-y divide-slate-100">
-                                {filteredPreview.map((f) => {
-                                    const cfg = TYPE_CONFIG[f.type];
-                                    return (
-                                        <li key={`${f.auditId}-${f.id}`}>
-                                            <button
-                                                type="button"
-                                                className="w-full text-left py-3 flex items-start gap-3 hover:bg-slate-50 rounded-lg px-2 -mx-2 transition-colors"
-                                                onClick={() =>
-                                                    navigate(
-                                                        `/audit-findings/${f.auditId}/${encodeURIComponent(f.id)}`,
-                                                    )
-                                                }
-                                            >
-                                                <span
-                                                    className={cn(
-                                                        "mt-0.5 shrink-0 inline-flex px-2 py-0.5 rounded-full text-[10px] font-bold ring-1",
-                                                        cfg.bg,
-                                                        cfg.text,
-                                                        cfg.ring,
-                                                    )}
-                                                >
-                                                    {cfg.label}
-                                                </span>
-                                                <div className="min-w-0 flex-1">
-                                                    <p className="text-sm font-semibold text-slate-800 truncate">
-                                                        {f.clauseRef || f.description || f.id}
-                                                    </p>
-                                                    <p className="text-xs text-slate-500 truncate mt-0.5">
-                                                        {f.auditName}
-                                                        {f.moduleName ? ` · ${f.moduleName}` : ""}
-                                                        {" · "}
-                                                        {normalizeStatusBucket(f.status)}
-                                                    </p>
-                                                </div>
-                                            </button>
-                                        </li>
-                                    );
-                                })}
-                            </ul>
-                        </Card>
+                        <RecentFindingsList
+                            items={filteredRecent}
+                            loading={
+                                statusFilter === "all" ? recentLoading : summaryLoading
+                            }
+                            statusFilter={statusFilter}
+                            onViewAll={goToFindings}
+                            onOpen={openFinding}
+                        />
                     </>
                 )}
             </div>
