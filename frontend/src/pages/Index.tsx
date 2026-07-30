@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { useCompanyStore } from "@/hooks/useCompanyStore";
 import { apiFetch } from "@/lib/api";
@@ -28,6 +28,7 @@ import {
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
   PieChart, Pie, Cell, ResponsiveContainer, Tooltip as RechartsTooltip,
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Legend, AreaChart, Area, Label
@@ -52,16 +53,88 @@ import {
 } from "@/lib/auditCompletion";
 import { getMergedPlanFindings } from "@/lib/auditFindings";
 
+function asArray(payload: unknown): any[] {
+  if (Array.isArray(payload)) return payload;
+  if (Array.isArray((payload as { data?: unknown })?.data)) {
+    return (payload as { data: unknown[] }).data;
+  }
+  if (Array.isArray((payload as { items?: unknown })?.items)) {
+    return (payload as { items: unknown[] }).items;
+  }
+  return [];
+}
+
+function KpiValueSkeleton() {
+  return <Skeleton className="h-8 w-16 mb-1 rounded-md" />;
+}
+
+function ChartAreaSkeleton({ className = "h-[240px]" }: { className?: string }) {
+  return (
+    <div className={`w-full flex flex-col justify-end gap-3 ${className}`}>
+      <Skeleton className="h-[55%] w-full rounded-lg" />
+      <div className="flex gap-2">
+        <Skeleton className="h-3 w-16 rounded-full" />
+        <Skeleton className="h-3 w-20 rounded-full" />
+      </div>
+    </div>
+  );
+}
+
+function ListRowsSkeleton({ rows = 4 }: { rows?: number }) {
+  return (
+    <div className="space-y-4">
+      {Array.from({ length: rows }).map((_, i) => (
+        <div key={i} className="flex items-center justify-between p-3">
+          <div className="flex items-center gap-4">
+            <Skeleton className="w-10 h-10 rounded-full" />
+            <div className="space-y-2">
+              <Skeleton className="h-3.5 w-40" />
+              <Skeleton className="h-3 w-24" />
+            </div>
+          </div>
+          <Skeleton className="h-6 w-20 rounded-full" />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function PieLegendSkeleton() {
+  return (
+    <div className="flex flex-col md:flex-row items-center justify-center gap-8 py-4 w-full">
+      <Skeleton className="h-[200px] w-[200px] rounded-full" />
+      <div className="flex-1 space-y-4 min-w-[200px] w-full">
+        {[0, 1, 2].map((i) => (
+          <div key={i} className="flex items-center justify-between">
+            <Skeleton className="h-4 w-36" />
+            <Skeleton className="h-4 w-16" />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 const Index = () => {
     const navigate = useNavigate();
     const { companies, hasFetchedCompanies, addCompany, addSite } = useCompanyStore();
-    const [users, setUsers] = useState<any[]>([]);
     const [auditPlans, setAuditPlans] = useState<any[]>([]);
+    const [findingsPlans, setFindingsPlans] = useState<any[]>([]);
     const [auditPrograms, setAuditPrograms] = useState<any[]>([]);
-    const [loading, setLoading] = useState(true);
     const [selfAssessments, setSelfAssessments] = useState<any[]>([]);
     const [gapAnalyses, setGapAnalyses] = useState<any[]>([]);
     const [currentUser, setCurrentUser] = useState<any>(null);
+    /** Independent widget loaders — never block the whole page. */
+    const [loadState, setLoadState] = useState({
+      plans: true,
+      findings: true,
+      programs: true,
+      sa: true,
+      gap: true,
+    });
+    const markLoaded = useCallback((key: keyof typeof loadState) => {
+      setLoadState((prev) => (prev[key] ? { ...prev, [key]: false } : prev));
+    }, []);
   
   // Onboarding state (starts only after trial welcome modal is dismissed)
   const [showWelcome, setShowWelcome] = useState(false);
@@ -79,8 +152,11 @@ const Index = () => {
   });
 
   // Calculate Metrics
-  const totalSites = companies.reduce((acc, c) => acc + (c.sites?.length || 0), 0);
-  const totalDepts = companies.reduce((acc, c) => acc + (c.sites?.reduce((a, s) => a + (s.departments?.length || 0), 0) || 0), 0);
+  const totalSites = useMemo(
+    () => companies.reduce((acc, c) => acc + (c.sites?.length || 0), 0),
+    [companies],
+  );
+  const sitesLoading = !hasFetchedCompanies;
 
   useEffect(() => {
     const onTrialDismissed = () => {
@@ -174,44 +250,74 @@ const Index = () => {
 
   useEffect(() => {
     let cancelled = false;
-    const fetchData = async () => {
-      try {
-        // Single plans fetch with includeData — avoids a second full list round-trip for charts.
-        const [usersRes, plansRes, programsRes, saResult, gaResult] = await Promise.all([
-          apiFetch(`/users`),
-          apiFetch(`/audit-plans?scope=org&includeData=true`),
-          apiFetch(`/audit-programs?scope=org`),
-          fetchSelfAssessmentsPersisted(),
-          fetchGapAnalysesPersisted(),
-        ]);
 
+    // Each widget resolves independently — layout never waits on the slowest request.
+    void (async () => {
+      try {
+        const res = await apiFetch(`/audit-plans?scope=org`);
         if (cancelled) return;
-        const asArray = (payload: unknown) =>
-          Array.isArray(payload)
-            ? payload
-            : Array.isArray((payload as { data?: unknown })?.data)
-              ? ((payload as { data: unknown[] }).data)
-              : Array.isArray((payload as { items?: unknown })?.items)
-                ? ((payload as { items: unknown[] }).items)
-                : [];
-        if (usersRes.ok) setUsers(asArray(await usersRes.json()));
-        if (plansRes.ok) setAuditPlans(asArray(await plansRes.json()));
-        if (programsRes.ok) setAuditPrograms(asArray(await programsRes.json()));
+        if (res.ok) setAuditPlans(asArray(await res.json()));
+      } catch (error) {
+        console.error("Failed to fetch audit plans:", error);
+        if (!cancelled) toast.error("Failed to load audit plans");
+      } finally {
+        if (!cancelled) markLoaded("plans");
+      }
+    })();
+
+    void (async () => {
+      try {
+        // Heavy payload only for finding distribution (needs auditData / findingsData).
+        const res = await apiFetch(`/audit-plans?scope=org&includeData=true`);
+        if (cancelled) return;
+        if (res.ok) setFindingsPlans(asArray(await res.json()));
+      } catch (error) {
+        console.error("Failed to fetch findings data:", error);
+      } finally {
+        if (!cancelled) markLoaded("findings");
+      }
+    })();
+
+    void (async () => {
+      try {
+        const res = await apiFetch(`/audit-programs?scope=org`);
+        if (cancelled) return;
+        if (res.ok) setAuditPrograms(asArray(await res.json()));
+      } catch (error) {
+        console.error("Failed to fetch audit programs:", error);
+      } finally {
+        if (!cancelled) markLoaded("programs");
+      }
+    })();
+
+    void (async () => {
+      try {
+        const saResult = await fetchSelfAssessmentsPersisted();
+        if (cancelled) return;
         setSelfAssessments(saResult.assessments);
+      } catch (error) {
+        console.error("Failed to fetch self assessments:", error);
+      } finally {
+        if (!cancelled) markLoaded("sa");
+      }
+    })();
+
+    void (async () => {
+      try {
+        const gaResult = await fetchGapAnalysesPersisted();
+        if (cancelled) return;
         setGapAnalyses(gaResult.analyses);
       } catch (error) {
-        console.error("Failed to fetch dashboard data:", error);
-        toast.error("Failed to load dashboard statistics");
+        console.error("Failed to fetch gap analyses:", error);
       } finally {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) markLoaded("gap");
       }
-    };
+    })();
 
-    void fetchData();
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [markLoaded]);
 
   const { saDistribution, totalSA } = useMemo(() => {
     const saHigh = selfAssessments.filter(a => a.score >= 38).length;
@@ -249,10 +355,10 @@ const Index = () => {
   }, [gapAnalyses]);
 
   const allFindings = useMemo(() =>
-    auditPlans.flatMap((plan) =>
+    findingsPlans.flatMap((plan) =>
       plan.auditData && plan.id ? getMergedPlanFindings(plan) : [],
     ),
-    [auditPlans],
+    [findingsPlans],
   );
 
   const { findingDistribution, findingPieData, totalFindings } = useMemo(() => {
@@ -301,54 +407,80 @@ const Index = () => {
     [auditPlans],
   );
 
-  const stats = [
-    {
-      label: "Sites",
-      value: totalSites,
-      icon: MapPin,
-      trend: "+5%",
-      trendColor: "text-emerald-500 bg-emerald-50",
-      iconColor: "text-emerald-600 bg-emerald-50"
-    },
-    {
-      label: "Gap Analyses",
-      value: gapAnalyses.length,
-      icon: Search,
-      trend: "+10%",
-      trendColor: "text-emerald-500 bg-emerald-50",
-      iconColor: "text-emerald-600 bg-emerald-50"
-    },
-    {
-      label: "Self Assessments",
-      value: selfAssessments.length,
-      icon: ShieldCheck,
-      trend: "+22%",
-      trendColor: "text-emerald-500 bg-emerald-50",
-      iconColor: "text-emerald-600 bg-emerald-50"
-    },
-    {
-      label: "Audit Programs",
-      value: auditPrograms.length,
-      icon: ClipboardCheck,
-      trend: "+8%",
-      trendColor: "text-emerald-500 bg-emerald-50",
-      iconColor: "text-emerald-600 bg-emerald-50"
-    },
-    {
-      label: "Total Audits",
-      value: auditPlans.length,
-      icon: BarChart3,
-      trend: "0%",
-      trendColor: "text-red-400 bg-red-50",
-      iconColor: "text-emerald-600 bg-emerald-50"
-    },
-  ];
+  const stats = useMemo(
+    () => [
+      {
+        label: "Sites",
+        value: totalSites,
+        loading: sitesLoading,
+        icon: MapPin,
+        trend: "+5%",
+        trendColor: "text-emerald-500 bg-emerald-50",
+        iconColor: "text-emerald-600 bg-emerald-50",
+      },
+      {
+        label: "Gap Analyses",
+        value: gapAnalyses.length,
+        loading: loadState.gap,
+        icon: Search,
+        trend: "+10%",
+        trendColor: "text-emerald-500 bg-emerald-50",
+        iconColor: "text-emerald-600 bg-emerald-50",
+      },
+      {
+        label: "Self Assessments",
+        value: selfAssessments.length,
+        loading: loadState.sa,
+        icon: ShieldCheck,
+        trend: "+22%",
+        trendColor: "text-emerald-500 bg-emerald-50",
+        iconColor: "text-emerald-600 bg-emerald-50",
+      },
+      {
+        label: "Audit Programs",
+        value: auditPrograms.length,
+        loading: loadState.programs,
+        icon: ClipboardCheck,
+        trend: "+8%",
+        trendColor: "text-emerald-500 bg-emerald-50",
+        iconColor: "text-emerald-600 bg-emerald-50",
+      },
+      {
+        label: "Total Audits",
+        value: auditPlans.length,
+        loading: loadState.plans,
+        icon: BarChart3,
+        trend: "0%",
+        trendColor: "text-red-400 bg-red-50",
+        iconColor: "text-emerald-600 bg-emerald-50",
+      },
+    ],
+    [
+      totalSites,
+      sitesLoading,
+      gapAnalyses.length,
+      loadState.gap,
+      loadState.sa,
+      loadState.programs,
+      loadState.plans,
+      selfAssessments.length,
+      auditPrograms.length,
+      auditPlans.length,
+    ],
+  );
 
   // Status Calculations
-  const totalScheduledCount = auditPlans.filter(
-    (p) => !isAuditPlanCompleted(p) && getProgress(p) === 0,
-  ).length;
-  const totalCompletedCount = auditPlans.filter((p) => isAuditPlanCompleted(p)).length;
+  const totalScheduledCount = useMemo(
+    () =>
+      auditPlans.filter(
+        (p) => !isAuditPlanCompleted(p) && getProgress(p) === 0,
+      ).length,
+    [auditPlans],
+  );
+  const totalCompletedCount = useMemo(
+    () => auditPlans.filter((p) => isAuditPlanCompleted(p)).length,
+    [auditPlans],
+  );
 
   // Dynamic Trend Data: Show months from Jan to July
   const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -356,18 +488,22 @@ const Index = () => {
   const currentYear = now.getFullYear();
 
   // Create an array for Jan to July (7 months)
-  const trendData = Array.from({ length: 7 }, (_, i) => {
-    const monthName = months[i];
-    const auditsInMonth = auditPlans.filter(p => {
-      const created = new Date(p.createdAt);
-      return created.getMonth() === i && created.getFullYear() === currentYear;
-    });
-    return {
-      month: monthName,
-      scheduled: auditsInMonth.length,
-      completed: auditsInMonth.filter((p) => isAuditPlanCompleted(p)).length,
-    };
-  });
+  const trendData = useMemo(
+    () =>
+      Array.from({ length: 7 }, (_, i) => {
+        const monthName = months[i];
+        const auditsInMonth = auditPlans.filter((p) => {
+          const created = new Date(p.createdAt);
+          return created.getMonth() === i && created.getFullYear() === currentYear;
+        });
+        return {
+          month: monthName,
+          scheduled: auditsInMonth.length,
+          completed: auditsInMonth.filter((p) => isAuditPlanCompleted(p)).length,
+        };
+      }),
+    [auditPlans, currentYear],
+  );
 
   // Calculate dynamic max for Y-axis scaling
   const maxVal = trendData.reduce((max, d) => Math.max(max, d.scheduled, d.completed), 0);
@@ -379,17 +515,6 @@ const Index = () => {
     shouldAwaitTrialWelcome(currentUser) &&
     !trialWelcomeDismissed;
   const showOnboarding = showWelcome && !onboardingBlocked;
-
-  if (loading) {
-    return (
-      <div className="h-screen flex items-center justify-center bg-background">
-        <div className="flex flex-col items-center gap-4">
-          <div className="w-12 h-12 border-4 border-emerald-100 border-t-emerald-600 rounded-full animate-spin" />
-          <p className="text-sm font-medium text-slate-500">Loading Dashboard...</p>
-        </div>
-      </div>
-    );
-  }
 
   return (
     <div className="min-h-screen bg-transparent px-6 py-6">
@@ -408,7 +533,11 @@ const Index = () => {
                     {stat.trend}
                   </div>
                 </div>
-                <h3 className="text-2xl font-extrabold text-[#111827] mb-1">{stat.value}</h3>
+                {stat.loading ? (
+                  <KpiValueSkeleton />
+                ) : (
+                  <h3 className="text-2xl font-extrabold text-[#111827] mb-1">{stat.value}</h3>
+                )}
                 <p className="text-xs font-semibold text-[#6B7280] mb-2">{stat.label}</p>
                 <p className="text-[10px] text-[#9CA3AF]">from last month</p>
               </CardContent>
@@ -432,15 +561,26 @@ const Index = () => {
             <div className="flex items-center gap-10 mb-6">
               <div>
                 <p className="text-[10px] font-semibold text-[#9CA3AF] mb-1">Total Scheduled</p>
-                <p className="text-xl font-extrabold text-[#111827]">{totalScheduledCount}</p>
+                {loadState.plans ? (
+                  <Skeleton className="h-7 w-12 rounded-md" />
+                ) : (
+                  <p className="text-xl font-extrabold text-[#111827]">{totalScheduledCount}</p>
+                )}
               </div>
               <div>
                 <p className="text-[10px] font-semibold text-[#9CA3AF] mb-1">Total Completed</p>
-                <p className="text-xl font-extrabold text-[#111827]">{totalCompletedCount}</p>
+                {loadState.plans ? (
+                  <Skeleton className="h-7 w-12 rounded-md" />
+                ) : (
+                  <p className="text-xl font-extrabold text-[#111827]">{totalCompletedCount}</p>
+                )}
               </div>
             </div>
 
             <div className="h-[240px] w-full">
+              {loadState.plans ? (
+                <ChartAreaSkeleton />
+              ) : (
               <ResponsiveContainer width="100%" height="100%">
                 <AreaChart data={trendData}>
                   <defs>
@@ -493,6 +633,7 @@ const Index = () => {
                   />
                 </AreaChart>
               </ResponsiveContainer>
+              )}
             </div>
 
             <div className="flex items-center gap-6 mt-4">
@@ -518,7 +659,9 @@ const Index = () => {
             </div>
 
             <div className="space-y-4">
-              {upcomingAudits.length > 0 ? (
+              {loadState.plans ? (
+                <ListRowsSkeleton rows={4} />
+              ) : upcomingAudits.length > 0 ? (
                 upcomingAudits.map((plan, idx) => {
                   const progress = getProgress(plan);
                   const status = getAuditPlanStatusLabel(plan);
@@ -572,7 +715,9 @@ const Index = () => {
             </div>
 
             <div className="space-y-4">
-              {completedAudits.length > 0 ? (
+              {loadState.plans ? (
+                <ListRowsSkeleton rows={3} />
+              ) : completedAudits.length > 0 ? (
                 completedAudits.map((plan) => {
                   const leadAuditorName = plan.leadAuditor
                     ? `${plan.leadAuditor.firstName} ${plan.leadAuditor.lastName}`
@@ -633,6 +778,12 @@ const Index = () => {
             </div>
 
             <div className="flex flex-col items-center justify-center py-2">
+              {loadState.findings ? (
+                <div className="w-full py-2">
+                  <PieLegendSkeleton />
+                </div>
+              ) : (
+              <>
               <div className="h-[220px] w-full relative">
                 {totalFindings === 0 ? (
                   <div className="h-full flex flex-col items-center justify-center text-center px-4">
@@ -702,6 +853,8 @@ const Index = () => {
                   </div>
                 ))}
               </div>
+              </>
+              )}
             </div>
           </Card>
 
@@ -715,6 +868,9 @@ const Index = () => {
             </div>
 
             <div className="h-[300px] w-full mt-4">
+              {loadState.plans ? (
+                <ChartAreaSkeleton className="h-[300px]" />
+              ) : (
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart
                   data={trendData}
@@ -756,6 +912,7 @@ const Index = () => {
                   />
                 </BarChart>
               </ResponsiveContainer>
+              )}
             </div>
 
             <div className="flex items-center gap-6 mt-6">
@@ -783,6 +940,9 @@ const Index = () => {
               <ShieldCheck className="w-5 h-5 text-slate-300" />
             </div>
 
+            {loadState.sa ? (
+              <PieLegendSkeleton />
+            ) : (
             <div className="flex flex-col md:flex-row items-center justify-center gap-8 py-4">
               <div className="h-[200px] w-[200px] relative">
                 <ResponsiveContainer width="100%" height="100%">
@@ -832,6 +992,7 @@ const Index = () => {
                 ))}
               </div>
             </div>
+            )}
           </Card>
 
           {/* Gap Analysis Scores */}
@@ -844,6 +1005,9 @@ const Index = () => {
               <Search className="w-5 h-5 text-slate-300" />
             </div>
 
+            {loadState.gap ? (
+              <PieLegendSkeleton />
+            ) : (
             <div className="flex flex-col md:flex-row items-center justify-center gap-8 py-4">
               <div className="h-[200px] w-[200px] relative">
                 <ResponsiveContainer width="100%" height="100%">
@@ -893,6 +1057,7 @@ const Index = () => {
                 ))}
               </div>
             </div>
+            )}
           </Card>
         </div>
 

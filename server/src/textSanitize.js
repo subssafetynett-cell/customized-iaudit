@@ -222,23 +222,42 @@ const SAFE_PDF_DATA_RE = /^data:application\/pdf;base64,[A-Za-z0-9+/=]+$/i;
 const AUDIT_EVIDENCE_IMAGE_MAX = 8_000_000;
 const AUDIT_EVIDENCE_PDF_MAX = 15_000_000;
 
-/** Single audit evidence attachment (PNG/JPEG data URL or PDF). */
+/** Single audit evidence attachment (PNG/JPEG data URL, PDF data URL, or Cloudinary HTTPS URL). */
 export function sanitizeAuditEvidenceMediaItem(item) {
     if (!item || typeof item !== 'object') return null;
     const name = sanitizePlainText(item.name, 255) || 'file';
     const type = typeof item.type === 'string' ? item.type.toLowerCase() : '';
     const rawData = typeof item.data === 'string' ? item.data.trim() : '';
+    const description = sanitizePlainText(item.description, 500) || undefined;
 
-    if (type.startsWith('image/')) {
+    // Cloudinary (or other https) URLs for images and PDFs
+    if (SAFE_HTTP_LOGO_RE.test(rawData)) {
+        const url = rawData.slice(0, Math.min(rawData.length, 2048));
+        const mime =
+            type.startsWith('image/') || type === 'application/pdf'
+                ? type
+                : /\.pdf(\?|#|$)/i.test(url)
+                  ? 'application/pdf'
+                  : 'image/jpeg';
+        return description
+            ? { name, type: mime, data: url, description }
+            : { name, type: mime, data: url };
+    }
+
+    if (type.startsWith('image/') || SAFE_DATA_IMAGE_RE.test(rawData)) {
         const data = sanitizeLogoField(rawData, AUDIT_EVIDENCE_IMAGE_MAX);
         if (!data) return null;
         const mime = data.startsWith('data:image/png') ? 'image/png' : 'image/jpeg';
-        return { name, type: mime, data };
+        return description
+            ? { name, type: mime, data, description }
+            : { name, type: mime, data };
     }
 
-    if (type === 'application/pdf') {
+    if (type === 'application/pdf' || rawData.startsWith('data:application/pdf')) {
         if (!SAFE_PDF_DATA_RE.test(rawData) || rawData.length > AUDIT_EVIDENCE_PDF_MAX) return null;
-        return { name, type: 'application/pdf', data: rawData };
+        return description
+            ? { name, type: 'application/pdf', data: rawData, description }
+            : { name, type: 'application/pdf', data: rawData };
     }
 
     return null;

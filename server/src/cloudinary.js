@@ -89,8 +89,15 @@ export async function uploadEvidenceBuffer(buffer, options = {}) {
                 ...(isPdf
                     ? {}
                     : {
+                          // Client already compresses; keep a light server-side guardrail.
                           transformation: [
-                              { width: 1600, height: 1600, crop: 'limit', quality: 'auto:good' },
+                              {
+                                  width: 1280,
+                                  height: 1280,
+                                  crop: 'limit',
+                                  quality: 'auto:good',
+                                  fetch_format: 'auto',
+                              },
                           ],
                       }),
             },

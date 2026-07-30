@@ -1,6 +1,14 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useParams, useLocation, useNavigate, useSearchParams } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
 import { apiFetch } from "@/lib/api";
+import {
+  AUDIT_PLAN_GC_MS,
+  AUDIT_PLAN_STALE_MS,
+  auditPlanQueryKey,
+  fetchAuditPlanForExecute,
+} from "@/lib/auditPlanExecute";
+import { AuditExecuteSkeleton } from "@/components/AuditExecuteSkeleton";
 import { useCompanyStore } from "@/hooks/useCompanyStore";
 import {
   ArrowLeft,
@@ -71,7 +79,10 @@ import { QuestionEvidenceUpload } from "@/components/QuestionEvidenceUpload";
 import {
   AUDIT_EVIDENCE_ACCEPT,
   AUDIT_EVIDENCE_UNSUPPORTED_MESSAGE,
-  processAuditEvidenceFileList,
+  prepareEvidenceUploads,
+  revokeEvidencePreviewUrl,
+  retryEvidenceUpload,
+  runEvidenceUploadJobs,
   sanitizeAuditEvidenceMediaMap,
   type AuditEvidenceMedia,
 } from "@/lib/evidenceImageUpload";
@@ -293,16 +304,31 @@ const AuditExecute = () => {
       ? "relative z-[60] ring-[4px] ring-emerald-500/80 ring-offset-2 rounded-xl"
       : "";
 
-  // State for the loaded plan
-  const [currentPlan, setCurrentPlan] = useState<any>(location.state?.plan);
+  // State for the loaded plan — seed from navigation so Perform Audit paints instantly
+  const navPlan = (location.state as { plan?: any } | null)?.plan;
+  const [currentPlan, setCurrentPlan] = useState<any>(navPlan ?? null);
   const { companies: storeCompanies } = useCompanyStore();
   const companies = storeCompanies as any[];
-  // Avoid flashing "not found" before /audit-plans/:id returns (direct URL / refresh).
-  const [isLoadingPlan, setIsLoadingPlan] = useState(
-    () => Boolean(id) && !location.state?.plan,
-  );
   const [planLoadError, setPlanLoadError] = useState<string | null>(null);
-  const plan = currentPlan;
+  const [answersHydrated, setAnswersHydrated] = useState(false);
+  const hydrateSigRef = useRef<string>("");
+
+  const planQuery = useQuery({
+    queryKey: auditPlanQueryKey(id || ""),
+    queryFn: () => fetchAuditPlanForExecute(id!),
+    enabled: Boolean(id),
+    staleTime: AUDIT_PLAN_STALE_MS,
+    gcTime: AUDIT_PLAN_GC_MS,
+    refetchOnWindowFocus: false,
+    initialData: navPlan?.id && String(navPlan.id) === String(id) ? navPlan : undefined,
+    placeholderData: (previous) =>
+      previous ??
+      (navPlan?.id && String(navPlan.id) === String(id) ? navPlan : undefined),
+  });
+
+  const isLoadingPlan = planQuery.isLoading && !currentPlan && !planQuery.data;
+  const isRefreshing = planQuery.isFetching && Boolean(currentPlan || planQuery.data);
+  const plan = currentPlan || planQuery.data || null;
   const programDepartments = useMemo(
     () => resolveDepartmentsFromProgram(plan?.auditProgram, companies),
     [plan?.auditProgram, companies],
@@ -592,7 +618,6 @@ const AuditExecute = () => {
 
 
 
-  const [isRefreshing, setIsRefreshing] = useState(false);
   const [findingsReportForm, setFindingsReportForm] = useState<FindingsReportForm>(
     defaultFindingsReportForm(),
   );
@@ -607,159 +632,168 @@ const AuditExecute = () => {
     setNcByFindingId((prev) => ({ ...prev, [nc.findingId]: nc }));
   }, []);
 
-  // Load saved progress
+  // Hydrate execute state from React Query plan (nav seed paints instantly; refresh is non-blocking)
   useEffect(() => {
-    const fetchPlanDetails = async () => {
-      if (!id) {
-        setIsLoadingPlan(false);
-        setPlanLoadError("Missing audit plan id");
-        return;
-      }
-      setIsRefreshing(true);
-      setIsLoadingPlan(true);
-      setPlanLoadError(null);
-      try {
-        const res = await apiFetch(`/audit-plans/${id}`);
-        if (!res.ok) throw new Error("Plan not found");
-        const found = await res.json();
-        if (found) {
-          setCurrentPlan(found);
-          if (found.auditData) {
-            const data = typeof found.auditData === 'string' ? JSON.parse(found.auditData) : found.auditData;
-            const ids = parseAuditPlanTemplateIds(found.templateId);
-            const preferredActive =
-              typeof data.activeModuleId === "string" && ids.includes(data.activeModuleId)
-                ? data.activeModuleId
-                : ids[0] || "";
-            if (preferredActive) setActiveModuleId(preferredActive);
+    if (planQuery.isError) {
+      setPlanLoadError(
+        planQuery.error instanceof Error
+          ? planQuery.error.message
+          : "Failed to load plan",
+      );
+      return;
+    }
+    const found = planQuery.data as any;
+    if (!found?.id) return;
 
-            if (data.moduleDataByTemplateId && typeof data.moduleDataByTemplateId === "object") {
-              setModuleDataByTemplateId(data.moduleDataByTemplateId);
-              const mod = preferredActive
-                ? data.moduleDataByTemplateId[preferredActive]
-                : null;
-              if (mod?.checklistData) setChecklistData(mod.checklistData);
-              else if (data.checklistData) setChecklistData(data.checklistData);
-              if (mod?.sectionData) setSectionData(mod.sectionData);
-              else if (data.sectionData) setSectionData(data.sectionData);
-              if (mod?.extraChecklistItems) setExtraChecklistItems(mod.extraChecklistItems);
-              else if (data.extraChecklistItems) setExtraChecklistItems(data.extraChecklistItems);
-            } else {
-              if (data.checklistData) setChecklistData(data.checklistData);
-              if (data.sectionData) setSectionData(data.sectionData);
-              if (data.extraChecklistItems) setExtraChecklistItems(data.extraChecklistItems);
-              if (preferredActive && (data.checklistData || data.editableChecklist)) {
-                setModuleDataByTemplateId({
-                  [preferredActive]: {
-                    checklistData: data.checklistData,
-                    editableChecklist: data.editableChecklist,
-                    extraChecklistItems: data.extraChecklistItems,
-                  },
-                });
-              }
-            }
+    setPlanLoadError(null);
+    setCurrentPlan(found);
 
-            if (data.clauseData) setClauseData(data.clauseData);
-            if (data.previousFindings) setPreviousFindings(data.previousFindings);
-            if (data.detailsOfChanges) setDetailsOfChanges(data.detailsOfChanges);
-            if (data.auditExecuteLayout) {
-              setAuditExecuteLayout(mergeAuditExecuteLayout(data.auditExecuteLayout));
-            }
-            if (data.positiveAspects) setPositiveAspects(data.positiveAspects);
-            if (data.opportunities) setOpportunities(data.opportunities);
-            if (data.nonConformances) setNonConformances(data.nonConformances);
-            if (data.executiveSummary) setExecutiveSummary(data.executiveSummary);
-            if (data.summaryCounts) setSummaryCounts(data.summaryCounts);
-            if (data.auditFindings) setAuditFindings(data.auditFindings);
-            if (data.auditGlobalInfo) {
-              setAuditGlobalInfo((prev) => ({ ...prev, ...data.auditGlobalInfo }));
-            }
-            if (data.processAudits) setProcessAudits(data.processAudits);
-            if (data.showExecutiveSummary !== undefined) setShowExecutiveSummary(data.showExecutiveSummary);
-            if (data.showAuditFindings !== undefined) setShowAuditFindings(data.showAuditFindings);
-            if (data.clauseFiles) setClauseFiles(sanitizeAuditEvidenceMediaMap(data.clauseFiles));
-            if (data.genericFiles) {
-              const sanitized = sanitizeAuditEvidenceMediaMap(data.genericFiles);
-              setGenericFiles(sanitized);
-              // Backfill evidenceMedia onto checklist rows so assignees always see NC evidence
-              setChecklistData((prev) => {
-                let next = prev;
-                let changed = false;
-                for (const [key, files] of Object.entries(sanitized)) {
-                  const m = /^clause_checklist_(\d+)$/.exec(key);
-                  if (!m || !Array.isArray(files) || files.length === 0) continue;
-                  const idx = Number(m[1]);
-                  if (!Number.isInteger(idx) || idx < 0) continue;
-                  const row = next[idx] || prev[idx] || {};
-                  const existing = Array.isArray((row as any).evidenceMedia)
-                    ? (row as any).evidenceMedia
-                    : [];
-                  if (existing.length >= files.length) continue;
-                  if (!changed) {
-                    next = { ...prev };
-                    changed = true;
-                  }
-                  next[idx] = {
-                    ...(next[idx] || row),
-                    evidenceMedia: files.map((f) => ({
-                      name: f.name,
-                      data: f.data,
-                      type: f.type,
-                      description: f.description,
-                    })),
-                  } as any;
-                }
-                return changed ? next : prev;
-              });
-            }
-            setFindingsReportForm(buildFindingsReportDefaults(found, data));
-            const currentTemplate = preferredActive
-              ? findAuditTemplate(preferredActive)
-              : findAuditTemplate(found.templateId);
+    const dataSig = `${found.id}:${String(found.updatedAt ?? "")}:${found.auditData != null ? "1" : "0"}`;
+    if (hydrateSigRef.current === dataSig) {
+      return;
+    }
+    hydrateSigRef.current = dataSig;
 
-            const modEditable =
-              preferredActive &&
-              data.moduleDataByTemplateId?.[preferredActive]?.editableChecklist;
-            if (Array.isArray(modEditable) && modEditable.length > 0) {
-              setEditableChecklist(modEditable);
-            } else if (data.editableChecklist && data.editableChecklist.length > 0) {
-              setEditableChecklist(data.editableChecklist);
-            } else if (currentTemplate?.content) {
-              setEditableChecklist(currentTemplate.content);
-            }
-          } else {
-            setFindingsReportForm(buildFindingsReportDefaults(found));
-            const ids = parseAuditPlanTemplateIds(found.templateId);
-            if (ids[0]) setActiveModuleId(ids[0]);
-            const currentTemplate = findAuditTemplate(ids[0] || found.templateId);
-            if (currentTemplate?.content) {
-              setEditableChecklist(currentTemplate.content);
-            }
-          }
+    if (found.auditData) {
+      const data =
+        typeof found.auditData === "string"
+          ? JSON.parse(found.auditData)
+          : found.auditData;
+      const ids = parseAuditPlanTemplateIds(found.templateId);
+      const preferredActive =
+        typeof data.activeModuleId === "string" && ids.includes(data.activeModuleId)
+          ? data.activeModuleId
+          : ids[0] || "";
+      if (preferredActive) setActiveModuleId(preferredActive);
 
-          try {
-            const ncs = await listNonconformancesForPlan(Number(found.id));
-            const map: Record<string, NonconformanceSummary> = {};
-            for (const nc of ncs) {
-              if (nc?.findingId) map[nc.findingId] = nc;
-            }
-            setNcByFindingId(map);
-          } catch {
-            setNcByFindingId({});
-          }
-        } else {
-          setPlanLoadError("Plan not found");
+      if (data.moduleDataByTemplateId && typeof data.moduleDataByTemplateId === "object") {
+        setModuleDataByTemplateId(data.moduleDataByTemplateId);
+        const mod = preferredActive
+          ? data.moduleDataByTemplateId[preferredActive]
+          : null;
+        if (mod?.checklistData) setChecklistData(mod.checklistData);
+        else if (data.checklistData) setChecklistData(data.checklistData);
+        if (mod?.sectionData) setSectionData(mod.sectionData);
+        else if (data.sectionData) setSectionData(data.sectionData);
+        if (mod?.extraChecklistItems) setExtraChecklistItems(mod.extraChecklistItems);
+        else if (data.extraChecklistItems) setExtraChecklistItems(data.extraChecklistItems);
+      } else {
+        if (data.checklistData) setChecklistData(data.checklistData);
+        if (data.sectionData) setSectionData(data.sectionData);
+        if (data.extraChecklistItems) setExtraChecklistItems(data.extraChecklistItems);
+        if (preferredActive && (data.checklistData || data.editableChecklist)) {
+          setModuleDataByTemplateId({
+            [preferredActive]: {
+              checklistData: data.checklistData,
+              editableChecklist: data.editableChecklist,
+              extraChecklistItems: data.extraChecklistItems,
+            },
+          });
         }
-      } catch (error) {
-        console.error("Failed to fetch plan details:", error);
-        setPlanLoadError(error instanceof Error ? error.message : "Failed to load plan");
-      } finally {
-        setIsRefreshing(false);
-        setIsLoadingPlan(false);
       }
+
+      if (data.clauseData) setClauseData(data.clauseData);
+      if (data.previousFindings) setPreviousFindings(data.previousFindings);
+      if (data.detailsOfChanges) setDetailsOfChanges(data.detailsOfChanges);
+      if (data.auditExecuteLayout) {
+        setAuditExecuteLayout(mergeAuditExecuteLayout(data.auditExecuteLayout));
+      }
+      if (data.positiveAspects) setPositiveAspects(data.positiveAspects);
+      if (data.opportunities) setOpportunities(data.opportunities);
+      if (data.nonConformances) setNonConformances(data.nonConformances);
+      if (data.executiveSummary) setExecutiveSummary(data.executiveSummary);
+      if (data.summaryCounts) setSummaryCounts(data.summaryCounts);
+      if (data.auditFindings) setAuditFindings(data.auditFindings);
+      if (data.auditGlobalInfo) {
+        setAuditGlobalInfo((prev) => ({ ...prev, ...data.auditGlobalInfo }));
+      }
+      if (data.processAudits) setProcessAudits(data.processAudits);
+      if (data.showExecutiveSummary !== undefined) setShowExecutiveSummary(data.showExecutiveSummary);
+      if (data.showAuditFindings !== undefined) setShowAuditFindings(data.showAuditFindings);
+      if (data.clauseFiles) setClauseFiles(sanitizeAuditEvidenceMediaMap(data.clauseFiles));
+      if (data.genericFiles) {
+        const sanitized = sanitizeAuditEvidenceMediaMap(data.genericFiles);
+        setGenericFiles(sanitized);
+        setChecklistData((prev) => {
+          let next = prev;
+          let changed = false;
+          for (const [key, files] of Object.entries(sanitized)) {
+            const m = /^clause_checklist_(\d+)$/.exec(key);
+            if (!m || !Array.isArray(files) || files.length === 0) continue;
+            const idx = Number(m[1]);
+            if (!Number.isInteger(idx) || idx < 0) continue;
+            const row = next[idx] || prev[idx] || {};
+            const existing = Array.isArray((row as any).evidenceMedia)
+              ? (row as any).evidenceMedia
+              : [];
+            if (existing.length >= files.length) continue;
+            if (!changed) {
+              next = { ...prev };
+              changed = true;
+            }
+            next[idx] = {
+              ...(next[idx] || row),
+              evidenceMedia: files.map((f) => ({
+                name: f.name,
+                data: f.data,
+                type: f.type,
+                description: f.description,
+              })),
+            } as any;
+          }
+          return changed ? next : prev;
+        });
+      }
+      setFindingsReportForm(buildFindingsReportDefaults(found, data));
+      const currentTemplate = preferredActive
+        ? findAuditTemplate(preferredActive)
+        : findAuditTemplate(found.templateId);
+
+      const modEditable =
+        preferredActive &&
+        data.moduleDataByTemplateId?.[preferredActive]?.editableChecklist;
+      if (Array.isArray(modEditable) && modEditable.length > 0) {
+        setEditableChecklist(modEditable);
+      } else if (data.editableChecklist && data.editableChecklist.length > 0) {
+        setEditableChecklist(data.editableChecklist);
+      } else if (currentTemplate?.content) {
+        setEditableChecklist(currentTemplate.content);
+      }
+      setAnswersHydrated(true);
+    } else {
+      setFindingsReportForm(buildFindingsReportDefaults(found));
+      const ids = parseAuditPlanTemplateIds(found.templateId);
+      if (ids[0]) setActiveModuleId(ids[0]);
+      const currentTemplate = findAuditTemplate(ids[0] || found.templateId);
+      if (currentTemplate?.content) {
+        setEditableChecklist(currentTemplate.content);
+      }
+      // List stub has no answers yet — keep placeholders until server auditData arrives
+      setAnswersHydrated(false);
+    }
+  }, [planQuery.data, planQuery.isError, planQuery.error]);
+
+  // NC list loads independently — never blocks first paint
+  useEffect(() => {
+    const planIdNum = Number(planQuery.data?.id);
+    if (!Number.isInteger(planIdNum) || planIdNum < 1) return;
+    let cancelled = false;
+    void listNonconformancesForPlan(planIdNum)
+      .then((ncs) => {
+        if (cancelled) return;
+        const map: Record<string, NonconformanceSummary> = {};
+        for (const nc of ncs) {
+          if (nc?.findingId) map[nc.findingId] = nc;
+        }
+        setNcByFindingId(map);
+      })
+      .catch(() => {
+        if (!cancelled) setNcByFindingId({});
+      });
+    return () => {
+      cancelled = true;
     };
-    fetchPlanDetails();
-  }, [id]);
+  }, [planQuery.data?.id]);
 
   // Companies come from useCompanyStore (shared singleton, no duplicate fetch).
 
@@ -1134,6 +1168,8 @@ const AuditExecute = () => {
         },
         lastSaved: new Date().toISOString(),
         progress: progressValue,
+        totalItems,
+        completedItems,
         editableChecklist,
         clauseFiles: sanitizeAuditEvidenceMediaMap(clauseFiles),
         genericFiles: sanitizeAuditEvidenceMediaMap(genericFiles),
@@ -1179,6 +1215,8 @@ const AuditExecute = () => {
       showExecutiveSummary,
       showAuditFindings,
       progressValue,
+      totalItems,
+      completedItems,
       editableChecklist,
       clauseFiles,
       genericFiles,
@@ -1215,6 +1253,22 @@ const AuditExecute = () => {
     buildAuditData: buildAuditDataPayload,
     enabled: !!plan && !!template && !isAuditeeReadOnly,
     deps: [buildAuditDataPayload, isAuditeeReadOnly],
+    onSaved: (result) => {
+      setCurrentPlan((prev: any) =>
+        prev
+          ? {
+              ...prev,
+              ...(result.status ? { status: result.status } : {}),
+              ...(typeof result.progress === "number"
+                ? { progress: result.progress }
+                : {}),
+              ...(typeof result.auditCompleted === "boolean"
+                ? { auditCompleted: result.auditCompleted }
+                : {}),
+            }
+          : prev,
+      );
+    },
   });
 
   const collectFindings = () => {
@@ -1340,17 +1394,10 @@ const AuditExecute = () => {
   ]);
 
   if (isLoadingPlan) {
-    return (
-      <div className="flex-1 p-8 pt-6 min-h-screen flex items-center justify-center">
-        <div className="text-center space-y-3">
-          <Loader2 className="w-8 h-8 animate-spin text-emerald-600 mx-auto" />
-          <p className="text-sm text-slate-500">Loading audit plan…</p>
-        </div>
-      </div>
-    );
+    return <AuditExecuteSkeleton />;
   }
 
-  if (!plan) {
+  if (!plan && planQuery.isError) {
     return (
       <div className="flex-1 p-8 pt-6 min-h-screen flex items-center justify-center">
         <div className="text-center">
@@ -1368,7 +1415,16 @@ const AuditExecute = () => {
     );
   }
 
+  if (!plan) {
+    return <AuditExecuteSkeleton />;
+  }
+
   if (!template) {
+    // Template resolves from plan.templateId (usually available from nav state).
+    // While waiting for server plan, keep shell; only hard-fail after fetch settles.
+    if (planQuery.isFetching || planQuery.isLoading) {
+      return <AuditExecuteSkeleton />;
+    }
     return (
       <div className="flex-1 p-8 pt-6 min-h-screen flex items-center justify-center">
         <div className="text-center max-w-md">
@@ -1540,36 +1596,119 @@ const AuditExecute = () => {
     }
   };
 
-  const handleClauseFileUpload = async (clause: string, files: FileList | null) => {
-    const { accepted, rejected } = await processAuditEvidenceFileList(files);
-    reportRejectedEvidence(rejected, accepted.length);
-    if (accepted.length === 0) return;
-
-    let nextClauseFiles: Record<string, AuditEvidenceMedia[]>;
-    setClauseFiles((prev) => {
-      nextClauseFiles = {
-        ...prev,
-        [clause]: [...(prev[clause] || []), ...accepted],
-      };
-      return nextClauseFiles;
-    });
-    toast.success(`${accepted.length} file(s) attached for Clause ${clause}`);
-    const saved = await saveNow({
-      clauseFiles: sanitizeAuditEvidenceMediaMap(nextClauseFiles!),
-    });
-    if (!saved) {
-      toast.error("Photo attached locally but could not save to the server. Click Save Audit Progress.", {
-        duration: 8000,
-      });
+  const patchEvidenceListByClientId = (
+    list: AuditEvidenceMedia[],
+    clientId: string,
+    media: AuditEvidenceMedia,
+  ) => {
+    const idx = list.findIndex((m) => m.clientId === clientId);
+    if (idx < 0) return list;
+    const prev = list[idx];
+    if (prev.localPreviewUrl && prev.localPreviewUrl !== media.localPreviewUrl) {
+      revokeEvidencePreviewUrl(prev);
     }
+    const next = [...list];
+    next[idx] = media;
+    return next;
+  };
+
+  const syncChecklistEvidenceMedia = (
+    key: string,
+    nextList: AuditEvidenceMedia[],
+    baseChecklist: typeof checklistData,
+  ) => {
+    const checklistMatch = /^clause_checklist_(\d+)$/.exec(key);
+    const checklistIndex =
+      checklistMatch != null ? Number(checklistMatch[1]) : NaN;
+    if (!Number.isInteger(checklistIndex) || checklistIndex < 0) {
+      return baseChecklist;
+    }
+    return {
+      ...baseChecklist,
+      [checklistIndex]: {
+        ...(baseChecklist[checklistIndex] || {}),
+        evidenceMedia: nextList
+          .filter(
+            (m) =>
+              m.uploadStatus !== "pending" &&
+              m.uploadStatus !== "uploading" &&
+              m.uploadStatus !== "error",
+          )
+          .map((m) => ({
+            name: m.name,
+            data: m.data,
+            type: m.type,
+            description: m.description,
+          })),
+      } as any,
+    };
+  };
+
+  const persistEvidenceAfterUpload = (
+    nextClauseFiles?: Record<string, AuditEvidenceMedia[]>,
+    nextGenericFiles?: Record<string, AuditEvidenceMedia[]>,
+    nextChecklistData?: typeof checklistData,
+  ) => {
+    void saveNow({
+      ...(nextClauseFiles
+        ? { clauseFiles: sanitizeAuditEvidenceMediaMap(nextClauseFiles) }
+        : {}),
+      ...(nextGenericFiles
+        ? { genericFiles: sanitizeAuditEvidenceMediaMap(nextGenericFiles) }
+        : {}),
+      ...(nextChecklistData ? { checklistData: nextChecklistData } : {}),
+    }).then((saved) => {
+      if (!saved) {
+        toast.error(
+          "Evidence uploaded but could not save to the server. Click Save Audit Progress.",
+          { duration: 8000 },
+        );
+      }
+    });
+  };
+
+  const handleClauseFileUpload = async (clause: string, files: FileList | null) => {
+    const { pending, jobs, rejected } = await prepareEvidenceUploads(files);
+    reportRejectedEvidence(rejected, pending.length);
+    if (pending.length === 0) return;
+
+    setClauseFiles((prev) => ({
+      ...prev,
+      [clause]: [...(prev[clause] || []), ...pending],
+    }));
+    toast.success(`${pending.length} file(s) attached for Clause ${clause}`);
+
+    void runEvidenceUploadJobs(jobs, {
+      planId: id,
+      onItemStart: (clientId) => {
+        setClauseFiles((prev) => ({
+          ...prev,
+          [clause]: (prev[clause] || []).map((m) =>
+            m.clientId === clientId ? { ...m, uploadStatus: "uploading" } : m,
+          ),
+        }));
+      },
+      onItemUpdate: (clientId, media) => {
+        setClauseFiles((prev) => {
+          const nextList = patchEvidenceListByClientId(prev[clause] || [], clientId, media);
+          const next = { ...prev, [clause]: nextList };
+          if (media.uploadStatus === "done") {
+            persistEvidenceAfterUpload(next);
+          }
+          return next;
+        });
+      },
+    });
   };
 
   const removeClauseFile = (clause: string, indexToRemove: number) => {
     let nextClauseFiles: Record<string, AuditEvidenceMedia[]>;
     setClauseFiles((prev) => {
+      const removed = prev[clause]?.[indexToRemove];
+      if (removed) revokeEvidencePreviewUrl(removed);
       nextClauseFiles = {
         ...prev,
-        [clause]: prev[clause].filter((_, index) => index !== indexToRemove),
+        [clause]: (prev[clause] || []).filter((_, index) => index !== indexToRemove),
       };
       return nextClauseFiles;
     });
@@ -1578,81 +1717,111 @@ const AuditExecute = () => {
     });
   };
 
-  const handleGenericFileUpload = async (key: string, files: FileList | null) => {
-    const { accepted, rejected } = await processAuditEvidenceFileList(files);
-    reportRejectedEvidence(rejected, accepted.length);
-    if (accepted.length === 0) return;
-
-    const nextList = [...(genericFiles[key] || []), ...accepted];
-    const nextGenericFiles = {
-      ...genericFiles,
-      [key]: nextList,
-    };
-    setGenericFiles(nextGenericFiles);
-
-    const checklistMatch = /^clause_checklist_(\d+)$/.exec(key);
-    const checklistIndex =
-      checklistMatch != null ? Number(checklistMatch[1]) : NaN;
-    let nextChecklistData = checklistData;
-    if (Number.isInteger(checklistIndex) && checklistIndex >= 0) {
-      nextChecklistData = {
-        ...checklistData,
-        [checklistIndex]: {
-          ...(checklistData[checklistIndex] || {}),
-          evidenceMedia: nextList.map((m) => ({
-            name: m.name,
-            data: m.data,
-            type: m.type,
-            description: m.description,
-          })),
-        } as any,
-      };
-      setChecklistData(nextChecklistData);
-    }
-
-    toast.success(`${accepted.length} file(s) attached`);
-    const saved = await saveNow({
-      genericFiles: sanitizeAuditEvidenceMediaMap(nextGenericFiles),
-      checklistData: nextChecklistData,
+  const retryClauseEvidenceUpload = (clause: string, _index: number, clientId: string) => {
+    void retryEvidenceUpload(clientId, {
+      planId: id,
+      onItemUpdate: (cid, media) => {
+        setClauseFiles((prev) => {
+          const nextList = patchEvidenceListByClientId(prev[clause] || [], cid, media);
+          const next = { ...prev, [clause]: nextList };
+          if (media.uploadStatus === "done") persistEvidenceAfterUpload(next);
+          return next;
+        });
+      },
     });
-    if (!saved) {
-      toast.error("File attached locally but could not save to the server. Click Save Audit Progress.", {
-        duration: 8000,
-      });
-    }
+  };
+
+  const handleGenericFileUpload = async (key: string, files: FileList | null) => {
+    const { pending, jobs, rejected } = await prepareEvidenceUploads(files);
+    reportRejectedEvidence(rejected, pending.length);
+    if (pending.length === 0) return;
+
+    setGenericFiles((prev) => ({
+      ...prev,
+      [key]: [...(prev[key] || []), ...pending],
+    }));
+    toast.success(`${pending.length} file(s) attached`);
+
+    void runEvidenceUploadJobs(jobs, {
+      planId: id,
+      onItemStart: (clientId) => {
+        setGenericFiles((prev) => ({
+          ...prev,
+          [key]: (prev[key] || []).map((m) =>
+            m.clientId === clientId ? { ...m, uploadStatus: "uploading" } : m,
+          ),
+        }));
+      },
+      onItemUpdate: (clientId, media) => {
+        setGenericFiles((prev) => {
+          const nextList = patchEvidenceListByClientId(prev[key] || [], clientId, media);
+          const nextGenericFiles = { ...prev, [key]: nextList };
+          if (media.uploadStatus === "done") {
+            Promise.resolve().then(() => {
+              setChecklistData((prevChecklist) => {
+                const nextChecklist = syncChecklistEvidenceMedia(
+                  key,
+                  nextList,
+                  prevChecklist,
+                );
+                persistEvidenceAfterUpload(undefined, nextGenericFiles, nextChecklist);
+                return nextChecklist;
+              });
+            });
+          }
+          return nextGenericFiles;
+        });
+      },
+    });
   };
 
   const removeGenericFile = (key: string, indexToRemove: number) => {
-    const nextList = (genericFiles[key] || []).filter((_, index) => index !== indexToRemove);
-    const nextGenericFiles = {
-      ...genericFiles,
-      [key]: nextList,
-    };
-    setGenericFiles(nextGenericFiles);
+    setGenericFiles((prev) => {
+      const removed = prev[key]?.[indexToRemove];
+      if (removed) revokeEvidencePreviewUrl(removed);
+      const nextList = (prev[key] || []).filter((_, index) => index !== indexToRemove);
+      const nextGenericFiles = { ...prev, [key]: nextList };
+      Promise.resolve().then(() => {
+        setChecklistData((prevChecklist) => {
+          const nextChecklistData = syncChecklistEvidenceMedia(
+            key,
+            nextList,
+            prevChecklist,
+          );
+          void saveNow({
+            genericFiles: sanitizeAuditEvidenceMediaMap(nextGenericFiles),
+            checklistData: nextChecklistData,
+          });
+          return nextChecklistData;
+        });
+      });
+      return nextGenericFiles;
+    });
+  };
 
-    const checklistMatch = /^clause_checklist_(\d+)$/.exec(key);
-    const checklistIndex =
-      checklistMatch != null ? Number(checklistMatch[1]) : NaN;
-    let nextChecklistData = checklistData;
-    if (Number.isInteger(checklistIndex) && checklistIndex >= 0) {
-      nextChecklistData = {
-        ...checklistData,
-        [checklistIndex]: {
-          ...(checklistData[checklistIndex] || {}),
-          evidenceMedia: nextList.map((m) => ({
-            name: m.name,
-            data: m.data,
-            type: m.type,
-            description: m.description,
-          })),
-        } as any,
-      };
-      setChecklistData(nextChecklistData);
-    }
-
-    void saveNow({
-      genericFiles: sanitizeAuditEvidenceMediaMap(nextGenericFiles),
-      checklistData: nextChecklistData,
+  const retryGenericEvidenceUpload = (key: string, _index: number, clientId: string) => {
+    void retryEvidenceUpload(clientId, {
+      planId: id,
+      onItemUpdate: (cid, media) => {
+        setGenericFiles((prev) => {
+          const nextList = patchEvidenceListByClientId(prev[key] || [], cid, media);
+          const nextGenericFiles = { ...prev, [key]: nextList };
+          if (media.uploadStatus === "done") {
+            Promise.resolve().then(() => {
+              setChecklistData((prevChecklist) => {
+                const nextChecklist = syncChecklistEvidenceMedia(
+                  key,
+                  nextList,
+                  prevChecklist,
+                );
+                persistEvidenceAfterUpload(undefined, nextGenericFiles, nextChecklist);
+                return nextChecklist;
+              });
+            });
+          }
+          return nextGenericFiles;
+        });
+      },
     });
   };
 
@@ -1698,6 +1867,8 @@ const AuditExecute = () => {
       updateGenericFileDescription(key, index, description),
     onDescriptionBlur: (index: number, description: string) =>
       persistGenericFileDescription(key, index, description),
+    onRetryUpload: (index: number, clientId: string) =>
+      retryGenericEvidenceUpload(key, index, clientId),
   });
 
   const updateClauseFileDescription = (
@@ -1742,6 +1913,8 @@ const AuditExecute = () => {
       updateClauseFileDescription(clause, index, description),
     onDescriptionBlur: (index: number, description: string) =>
       persistClauseFileDescription(clause, index, description),
+    onRetryUpload: (index: number, clientId: string) =>
+      retryClauseEvidenceUpload(clause, index, clientId),
   });
 
   const handleSectionChange = (index: number, value: string) => {
@@ -1814,6 +1987,26 @@ const AuditExecute = () => {
       });
 
       if (res.ok) {
+        const body = await res.json().catch(() => ({} as Record<string, unknown>));
+        if (body && typeof body === "object") {
+          setCurrentPlan((prev: any) =>
+            prev
+              ? {
+                  ...prev,
+                  status:
+                    typeof body.status === "string" ? body.status : prev.status,
+                  progress:
+                    typeof body.progress === "number"
+                      ? body.progress
+                      : prev.progress,
+                  auditCompleted:
+                    typeof body.auditCompleted === "boolean"
+                      ? body.auditCompleted
+                      : prev.auditCompleted,
+                }
+              : prev,
+          );
+        }
         const savedPayload = buildAuditDataPayload();
         if (savedPayload.auditCompleted) {
           toast.success("Audit completed — all clauses assessed and findings closed.", { id: toastId });
@@ -1935,6 +2128,12 @@ const AuditExecute = () => {
             >
               <ArrowLeft className="w-4 h-4" /> Back to Audit List
             </Button>
+            {isRefreshing && (
+              <span className="inline-flex items-center gap-1.5 text-xs text-slate-400">
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                Syncing…
+              </span>
+            )}
             {auditCompletion.auditCompleted && (
               <Badge className="bg-emerald-50 text-emerald-700 border-emerald-200 gap-1.5 px-3 py-1">
                 <CheckCircle2 className="w-3.5 h-3.5" />
