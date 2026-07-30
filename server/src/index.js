@@ -8,6 +8,14 @@ import {
     applyFindingAssignmentToAuditData,
 } from './audit/findingAssignment.js';
 import {
+    AUDIT_LIFECYCLE,
+    lifecycleStatusFromAuditData,
+} from './audit/lifecycleStatus.js';
+import {
+    collectAssigneeEmailsFromAuditData,
+    loadFindingsInboxPlans,
+} from './audit/findingsInbox.js';
+import {
     sendNcAssignmentEmail,
     sendFindingResponseEmail,
 } from './mail/smtp.js';
@@ -1756,38 +1764,6 @@ async function actorCanAccessAuditProgram(actorId, program) {
     return false;
 }
 
-/** Collect all assignToEmail values nested anywhere in saved audit execution JSON. */
-function collectAssigneeEmailsFromAuditData(auditData) {
-    const emails = new Set();
-    if (auditData == null) return emails;
-
-    let data = auditData;
-    if (typeof data === 'string') {
-        try {
-            data = JSON.parse(data);
-        } catch {
-            return emails;
-        }
-    }
-    if (!data || typeof data !== 'object') return emails;
-
-    const visit = (node) => {
-        if (node == null) return;
-        if (Array.isArray(node)) {
-            node.forEach(visit);
-            return;
-        }
-        if (typeof node !== 'object') return;
-        if (typeof node.assignToEmail === 'string') {
-            const normalized = node.assignToEmail.toLowerCase().trim();
-            if (normalized) emails.add(normalized);
-        }
-        Object.values(node).forEach(visit);
-    };
-    visit(data);
-    return emails;
-}
-
 async function actorIsFindingAssignee(actorId, plan) {
     if (!plan?.auditData) return false;
     const actor = await prisma.user.findUnique({
@@ -1798,28 +1774,6 @@ async function actorIsFindingAssignee(actorId, plan) {
     const actorEmail = actor.email.toLowerCase().trim();
     return collectAssigneeEmailsFromAuditData(plan.auditData).has(actorEmail);
 }
-
-const ASSIGNED_FINDINGS_PLAN_SELECT = {
-    id: true,
-    executionId: true,
-    auditType: true,
-    auditName: true,
-    date: true,
-    location: true,
-    createdAt: true,
-    updatedAt: true,
-    templateId: true,
-    auditProgramId: true,
-    userId: true,
-    leadAuditorId: true,
-    auditData: true,
-    findingsData: true,
-    auditProgram: {
-        select: {
-            siteId: true,
-        },
-    },
-};
 
 async function actorCanAccessAuditPlan(actorId, plan) {
     if (!plan) return false;
@@ -2890,41 +2844,102 @@ async function actorHasFullOrgAuditVisibility(actorId) {
     return actorCanManageOrgUsers(id);
 }
 
-// Track startup state for health checks — server starts accepting immediately,
-// but /health reports degraded until bootstrap (migrations, seeding) completes.
+// Track startup state for health checks — server listens immediately;
+// /health is readiness (DB + bounded probe). /live is process liveness only.
 let bootstrapComplete = false;
 let dbHealthy = false;
 const startedAt = Date.now();
+const APP_VERSION = process.env.APP_VERSION || process.env.npm_package_version || '1.0.0';
+const HEALTH_DB_TIMEOUT_MS = Number.parseInt(process.env.HEALTH_DB_TIMEOUT_MS || '2000', 10);
 
+function withTimeout(promise, ms, label) {
+    let timer;
+    return Promise.race([
+        promise.finally(() => clearTimeout(timer)),
+        new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+        }),
+    ]);
+}
+
+async function probeDatabase() {
+    await withTimeout(prisma.$queryRaw`SELECT 1`, HEALTH_DB_TIMEOUT_MS, 'health DB probe');
+}
+
+function healthPayload(extra = {}) {
+    return {
+        status: extra.status || 'ok',
+        database: extra.database || 'unknown',
+        uptime: Math.floor((Date.now() - startedAt) / 1000),
+        version: APP_VERSION,
+        bootstrapComplete,
+        timestamp: new Date().toISOString(),
+        ...extra,
+    };
+}
+
+/** Liveness — process is up; never touches the DB (safe for proxies during migrate). */
+app.get('/live', (req, res) => {
+    res.status(200).json(healthPayload({ status: 'ok', database: 'skipped' }));
+});
+
+/**
+ * Readiness — DB must answer within HEALTH_DB_TIMEOUT_MS.
+ * Bounded timeout prevents pool exhaustion from hanging probes → Traefik 504.
+ */
 app.get('/health', async (req, res) => {
     try {
-        await prisma.$queryRaw`SELECT 1`;
+        await probeDatabase();
         dbHealthy = true;
-        res.status(200).json({
-            status: 'ok',
+        const ready = bootstrapComplete;
+        res.status(ready ? 200 : 503).json(healthPayload({
+            status: ready ? 'ok' : 'starting',
             database: 'connected',
-            uptime: Math.floor((Date.now() - startedAt) / 1000),
-            bootstrapComplete,
-            timestamp: new Date().toISOString(),
-        });
+        }));
     } catch (error) {
         dbHealthy = false;
         console.error('[health] Database check failed:', error.message);
-        res.status(503).json({
+        res.status(503).json(healthPayload({
             status: 'degraded',
             database: 'unavailable',
-            uptime: Math.floor((Date.now() - startedAt) / 1000),
-            bootstrapComplete,
-            timestamp: new Date().toISOString(),
             error: error.message,
-        });
+        }));
     }
 });
-app.get('/api/health', (req, res) => {
-    res.status(200).json({ status: 'ok' });
+
+app.get('/api/health', async (req, res) => {
+    try {
+        await probeDatabase();
+        dbHealthy = true;
+        res.status(bootstrapComplete ? 200 : 503).json(healthPayload({
+            status: bootstrapComplete ? 'ok' : 'starting',
+            database: 'connected',
+        }));
+    } catch (error) {
+        dbHealthy = false;
+        res.status(503).json(healthPayload({
+            status: 'degraded',
+            database: 'unavailable',
+            error: error.message,
+        }));
+    }
 });
-mountedApiRouter.get('/health', (req, res) => {
-    res.status(200).json({ status: 'ok' });
+mountedApiRouter.get('/health', async (req, res) => {
+    try {
+        await probeDatabase();
+        dbHealthy = true;
+        res.status(bootstrapComplete ? 200 : 503).json(healthPayload({
+            status: bootstrapComplete ? 'ok' : 'starting',
+            database: 'connected',
+        }));
+    } catch (error) {
+        dbHealthy = false;
+        res.status(503).json(healthPayload({
+            status: 'degraded',
+            database: 'unavailable',
+            error: error.message,
+        }));
+    }
 });
 
 // Root route to prevent 404
@@ -6852,6 +6867,7 @@ app.get('/audit-plans', authenticateToken, checkTrialExpiration, async (req, res
         const pagination = parsePaginationQuery(req.query, { defaultLimit: 8 });
         const search = String(req.query.search || '').trim();
         const siteName = String(req.query.site || req.query.siteName || '').trim();
+        const siteIdFilter = String(req.query.siteId || '').trim();
         const typeFilter = String(req.query.type || '').trim().toLowerCase();
 
         const andFilters = [];
@@ -6863,6 +6879,14 @@ app.get('/audit-plans', authenticateToken, checkTrialExpiration, async (req, res
                     { location: { contains: search, mode: 'insensitive' } },
                 ],
             });
+        }
+        if (siteIdFilter && siteIdFilter !== 'all') {
+            const siteIdNum = Number.parseInt(siteIdFilter, 10);
+            if (!Number.isNaN(siteIdNum) && siteIdNum > 0) {
+                andFilters.push({
+                    auditProgram: { is: { siteId: siteIdNum } },
+                });
+            }
         }
         if (siteName && siteName !== 'all') {
             andFilters.push({
@@ -6912,6 +6936,7 @@ app.get('/audit-plans', authenticateToken, checkTrialExpiration, async (req, res
             auditProgramId: true,
             userId: true,
             leadAuditorId: true,
+            status: true,
             ...(includeData
                 ? {
                       findingsData: true,
@@ -7067,29 +7092,105 @@ app.get('/audit-plans', authenticateToken, checkTrialExpiration, async (req, res
     }
 });
 
-// Get single Audit Plan (Full Details)
+// Get single Audit Plan (Full Details) — slim selects (no deep company/auditor dumps)
 app.get('/audit-plans/:id', authenticateToken, checkTrialExpiration, async (req, res) => {
     const { id } = req.params;
+    const planId = Number.parseInt(id, 10);
+    if (!Number.isInteger(planId) || planId < 1) {
+        return res.status(400).json({ error: 'Invalid audit plan id' });
+    }
     try {
+        const startedAt = performance.now();
         const plan = await prisma.auditPlan.findUnique({
-            where: { id: Number.parseInt(id) },
-            include: {
-                leadAuditor: true,
-                auditors: true,
+            where: { id: planId },
+            select: {
+                id: true,
+                executionId: true,
+                auditType: true,
+                auditName: true,
+                templateId: true,
+                date: true,
+                location: true,
+                scope: true,
+                objective: true,
+                criteria: true,
+                leadAuditorId: true,
+                auditProgramId: true,
+                userId: true,
+                status: true,
+                itinerary: true,
+                auditData: true,
+                findingsData: true,
+                createdAt: true,
+                updatedAt: true,
+                leadAuditor: {
+                    select: {
+                        id: true,
+                        firstName: true,
+                        lastName: true,
+                        email: true,
+                    },
+                },
+                auditors: {
+                    select: {
+                        id: true,
+                        firstName: true,
+                        lastName: true,
+                        email: true,
+                    },
+                },
                 auditProgram: {
-                    include: {
-                        site: { include: { company: true } },
-                        auditors: true,
-                        leadAuditor: true
-                    }
-                }
-            }
+                    select: {
+                        id: true,
+                        name: true,
+                        frequency: true,
+                        duration: true,
+                        createdAt: true,
+                        scheduleData: true,
+                        siteId: true,
+                        userId: true,
+                        leadAuditorId: true,
+                        site: {
+                            select: {
+                                id: true,
+                                name: true,
+                                companyId: true,
+                                company: {
+                                    select: {
+                                        id: true,
+                                        name: true,
+                                    },
+                                },
+                            },
+                        },
+                        leadAuditor: {
+                            select: {
+                                id: true,
+                                firstName: true,
+                                lastName: true,
+                            },
+                        },
+                        auditors: {
+                            select: {
+                                id: true,
+                                firstName: true,
+                                lastName: true,
+                            },
+                        },
+                    },
+                },
+            },
         });
         if (!plan) return res.status(404).json({ error: 'Audit plan not found' });
         if (!(await actorCanAccessAuditPlan(req.user.id, plan))) {
             return res.status(403).json({ error: 'Forbidden' });
         }
-        res.json(plan);
+        const ms = performance.now() - startedAt;
+        res.setHeader('Server-Timing', `db;dur=${ms.toFixed(1)}`);
+        res.setHeader('X-Response-Time', `${ms.toFixed(1)}ms`);
+        // Alias site onto plan for execute UI that reads plan.site
+        const site = plan.auditProgram?.site || null;
+        res.json({ ...plan, site });
     } catch (error) {
         console.error('Failed to fetch audit plan details:', error);
         res.status(500).json({ error: 'Failed to fetch audit plan details' });
@@ -7156,7 +7257,8 @@ app.post('/audit-plans', authenticateToken, checkTrialExpiration, async (req, re
                     connect: auditorCheck.auditorIds.map((id) => ({ id })),
                 },
                 itinerary: itinerary || [],
-                userId: planOwnerId
+                userId: planOwnerId,
+                status: AUDIT_LIFECYCLE.PLANNED,
             }
         });
         res.status(201).json(plan);
@@ -7258,10 +7360,16 @@ app.put('/audit-plans/:id', authenticateToken, checkTrialExpiration, async (req,
         // Do not echo multi‑MB auditData back to the client — Save Audit only needs ack + progress.
         let progress = 0;
         let auditCompleted = false;
+        let lifecycleStatus = existing.status || AUDIT_LIFECYCLE.PLANNED;
         if (updateData.auditData && typeof updateData.auditData === 'object') {
             const p = Number(updateData.auditData.progress);
             if (Number.isFinite(p)) progress = Math.min(100, Math.max(0, Math.round(p)));
             auditCompleted = updateData.auditData.auditCompleted === true;
+            lifecycleStatus = lifecycleStatusFromAuditData(updateData.auditData);
+            updateData.status = lifecycleStatus;
+        } else if (updateData.auditData === null) {
+            lifecycleStatus = AUDIT_LIFECYCLE.PLANNED;
+            updateData.status = lifecycleStatus;
         }
 
         const plan = await prisma.auditPlan.update({
@@ -7274,12 +7382,14 @@ app.put('/audit-plans/:id', authenticateToken, checkTrialExpiration, async (req,
                 executionId: true,
                 templateId: true,
                 auditProgramId: true,
+                status: true,
             },
         });
         res.status(200).json({
             ...plan,
             progress,
             auditCompleted,
+            status: plan.status || lifecycleStatus,
             saved: true,
         });
     } catch (error) {
@@ -7288,122 +7398,81 @@ app.put('/audit-plans/:id', authenticateToken, checkTrialExpiration, async (req,
     }
 });
 
-app.get('/assigned-audit-findings', authenticateToken, checkTrialExpiration, async (req, res) => {
+async function handleFindingsInboxRequest(req, res) {
     const actorId = Number(req.user?.id);
+    const rawOwnership = String(req.query.ownership || req.query.type || 'assigned')
+        .toLowerCase()
+        .trim();
+    const ownership =
+        rawOwnership === 'raised'
+            ? 'raised'
+            : rawOwnership === 'visible' || rawOwnership === 'dashboard'
+              ? 'visible'
+              : 'assigned';
+
     try {
-        const actor = await prisma.user.findUnique({
-            where: { id: actorId },
-            select: { email: true },
-        });
-        if (!actor?.email) {
-            return res.json([]);
-        }
-
-        const actorEmail = actor.email.toLowerCase().trim();
-        const isAuditee = await actorIsAuditee(actorId);
-        const auditeeSiteIds = isAuditee ? await getAuditeeAssignedSiteIds(actorId) : null;
-
-        // Formal NC rows assigned to this user (may not be auditor on the plan).
-        const ncAssigned = await prisma.nonconformance.findMany({
-            where: { assigneeId: actorId },
-            select: { auditPlanId: true },
-            distinct: ['auditPlanId'],
-            take: 200,
-        });
-        const ncPlanIds = ncAssigned
-            .map((row) => Number(row.auditPlanId))
-            .filter((id) => Number.isInteger(id) && id > 0);
-
-        // Informal OFI/NC assignments store assignToEmail inside auditData JSON.
-        // Match those plan ids without requiring auditor membership on the plan.
-        let informalAssigneePlanIds = [];
-        try {
-            const likePattern = `%"assignToEmail":"${actorEmail.replace(/"/g, '')}"%`;
-            const informalRows = await prisma.$queryRawUnsafe(
-                `SELECT id FROM "AuditPlan"
-                 WHERE "auditData" IS NOT NULL
-                   AND LOWER("auditData"::text) LIKE LOWER($1)
-                 ORDER BY "updatedAt" DESC
-                 LIMIT 150`,
-                likePattern,
-            );
-            informalAssigneePlanIds = (Array.isArray(informalRows) ? informalRows : [])
-                .map((row) => Number(row.id))
-                .filter((id) => Number.isInteger(id) && id > 0);
-        } catch (scanErr) {
-            console.warn('[ASSIGNED-FINDINGS] Informal assignee scan skipped:', scanErr?.message || scanErr);
-        }
-
-        const assigneePlanIds = [...new Set([...ncPlanIds, ...informalAssigneePlanIds])];
-
-        /** Limit scan to plans the actor can already see — never all org rows with auditData. */
-        let visibilityWhere = { auditData: { not: null } };
-        if (isAuditee && auditeeSiteIds) {
-            visibilityWhere = {
-                auditData: { not: null },
-                OR: [
-                    {
-                        auditProgram: {
-                            is: auditeeSiteIds.length > 0
-                                ? { siteId: { in: auditeeSiteIds } }
-                                : { siteId: -1 },
-                        },
-                    },
-                    ...(assigneePlanIds.length ? [{ id: { in: assigneePlanIds } }] : []),
-                ],
-            };
-        } else if (await actorHasFullOrgAuditVisibility(actorId)) {
-            const orgRootId = await resolveActorOrgRootId(actorId);
-            const subtreeIds = await collectOrgSubtreeUserIds(orgRootId);
-            visibilityWhere = {
-                auditData: { not: null },
-                OR: [
-                    ...buildOrgSubtreePlanVisibilityOr(subtreeIds),
-                    ...(assigneePlanIds.length ? [{ id: { in: assigneePlanIds } }] : []),
-                ],
-            };
-        } else {
-            visibilityWhere = {
-                auditData: { not: null },
-                OR: [
-                    ...buildAssignedAuditPlanVisibilityOr(actorId),
-                    ...(assigneePlanIds.length ? [{ id: { in: assigneePlanIds } }] : []),
-                ],
-            };
-        }
-
-        const plans = await prisma.auditPlan.findMany({
-            where: visibilityWhere,
-            select: ASSIGNED_FINDINGS_PLAN_SELECT,
-            orderBy: { updatedAt: 'desc' },
-            take: 200,
-        });
-
-        const assignedPlans = plans
-            .filter((plan) => {
-                const planId = Number(plan.id);
-                if (!collectAssigneeEmailsFromAuditData(plan.auditData).has(actorEmail)) {
-                    // Formal NC assignee or informal scan hit — keep even if JSON parse differs.
-                    if (!assigneePlanIds.includes(planId)) return false;
-                }
-                if (isAuditee && auditeeSiteIds) {
-                    if (assigneePlanIds.includes(planId)) return true;
-                    const siteId = plan.auditProgram?.siteId;
-                    return siteId != null && auditeeSiteIds.includes(Number(siteId));
-                }
-                return true;
-            })
-            .map((plan) => ({
-                ...plan,
-                auditData: stripHeavyAuditListPayload(plan.auditData),
-                findingsData: stripHeavyAuditListPayload(plan.findingsData),
-            }));
-
-        res.json(assignedPlans);
+        const plans = await loadFindingsInboxPlans(
+            {
+                actorIsAuditee,
+                getAuditeeAssignedSiteIds,
+                actorHasFullOrgAuditVisibility,
+                resolveActorOrgRootId,
+                collectOrgSubtreeUserIds,
+                buildOrgSubtreePlanVisibilityOr,
+                buildAssignedAuditPlanVisibilityOr,
+            },
+            actorId,
+            ownership,
+        );
+        res.json(plans);
     } catch (error) {
-        console.error('Failed to fetch assigned audit findings:', error);
-        res.status(500).json({ error: 'Failed to fetch assigned findings' });
+        console.error('Failed to fetch findings inbox:', error);
+        res.status(500).json({ error: 'Failed to fetch findings' });
     }
+}
+
+/** Ownership-scoped findings inbox: ?ownership=assigned|raised|visible (alias: ?type=). */
+app.get('/audit-findings', authenticateToken, checkTrialExpiration, handleFindingsInboxRequest);
+
+/**
+ * Recent findings for dashboard widgets.
+ * Returns slim plan rows (same shape as /audit-findings); clients extract and slice.
+ * Query: ?limit=5 (max 20).
+ */
+app.get('/audit-findings/recent', authenticateToken, checkTrialExpiration, async (req, res) => {
+    const actorId = Number(req.user?.id);
+    const limitRaw = Number.parseInt(String(req.query.limit ?? '5'), 10);
+    const limit = Number.isFinite(limitRaw)
+        ? Math.min(20, Math.max(1, limitRaw))
+        : 5;
+    try {
+        const plans = await loadFindingsInboxPlans(
+            {
+                actorIsAuditee,
+                getAuditeeAssignedSiteIds,
+                actorHasFullOrgAuditVisibility,
+                resolveActorOrgRootId,
+                collectOrgSubtreeUserIds,
+                buildOrgSubtreePlanVisibilityOr,
+                buildAssignedAuditPlanVisibilityOr,
+            },
+            actorId,
+            'visible',
+        );
+        // Newest plans first already; cap payload for the recent widget.
+        res.json(plans.slice(0, Math.max(limit, 8)));
+    } catch (error) {
+        console.error('Failed to fetch recent findings:', error);
+        res.status(500).json({ error: 'Failed to fetch recent findings' });
+    }
+});
+
+app.get('/assigned-audit-findings', authenticateToken, checkTrialExpiration, async (req, res) => {
+    // Backward compatible: defaults to assigned; accepts ?ownership= / ?type=
+    if (!req.query.ownership && !req.query.type) {
+        req.query.ownership = 'assigned';
+    }
+    return handleFindingsInboxRequest(req, res);
 });
 
 app.post('/audit-plans/:id/notify-finding-assignment', authenticateToken, checkTrialExpiration, async (req, res) => {
@@ -8920,10 +8989,8 @@ app.post('/subscription/upgrade-request', authenticateToken, async (req, res) =>
 });
 
 // =====================================================================
-// STARTUP — listen FIRST, then run migrations/seeds in the background.
-// This eliminates the 502 window: the port is open within ~1 second,
-// and /health returns 503 (database: unavailable) until bootstrap
-// finishes — Coolify/Docker waits for a healthy check before routing.
+// STARTUP — listen FIRST, then bootstrap in the background WITHOUT
+// blocking the event loop (async migrate — never spawnSync).
 // =====================================================================
 
 async function ensureDatabaseSchemaPatches() {
@@ -8954,16 +9021,16 @@ async function ensureLegacySiteUserIdsCleared() {
     }
 }
 
-/** Wait for Postgres to accept connections (retries with backoff). */
-async function waitForDatabase(maxRetries = 15, initialDelayMs = 1000) {
+/** Wait for Postgres to accept connections (retries with exponential backoff). */
+async function waitForDatabase(maxRetries = 20, initialDelayMs = 500) {
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
-            await pool.query('SELECT 1');
+            await withTimeout(pool.query('SELECT 1'), 5000, 'startup DB connect');
             console.log(`[bootstrap] ✔ Database connected (attempt ${attempt})`);
             dbHealthy = true;
             return;
         } catch (err) {
-            const delay = Math.min(initialDelayMs * attempt, 10000);
+            const delay = Math.min(initialDelayMs * 2 ** (attempt - 1), 10000);
             console.warn(
                 `[bootstrap] Database not ready (attempt ${attempt}/${maxRetries}): ${err.message} — retrying in ${delay}ms`,
             );
@@ -8973,30 +9040,18 @@ async function waitForDatabase(maxRetries = 15, initialDelayMs = 1000) {
     throw new Error('Database did not become available after retries');
 }
 
-/** Run migrations via prisma migrate deploy (same as the old entrypoint). */
+/** Async migrate deploy — must NOT use spawnSync (blocks event loop → 504). */
 async function runMigrations() {
-    const { spawnSync } = await import('node:child_process');
-    const { dirname, resolve } = await import('node:path');
-    const { fileURLToPath } = await import('node:url');
-    const serverRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+    const { runPrismaMigrateDeploy } = await import('./runMigrateAsync.js');
 
-    console.log('[bootstrap] Applying database migrations…');
-    const result = spawnSync('npx', ['prisma', 'migrate', 'deploy'], {
-        cwd: serverRoot,
-        stdio: 'pipe',
-        encoding: 'utf-8',
-        env: { ...process.env },
-        shell: true,
-    });
-    if (result.stdout) process.stdout.write(result.stdout);
-    if (result.stderr) process.stderr.write(result.stderr);
+    console.log('[bootstrap] Applying database migrations (async, non-blocking)…');
+    const result = await runPrismaMigrateDeploy(process.env.DATABASE_URL);
 
     if (result.status === 0) {
         console.log('[bootstrap] ✔ Migrations applied');
         return;
     }
-    const output = `${result.stdout || ''}\n${result.stderr || ''}`;
-    if (/P3005/.test(output)) {
+    if (/P3005/.test(result.output)) {
         console.warn('[bootstrap] Database needs baselining (P3005) — attempting…');
         const { baselineExistingDatabase } = await import(
             '../scripts/baseline-migrations.js'
@@ -9009,8 +9064,11 @@ async function runMigrations() {
 }
 
 async function runBootstrap() {
+    const t0 = Date.now();
     try {
+        console.log('[bootstrap] Starting…');
         await waitForDatabase();
+        console.log('[bootstrap] ✔ Prisma / pg pool ready');
         await runMigrations();
         await Promise.all([
             ensureDatabaseSchemaPatches(),
@@ -9020,30 +9078,35 @@ async function runBootstrap() {
             ensureLegacySiteUserIdsCleared(),
         ]);
         bootstrapComplete = true;
-        console.log('[bootstrap] ✔ All startup tasks complete');
+        console.log(`[bootstrap] ✔ All startup tasks complete in ${Date.now() - t0}ms`);
+        console.log('[bootstrap] ✔ Container ready for traffic');
     } catch (err) {
         console.error('[bootstrap] Startup bootstrap failed:', err);
-        // Don't crash — health endpoint will report degraded, Coolify won't route traffic yet.
+        // Don't crash — /health stays 503 until DB recovers; /live stays 200.
     }
 }
 
-// 1. Open the port immediately (eliminates the 502 window).
+console.log('[start] Server starting…');
+console.log(`[start] NODE_ENV=${process.env.NODE_ENV || 'development'} PORT=${PORT}`);
+
+// 1. Open the port immediately (eliminates the connection-refused 502 window).
 const server = app.listen(PORT, '0.0.0.0', () => {
-    console.log(`✔ Server listening on 0.0.0.0:${PORT}`);
-    console.log(`✔ Environment: ${process.env.NODE_ENV || 'development'}`);
-    console.log(`✔ Health endpoint ready: /health`);
+    console.log(`[start] ✔ Listening on 0.0.0.0:${PORT}`);
+    console.log('[start] ✔ Routes registered');
+    console.log('[start] ✔ Health endpoints ready: /live /health /api/health');
 });
 
-// Keep-alive / header timeouts must exceed the reverse proxy's (nginx 120s).
-server.keepAliveTimeout = 65000;
-server.headersTimeout = 66000;
+// Keep-alive MUST exceed reverse-proxy idle/read timeouts (nginx proxy_* = 120s).
+// If Node closes idle sockets first, nginx reuses a dead connection → intermittent 502.
+server.keepAliveTimeout = 130000;
+server.headersTimeout = 131000;
+server.requestTimeout = 0;
 
-// 2. Run DB migrations, seeds, patches in the background.
+// 2. Migrations / seeds in background without freezing HTTP.
 runBootstrap();
 
 // =====================================================================
-// GRACEFUL SHUTDOWN — drain connections before exiting so the old
-// container doesn't hold the port while the new one starts.
+// GRACEFUL SHUTDOWN — drain HTTP before closing pools.
 // =====================================================================
 let shuttingDown = false;
 
@@ -9052,43 +9115,42 @@ const gracefulShutdown = async (signal) => {
     shuttingDown = true;
     console.log(`\n${signal} received — shutting down gracefully…`);
 
-    // Stop accepting new connections.
-    server.close(() => {
-        console.log('✔ HTTP server closed (no new connections)');
-    });
-
-    // Give in-flight requests a few seconds to finish.
     const forceExitTimer = setTimeout(() => {
-        console.error('Shutdown timed out — forcing exit');
+        console.error('[shutdown] Timed out — forcing exit');
         process.exit(1);
     }, 15000);
     forceExitTimer.unref();
 
+    await new Promise((resolveClose) => {
+        server.close((err) => {
+            if (err) console.error('[shutdown] server.close error:', err.message);
+            else console.log('[shutdown] ✔ HTTP server closed');
+            resolveClose();
+        });
+    });
+
     try {
         await prisma.$disconnect();
-        console.log('✔ Prisma disconnected');
+        console.log('[shutdown] ✔ Prisma disconnected');
     } catch (err) {
-        console.error('Prisma disconnect error:', err.message);
+        console.error('[shutdown] Prisma disconnect error:', err.message);
     }
 
     try {
         await pool.end();
-        console.log('✔ pg Pool closed');
+        console.log('[shutdown] ✔ pg Pool closed');
     } catch (err) {
-        console.error('pg Pool close error:', err.message);
+        console.error('[shutdown] pg Pool close error:', err.message);
     }
 
     clearTimeout(forceExitTimer);
-    process.exit(0);
+    process.exit(signal === 'uncaughtException' ? 1 : 0);
 };
 
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGHUP', () => gracefulShutdown('SIGHUP'));
 
-// =====================================================================
-// GLOBAL ERROR HANDLERS — prevent silent crashes that cause 502.
-// =====================================================================
 process.on('uncaughtException', (err) => {
     console.error('[FATAL] Uncaught exception:', err);
     gracefulShutdown('uncaughtException');
@@ -9096,5 +9158,4 @@ process.on('uncaughtException', (err) => {
 
 process.on('unhandledRejection', (reason) => {
     console.error('[WARN] Unhandled promise rejection:', reason);
-    // Don't crash — log and continue. Most rejections are non-fatal.
 });

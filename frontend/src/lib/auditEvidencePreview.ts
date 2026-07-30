@@ -1,11 +1,14 @@
-import type { AuditEvidenceMedia } from "@/lib/evidenceImageUpload";
+import {
+    evidenceMediaDisplayUrl,
+    type AuditEvidenceMedia,
+} from "@/lib/evidenceImageUpload";
 
 export function isPreviewableAuditEvidence(media: AuditEvidenceMedia): boolean {
     return media.type.startsWith("image/") || media.type === "application/pdf";
 }
 
 export function downloadAuditEvidenceMedia(media: AuditEvidenceMedia): void {
-    const href = media.data;
+    const href = evidenceMediaDisplayUrl(media) || media.data;
     if (!href) return;
     // Hosted Cloudinary URLs: open/download via navigation; data URLs use download attribute.
     if (/^https?:\/\//i.test(href)) {

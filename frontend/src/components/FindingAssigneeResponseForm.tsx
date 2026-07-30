@@ -24,7 +24,8 @@ import {
     type FindingCapaForm,
 } from "@/lib/findingCapaForm";
 import {
-    processAuditEvidenceFileList,
+    prepareEvidenceUploads,
+    runEvidenceUploadJobs,
     type AuditEvidenceMedia,
 } from "@/lib/evidenceImageUpload";
 import {
@@ -302,18 +303,37 @@ export function FindingAssigneeResponseForm({
 
     const handleEvidenceUpload = async (files: FileList | null) => {
         if (!files?.length) return;
-        const { accepted, rejected } = await processAuditEvidenceFileList(files);
+        const { pending, jobs, rejected } = await prepareEvidenceUploads(files);
         if (rejected.length > 0) {
             toast.error(rejected[0].error || "Some files could not be uploaded");
         }
-        if (accepted.length > 0) {
-            setEvidenceFiles((prev) => [...prev, ...accepted]);
-            toast.success(
-                accepted.length === 1
-                    ? "Evidence file added"
-                    : `${accepted.length} evidence files added`,
-            );
-        }
+        if (pending.length === 0) return;
+
+        setEvidenceFiles((prev) => [...prev, ...pending]);
+        toast.success(
+            pending.length === 1
+                ? "Evidence file added"
+                : `${pending.length} evidence files added`,
+        );
+
+        void runEvidenceUploadJobs(jobs, {
+            onItemStart: (clientId) => {
+                setEvidenceFiles((prev) =>
+                    prev.map((m) =>
+                        m.clientId === clientId ? { ...m, uploadStatus: "uploading" } : m,
+                    ),
+                );
+            },
+            onItemUpdate: (clientId, media) => {
+                setEvidenceFiles((prev) => {
+                    const idx = prev.findIndex((m) => m.clientId === clientId);
+                    if (idx < 0) return prev;
+                    const next = [...prev];
+                    next[idx] = media;
+                    return next;
+                });
+            },
+        });
     };
 
     const buildFindingPayload = (isDraft: boolean): Finding => {

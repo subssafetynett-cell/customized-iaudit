@@ -1,6 +1,6 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useCallback, memo } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { apiFetch } from "@/lib/api";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import {
     Table,
@@ -11,7 +11,7 @@ import {
     TableRow,
 } from "@/components/ui/table";
 import { Input } from "@/components/ui/input";
-import { AlertTriangle, RefreshCw, SearchX, Search, Upload, Eye, Download, FileText } from "lucide-react";
+import { AlertTriangle, SearchX, Search, Upload, Eye, Download, FileText } from "lucide-react";
 import {
     DropdownMenu,
     DropdownMenuContent,
@@ -19,14 +19,20 @@ import {
     DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
-    extractFindings,
     findingActionByDisplay,
-    mergeFindingWithOverrides,
     TYPE_CONFIG,
     type Finding,
     type FindingStatus,
     type FindingType,
 } from "@/lib/auditFindings";
+import {
+    FINDINGS_INBOX_GC_MS,
+    FINDINGS_INBOX_STALE_MS,
+    fetchFindingsInboxPlans,
+    findingsFromInboxPlans,
+    findingsInboxQueryKey,
+    type FindingsOwnership,
+} from "@/lib/auditFindingsInbox";
 import { FindingStatusBadge } from "@/components/FindingDetailView";
 import ReusablePagination from "@/components/ReusablePagination";
 import { toast } from "sonner";
@@ -47,7 +53,6 @@ import {
     findingMediaToReportSources,
     prepareReportEvidenceImages,
 } from "@/lib/reportEvidenceImages";
-import { isAuditeeRole } from "@/lib/userRoles";
 import {
     Select,
     SelectContent,
@@ -56,11 +61,6 @@ import {
     SelectValue,
 } from "@/components/ui/select";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-
-function canViewAllOrgFindings(role?: string) {
-    const normalized = String(role ?? "").trim().toLowerCase();
-    return ["superadmin", "admin", "auditor", "lead_auditor"].includes(normalized);
-}
 
 function findingAssigneeEmail(finding: Finding) {
     if (finding.assignToEmail?.trim()) {
@@ -107,7 +107,7 @@ function isFindingRaisedByMe(
     return false;
 }
 
-type OwnershipTab = "assigned" | "raised";
+type OwnershipTab = FindingsOwnership;
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
@@ -146,8 +146,172 @@ function findingMatchesStatusFilter(finding: Finding, statusFilter: StatusFilter
     return finding.status === statusFilter;
 }
 
+function readViewerFromStorage(): {
+    email: string;
+    viewerId: number | null;
+} {
+    try {
+        const userStr = localStorage.getItem("user");
+        if (!userStr) return { email: "", viewerId: null };
+        const user = JSON.parse(userStr);
+        const email = String(user.email || "").toLowerCase().trim();
+        const parsedViewerId = Number(user.id ?? user._id);
+        return {
+            email,
+            viewerId:
+                Number.isInteger(parsedViewerId) && parsedViewerId > 0
+                    ? parsedViewerId
+                    : null,
+        };
+    } catch {
+        return { email: "", viewerId: null };
+    }
+}
+
+function FindingsTableSkeleton({ rows = 8 }: { rows?: number }) {
+    return (
+        <div className="rounded-xl border border-slate-200 overflow-hidden shadow-sm">
+            <Table>
+                <TableHeader className="bg-[#213847]">
+                    <TableRow className="hover:bg-slate-800 divide-x divide-slate-600">
+                        <TableHead className="text-white font-bold w-12 text-center">#</TableHead>
+                        <TableHead className="text-white font-bold w-[22%]">Audit Name</TableHead>
+                        <TableHead className="text-white font-bold w-[14%]">Clause / Item</TableHead>
+                        <TableHead className="text-white font-bold w-[10%]">Type</TableHead>
+                        <TableHead className="text-white font-bold w-[12%]">Status</TableHead>
+                        <TableHead className="text-white font-bold w-[14%]">—</TableHead>
+                        <TableHead className="text-white font-bold min-w-[160px] text-right pr-4">
+                            Actions
+                        </TableHead>
+                    </TableRow>
+                </TableHeader>
+                <TableBody>
+                    {Array.from({ length: rows }).map((_, i) => (
+                        <TableRow key={i} className="bg-white divide-x divide-slate-100">
+                            {Array.from({ length: 7 }).map((__, j) => (
+                                <TableCell key={j} className="py-3">
+                                    <div className="h-4 rounded bg-slate-100 animate-pulse" />
+                                </TableCell>
+                            ))}
+                        </TableRow>
+                    ))}
+                </TableBody>
+            </Table>
+        </div>
+    );
+}
+
+type FindingRowProps = {
+    finding: Finding;
+    index: number;
+    ownershipTab: OwnershipTab;
+    onView: (finding: Finding) => void;
+};
+
+const FindingTableRow = memo(function FindingTableRow({
+    finding,
+    index,
+    ownershipTab,
+    onView,
+}: FindingRowProps) {
+    const uiType = toFindingsUiType(finding.type);
+    const cfg = TYPE_CONFIG[uiType];
+    const raw =
+        ownershipTab === "assigned"
+            ? finding.raisedByName?.trim() ||
+              finding.raisedBy?.trim() ||
+              findingActionByDisplay(finding)
+            : finding.assignToName?.trim() || finding.assignTo?.trim() || "";
+    const name = raw.replace(/\s*\([^)]*@[^)]*\)\s*$/, "").trim();
+
+    return (
+        <TableRow className="bg-white hover:bg-slate-50 transition-colors divide-x divide-slate-100 align-top">
+            <TableCell className="text-center text-slate-500 font-medium text-sm py-3">
+                {index}
+            </TableCell>
+            <TableCell className="font-semibold text-slate-800 text-sm py-3">
+                {finding.auditName}
+            </TableCell>
+            <TableCell className="text-slate-800 text-sm font-medium py-3">
+                <div className="flex items-start gap-2 min-w-0">
+                    <div className="min-w-0">
+                        {finding.moduleName ? (
+                            <>
+                                <p
+                                    className="font-semibold text-slate-900 truncate"
+                                    title={finding.moduleName}
+                                >
+                                    {finding.moduleName}
+                                </p>
+                                {(() => {
+                                    const prefix = `${finding.moduleName} · `;
+                                    const itemPart = finding.clauseRef.startsWith(prefix)
+                                        ? finding.clauseRef.slice(prefix.length)
+                                        : "";
+                                    return itemPart ? (
+                                        <p
+                                            className="text-xs text-slate-500 truncate mt-0.5"
+                                            title={itemPart}
+                                        >
+                                            {itemPart}
+                                        </p>
+                                    ) : null;
+                                })()}
+                            </>
+                        ) : (
+                            <span className="truncate block">{finding.clauseRef}</span>
+                        )}
+                    </div>
+                    {finding.media && finding.media.length > 0 && (
+                        <span
+                            title={`${finding.media.length} attachments`}
+                            className="shrink-0 mt-0.5"
+                        >
+                            <Upload className="w-3 h-3 text-amber-500" />
+                        </span>
+                    )}
+                </div>
+            </TableCell>
+            <TableCell className="py-3">
+                <span
+                    className={`inline-block px-2.5 py-1 rounded-full text-xs font-bold ring-1 ${cfg.bg} ${cfg.text} ${cfg.ring}`}
+                >
+                    {cfg.label}
+                </span>
+            </TableCell>
+            <TableCell className="py-3">
+                <FindingStatusBadge status={finding.status} />
+            </TableCell>
+            <TableCell className="text-slate-600 text-sm font-medium py-3">
+                {name ? (
+                    <p className="truncate" title={name}>
+                        {name}
+                    </p>
+                ) : (
+                    <span className="text-slate-400">—</span>
+                )}
+            </TableCell>
+            <TableCell className="py-3 pr-4">
+                <div className="flex flex-wrap items-center justify-end gap-2">
+                    <Button
+                        variant="outline"
+                        size="sm"
+                        title="View finding"
+                        onClick={() => onView(finding)}
+                        className="h-8 gap-1.5 border-slate-200 text-slate-700 hover:text-[#213847]"
+                    >
+                        <Eye className="w-3.5 h-3.5" />
+                        View
+                    </Button>
+                </div>
+            </TableCell>
+        </TableRow>
+    );
+});
+
 export default function AuditFindings() {
     const navigate = useNavigate();
+    const queryClient = useQueryClient();
     const [searchParams, setSearchParams] = useSearchParams();
     const auditFindingsTourActive = searchParams.get("auditFindingsTour") === "true";
     const auditFindingsTourStep = Math.min(
@@ -205,134 +369,99 @@ export default function AuditFindings() {
         setAuditFindingsTourStep(auditFindingsTourStep - 1);
     };
 
-    const [findings, setFindings] = useState<Finding[]>([]);
-    const [loading, setLoading] = useState(true);
-    const [viewerEmail, setViewerEmail] = useState("");
-    const [viewerId, setViewerId] = useState<number | null>(null);
+    const viewer = useMemo(() => readViewerFromStorage(), []);
+    const viewerEmail = viewer.email;
+    const viewerId = viewer.viewerId;
+
     const [activeFilter, setActiveFilter] = useState<FilterType>("All");
     const [statusFilter, setStatusFilter] = useState<StatusFilter>("All");
     const [ownershipTab, setOwnershipTab] = useState<OwnershipTab>(() =>
         searchParams.get("tab") === "raised" ? "raised" : "assigned",
     );
     const [searchQuery, setSearchQuery] = useState("");
-
-    // Pagination
     const [currentPage, setCurrentPage] = useState(1);
     const [itemsPerPage, setItemsPerPage] = useState(10);
+    const [prefetchOther, setPrefetchOther] = useState(false);
 
-    const fetchFindings = async () => {
-        setLoading(true);
-        try {
-            const userStr = localStorage.getItem('user');
-            if (!userStr) {
-                setLoading(false);
-                return;
-            }
-            const user = JSON.parse(userStr);
-            const userEmail = String(user.email || "").toLowerCase().trim();
-            const parsedViewerId = Number(user.id ?? user._id);
-            const isAuditee = isAuditeeRole(user.role);
-            setViewerEmail(userEmail);
-            setViewerId(Number.isInteger(parsedViewerId) && parsedViewerId > 0 ? parsedViewerId : null);
+    const assignedQuery = useQuery({
+        queryKey: findingsInboxQueryKey("assigned"),
+        queryFn: () => fetchFindingsInboxPlans("assigned"),
+        staleTime: FINDINGS_INBOX_STALE_MS,
+        gcTime: FINDINGS_INBOX_GC_MS,
+        enabled: Boolean(viewerEmail),
+        refetchOnWindowFocus: false,
+    });
 
-            const isSuperAdmin = user.role === 'superadmin';
-            const seesAll = canViewAllOrgFindings(user.role);
-
-            const planById = new Map<number, any>();
-
-            const addPlans = (rows: any[]) => {
-                if (!Array.isArray(rows)) return;
-                rows.forEach((plan) => {
-                    if (plan?.id != null) planById.set(Number(plan.id), plan);
-                });
-            };
-
-            if (isSuperAdmin) {
-                const res = await apiFetch(`/audit-plans?scope=all&includeData=true`);
-                if (!res.ok) throw new Error("API call failed");
-                addPlans(await res.json());
-            } else if (isAuditee) {
-                const [plansRes, assignedRes] = await Promise.all([
-                    apiFetch(`/audit-plans?includeData=true`),
-                    apiFetch(`/assigned-audit-findings`),
-                ]);
-                if (plansRes.ok) addPlans(await plansRes.json());
-                if (assignedRes.ok) addPlans(await assignedRes.json());
-            } else {
-                const requests: Promise<Response>[] = [
-                    apiFetch(`/assigned-audit-findings`),
-                ];
-                if (seesAll) {
-                    requests.push(apiFetch(`/audit-plans?scope=org&includeData=true`));
-                }
-
-                const responses = await Promise.all(requests);
-                for (const res of responses) {
-                    if (res.ok) {
-                        addPlans(await res.json());
-                    }
-                }
-            }
-
-            const plans = Array.from(planById.values());
-
-            const all: Finding[] = [];
-
-            if (Array.isArray(plans)) {
-                plans.forEach((plan) => {
-                    const baseFindings = extractFindings(plan);
-                    const overrides = plan.findingsData
-                        ? typeof plan.findingsData === "string"
-                            ? JSON.parse(plan.findingsData)
-                            : plan.findingsData
-                        : {};
-
-                    const merged = baseFindings.map((f) =>
-                        mergeFindingWithOverrides(f, overrides),
-                    );
-
-                    all.push(...merged);
-                });
-                const visible =
-                    seesAll || isSuperAdmin
-                        ? all
-                        : all.filter(
-                              (f) =>
-                                  isFindingAssignedToMe(f, userEmail) ||
-                                  isFindingRaisedByMe(
-                                      f,
-                                      userEmail,
-                                      Number.isInteger(parsedViewerId) && parsedViewerId > 0
-                                          ? parsedViewerId
-                                          : null,
-                                  ),
-                          );
-                setFindings(visible);
-            }
-        } catch (error) {
-            console.error("Fetch findings error:", error);
-            setFindings([]);
-        } finally {
-            setLoading(false);
-        }
-    };
+    const raisedQuery = useQuery({
+        queryKey: findingsInboxQueryKey("raised"),
+        queryFn: () => fetchFindingsInboxPlans("raised"),
+        staleTime: FINDINGS_INBOX_STALE_MS,
+        gcTime: FINDINGS_INBOX_GC_MS,
+        enabled:
+            Boolean(viewerEmail) &&
+            (ownershipTab === "raised" || prefetchOther || searchParams.get("tab") === "raised"),
+        refetchOnWindowFocus: false,
+    });
 
     useEffect(() => {
-        fetchFindings();
+        if (!assignedQuery.isSuccess || prefetchOther) return;
+        const idle = window.setTimeout(() => setPrefetchOther(true), 400);
+        return () => window.clearTimeout(idle);
+    }, [assignedQuery.isSuccess, prefetchOther]);
+
+    useEffect(() => {
+        if (ownershipTab !== "raised") return;
+        if (assignedQuery.isSuccess || assignedQuery.isFetching) return;
+        void queryClient.prefetchQuery({
+            queryKey: findingsInboxQueryKey("assigned"),
+            queryFn: () => fetchFindingsInboxPlans("assigned"),
+            staleTime: FINDINGS_INBOX_STALE_MS,
+        });
+    }, [ownershipTab, assignedQuery.isSuccess, assignedQuery.isFetching, queryClient]);
+
+    const assignedFindings = useMemo(() => {
+        const plans = assignedQuery.data ?? [];
+        const all = findingsFromInboxPlans(plans);
+        if (!viewerEmail) return all;
+        return all.filter((f) => isFindingAssignedToMe(f, viewerEmail));
+    }, [assignedQuery.data, viewerEmail]);
+
+    const raisedFindings = useMemo(() => {
+        const plans = raisedQuery.data ?? [];
+        const all = findingsFromInboxPlans(plans);
+        if (!viewerEmail && !viewerId) return all;
+        return all.filter((f) => isFindingRaisedByMe(f, viewerEmail, viewerId));
+    }, [raisedQuery.data, viewerEmail, viewerId]);
+
+    const activeQuery = ownershipTab === "assigned" ? assignedQuery : raisedQuery;
+    const tableLoading =
+        activeQuery.isLoading || (activeQuery.isFetching && !activeQuery.data);
+    const ownershipFindings =
+        ownershipTab === "assigned" ? assignedFindings : raisedFindings;
+
+    const assignedCount = assignedFindings.length;
+    const raisedCount = raisedQuery.isSuccess ? raisedFindings.length : null;
+
+    const handleOwnershipChange = useCallback((value: string) => {
+        setOwnershipTab(value === "raised" ? "raised" : "assigned");
     }, []);
 
-    const ownershipFindings = useMemo(() => findings.filter((f) =>
-        ownershipTab === "assigned"
-            ? isFindingAssignedToMe(f, viewerEmail)
-            : isFindingRaisedByMe(f, viewerEmail, viewerId),
-    ), [findings, ownershipTab, viewerEmail, viewerId]);
-
-    const assignedCount = useMemo(() => findings.filter((f) =>
-        isFindingAssignedToMe(f, viewerEmail),
-    ).length, [findings, viewerEmail]);
-    const raisedCount = useMemo(() => findings.filter((f) =>
-        isFindingRaisedByMe(f, viewerEmail, viewerId),
-    ).length, [findings, viewerEmail, viewerId]);
+    const handleViewFinding = useCallback(
+        (finding: Finding) => {
+            navigate(
+                {
+                    pathname: `/audit-findings/${finding.auditId}/${encodeURIComponent(finding.id)}`,
+                    search: "",
+                },
+                {
+                    state: {
+                        returnTab: ownershipTab,
+                    },
+                },
+            );
+        },
+        [navigate, ownershipTab],
+    );
 
     const searchedFindings = useMemo(() => ownershipFindings.filter((f) => {
         if (!searchQuery) return true;
@@ -602,7 +731,9 @@ export default function AuditFindings() {
                     ${activeFilter === type ? `border-${accent}-400 ring-2 ring-${accent}-200 bg-${accent}-50` : "border-slate-200 bg-white hover:bg-slate-50"}`}
                             >
                                 <span className={`text-xs font-bold uppercase tracking-widest text-${accent}-600`}>{type}</span>
-                                <div className={`text-4xl font-extrabold mt-1 text-${accent}-600`}>{countOf(type)}</div>
+                                <div className={`text-4xl font-extrabold mt-1 text-${accent}-600`}>
+                                    {tableLoading ? "—" : countOf(type)}
+                                </div>
                                 <div className="text-xs text-slate-500 mt-1">findings</div>
                             </button>
                         );
@@ -624,8 +755,8 @@ export default function AuditFindings() {
                                 className={`px-4 py-1.5 rounded-full text-sm font-semibold transition-all shadow-sm ${activeFilter === f ? FILTER_STYLE[f] : FILTER_INACTIVE}`}
                             >
                                 {f === "All"
-                                    ? `All (${searchedFindings.length})`
-                                    : `${f} (${countOf(f)})`}
+                                    ? `All (${tableLoading ? "…" : searchedFindings.length})`
+                                    : `${f} (${tableLoading ? "…" : countOf(f)})`}
                             </button>
                         ))}
                     </div>
@@ -666,9 +797,7 @@ export default function AuditFindings() {
                 <div className="space-y-3">
                     <Tabs
                         value={ownershipTab}
-                        onValueChange={(value) =>
-                            setOwnershipTab(value === "raised" ? "raised" : "assigned")
-                        }
+                        onValueChange={handleOwnershipChange}
                         className="w-full"
                     >
                         <TabsList className="h-11 w-full sm:w-auto grid grid-cols-2 sm:inline-flex bg-slate-100 p-1 rounded-full">
@@ -678,7 +807,7 @@ export default function AuditFindings() {
                             >
                                 Assign to me
                                 <span className="ml-1.5 text-xs font-bold text-slate-500">
-                                    ({assignedCount})
+                                    ({assignedQuery.isSuccess ? assignedCount : "…"})
                                 </span>
                             </TabsTrigger>
                             <TabsTrigger
@@ -687,21 +816,18 @@ export default function AuditFindings() {
                             >
                                 Raised by me
                                 <span className="ml-1.5 text-xs font-bold text-slate-500">
-                                    ({raisedCount})
+                                    ({raisedCount == null ? "…" : raisedCount})
                                 </span>
                             </TabsTrigger>
                         </TabsList>
                     </Tabs>
 
-                {loading ? (
+                {tableLoading ? (
                     <div
                         id="tour-step-findings-list"
-                        className={cn(
-                            "flex items-center justify-center py-24 text-slate-400 text-sm gap-2 min-h-[200px]",
-                            tourFindingsHighlight(4),
-                        )}
+                        className={cn(tourFindingsHighlight(4))}
                     >
-                        <RefreshCw className="w-5 h-5 animate-spin" /> Loading findings…
+                        <FindingsTableSkeleton />
                     </div>
                 ) : filtered.length === 0 ? (
                     <div
@@ -747,128 +873,15 @@ export default function AuditFindings() {
                                     </TableRow>
                                 </TableHeader>
                                 <TableBody>
-                                    {paginatedFindings.map((finding, idx) => {
-                                        const uiType = toFindingsUiType(finding.type);
-                                        const cfg = TYPE_CONFIG[uiType];
-                                        return (
-                                            <TableRow
-                                                key={`${finding.auditId}-${finding.id}-${idx}`}
-                                                className="bg-white hover:bg-slate-50 transition-colors divide-x divide-slate-100 align-top"
-                                            >
-                                                <TableCell className="text-center text-slate-500 font-medium text-sm py-3">
-                                                    {(currentPage - 1) * itemsPerPage + idx + 1}
-                                                </TableCell>
-                                                <TableCell className="font-semibold text-slate-800 text-sm py-3">
-                                                    {finding.auditName}
-                                                </TableCell>
-                                                <TableCell className="text-slate-800 text-sm font-medium py-3">
-                                                    <div className="flex items-start gap-2 min-w-0">
-                                                        <div className="min-w-0">
-                                                            {finding.moduleName ? (
-                                                                <>
-                                                                    <p
-                                                                        className="font-semibold text-slate-900 truncate"
-                                                                        title={finding.moduleName}
-                                                                    >
-                                                                        {finding.moduleName}
-                                                                    </p>
-                                                                    {(() => {
-                                                                        const prefix = `${finding.moduleName} · `;
-                                                                        const itemPart =
-                                                                            finding.clauseRef.startsWith(
-                                                                                prefix,
-                                                                            )
-                                                                                ? finding.clauseRef.slice(
-                                                                                      prefix.length,
-                                                                                  )
-                                                                                : "";
-                                                                        return itemPart ? (
-                                                                            <p
-                                                                                className="text-xs text-slate-500 truncate mt-0.5"
-                                                                                title={itemPart}
-                                                                            >
-                                                                                {itemPart}
-                                                                            </p>
-                                                                        ) : null;
-                                                                    })()}
-                                                                </>
-                                                            ) : (
-                                                                <span className="truncate block">
-                                                                    {finding.clauseRef}
-                                                                </span>
-                                                            )}
-                                                        </div>
-                                                        {finding.media && finding.media.length > 0 && (
-                                                            <span
-                                                                title={`${finding.media.length} attachments`}
-                                                                className="shrink-0 mt-0.5"
-                                                            >
-                                                                <Upload className="w-3 h-3 text-amber-500" />
-                                                            </span>
-                                                        )}
-                                                    </div>
-                                                </TableCell>
-                                                <TableCell className="py-3">
-                                                    <span
-                                                        className={`inline-block px-2.5 py-1 rounded-full text-xs font-bold ring-1 ${cfg.bg} ${cfg.text} ${cfg.ring}`}
-                                                    >
-                                                        {cfg.label}
-                                                    </span>
-                                                </TableCell>
-                                                <TableCell className="py-3">
-                                                    <FindingStatusBadge status={finding.status} />
-                                                </TableCell>
-                                                <TableCell className="text-slate-600 text-sm font-medium py-3">
-                                                    {(() => {
-                                                        const raw =
-                                                            ownershipTab === "assigned"
-                                                                ? finding.raisedByName?.trim() ||
-                                                                  finding.raisedBy?.trim() ||
-                                                                  findingActionByDisplay(finding)
-                                                                : finding.assignToName?.trim() ||
-                                                                  finding.assignTo?.trim() ||
-                                                                  "";
-                                                        const name = raw
-                                                            .replace(/\s*\([^)]*@[^)]*\)\s*$/, "")
-                                                            .trim();
-                                                        return name ? (
-                                                            <p className="truncate" title={name}>
-                                                                {name}
-                                                            </p>
-                                                        ) : (
-                                                            <span className="text-slate-400">—</span>
-                                                        );
-                                                    })()}
-                                                </TableCell>
-                                                <TableCell className="py-3 pr-4">
-                                                    <div className="flex flex-wrap items-center justify-end gap-2">
-                                                        <Button
-                                                            variant="outline"
-                                                            size="sm"
-                                                            title="View finding"
-                                                            onClick={() =>
-                                                                navigate(
-                                                                    {
-                                                                        pathname: `/audit-findings/${finding.auditId}/${encodeURIComponent(finding.id)}`,
-                                                                        search: "",
-                                                                    },
-                                                                    {
-                                                                        state: {
-                                                                            returnTab: ownershipTab,
-                                                                        },
-                                                                    },
-                                                                )
-                                                            }
-                                                            className="h-8 gap-1.5 border-slate-200 text-slate-700 hover:text-[#213847]"
-                                                        >
-                                                            <Eye className="w-3.5 h-3.5" />
-                                                            View
-                                                        </Button>
-                                                    </div>
-                                                </TableCell>
-                                            </TableRow>
-                                        );
-                                    })}
+                                    {paginatedFindings.map((finding, idx) => (
+                                        <FindingTableRow
+                                            key={`${finding.auditId}-${finding.id}`}
+                                            finding={finding}
+                                            index={(currentPage - 1) * itemsPerPage + idx + 1}
+                                            ownershipTab={ownershipTab}
+                                            onView={handleViewFinding}
+                                        />
+                                    ))}
                                 </TableBody>
                             </Table>
                         </div>

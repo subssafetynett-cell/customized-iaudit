@@ -1,8 +1,10 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { format } from "date-fns";
 import { apiFetch } from "@/lib/api";
 import { sitesFromCompanies } from "@/lib/orgSites";
+import { useCompanyStore } from "@/hooks/useCompanyStore";
+import { Skeleton } from "@/components/ui/skeleton";
 import { TopNav } from "@/components/TopNav";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -197,12 +199,78 @@ function getModuleProgramMeta(program: any): {
     };
 }
 
+function asListPayload(payload: unknown): any[] {
+    if (Array.isArray(payload)) return payload;
+    if (Array.isArray((payload as { data?: unknown })?.data)) {
+        return (payload as { data: unknown[] }).data;
+    }
+    if (Array.isArray((payload as { items?: unknown })?.items)) {
+        return (payload as { items: unknown[] }).items;
+    }
+    return [];
+}
+
+type SitePlansCache = { programs: any[]; plans: any[] };
+
+function AuditPlansContentSkeleton({ viewMode }: { viewMode: "card" | "list" }) {
+    if (viewMode === "list") {
+        return (
+            <div className="flex flex-col gap-3">
+                {Array.from({ length: 5 }).map((_, i) => (
+                    <div
+                        key={i}
+                        className="flex items-center justify-between gap-4 p-4 rounded-2xl border border-slate-200/50 bg-white"
+                    >
+                        <div className="flex items-center gap-4 flex-1">
+                            <Skeleton className="h-10 w-10 rounded-xl" />
+                            <div className="space-y-2 flex-1">
+                                <Skeleton className="h-4 w-2/3 max-w-md" />
+                                <Skeleton className="h-3 w-40" />
+                            </div>
+                        </div>
+                        <Skeleton className="h-8 w-24 rounded-full" />
+                    </div>
+                ))}
+            </div>
+        );
+    }
+    return (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            {Array.from({ length: 6 }).map((_, i) => (
+                <Card
+                    key={i}
+                    className="border border-slate-200/50 bg-white shadow-sm rounded-2xl p-6 flex flex-col gap-6"
+                >
+                    <div className="flex items-start justify-between gap-3">
+                        <div className="space-y-2 flex-1">
+                            <Skeleton className="h-5 w-3/4" />
+                            <Skeleton className="h-3 w-24" />
+                        </div>
+                        <Skeleton className="h-8 w-8 rounded-lg" />
+                    </div>
+                    <Skeleton className="h-3 w-full" />
+                    <Skeleton className="h-3 w-5/6" />
+                    <div className="flex gap-2 pt-2">
+                        <Skeleton className="h-9 w-24 rounded-xl" />
+                        <Skeleton className="h-9 w-9 rounded-xl" />
+                    </div>
+                </Card>
+            ))}
+        </div>
+    );
+}
+
 const AuditProgramPage = () => {
+    const { companies: storeCompanies, hasFetchedCompanies } = useCompanyStore();
     const [sites, setSites] = useState<any[]>([]);
     const [companies, setCompanies] = useState<any[]>([]);
-    const [auditPrograms, setAuditPrograms] = useState<any[]>([]);
-    const [auditPlans, setAuditPlans] = useState<any[]>([]);
-    const [loading, setLoading] = useState(true);
+    /** Per-site cache — switching back to a loaded tab is instant (no refetch). */
+    const [siteCache, setSiteCache] = useState<Record<string, SitePlansCache>>({});
+    const siteCacheRef = useRef(siteCache);
+    siteCacheRef.current = siteCache;
+    const inflightSiteRef = useRef<Record<string, Promise<void>>>({});
+    const [sitesLoading, setSitesLoading] = useState(true);
+    const [contentLoading, setContentLoading] = useState(false);
     const [downloading, setDownloading] = useState(false); // Added for download state
     const [viewMode, setViewMode] = useState<"card" | "list">("card");
     const [activeSiteId, setActiveSiteId] = useState<string>("");
@@ -252,46 +320,147 @@ const AuditProgramPage = () => {
     const [planToDelete, setPlanToDelete] = useState<any>(null);
     const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
 
+    const auditPrograms = useMemo(
+        () => Object.values(siteCache).flatMap((entry) => entry.programs),
+        [siteCache],
+    );
+    const auditPlans = useMemo(
+        () => Object.values(siteCache).flatMap((entry) => entry.plans),
+        [siteCache],
+    );
+    const activeSitePrograms = useMemo(
+        () => siteCache[activeSiteId]?.programs ?? [],
+        [siteCache, activeSiteId],
+    );
+    const activeSiteCached = Boolean(activeSiteId && siteCache[activeSiteId]);
+
+    const loadSiteData = useCallback(async (siteId: string, opts?: { background?: boolean }) => {
+        const id = String(siteId || "").trim();
+        if (!id) return;
+        if (siteCacheRef.current[id]) return;
+        if (inflightSiteRef.current[id]) {
+            await inflightSiteRef.current[id];
+            return;
+        }
+
+        const task = (async () => {
+            const [programsRes, plansRes] = await Promise.all([
+                apiFetch(`/audit-programs?scope=org&full=true&siteId=${encodeURIComponent(id)}`),
+                apiFetch(`/audit-plans?scope=org&siteId=${encodeURIComponent(id)}`),
+            ]);
+            const programs = programsRes.ok ? asListPayload(await programsRes.json()) : [];
+            const plans = plansRes.ok ? asListPayload(await plansRes.json()) : [];
+            setSiteCache((prev) => {
+                if (prev[id]) return prev;
+                return { ...prev, [id]: { programs, plans } };
+            });
+        })();
+
+        inflightSiteRef.current[id] = task;
+        try {
+            await task;
+        } catch (error) {
+            console.error(`Failed to load audit plans for site ${id}:`, error);
+            if (!opts?.background) {
+                toast.error("Failed to load audit plans for this site");
+            }
+        } finally {
+            delete inflightSiteRef.current[id];
+        }
+    }, []);
+
+    // 1) Load sites only — render tabs ASAP; do not wait on all org plans.
     useEffect(() => {
-        const fetchData = async () => {
+        let cancelled = false;
+        const loadSites = async () => {
             try {
-                const user = JSON.parse(localStorage.getItem('user') || '{}');
-                const [sitesRes, companiesRes, programsRes, plansRes] = await Promise.all([
-                    apiFetch("/sites"),
-                    apiFetch("/companies"),
-                    apiFetch(`/audit-programs?scope=org&full=true`),
-                    apiFetch(`/audit-plans?scope=org`),
-                ]);
-                const sitesData = sitesRes.ok ? await sitesRes.json() : [];
-                const companiesData = companiesRes.ok ? await companiesRes.json() : [];
-                const programsData = programsRes.ok ? await programsRes.json() : [];
-                const plansData = plansRes.ok ? await plansRes.json() : [];
+                const sitesRes = await apiFetch("/sites?minimal=1");
+                let validSites = sitesRes.ok ? asListPayload(await sitesRes.json()) : [];
 
-                let validSites = Array.isArray(sitesData) ? sitesData : [];
-                if (validSites.length === 0 && Array.isArray(companiesData) && companiesData.length > 0) {
-                    validSites = sitesFromCompanies(companiesData);
+                let companiesData: any[] = storeCompanies;
+                if (validSites.length === 0) {
+                    if (hasFetchedCompanies && storeCompanies.length > 0) {
+                        validSites = sitesFromCompanies(storeCompanies);
+                    } else {
+                        const companiesRes = await apiFetch("/companies");
+                        companiesData = companiesRes.ok ? asListPayload(await companiesRes.json()) : [];
+                        if (Array.isArray(companiesData) && companiesData.length > 0) {
+                            validSites = sitesFromCompanies(companiesData);
+                        }
+                    }
+                } else if (storeCompanies.length === 0 && !hasFetchedCompanies) {
+                    const companiesRes = await apiFetch("/companies");
+                    if (companiesRes.ok) {
+                        companiesData = asListPayload(await companiesRes.json());
+                    }
                 }
-                const validPrograms = Array.isArray(programsData) ? programsData : [];
-                const validPlans = Array.isArray(plansData) ? plansData : [];
 
+                if (cancelled) return;
                 setSites(validSites);
-                setCompanies(Array.isArray(companiesData) ? companiesData : []);
-                setAuditPrograms(validPrograms);
-                setAuditPlans(validPlans);
-
-                // Set first site as default if activeSiteId is not set
+                setCompanies(
+                    Array.isArray(companiesData) && companiesData.length > 0
+                        ? companiesData
+                        : storeCompanies,
+                );
                 if (validSites.length > 0) {
-                    setActiveSiteId(validSites[0].id.toString());
+                    setActiveSiteId((prev) => prev || String(validSites[0].id));
                 }
             } catch (error) {
-                console.error("Failed to fetch data:", error);
-                toast.error("Failed to load data");
+                console.error("Failed to fetch sites:", error);
+                if (!cancelled) toast.error("Failed to load sites");
             } finally {
-                setLoading(false);
+                if (!cancelled) setSitesLoading(false);
             }
         };
-        fetchData();
+        void loadSites();
+        return () => {
+            cancelled = true;
+        };
+        // Intentionally once on mount — store may hydrate later via sync effect below.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
+
+    // Prefer company store when it arrives after mount (avoids blank company branding).
+    useEffect(() => {
+        if (storeCompanies.length > 0) {
+            setCompanies((prev) => (prev.length > 0 ? prev : storeCompanies));
+            setSites((prev) => {
+                if (prev.length > 0) return prev;
+                return sitesFromCompanies(storeCompanies);
+            });
+        }
+    }, [storeCompanies]);
+
+    // 2) Lazy-load the active site's programs + plans; cache for instant tab switches.
+    useEffect(() => {
+        if (!activeSiteId) return;
+        if (siteCacheRef.current[activeSiteId]) {
+            setContentLoading(false);
+            return;
+        }
+        let cancelled = false;
+        setContentLoading(true);
+        void loadSiteData(activeSiteId).finally(() => {
+            if (!cancelled) setContentLoading(false);
+        });
+        return () => {
+            cancelled = true;
+        };
+    }, [activeSiteId, loadSiteData]);
+
+    // 3) Background prefetch the next site (never blocks UI).
+    useEffect(() => {
+        if (!activeSiteId || sites.length < 2) return;
+        if (!siteCache[activeSiteId]) return;
+        const idx = sites.findIndex((s) => String(s.id) === activeSiteId);
+        const next = sites[idx + 1] ?? sites[0];
+        const nextId = next ? String(next.id) : "";
+        if (!nextId || nextId === activeSiteId || siteCache[nextId]) return;
+        const t = window.setTimeout(() => {
+            void loadSiteData(nextId, { background: true });
+        }, 400);
+        return () => window.clearTimeout(t);
+    }, [activeSiteId, sites, siteCache, loadSiteData]);
 
     const handleFinishOnboarding = async () => {
         setIsFinishing(true);
@@ -492,8 +661,12 @@ const AuditProgramPage = () => {
         return null;
     };
 
-    const handleAuditPlanTourNext = () => {
+    const handleAuditPlanTourNext = async () => {
         if (auditPlanTourStep === 3) {
+            // Tour may need a pending plan on another site — ensure caches are warm.
+            await Promise.all(
+                sites.map((site) => loadSiteData(String(site.id), { background: true })),
+            );
             const target = getPendingCreatePlanTarget();
             if (!target) {
                 toast.error(
@@ -531,7 +704,16 @@ const AuditProgramPage = () => {
                 method: "DELETE"
             });
             if (res.ok) {
-                setAuditPlans(prev => prev.filter(p => p.id !== planId));
+                setSiteCache((prev) => {
+                    const next: Record<string, SitePlansCache> = {};
+                    for (const [siteId, entry] of Object.entries(prev)) {
+                        next[siteId] = {
+                            programs: entry.programs,
+                            plans: entry.plans.filter((p) => p.id !== planId),
+                        };
+                    }
+                    return next;
+                });
                 toast.success("Audit plan deleted successfully");
             } else {
                 throw new Error("Failed to delete");
@@ -861,15 +1043,6 @@ const AuditProgramPage = () => {
         }
     };
 
-    if (loading) return (
-        <div className="flex items-center justify-center min-h-screen bg-slate-50">
-            <div className="flex flex-col items-center gap-4">
-                <div className="w-12 h-12 border-4 border-emerald-200 border-t-emerald-600 rounded-full animate-spin" />
-                <p className="text-slate-500 font-medium animate-pulse text-sm">Synchronizing audit data...</p>
-            </div>
-        </div>
-    );
-
     return (
         <div className="flex-1 space-y-8 p-8 pt-6 min-h-screen bg-white relative">
             {auditPlanTourActive && (
@@ -950,7 +1123,13 @@ const AuditProgramPage = () => {
                     </div>
                 </div>
 
-                {sites.length > 0 && (
+                {sitesLoading ? (
+                    <div className="w-full border-b border-slate-200 pb-2 flex gap-8">
+                        {Array.from({ length: 3 }).map((_, i) => (
+                            <Skeleton key={i} className="h-6 w-28 rounded-md" />
+                        ))}
+                    </div>
+                ) : sites.length > 0 ? (
                     <Tabs value={activeSiteId} onValueChange={setActiveSiteId} className="w-full">
                         <TabsList className="bg-transparent h-auto p-0 flex gap-8 border-b border-slate-200 w-full justify-start rounded-none">
 
@@ -965,15 +1144,18 @@ const AuditProgramPage = () => {
                             ))}
                         </TabsList>
                     </Tabs>
-                )}
+                ) : null}
 
-                {sites.length > 0 ? (
+                {sitesLoading || (sites.length > 0 && (contentLoading || !activeSiteCached)) ? (
+                    <div className="space-y-8 relative z-10">
+                        <AuditPlansContentSkeleton viewMode={viewMode} />
+                    </div>
+                ) : sites.length > 0 ? (
                     <div className="space-y-8 relative z-10">
                         {(() => {
-                            const allExecutions = (auditPrograms || [])
-                                .filter(p => p.siteId.toString() === activeSiteId)
+                            const allExecutions = (activeSitePrograms || [])
                                 .flatMap(p => {
-                                    const site = (sites || []).find(s => s.id === p.siteId);
+                                    const site = (sites || []).find(s => s.id === p.siteId || String(s.id) === String(p.siteId));
                                     const executions = getAuditExecutions(p) || [];
                                     return executions.map(exec => ({
                                         ...exec,
@@ -995,7 +1177,7 @@ const AuditProgramPage = () => {
                             }
 
                             const firstPendingIdx = allExecutions.findIndex((exec) => {
-                                const siteProgram = (auditPrograms || []).find(
+                                const siteProgram = (activeSitePrograms || []).find(
                                     (p) => p.id === exec.programId,
                                 );
                                 return (
@@ -1015,7 +1197,7 @@ const AuditProgramPage = () => {
                                     )}
                                 >
                                     {(allExecutions || []).map((exec, idx) => {
-                                        const siteProgram = (auditPrograms || []).find(p => p.id === exec.programId);
+                                        const siteProgram = (activeSitePrograms || []).find(p => p.id === exec.programId);
                                         const executionDepartments = resolveDepartmentsFromProgram(siteProgram, companies);
                                         const plan = (auditPlans || []).find(p => p.auditProgramId === exec.programId && p.executionId === exec.id);
                                         const planExists = !!plan;
@@ -1281,7 +1463,7 @@ const AuditProgramPage = () => {
                             );
                         })()}
                     </div>
-                ) : ((
+                ) : (
                     <div className="flex flex-col items-center justify-center p-24 bg-white/50 rounded-2xl border-2 border-dashed border-slate-200 text-center space-y-6 animate-in zoom-in-95 duration-1000">
                         <Globe className="w-16 h-16 text-slate-200" />
                         <div className="space-y-2">
@@ -1291,7 +1473,7 @@ const AuditProgramPage = () => {
                             </p>
                         </div>
                     </div>
-                ))}
+                )}
             </div>
             {auditPlanTourActive &&
                 auditPlanTourStep <= 3 &&

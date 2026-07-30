@@ -12,6 +12,7 @@ type Props = {
     onRemove: (index: number) => void;
     onDescriptionChange?: (index: number, description: string) => void;
     onDescriptionBlur?: (index: number, description: string) => void;
+    onRetryUpload?: (index: number, clientId: string) => void;
     readOnly?: boolean;
     className?: string;
     uploadId?: string;
@@ -28,6 +29,7 @@ export function QuestionEvidenceUpload({
     onRemove,
     onDescriptionChange,
     onDescriptionBlur,
+    onRetryUpload,
     readOnly = false,
     className,
     uploadId,
@@ -80,6 +82,7 @@ export function QuestionEvidenceUpload({
                 onRemove={onRemove}
                 onDescriptionChange={onDescriptionChange}
                 onDescriptionBlur={onDescriptionBlur}
+                onRetryUpload={onRetryUpload}
                 readOnly={readOnly}
                 label={compact ? "Images" : "Attached evidence"}
                 chipClassName="text-[10px]"
