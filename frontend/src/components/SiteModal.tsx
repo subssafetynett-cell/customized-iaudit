@@ -26,7 +26,7 @@ import {
 interface Props {
     open: boolean;
     onClose: () => void;
-    onSubmit: (data: any) => void;
+    onSubmit: (data: any) => void | Promise<void>;
     initialData?: Partial<Site>;
     mode?: "create" | "edit";
     hideCancel?: boolean;
@@ -53,6 +53,7 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
     const [email, setEmail] = useState("");
     const [error, setError] = useState("");
     const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+    const [isSubmitting, setIsSubmitting] = useState(false);
 
     const statesForSelectedCountry = countryIso ? StateCity.getStatesOfCountry(countryIso) : [];
     const hasStatesForCountry = statesForSelectedCountry.length > 0;
@@ -98,7 +99,7 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
         setContactNumber((prev) => normalizePhoneDigits(prev, countryIso));
     }, [countryIso]);
 
-    const handleSubmit = () => {
+    const handleSubmit = async () => {
         const trimmedName = name.trim();
         const trimmedDescription = description.trim();
         const trimmedAddress = address.trim();
@@ -162,21 +163,29 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
             return;
         }
 
-        onSubmit({
-            name: trimmedName,
-            description: trimmedDescription,
-            siteType,
-            status,
-            address: trimmedAddress,
-            city: trimmedCity,
-            state: stateName,
-            country: countryName,
-            postalCode: trimmedPostalCode,
-            contactName: trimmedContactName,
-            contactPosition: trimmedContactPosition,
-            contactNumber: contactDigits,
-            email: trimmedEmail,
-        });
+        setIsSubmitting(true);
+        setError("");
+        try {
+            await onSubmit({
+                name: trimmedName,
+                description: trimmedDescription,
+                siteType,
+                status,
+                address: trimmedAddress,
+                city: trimmedCity,
+                state: stateName,
+                country: countryName,
+                postalCode: trimmedPostalCode,
+                contactName: trimmedContactName,
+                contactPosition: trimmedContactPosition,
+                contactNumber: contactDigits,
+                email: trimmedEmail,
+            });
+        } catch (err: any) {
+            setError(err?.message || "Failed to save site. Please try again.");
+        } finally {
+            setIsSubmitting(false);
+        }
     };
 
     const clearFieldError = (field: string) => {
@@ -463,12 +472,18 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
 
                 <DialogFooter className="p-6 pt-4 border-t bg-muted/20 gap-2">
                     {!hideCancel && (
-                        <Button variant="outline" onClick={onClose} className="px-6">
+                        <Button variant="outline" onClick={onClose} className="px-6" disabled={isSubmitting}>
                             Cancel
                         </Button>
                     )}
-                    <Button onClick={handleSubmit} className="px-8 shadow-sm">
-                        {mode === "create" ? "Add Site" : "Save Changes"}
+                    <Button onClick={handleSubmit} className="px-8 shadow-sm" disabled={isSubmitting}>
+                        {isSubmitting
+                            ? mode === "create"
+                                ? "Adding…"
+                                : "Saving…"
+                            : mode === "create"
+                              ? "Add Site"
+                              : "Save Changes"}
                     </Button>
                 </DialogFooter>
             </DialogContent>

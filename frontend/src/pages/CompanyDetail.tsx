@@ -269,7 +269,13 @@ export default function CompanyDetail() {
       <SiteModal
         open={showAddSite}
         onClose={() => setShowAddSite(false)}
-        onSubmit={(data) => addSite(company.id, data)}
+        onSubmit={async (data) => {
+          const res = await addSite(company.id, data);
+          if (!res?.success) {
+            throw new Error(res?.error || "Failed to create site");
+          }
+          setShowAddSite(false);
+        }}
         mode="create"
       />
 
@@ -279,7 +285,10 @@ export default function CompanyDetail() {
           onClose={() => setAddDeptSiteId(null)}
           onSubmit={async (data) => {
             const targetSiteId = data.siteId ?? activeSite.id;
-            await addDepartment(company.id, targetSiteId, data.name, data);
+            const res = await addDepartment(company.id, targetSiteId, data.name, data);
+            if (!res?.success) {
+              throw new Error(res?.error || "Failed to create department");
+            }
             setAddDeptSiteId(null);
           }}
           sites={company.sites.map((s) => ({ id: s.id, name: s.name }))}
@@ -342,15 +351,10 @@ export default function CompanyDetail() {
         onConfirm={async () => {
           if (siteToDelete) {
             setIsDeleting(true);
-            try {
-              await deleteSite(company.id, siteToDelete.id);
-              toast.success("Site deleted");
-              setSiteToDelete(null);
-            } catch (err) {
-              toast.error(err instanceof Error ? err.message : "Failed to delete site");
-            } finally {
-              setIsDeleting(false);
-            }
+            const pending = siteToDelete;
+            setSiteToDelete(null);
+            await deleteSite(company.id, pending.id);
+            setIsDeleting(false);
           }
         }}
         isLoading={isDeleting}
@@ -368,9 +372,10 @@ export default function CompanyDetail() {
         onConfirm={async () => {
           if (deptToDelete) {
             setIsDeleting(true);
-            await deleteDepartment(company.id, deptToDelete.siteId, deptToDelete.dept.id);
-            setIsDeleting(false);
+            const pending = deptToDelete;
             setDeptToDelete(null);
+            await deleteDepartment(company.id, pending.siteId, pending.dept.id);
+            setIsDeleting(false);
           }
         }}
         isLoading={isDeleting}

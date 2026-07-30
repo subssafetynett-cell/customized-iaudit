@@ -19,7 +19,7 @@ type SiteOption = { id: string; name: string };
 interface Props {
     open: boolean;
     onClose: () => void;
-    onSubmit: (data: any) => void;
+    onSubmit: (data: any) => void | Promise<void>;
     initialData?: Partial<Department>;
     mode?: "create" | "edit";
     sites?: SiteOption[];
@@ -76,6 +76,7 @@ export default function DepartmentModal({
     const [description, setDescription] = useState("");
     const [siteId, setSiteId] = useState("");
     const [error, setError] = useState("");
+    const [isSubmitting, setIsSubmitting] = useState(false);
     const [orgUsers, setOrgUsers] = useState<OrgUser[]>([]);
     const [usersLoading, setUsersLoading] = useState(false);
 
@@ -172,7 +173,7 @@ export default function DepartmentModal({
         setSiteId(defaultId);
     }, [open, initialSiteId, siteOptionsKey, sites]);
 
-    const handleSubmit = () => {
+    const handleSubmit = async () => {
         const trimmedName = name.trim();
         if (!trimmedName) {
             setError("Department name is required");
@@ -186,15 +187,23 @@ export default function DepartmentModal({
             setError("Please select a site");
             return;
         }
-        onSubmit({
-            name: trimmedName,
-            code: code.trim(),
-            status,
-            manager,
-            description: description.trim(),
-            ...(siteId ? { siteId } : {}),
-        });
-        onClose();
+        setIsSubmitting(true);
+        setError("");
+        try {
+            await onSubmit({
+                name: trimmedName,
+                code: code.trim(),
+                status,
+                manager,
+                description: description.trim(),
+                ...(siteId ? { siteId } : {}),
+            });
+            onClose();
+        } catch (err: any) {
+            setError(err?.message || "Failed to save department. Please try again.");
+        } finally {
+            setIsSubmitting(false);
+        }
     };
 
     return (
@@ -345,12 +354,23 @@ export default function DepartmentModal({
 
                 <DialogFooter className="p-6 pt-4 border-t bg-muted/20 gap-2 sm:gap-0">
                     {!hideCancel && (
-                        <Button variant="outline" onClick={onClose} className="px-6 border-muted-foreground/30">
+                        <Button
+                            variant="outline"
+                            onClick={onClose}
+                            className="px-6 border-muted-foreground/30"
+                            disabled={isSubmitting}
+                        >
                             Cancel
                         </Button>
                     )}
-                    <Button onClick={handleSubmit} className="px-8 shadow-sm">
-                        {mode === "create" ? "Create Department" : "Save Changes"}
+                    <Button onClick={handleSubmit} className="px-8 shadow-sm" disabled={isSubmitting}>
+                        {isSubmitting
+                            ? mode === "create"
+                                ? "Creating…"
+                                : "Saving…"
+                            : mode === "create"
+                              ? "Create Department"
+                              : "Save Changes"}
                     </Button>
                 </DialogFooter>
             </DialogContent>
