@@ -1,5 +1,3 @@
-import prisma from './prisma.js';
-
 /** Per-email FIFO queue — one OTP send at a time per address in this process. */
 const otpSendQueues = new Map();
 
@@ -18,14 +16,11 @@ export function runOtpSendExclusive(normalizedEmail, fn) {
 }
 
 /**
- * Cluster-safe mutex: blocks until this email's OTP send slot is available (PostgreSQL).
- * Uses $executeRaw — pg_advisory_* returns void and cannot be read via $queryRaw in Prisma 7.
+ * Previously used session-level `pg_advisory_lock` via Prisma's connection pool.
+ * That is unsafe: lock and unlock often run on different pooled connections, so the
+ * lock stays held and the next invite/OTP for that email blocks forever → proxy 504/502.
+ * In-process `runOtpSendExclusive` is sufficient for a single API container (Coolify).
  */
-export async function withPgOtpAdvisoryLock(normalizedEmail, fn) {
-    await prisma.$executeRaw`SELECT pg_advisory_lock(hashtext(${normalizedEmail})::bigint)`;
-    try {
-        return await fn();
-    } finally {
-        await prisma.$executeRaw`SELECT pg_advisory_unlock(hashtext(${normalizedEmail})::bigint)`;
-    }
+export async function withPgOtpAdvisoryLock(_normalizedEmail, fn) {
+    return fn();
 }

@@ -75,7 +75,10 @@ export function NotificationBell({ className }: Props) {
             setItems(data);
             lastFetchedRef.current = Date.now();
         } catch (err) {
-            console.error(err);
+            // Transient network/DNS blips — keep last good list; avoid noisy console spam.
+            if (!(err instanceof Error && /temporarily unavailable/i.test(err.message))) {
+                console.error(err);
+            }
         } finally {
             setLoading(false);
         }

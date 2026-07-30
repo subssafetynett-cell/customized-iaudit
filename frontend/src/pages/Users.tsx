@@ -439,9 +439,17 @@ function UsersPage() {
             } else {
                 const errorData = await response.json();
                 console.error("Server error data:", errorData);
-                const errorMsg = errorData.error || errorData.message || "Operation failed";
-                toast.error(errorMsg);
-                throw new Error(errorMsg); // Throw so UserModal can catch it
+                const errorMsg =
+                    errorData.error ||
+                    errorData.message ||
+                    errorData.details ||
+                    "Operation failed";
+                const detail =
+                    errorData.details && errorData.details !== errorMsg
+                        ? ` (${errorData.details})`
+                        : "";
+                toast.error(`${errorMsg}${detail}`);
+                throw new Error(`${errorMsg}${detail}`); // Throw so UserModal can catch it
             }
         } catch (error: any) {
             console.error("Error processing user:", error);

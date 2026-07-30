@@ -131,17 +131,29 @@ export async function apiFetch(endpoint: string, options: ApiFetchOptions = {}) 
     }
 
     const run = (async (): Promise<Response | CoalescedGetPayload> => {
-        let response: Response;
-        try {
-            response = await fetch(url, {
+        const doFetch = async (): Promise<Response> =>
+            fetch(url, {
                 ...fetchOptions,
                 method,
                 headers,
                 credentials: "include",
             });
+
+        let response: Response;
+        try {
+            response = await doFetch();
         } catch {
-            // Proxy/backend blip (ECONNRESET during nodemon restart, etc.) — never treat as logout.
-            throw new Error("The API is temporarily unavailable. Please try again.");
+            // Transient client/network blips (ERR_NETWORK_CHANGED, DNS, connection closed).
+            if (method === "GET") {
+                await new Promise((r) => setTimeout(r, 450));
+                try {
+                    response = await doFetch();
+                } catch {
+                    throw new Error("The API is temporarily unavailable. Please try again.");
+                }
+            } else {
+                throw new Error("The API is temporarily unavailable. Please try again.");
+            }
         }
 
         applySessionExpiryFromResponse(response);

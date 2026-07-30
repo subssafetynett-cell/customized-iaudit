@@ -201,6 +201,8 @@ model Session {
 
   @@index([userId])
   @@index([expiresAt])
+  /// Speeds up "active session for user?" checks (userId + expiresAt > now).
+  @@index([userId, expiresAt])
 }
 
 model Subscription {
