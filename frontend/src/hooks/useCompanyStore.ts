@@ -313,6 +313,10 @@ export function useCompanyStore() {
       toast.error("Network error while deleting site");
       return { success: false as const, error: "Network error while deleting site" };
     }
+    globalCompanies = globalCompanies.map((c) =>
+      c.id === companyId ? { ...c, sites: c.sites.filter((s) => s.id !== siteId) } : c
+    );
+    notify();
   };
 
   // Departments

@@ -1,4 +1,5 @@
 import type { CSSProperties } from "react";
+import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { EOSH_EXCEL_MODULE_META } from "@/data/eoshExcelModuleTemplates";
 
@@ -271,7 +272,7 @@ export function EoshCapabilityFormBanner({
         </label>
         <label className="block min-w-0">
           <span className="font-bold uppercase tracking-wide">Date:</span>
-          <input
+          <Input
             type="date"
             className={fieldClass}
             value={auditDate}

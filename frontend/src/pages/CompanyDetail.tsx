@@ -12,6 +12,7 @@ import SiteModal from "@/components/SiteModal";
 import DepartmentModal from "@/components/DepartmentModal";
 import CompanyModal from "@/components/CompanyModal";
 import { DeleteConfirmationDialog } from "@/components/DeleteConfirmationDialog";
+import { toast } from "sonner";
 import { Site, Department, ISOStandard } from "@/types/company";
 import {
   formatDeleteDepartmentDescription,
@@ -341,9 +342,15 @@ export default function CompanyDetail() {
         onConfirm={async () => {
           if (siteToDelete) {
             setIsDeleting(true);
-            await deleteSite(company.id, siteToDelete.id);
-            setIsDeleting(false);
-            setSiteToDelete(null);
+            try {
+              await deleteSite(company.id, siteToDelete.id);
+              toast.success("Site deleted");
+              setSiteToDelete(null);
+            } catch (err) {
+              toast.error(err instanceof Error ? err.message : "Failed to delete site");
+            } finally {
+              setIsDeleting(false);
+            }
           }
         }}
         isLoading={isDeleting}
