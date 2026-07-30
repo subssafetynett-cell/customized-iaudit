@@ -24,6 +24,7 @@ import {
   type FindingsReportForm,
 } from "@/lib/findingsReportForm";
 import { SignatureInput } from "./SignatureInput";
+import { DatePickerInput } from "./DatePickerInput";
 import { EditableFindingsField } from "./EditableFindingsField";
 
 interface AuditFindingsReportFormProps {
@@ -108,7 +109,7 @@ export function AuditFindingsReportForm({
     key: FindingsReportFieldKey,
     fieldValue: string,
     onValueChange: (next: string) => void,
-    options?: { placeholder?: string; multiline?: boolean },
+    options?: { placeholder?: string; multiline?: boolean; variant?: "text" | "date" },
   ) => {
     if (!isFieldVisible(value, key)) return null;
     return (
@@ -122,6 +123,7 @@ export function AuditFindingsReportForm({
         onDelete={() => hideField(key)}
         placeholder={options?.placeholder}
         multiline={options?.multiline}
+        variant={options?.variant}
       />
     );
   };
@@ -160,7 +162,7 @@ export function AuditFindingsReportForm({
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 max-w-md">
         {renderEditableField("issueDate", value.issueDate, (next) =>
           patch({ issueDate: next }),
-          { placeholder: "dd/mm/yy" },
+          { placeholder: "Pick a date", variant: "date" },
         )}
       </div>
       {renderCustomFields("document")}
@@ -220,7 +222,7 @@ export function AuditFindingsReportForm({
           patch({ department: next }))}
         {renderEditableField("auditDate", value.auditDate, (next) =>
           patch({ auditDate: next }),
-          { placeholder: "dd/mm/yy" },
+          { placeholder: "Pick a date", variant: "date" },
         )}
         {renderEditableField("auditors", value.auditors, (next) =>
           patch({ auditors: next }))}
@@ -378,11 +380,12 @@ export function AuditFindingsReportForm({
           />
           <div className="space-y-2">
             <Label htmlFor="fr-auditee-date">Date</Label>
-            <Input
+            <DatePickerInput
               id="fr-auditee-date"
-              placeholder="dd/mm/yy"
+              placeholder="Pick a date"
+              valueFormat="display"
               value={value.acknowledgement.auditeeDate}
-              onChange={(e) => patchAck({ auditeeDate: e.target.value })}
+              onChange={(next) => patchAck({ auditeeDate: next })}
             />
           </div>
         </div>
@@ -395,11 +398,12 @@ export function AuditFindingsReportForm({
           />
           <div className="space-y-2">
             <Label htmlFor="fr-auditor-date">Date</Label>
-            <Input
+            <DatePickerInput
               id="fr-auditor-date"
-              placeholder="dd/mm/yy"
+              placeholder="Pick a date"
+              valueFormat="display"
               value={value.acknowledgement.auditorDate}
-              onChange={(e) => patchAck({ auditorDate: e.target.value })}
+              onChange={(next) => patchAck({ auditorDate: next })}
             />
           </div>
         </div>

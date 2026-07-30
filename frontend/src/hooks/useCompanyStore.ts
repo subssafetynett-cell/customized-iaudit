@@ -282,19 +282,23 @@ export function useCompanyStore() {
     }
   };
   const deleteSite = async (companyId: string, siteId: string) => {
-    try {
-      const response = await apiFetch(`/sites/${siteId}`, {
-        method: "DELETE",
-      });
-      if (response.ok) {
-        globalCompanies = globalCompanies.map((c) =>
-          c.id === companyId ? { ...c, sites: c.sites.filter((s) => s.id !== siteId) } : c
-        );
-        notify();
+    const response = await apiFetch(`/sites/${siteId}`, {
+      method: "DELETE",
+    });
+    if (!response.ok) {
+      let message = "Failed to delete site";
+      try {
+        const body = await response.json();
+        if (body?.error) message = String(body.error);
+      } catch {
+        /* ignore parse errors */
       }
-    } catch (error) {
-      console.error("Failed to delete site:", error);
+      throw new Error(message);
     }
+    globalCompanies = globalCompanies.map((c) =>
+      c.id === companyId ? { ...c, sites: c.sites.filter((s) => s.id !== siteId) } : c
+    );
+    notify();
   };
 
   // Departments

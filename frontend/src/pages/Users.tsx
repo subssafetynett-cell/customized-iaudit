@@ -382,10 +382,10 @@ function UsersPage() {
                     void refetchCompanies();
                     if (updatedUser.emailVerificationPending) {
                         toast.success(
-                            updatedUser.verificationEmailSent
-                                ? updatedUser.welcomeEmailSent
-                                    ? "User created. A welcome email with login credentials and verification code was sent — they must verify before signing in."
-                                    : "User created. A verification code was sent to their email — they must verify before signing in."
+                            updatedUser.verificationEmailSent || updatedUser.emailQueued
+                                ? updatedUser.welcomeEmailSent || updatedUser.emailQueued
+                                    ? "User created. A welcome email with login credentials and verification code is being sent — they must verify before signing in."
+                                    : "User created. A verification code is being sent to their email — they must verify before signing in."
                                 : "User created but the onboarding email could not be sent. Use Resend verification from the user menu.",
                             { duration: 8000 },
                         );

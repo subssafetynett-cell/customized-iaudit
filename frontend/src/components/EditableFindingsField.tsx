@@ -1,5 +1,6 @@
 import { Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { DatePickerInput } from "@/components/DatePickerInput";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 
@@ -12,6 +13,7 @@ interface EditableFindingsFieldProps {
   onDelete: () => void;
   placeholder?: string;
   multiline?: boolean;
+  variant?: "text" | "date";
 }
 
 export function EditableFindingsField({
@@ -23,6 +25,7 @@ export function EditableFindingsField({
   onDelete,
   placeholder,
   multiline = false,
+  variant = "text",
 }: EditableFindingsFieldProps) {
   return (
     <div className="flex gap-2 items-start group rounded-lg border border-transparent hover:border-slate-200 hover:bg-slate-50/60 p-2 -mx-2 transition-colors">
@@ -41,6 +44,14 @@ export function EditableFindingsField({
             placeholder={placeholder}
             onChange={(e) => onValueChange(e.target.value)}
             className="resize-none"
+          />
+        ) : variant === "date" ? (
+          <DatePickerInput
+            id={inputId}
+            value={value}
+            placeholder={placeholder ?? "Pick a date"}
+            valueFormat="display"
+            onChange={onValueChange}
           />
         ) : (
           <Input
