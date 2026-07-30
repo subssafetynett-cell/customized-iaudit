@@ -14,6 +14,10 @@ function notify() {
   listeners.forEach((l) => l());
 }
 
+function idsEqual(a: unknown, b: unknown): boolean {
+  return String(a) === String(b);
+}
+
 function normalizeDepartment(d: any): Department {
   return {
     ...d,
@@ -228,77 +232,108 @@ export function useCompanyStore() {
 
   // Sites
   const addSite = async (companyId: string, data: any) => {
-    console.log(`[useCompanyStore] Initiating addSite for company ${companyId}`, data);
+    const companyKey = String(companyId);
     try {
-      const response = await apiFetch(`/companies/${companyId}/sites`, {
+      const response = await apiFetch(`/companies/${companyKey}/sites`, {
         method: "POST",
         body: JSON.stringify(data),
       });
-      
+
       if (response.ok) {
         const newSite = await response.json();
-        console.log(`[useCompanyStore] addSite success:`, newSite);
-        const site: Site = normalizeSite({ ...newSite, departments: [] });
+        const site: Site = normalizeSite({ ...newSite, departments: newSite.departments || [] });
         globalCompanies = globalCompanies.map((c) =>
-          c.id === companyId ? { ...c, sites: [...c.sites, site] } : c
+          idsEqual(c.id, companyKey)
+            ? {
+                ...c,
+                sites: [...(c.sites || []).filter((s) => !idsEqual(s.id, site.id)), site],
+              }
+            : c,
         );
         notify();
-        return { success: true, site };
-      } else {
-        const errorData = await response.json().catch(() => ({}));
-        console.error(`[useCompanyStore] addSite failed with status ${response.status}:`, errorData);
-        return { success: false, error: errorData.message || `Failed to create site (Status: ${response.status})` };
+        toast.success("Site added successfully");
+        return { success: true as const, site };
       }
+
+      const errorData = await response.json().catch(() => ({}));
+      const message =
+        (typeof errorData.error === "string" && errorData.error) ||
+        (typeof errorData.message === "string" && errorData.message) ||
+        `Failed to create site (Status: ${response.status})`;
+      toast.error(message);
+      return { success: false as const, error: message };
     } catch (error) {
       console.error("[useCompanyStore] addSite network error:", error);
-      return { success: false, error: "Network error occurred while creating site" };
+      toast.error("Network error occurred while creating site");
+      return { success: false as const, error: "Network error occurred while creating site" };
     }
   };
 
   const updateSite = async (companyId: string, siteId: string, data: any) => {
+    const companyKey = String(companyId);
+    const siteKey = String(siteId);
     try {
-      const response = await apiFetch(`/sites/${siteId}`, {
+      const response = await apiFetch(`/sites/${siteKey}`, {
         method: "PUT",
         body: JSON.stringify(data),
       });
       if (response.ok) {
         const updated = await response.json();
         globalCompanies = globalCompanies.map((c) =>
-          c.id === companyId
+          idsEqual(c.id, companyKey)
             ? {
-              ...c,
-              sites: c.sites.map((s) =>
-                s.id === siteId
-                  ? normalizeSite({ ...s, ...updated, departments: s.departments ?? [] })
-                  : s
-              )
-            }
-            : c
+                ...c,
+                sites: c.sites.map((s) =>
+                  idsEqual(s.id, siteKey)
+                    ? normalizeSite({ ...s, ...updated, departments: s.departments ?? [] })
+                    : s,
+                ),
+              }
+            : c,
         );
         notify();
+        toast.success("Site updated successfully");
+        return { success: true as const };
       }
+      const errBody = await response.json().catch(() => ({}));
+      const message =
+        (typeof errBody.error === "string" && errBody.error) ||
+        "Failed to update site";
+      toast.error(message);
+      return { success: false as const, error: message };
     } catch (error) {
       console.error("Failed to update site:", error);
+      toast.error("Network error while updating site");
+      return { success: false as const, error: "Network error while updating site" };
     }
   };
+
   const deleteSite = async (companyId: string, siteId: string) => {
+    const companyKey = String(companyId);
+    const siteKey = String(siteId);
+    const previous = globalCompanies;
+
+    // Optimistic remove — UI updates immediately; restore if API fails.
+    globalCompanies = globalCompanies.map((c) =>
+      idsEqual(c.id, companyKey)
+        ? {
+            ...c,
+            sites: c.sites.filter((s) => !idsEqual(s.id, siteKey)),
+          }
+        : c,
+    );
+    notify();
+
     try {
-      const response = await apiFetch(`/sites/${siteId}`, {
+      const response = await apiFetch(`/sites/${siteKey}`, {
         method: "DELETE",
       });
       if (response.ok || response.status === 204) {
-        globalCompanies = globalCompanies.map((c) =>
-          c.id === companyId
-            ? {
-                ...c,
-                sites: c.sites.filter((s) => String(s.id) !== String(siteId)),
-              }
-            : c
-        );
-        notify();
-        toast.success("Site deleted");
+        toast.success("Site deleted successfully");
         return { success: true as const };
       }
+      globalCompanies = previous;
+      notify();
       let message = `Failed to delete site (Status: ${response.status})`;
       try {
         const errBody = await response.json();
@@ -309,6 +344,8 @@ export function useCompanyStore() {
       toast.error(message);
       return { success: false as const, error: message };
     } catch (error) {
+      globalCompanies = previous;
+      notify();
       console.error("Failed to delete site:", error);
       toast.error("Network error while deleting site");
       return { success: false as const, error: "Network error while deleting site" };
@@ -321,78 +358,113 @@ export function useCompanyStore() {
 
   // Departments
   const addDepartment = async (companyId: string, siteId: string, name: string, data: any) => {
+    const companyKey = String(companyId);
+    const siteKey = String(data?.siteId ?? siteId);
     try {
-      const response = await apiFetch(`/sites/${siteId}/departments`, {
+      const payload: Record<string, unknown> = {
+        name,
+        code: data?.code,
+        status: data?.status,
+        manager: data?.manager,
+        description: data?.description,
+      };
+      if (data?.siteId != null && String(data.siteId).trim() !== "") {
+        payload.siteId = data.siteId;
+      }
+      const response = await apiFetch(`/sites/${siteKey}/departments`, {
         method: "POST",
-        body: JSON.stringify({ name, ...data }),
+        body: JSON.stringify(payload),
       });
       if (response.ok) {
         const newDept = await response.json();
-        const dept: Department = {
-          ...newDept,
-          id: String(newDept.id),
-        };
+        const dept: Department = normalizeDepartment(newDept);
+        const resolvedSiteId = String(newDept.siteId ?? siteKey);
         globalCompanies = globalCompanies.map((c) =>
-          c.id === companyId
+          idsEqual(c.id, companyKey)
             ? {
-              ...c,
-              sites: c.sites.map((s) =>
-                s.id === siteId ? { ...s, departments: [...s.departments, dept] } : s
-              ),
-            }
-            : c
+                ...c,
+                sites: c.sites.map((s) =>
+                  idsEqual(s.id, resolvedSiteId)
+                    ? {
+                        ...s,
+                        departments: [
+                          ...(s.departments || []).filter((d) => !idsEqual(d.id, dept.id)),
+                          dept,
+                        ],
+                      }
+                    : s,
+                ),
+              }
+            : c,
         );
         notify();
-        return dept;
+        toast.success("Department added successfully");
+        return { success: true as const, department: dept };
       }
+      const errorData = await response.json().catch(() => ({}));
+      const message =
+        (typeof errorData.error === "string" && errorData.error) ||
+        (typeof errorData.message === "string" && errorData.message) ||
+        `Failed to create department (Status: ${response.status})`;
+      toast.error(message);
+      return { success: false as const, error: message };
     } catch (error) {
       console.error("Failed to add department:", error);
+      toast.error("Network error while creating department");
+      return { success: false as const, error: "Network error while creating department" };
     }
   };
 
   const updateDepartment = async (companyId: string, siteId: string, deptId: string, data: any) => {
+    const companyKey = String(companyId);
+    const sourceSiteId = String(siteId);
+    const deptKey = String(deptId);
     try {
-      const response = await apiFetch(`/departments/${deptId}`, {
+      const response = await apiFetch(`/departments/${deptKey}`, {
         method: "PUT",
         body: JSON.stringify(data),
       });
       if (response.ok) {
         const updated = await response.json();
-        const targetSiteId = String(updated.siteId ?? data.siteId ?? siteId);
-        const sourceSiteId = String(siteId);
+        const targetSiteId = String(updated.siteId ?? data.siteId ?? sourceSiteId);
 
         globalCompanies = globalCompanies.map((c) => {
-          if (c.id !== companyId) return c;
+          if (!idsEqual(c.id, companyKey)) return c;
 
-          if (targetSiteId === sourceSiteId) {
+          if (idsEqual(targetSiteId, sourceSiteId)) {
             return {
               ...c,
               sites: c.sites.map((s) =>
-                s.id === sourceSiteId
+                idsEqual(s.id, sourceSiteId)
                   ? {
-                    ...s,
-                    departments: s.departments.map((d) =>
-                      d.id === deptId ? { ...d, ...updated, id: String(updated.id) } : d,
-                    ),
-                  }
+                      ...s,
+                      departments: s.departments.map((d) =>
+                        idsEqual(d.id, deptKey)
+                          ? { ...d, ...updated, id: String(updated.id) }
+                          : d,
+                      ),
+                    }
                   : s,
               ),
             };
           }
 
           const existingDept = c.sites
-            .find((s) => s.id === sourceSiteId)
-            ?.departments.find((d) => d.id === deptId);
+            .find((s) => idsEqual(s.id, sourceSiteId))
+            ?.departments.find((d) => idsEqual(d.id, deptKey));
 
           return {
             ...c,
             sites: c.sites.map((s) => {
-              if (s.id === sourceSiteId) {
-                return { ...s, departments: s.departments.filter((d) => d.id !== deptId) };
+              if (idsEqual(s.id, sourceSiteId)) {
+                return {
+                  ...s,
+                  departments: s.departments.filter((d) => !idsEqual(d.id, deptKey)),
+                };
               }
-              if (s.id === targetSiteId) {
+              if (idsEqual(s.id, targetSiteId)) {
                 const movedDept = {
-                  ...(existingDept ?? { id: deptId }),
+                  ...(existingDept ?? { id: deptKey }),
                   ...updated,
                   id: String(updated.id),
                 };
@@ -403,32 +475,70 @@ export function useCompanyStore() {
           };
         });
         notify();
+        toast.success("Department updated successfully");
+        return { success: true as const };
       }
+      const errBody = await response.json().catch(() => ({}));
+      const message =
+        (typeof errBody.error === "string" && errBody.error) ||
+        "Failed to update department";
+      toast.error(message);
+      return { success: false as const, error: message };
     } catch (error) {
       console.error("Failed to update department:", error);
+      toast.error("Network error while updating department");
+      return { success: false as const, error: "Network error while updating department" };
     }
   };
 
   const deleteDepartment = async (companyId: string, siteId: string, deptId: string) => {
+    const companyKey = String(companyId);
+    const siteKey = String(siteId);
+    const deptKey = String(deptId);
+    const previous = globalCompanies;
+
+    globalCompanies = globalCompanies.map((c) =>
+      idsEqual(c.id, companyKey)
+        ? {
+            ...c,
+            sites: c.sites.map((s) =>
+              idsEqual(s.id, siteKey)
+                ? {
+                    ...s,
+                    departments: s.departments.filter((d) => !idsEqual(d.id, deptKey)),
+                  }
+                : s,
+            ),
+          }
+        : c,
+    );
+    notify();
+
     try {
-      const response = await apiFetch(`/departments/${deptId}`, {
+      const response = await apiFetch(`/departments/${deptKey}`, {
         method: "DELETE",
       });
-      if (response.ok) {
-        globalCompanies = globalCompanies.map((c) =>
-          c.id === companyId
-            ? {
-              ...c,
-              sites: c.sites.map((s) =>
-                s.id === siteId ? { ...s, departments: s.departments.filter((d) => d.id !== deptId) } : s
-              ),
-            }
-            : c
-        );
-        notify();
+      if (response.ok || response.status === 204) {
+        toast.success("Department deleted successfully");
+        return { success: true as const };
       }
+      globalCompanies = previous;
+      notify();
+      let message = `Failed to delete department (Status: ${response.status})`;
+      try {
+        const errBody = await response.json();
+        if (errBody?.error) message = String(errBody.error);
+      } catch {
+        /* ignore */
+      }
+      toast.error(message);
+      return { success: false as const, error: message };
     } catch (error) {
+      globalCompanies = previous;
+      notify();
       console.error("Failed to delete department:", error);
+      toast.error("Network error while deleting department");
+      return { success: false as const, error: "Network error while deleting department" };
     }
   };
 

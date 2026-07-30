@@ -249,13 +249,28 @@ const CompaniesPage = () => {
   const [deptToDelete, setDeptToDelete] = useState<{ siteId: string; dept: Department } | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
 
-  // Derived states
+  // Derived states — prefer live store over paginated list so add/delete show immediately.
   const selectedCompany = useMemo(() => {
     if (!selectedCompanyId) return undefined;
-    const fromPage = pagedCompanies.find((c) => c.id === selectedCompanyId);
-    if (fromPage) return fromPage;
-    return companies.find((c) => c.id === selectedCompanyId);
+    const fromStore = companies.find((c) => String(c.id) === String(selectedCompanyId));
+    if (fromStore) return fromStore;
+    return pagedCompanies.find((c) => String(c.id) === String(selectedCompanyId));
   }, [selectedCompanyId, pagedCompanies, companies]);
+
+  // Keep paginated list in sync with the live store for the open company.
+  useEffect(() => {
+    if (!selectedCompanyId) return;
+    const fresh = companies.find((c) => String(c.id) === String(selectedCompanyId));
+    if (!fresh) return;
+    setPagedCompanies((prev) => {
+      const idx = prev.findIndex((c) => String(c.id) === String(selectedCompanyId));
+      if (idx < 0) return prev;
+      if (prev[idx].sites === fresh.sites) return prev;
+      const next = [...prev];
+      next[idx] = { ...prev[idx], sites: fresh.sites };
+      return next;
+    });
+  }, [companies, selectedCompanyId]);
 
   const activeSite = selectedCompany?.sites.find((s) => s.id === addDeptSiteId);
   const selectedCompanyHasSites = (selectedCompany?.sites?.length ?? 0) > 0;
@@ -720,18 +735,19 @@ const CompaniesPage = () => {
             }}
             onSubmit={async (data) => {
               const res = await addSite(selectedCompany.id, data);
-              if (res?.success) {
-                if (showOnboardingGuide && onboardingStep === 7) {
-                  setShowAddSite(false);
-                  if (res.site?.id) {
-                    setAddDeptSiteId(res.site.id);
-                  }
-                } else if (showOnboardingGuide && onboardingStep === 4) {
-                  setShowAddSite(false);
-                  goToTourStep(5);
-                } else {
-                  setShowAddSite(false);
+              if (!res?.success) {
+                throw new Error(res?.error || "Failed to create site");
+              }
+              if (showOnboardingGuide && onboardingStep === 7) {
+                setShowAddSite(false);
+                if (res.site?.id) {
+                  setAddDeptSiteId(res.site.id);
                 }
+              } else if (showOnboardingGuide && onboardingStep === 4) {
+                setShowAddSite(false);
+                goToTourStep(5);
+              } else {
+                setShowAddSite(false);
               }
             }}
             mode="create"
@@ -793,11 +809,13 @@ const CompaniesPage = () => {
                     data.name,
                     data
                   );
-                  if (res && showOnboardingGuide) {
-                    goToTourStep(8);
-                  } else if (res) {
-                    setAddDeptSiteId(null);
+                  if (!res?.success) {
+                    throw new Error(res?.error || "Failed to create department");
                   }
+                  if (showOnboardingGuide) {
+                    goToTourStep(8);
+                  }
+                  setAddDeptSiteId(null);
                 }}
                 sites={selectedCompany.sites.map((s) => ({ id: s.id, name: s.name }))}
                 initialSiteId={deptModalSite.id}
@@ -870,15 +888,10 @@ const CompaniesPage = () => {
             onConfirm={async () => {
               if (siteToDelete) {
                 setIsDeleting(true);
-                try {
-                  await deleteSite(selectedCompany.id, siteToDelete.id);
-                  toast.success("Site deleted");
-                  setSiteToDelete(null);
-                } catch (err) {
-                  toast.error(err instanceof Error ? err.message : "Failed to delete site");
-                } finally {
-                  setIsDeleting(false);
-                }
+                const pending = siteToDelete;
+                setSiteToDelete(null);
+                await deleteSite(selectedCompany.id, pending.id);
+                setIsDeleting(false);
               }
             }}
             isLoading={isDeleting}
@@ -896,9 +909,10 @@ const CompaniesPage = () => {
             onConfirm={async () => {
               if (deptToDelete) {
                 setIsDeleting(true);
-                await deleteDepartment(selectedCompany.id, deptToDelete.siteId, deptToDelete.dept.id);
-                setIsDeleting(false);
+                const pending = deptToDelete;
                 setDeptToDelete(null);
+                await deleteDepartment(selectedCompany.id, pending.siteId, pending.dept.id);
+                setIsDeleting(false);
               }
             }}
             isLoading={isDeleting}

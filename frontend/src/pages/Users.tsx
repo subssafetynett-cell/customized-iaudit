@@ -406,16 +406,21 @@ function UsersPage() {
                         void refetchCompanies();
                     }
                     if (updatedUser.emailVerificationPending) {
-                        toast.success(
-                            updatedUser.verificationEmailSent || updatedUser.emailQueued
-                                ? updatedUser.welcomeEmailSent || updatedUser.emailQueued
-                                    ? "User created. A welcome email with login credentials and verification code is being sent — they must verify before signing in."
-                                    : "User created. A verification code is being sent to their email — they must verify before signing in."
-                                : "User created but the onboarding email could not be sent. Use Resend verification from the user menu.",
-                            { duration: 8000 },
-                        );
+                        if (updatedUser.welcomeEmailSent || updatedUser.verificationEmailSent) {
+                            toast.success(
+                                updatedUser.welcomeEmailSent
+                                    ? "User invited successfully. A welcome email with login credentials and verification code was sent."
+                                    : "User invited successfully. A verification code was sent to their email.",
+                                { duration: 8000 },
+                            );
+                        } else {
+                            toast.success(
+                                "User invited successfully, but the welcome email could not be sent. Use Resend verification from the user menu.",
+                                { duration: 8000 },
+                            );
+                        }
                     } else {
-                        toast.success("User created successfully!");
+                        toast.success("User invited successfully!");
                     }
                 } else {
                     setUsers((prev) =>

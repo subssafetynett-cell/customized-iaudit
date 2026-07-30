@@ -3527,6 +3527,7 @@ app.delete('/sites/:id', authenticateToken, checkTrialExpiration, async (req, re
     try {
         const siteId = access.siteId;
 
+        // Respond as soon as the site row is gone for snappy UI; cascade related rows first.
         await prisma.$transaction(async (tx) => {
             const programs = await tx.auditProgram.findMany({
                 where: { siteId },
@@ -3535,7 +3536,6 @@ app.delete('/sites/:id', authenticateToken, checkTrialExpiration, async (req, re
             const programIds = programs.map((p) => p.id);
 
             if (programIds.length > 0) {
-                // Nonconformances cascade from AuditPlan (onDelete: Cascade).
                 await tx.auditPlan.deleteMany({
                     where: { auditProgramId: { in: programIds } },
                 });
@@ -3545,7 +3545,6 @@ app.delete('/sites/:id', authenticateToken, checkTrialExpiration, async (req, re
             }
 
             await tx.department.deleteMany({ where: { siteId } });
-
             await tx.site.delete({ where: { id: siteId } });
         });
 
@@ -5739,31 +5738,43 @@ app.post('/users/invite-auditee', authenticateToken, async (req, res) => {
 
         invalidateOrgLookupCaches();
 
-        const inviteEmailOptions = {
-            backgroundDelivery: true,
-            ...(sendWelcomeEmail !== false
-                ? { welcomeCredentials: { firstName: fn, lastName: ln, password } }
-                : {}),
-        };
-        setImmediate(() => {
-            void sendOtpToEmailAddress(emailNorm, 'user_invite', inviteEmailOptions).catch(
-                (otpErr) => {
-                    console.error('Failed to send auditee invite email:', otpErr);
-                },
-            );
-        });
+        const wantWelcomeEmail = sendWelcomeEmail !== false;
+        const { password: _pw, ...userWithoutPassword } = user;
+        let siteLabels = [];
+        try {
+            siteLabels = await formatAuditeeSiteLabels(parsedSiteIds);
+        } catch (labelErr) {
+            console.error('[invite-auditee] formatAuditeeSiteLabels failed:', labelErr);
+        }
 
-        const siteLabels = await formatAuditeeSiteLabels(parsedSiteIds);
-        const { password: _, ...userWithoutPassword } = user;
-        res.status(201).json({
+        let verificationEmailSent = false;
+        let welcomeEmailSent = false;
+        try {
+            const inviteEmailOptions = {
+                backgroundDelivery: true,
+                ...(wantWelcomeEmail
+                    ? { welcomeCredentials: { firstName: fn, lastName: ln, password } }
+                    : {}),
+            };
+            const { emailTransmitted } = await sendOtpToEmailAddress(
+                emailNorm,
+                'user_invite',
+                inviteEmailOptions,
+            );
+            verificationEmailSent = emailTransmitted === true;
+            welcomeEmailSent = Boolean(wantWelcomeEmail && emailTransmitted === true);
+        } catch (otpErr) {
+            console.error('Failed to send auditee invite email:', otpErr);
+        }
+
+        return res.status(201).json({
             ...userWithoutPassword,
             siteIds: parsedSiteIds,
             siteLabels,
             siteId: parsedSiteIds[0] ?? null,
             emailVerificationPending: true,
-            verificationEmailSent: emailWillSend,
-            welcomeEmailSent: Boolean(sendWelcomeEmail !== false && emailWillSend),
-            emailQueued: true,
+            verificationEmailSent,
+            welcomeEmailSent,
         });
     } catch (error) {
         console.error('Error inviting auditee:', error);
@@ -5982,40 +5993,52 @@ app.post('/users', authenticateToken, async (req, res) => {
 
         invalidateOrgLookupCaches();
 
-        // Respond after DB commit; deliver invite email in the background without
-        // blocking (and without risking pool advisory-lock hangs on the request).
-        let verificationEmailSent = sendWelcomeEmail !== false;
-        let welcomeEmailSent = sendWelcomeEmail !== false;
-        const inviteEmailOptions = {
-            backgroundDelivery: true,
-            ...(sendWelcomeEmail !== false
-                ? { welcomeCredentials: { firstName: fn, lastName: ln, password } }
-                : {}),
-        };
-        setImmediate(() => {
-            void sendOtpToEmailAddress(emailNorm, 'user_invite', inviteEmailOptions).catch(
-                (otpErr) => {
-                    console.error('Failed to send invite onboarding email:', otpErr);
-                },
-            );
-        });
-
-        const { password: _, ...userWithoutPassword } = user;
+        // User is committed — never return 500 after this point (would make retries
+        // falsely report "Email already exists" while the invite already exists).
+        const wantWelcomeEmail = sendWelcomeEmail !== false;
+        const { password: _pw, ...userWithoutPassword } = user;
         const responseBody = {
             ...userWithoutPassword,
             emailVerificationPending: true,
-            verificationEmailSent: emailWillSend,
-            welcomeEmailSent: Boolean(sendWelcomeEmail !== false && emailWillSend),
-            emailQueued: true,
+            verificationEmailSent: false,
+            welcomeEmailSent: false,
         };
+
         if (roleNorm === 'auditee' && parsedSiteIds) {
-            const siteLabels = await formatAuditeeSiteLabels(parsedSiteIds);
-            responseBody.siteIds = parsedSiteIds;
-            responseBody.siteLabels = siteLabels;
-            responseBody.siteId = parsedSiteIds[0] ?? null;
-            responseBody.siteLabel = siteLabels.length > 0 ? siteLabels.join(', ') : null;
+            try {
+                const siteLabels = await formatAuditeeSiteLabels(parsedSiteIds);
+                responseBody.siteIds = parsedSiteIds;
+                responseBody.siteLabels = siteLabels;
+                responseBody.siteId = parsedSiteIds[0] ?? null;
+                responseBody.siteLabel = siteLabels.length > 0 ? siteLabels.join(', ') : null;
+            } catch (labelErr) {
+                console.error('[invite] formatAuditeeSiteLabels failed:', labelErr);
+                responseBody.siteIds = parsedSiteIds;
+                responseBody.siteId = parsedSiteIds[0] ?? null;
+            }
         }
-        res.status(201).json(responseBody);
+
+        try {
+            const inviteEmailOptions = {
+                backgroundDelivery: true,
+                ...(wantWelcomeEmail
+                    ? { welcomeCredentials: { firstName: fn, lastName: ln, password } }
+                    : {}),
+            };
+            const { emailTransmitted } = await sendOtpToEmailAddress(
+                emailNorm,
+                'user_invite',
+                inviteEmailOptions,
+            );
+            responseBody.verificationEmailSent = emailTransmitted === true;
+            responseBody.welcomeEmailSent = Boolean(wantWelcomeEmail && emailTransmitted === true);
+        } catch (otpErr) {
+            console.error('Failed to send invite onboarding email:', otpErr);
+            responseBody.verificationEmailSent = false;
+            responseBody.welcomeEmailSent = false;
+        }
+
+        return res.status(201).json(responseBody);
     } catch (error) {
         console.error('Error creating user:', error);
         handlePrismaError(error, 'POST /users');
