@@ -53,7 +53,7 @@ async function logoutIfSessionInvalid() {
     const clientExpired = isSessionExpired();
     // When the client clock has not expired yet, still periodically confirm the
     // cookie is valid so a revoked session (e.g. password reset) does not leave
-    // a zombie UI. Concurrent logins on other devices never revoke this cookie.
+    // a zombie UI. Only one active session exists per account server-side.
     const result = await confirmSessionWithServer();
     if (result === "ok" || result === "unknown") return;
     if (!clientExpired && result === "invalid") {
@@ -65,8 +65,7 @@ async function logoutIfSessionInvalid() {
 }
 
 /**
- * Keeps the UI in sync with the server session cookie.
- * Concurrent logins on other browsers keep separate cookies/DB rows and are not affected.
+ * Keeps the UI in sync with the server session cookie (single active session per user).
  */
 export function useSessionExpiry() {
     useEffect(() => {

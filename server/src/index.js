@@ -23,7 +23,12 @@ import {
     NcNotificationTemplates,
     createNotification,
 } from './notifications/index.js';
-import prisma, { handlePrismaError, pool } from './prisma.js';
+import prisma, {
+    handlePrismaError,
+    isPrismaForeignKeyViolation,
+    isPrismaUniqueViolation,
+    pool,
+} from './prisma.js';
 import { runOtpSendExclusive, withPgOtpAdvisoryLock } from './otpSendLock.js';
 import bcrypt from 'bcrypt';
 import Stripe from 'stripe';
@@ -322,39 +327,100 @@ function resetPasswordVerifyRateLimit(req, res, next) {
 }
 
 /**
- * Create a new opaque session for this login.
- * Does NOT revoke other active sessions — multiple browsers/devices may stay logged in concurrently.
- * Only globally expired rows are cleaned up.
- * @returns {{ token: string, sessionExpiresAt: string }} ISO time when the DB session row expires
+ * Create a new opaque session for this login under a single-active-session policy.
+ * - At most one non-expired Session row per user.
+ * - If another device already has an active session → throws SESSION_ALREADY_ACTIVE (no new row).
+ * - If this request already presents that same session cookie → renew and reuse (same browser).
+ * @param {number} userId
+ * @param {{ existingToken?: string | null }} [opts]
+ * @returns {Promise<{ token: string, sessionExpiresAt: string }>}
  */
-async function createSessionTokenForUser(userId) {
-    await prisma.session.deleteMany({
-        where: { expiresAt: { lt: new Date() } }
-    }).catch(() => {});
-    const token = crypto.randomBytes(48).toString('base64url');
-    const expiresAt = new Date(Date.now() + SESSION_MAX_AGE_MS);
+async function createSessionTokenForUser(userId, opts = {}) {
+    const uid = Number(userId);
+    if (!Number.isInteger(uid) || uid < 1) {
+        throw new Error('Invalid user id for session');
+    }
+    const existingToken =
+        typeof opts.existingToken === 'string' && opts.existingToken.trim()
+            ? opts.existingToken.trim()
+            : null;
     const now = new Date();
-    await prisma.session.create({
-        data: { token, userId, expiresAt }
-    });
+
+    // Opportunistic global cleanup of expired sessions (stale rows must not linger).
+    await prisma.session.deleteMany({
+        where: { expiresAt: { lt: now } },
+    }).catch(() => {});
+
+    let sessionPayload;
+    try {
+        sessionPayload = await prisma.$transaction(async (tx) => {
+            await tx.session.deleteMany({
+                where: { userId: uid, expiresAt: { lt: now } },
+            });
+
+            const actives = await tx.session.findMany({
+                where: { userId: uid, expiresAt: { gt: now } },
+                orderBy: { createdAt: 'desc' },
+                select: { token: true },
+            });
+
+            // Legacy multi-session rows: keep newest only so the policy is consistent.
+            if (actives.length > 1) {
+                await tx.session.deleteMany({
+                    where: {
+                        token: { in: actives.slice(1).map((s) => s.token) },
+                    },
+                });
+            }
+
+            const active = actives[0] ?? null;
+            if (active) {
+                if (existingToken && existingToken === active.token) {
+                    const expiresAt = new Date(Date.now() + SESSION_MAX_AGE_MS);
+                    await tx.session.update({
+                        where: { token: active.token },
+                        data: { expiresAt },
+                    });
+                    return {
+                        token: active.token,
+                        sessionExpiresAt: expiresAt.toISOString(),
+                    };
+                }
+                const err = new Error('SESSION_ALREADY_ACTIVE');
+                err.code = 'SESSION_ALREADY_ACTIVE';
+                throw err;
+            }
+
+            const token = crypto.randomBytes(48).toString('base64url');
+            const expiresAt = new Date(Date.now() + SESSION_MAX_AGE_MS);
+            await tx.session.create({
+                data: { token, userId: uid, expiresAt },
+            });
+            return { token, sessionExpiresAt: expiresAt.toISOString() };
+        });
+    } catch (error) {
+        if (error?.code === 'SESSION_ALREADY_ACTIVE') throw error;
+        throw error;
+    }
+
     const loginStamp = await prisma.user.findUnique({
-        where: { id: userId },
-        select: { firstLoginAt: true }
+        where: { id: uid },
+        select: { firstLoginAt: true },
     }).catch(() => null);
     await prisma.user.update({
-        where: { id: userId },
+        where: { id: uid },
         data: {
-            lastLoginAt: now,
-            ...(loginStamp?.firstLoginAt == null ? { firstLoginAt: now } : {})
-        }
+            lastLoginAt: new Date(),
+            ...(loginStamp?.firstLoginAt == null ? { firstLoginAt: new Date() } : {}),
+        },
     }).catch(() => {});
-    return { token, sessionExpiresAt: expiresAt.toISOString() };
+
+    return sessionPayload;
 }
 
 /**
  * Revoke every server session for a user.
- * Intentionally global — used after password change/reset or account deactivation only.
- * Normal logout must NOT call this (it would kick other concurrent devices).
+ * Used after password change/reset or account deactivation so a new device can sign in.
  */
 async function invalidateAllUserSessions(userId) {
     const uid = Number.parseInt(String(userId), 10);
@@ -4452,15 +4518,25 @@ app.post('/auth/verify-otp-and-signup', async (req, res) => {
             return res.status(500).json({ error: 'Account creation could not be completed' });
         }
 
-        const session = await createSessionTokenForUser(profile.id);
+        const session = await createSessionTokenForUser(profile.id, {
+            existingToken: getSessionTokenFromRequest(req),
+        });
 
         res.status(201).json(sendAuthenticatedSession(res, profile, session));
     } catch (error) {
         console.error('Error creating user during OTP verification:', error);
-        if (error.code === 'P2002') {
+        if (error?.code === 'SESSION_ALREADY_ACTIVE') {
+            return res.status(409).json({
+                success: false,
+                code: 'SESSION_ALREADY_ACTIVE',
+                message: 'This account is already logged in on another device.',
+                error: 'This account is already logged in on another device. Please log out from the other device before signing in.',
+            });
+        }
+        if (isPrismaUniqueViolation(error)) {
             return res.status(400).json({ error: 'Email already exists' });
         }
-        res.status(500).json({ error: 'Failed to create user' });
+        res.status(500).json({ error: 'Failed to create user', details: error?.message || String(error) });
     }
 });
 
@@ -4689,12 +4765,22 @@ async function handleAuthLogin(req, res) {
             return res.status(500).json({ error: 'Login could not be completed' });
         }
 
-        const session = await createSessionTokenForUser(profile.id);
+        const session = await createSessionTokenForUser(profile.id, {
+            existingToken: getSessionTokenFromRequest(req),
+        });
 
         console.log(`[AUTH] Login successful for user: ${profile.id}, onboardingCompleted: ${profile.onboardingCompleted}`);
         res.status(200).json(sendAuthenticatedSession(res, profile, session));
 
     } catch (error) {
+        if (error?.code === 'SESSION_ALREADY_ACTIVE') {
+            return res.status(409).json({
+                success: false,
+                code: 'SESSION_ALREADY_ACTIVE',
+                message: 'This account is already logged in on another device.',
+                error: 'This account is already logged in on another device. Please log out from the other device before signing in.',
+            });
+        }
         handlePrismaError(error, 'login');
         res.status(500).json({ error: 'An error occurred during login' });
     }
@@ -4831,7 +4917,7 @@ async function handleResetPassword(req, res) {
 app.post('/auth/forgot-password', sendOtpIpRateLimit, handleForgotPassword);
 app.post('/auth/reset-password', resetPasswordVerifyRateLimit, handleResetPassword);
 
-/** Log out the current browser/device only — other concurrent sessions stay active. */
+/** Log out the current browser/device only — deletes this session token so another device may sign in. */
 async function handleLogout(req, res) {
     try {
         const token =
@@ -4842,6 +4928,10 @@ async function handleLogout(req, res) {
             return res.status(204).send();
         }
         const { count } = await prisma.session.deleteMany({ where: { token } });
+        // Also sweep expired rows so a blocked login is not held by stale sessions.
+        await prisma.session.deleteMany({
+            where: { expiresAt: { lt: new Date() } },
+        }).catch(() => {});
         console.log(`[AUTH] Logout: removed ${count} session(s) for current device`);
         clearSessionCookie(res);
         res.status(204).send();
@@ -5649,25 +5739,19 @@ app.post('/users/invite-auditee', authenticateToken, async (req, res) => {
 
         invalidateOrgLookupCaches();
 
-        let verificationEmailSent = false;
-        let welcomeEmailSent = false;
         const inviteEmailOptions = {
             backgroundDelivery: true,
             ...(sendWelcomeEmail !== false
                 ? { welcomeCredentials: { firstName: fn, lastName: ln, password } }
                 : {}),
         };
-        try {
-            const { emailTransmitted } = await sendOtpToEmailAddress(
-                emailNorm,
-                'user_invite',
-                inviteEmailOptions,
+        setImmediate(() => {
+            void sendOtpToEmailAddress(emailNorm, 'user_invite', inviteEmailOptions).catch(
+                (otpErr) => {
+                    console.error('Failed to send auditee invite email:', otpErr);
+                },
             );
-            verificationEmailSent = emailTransmitted === true;
-            welcomeEmailSent = Boolean(sendWelcomeEmail !== false && verificationEmailSent);
-        } catch (otpErr) {
-            console.error('Failed to send auditee invite email:', otpErr);
-        }
+        });
 
         const siteLabels = await formatAuditeeSiteLabels(parsedSiteIds);
         const { password: _, ...userWithoutPassword } = user;
@@ -5683,6 +5767,7 @@ app.post('/users/invite-auditee', authenticateToken, async (req, res) => {
         });
     } catch (error) {
         console.error('Error inviting auditee:', error);
+        handlePrismaError(error, 'POST /users/invite-auditee');
         if (error.code === 'SITE_NOT_FOUND') {
             return res.status(404).json({ error: 'Site not found' });
         }
@@ -5693,10 +5778,13 @@ app.post('/users/invite-auditee', authenticateToken, async (req, res) => {
                     'One or more selected sites are already assigned to another auditee. Unassign them or choose different sites.',
             });
         }
-        if (error.code === 'P2002') {
+        if (isPrismaUniqueViolation(error)) {
             return res.status(400).json({ error: 'Email already exists' });
         }
-        res.status(500).json({ error: 'Failed to invite auditee' });
+        res.status(500).json({
+            error: 'Failed to invite auditee',
+            details: error?.message || String(error),
+        });
     }
 });
 
@@ -5828,6 +5916,18 @@ app.post('/users', authenticateToken, async (req, res) => {
         }
 
         const hashedPassword = await bcrypt.hash(password, 10);
+        const existingEmail = await prisma.user.findFirst({
+            where: { email: emailNorm },
+            select: { id: true },
+        });
+        if (existingEmail) {
+            return res.status(400).json({ error: 'Email already exists' });
+        }
+
+        const creatorIdNum = Number(creatorId);
+        const creatorFk =
+            Number.isInteger(creatorIdNum) && creatorIdNum > 0 ? creatorIdNum : null;
+
         const user = await prisma.$transaction(async (tx) => {
             if (roleNorm === 'auditee' && parsedSiteIds) {
                 const sites = await tx.site.findMany({
@@ -5869,7 +5969,7 @@ app.post('/users', authenticateToken, async (req, res) => {
                     isActive: false,
                     emailVerifiedAt: null,
                     password: hashedPassword,
-                    creatorId: creatorId ? Number.parseInt(creatorId) : null
+                    creatorId: creatorFk,
                 }
             });
 
@@ -5882,26 +5982,23 @@ app.post('/users', authenticateToken, async (req, res) => {
 
         invalidateOrgLookupCaches();
 
-        // Respond after DB commit; deliver invite email in the background.
-        let verificationEmailSent = false;
-        let welcomeEmailSent = false;
+        // Respond after DB commit; deliver invite email in the background without
+        // blocking (and without risking pool advisory-lock hangs on the request).
+        let verificationEmailSent = sendWelcomeEmail !== false;
+        let welcomeEmailSent = sendWelcomeEmail !== false;
         const inviteEmailOptions = {
             backgroundDelivery: true,
             ...(sendWelcomeEmail !== false
                 ? { welcomeCredentials: { firstName: fn, lastName: ln, password } }
                 : {}),
         };
-        try {
-            const { emailTransmitted } = await sendOtpToEmailAddress(
-                emailNorm,
-                'user_invite',
-                inviteEmailOptions
+        setImmediate(() => {
+            void sendOtpToEmailAddress(emailNorm, 'user_invite', inviteEmailOptions).catch(
+                (otpErr) => {
+                    console.error('Failed to send invite onboarding email:', otpErr);
+                },
             );
-            verificationEmailSent = emailTransmitted === true;
-            welcomeEmailSent = Boolean(sendWelcomeEmail !== false && verificationEmailSent);
-        } catch (otpErr) {
-            console.error('Failed to send invite onboarding email:', otpErr);
-        }
+        });
 
         const { password: _, ...userWithoutPassword } = user;
         const responseBody = {
@@ -5921,6 +6018,7 @@ app.post('/users', authenticateToken, async (req, res) => {
         res.status(201).json(responseBody);
     } catch (error) {
         console.error('Error creating user:', error);
+        handlePrismaError(error, 'POST /users');
         if (error.code === 'SITE_NOT_FOUND') {
             return res.status(404).json({ error: 'Site not found' });
         }
@@ -5931,10 +6029,19 @@ app.post('/users', authenticateToken, async (req, res) => {
                     'One or more selected sites are already assigned to another auditee. Unassign them or choose different sites.',
             });
         }
-        if (error.code === 'P2002') {
+        if (isPrismaUniqueViolation(error)) {
             return res.status(400).json({ error: 'Email already exists' });
         }
-        res.status(500).json({ error: 'Failed to create user' });
+        if (isPrismaForeignKeyViolation(error)) {
+            return res.status(400).json({
+                error: 'Invalid creator or related record',
+                details: error?.message || String(error),
+            });
+        }
+        res.status(500).json({
+            error: 'Failed to create user',
+            details: error?.message || String(error),
+        });
     }
 });
 
@@ -6312,10 +6419,13 @@ app.put('/users/:id', authenticateToken, async (req, res) => {
                     'One or more selected sites are already assigned to another auditee. Unassign them or choose different sites.',
             });
         }
-        if (error.code === 'P2002') {
+        if (isPrismaUniqueViolation(error)) {
             return res.status(400).json({ error: 'Email already exists' });
         }
-        res.status(500).json({ error: 'Failed to update user' });
+        res.status(500).json({
+            error: 'Failed to update user',
+            details: error?.message || String(error),
+        });
     }
 });
 
@@ -7293,7 +7403,7 @@ app.post('/audit-plans', authenticateToken, checkTrialExpiration, async (req, re
     } catch (error) {
         console.error('Error saving audit plan:', error);
         import('fs').then(fs => fs.appendFileSync('audit_debug.log', JSON.stringify({ error: error.message, stack: error.stack, body: req.body }) + '\n'));
-        if (error.code === 'P2002') {
+        if (isPrismaUniqueViolation(error)) {
             return res.status(409).json({ error: 'An audit plan for this program and execution already exists.' });
         }
         res.status(500).json({ error: 'Failed to save audit plan', details: error.message });

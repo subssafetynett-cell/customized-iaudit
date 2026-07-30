@@ -404,6 +404,17 @@ export default function Auth() {
             const data = await response.json().catch(() => ({}));
 
             if (!response.ok) {
+                if (
+                    response.status === 409 &&
+                    (data.code === "SESSION_ALREADY_ACTIVE" || data.success === false)
+                ) {
+                    setErrorMessage(
+                        data.error ||
+                            data.message ||
+                            "This account is already logged in on another device. Please log out from the other device before signing in.",
+                    );
+                    return;
+                }
                 if (response.status === 403 && data.code === 'EMAIL_VERIFICATION_REQUIRED') {
                     setInviteVerifyEmail(
                         typeof data.email === 'string' ? data.email : loginEmail.trim().toLowerCase(),

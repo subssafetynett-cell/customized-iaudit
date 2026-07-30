@@ -34,5 +34,30 @@ export const handlePrismaError = (error, context) => {
     });
 };
 
+/** Prisma 7 + driver adapter may surface unique violations without a top-level P2002. */
+export function getPrismaErrorCode(error) {
+    if (!error || typeof error !== 'object') return null;
+    if (typeof error.code === 'string' && error.code) return error.code;
+    const cause = error.cause;
+    if (cause && typeof cause === 'object' && typeof cause.code === 'string' && cause.code) {
+        return cause.code;
+    }
+    return null;
+}
+
+export function isPrismaUniqueViolation(error) {
+    const code = getPrismaErrorCode(error);
+    if (code === 'P2002' || code === '23505') return true;
+    const msg = `${error?.message || ''} ${error?.cause?.message || ''}`;
+    return /unique constraint|duplicate key value|P2002|\b23505\b/i.test(msg);
+}
+
+export function isPrismaForeignKeyViolation(error) {
+    const code = getPrismaErrorCode(error);
+    if (code === 'P2003' || code === '23503') return true;
+    const msg = `${error?.message || ''} ${error?.cause?.message || ''}`;
+    return /foreign key constraint|P2003|\b23503\b/i.test(msg);
+}
+
 export { pool };
 export default prisma;
