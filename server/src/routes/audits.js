@@ -530,6 +530,7 @@ export function createAuditsRouter({ authenticateToken, checkTrialExpiration }) 
             const siteName = String(req.query.site || req.query.siteName || '').trim();
             const siteIdFilter = String(req.query.siteId || '').trim();
             const typeFilter = String(req.query.type || '').trim().toLowerCase();
+            const statusFilter = String(req.query.status || '').trim().toUpperCase().replace(/\s+/g, '_');
 
             const andFilters = [];
             if (search) {
@@ -577,6 +578,20 @@ export function createAuditsRouter({ authenticateToken, checkTrialExpiration }) 
                 andFilters.push({
                     OR: [{ templateId: null }, { templateId: '' }],
                 });
+            }
+            // Lifecycle status tabs: Planned | In Progress | Completed
+            if (statusFilter === 'PLANNED') {
+                andFilters.push({
+                    OR: [
+                        { status: 'PLANNED' },
+                        { status: null },
+                        { status: '' },
+                    ],
+                });
+            } else if (statusFilter === 'IN_PROGRESS') {
+                andFilters.push({ status: 'IN_PROGRESS' });
+            } else if (statusFilter === 'COMPLETED') {
+                andFilters.push({ status: 'COMPLETED' });
             }
 
             const listWhere =

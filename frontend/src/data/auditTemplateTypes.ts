@@ -19,14 +19,14 @@ export interface ChecklistContent {
     assignTo?: string;
     assignToName?: string;
     assignToEmail?: string;
-    findingType?: "C" | "OFI" | "Min" | "Maj";
+    findingType?: "C" | "OFI" | "Min" | "Maj" | "OK" | "NC";
 }
 
 export interface ClauseChecklistContent {
     clauseId: string;
     title: string;
     subClauses: string[];
-    findingType?: "C" | "OFI" | "Minor" | "Major";
+    findingType?: "C" | "OFI" | "Minor" | "Major" | "OK" | "NC";
     findingDetails?: string;
     findingImages?: string[];
     description?: string;
@@ -49,7 +49,7 @@ export interface ProcessAuditContent {
     auditees?: string;
     evidence?: string;
     conclusion?: string;
-    findingType?: "C" | "OFI" | "Minor" | "Major";
+    findingType?: "C" | "OFI" | "Minor" | "Major" | "OK" | "NC";
     description?: string;
     correction?: string;
     rootCause?: string;
@@ -71,7 +71,12 @@ export interface AuditTemplate {
     isTripleMapping?: boolean;
     alwaysAvailableInPlan?: boolean;
     module?: string;
-    /** Checklist response scale. Default is C / OFI / Min / Maj. */
-    findingScale?: "yes-no";
+    /**
+     * Checklist response scale.
+     * - Default / `ok-not-ok`: OK / Not OK (Not OK stored as NC) — ISO standards
+     * - `yes-no`: Yes / No buttons
+     * Module (EOSH / QFS) templates ignore this and use scored layouts.
+     */
+    findingScale?: "yes-no" | "ok-not-ok";
     content: SectionContent[] | ChecklistContent[] | ClauseChecklistContent[] | ProcessAuditContent[];
 }

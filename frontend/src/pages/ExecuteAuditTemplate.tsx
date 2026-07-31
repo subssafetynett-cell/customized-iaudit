@@ -8,7 +8,8 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { auditTemplates, ChecklistContent, SectionContent, ClauseChecklistContent, ProcessAuditContent } from "@/data/auditTemplates";
+import { auditTemplates, ChecklistContent, SectionContent, ClauseChecklistContent, ProcessAuditContent, usesOkNotOkChecklistFindings } from "@/data/auditTemplates";
+import { IsoOkNotOkFindingSelect } from "@/components/IsoOkNotOkFindingSelect";
 import { toast } from "sonner";
 import { TourStepPopover } from "@/components/TourStepPopover";
 import { QuestionEvidenceUploadPreview } from "@/components/QuestionEvidenceUploadPreview";
@@ -1839,7 +1840,16 @@ const ExecuteAuditTemplate = () => {
                                                                         index === 0 && tourTemplateHighlight(12),
                                                                     )}
                                                                 >
-                                                                    {[{ val: 'C', label: 'Compliant (C)', color: 'bg-emerald-500' }, { val: 'OFI', label: 'Opportunity for Improvement', color: 'bg-amber-500' }, { val: 'Min', label: 'Minor Non-Conformity', color: 'bg-orange-600' }, { val: 'Maj', label: 'Major Non-Conformity', color: 'bg-red-600' }].map(opt => (
+                                                                    {usesOkNotOkChecklistFindings(template) ? (
+                                                                        <IsoOkNotOkFindingSelect
+                                                                            compact
+                                                                            value={checklistData[index]?.findings}
+                                                                            onChange={(v) =>
+                                                                                handleChecklistChange(index, "findings", v)
+                                                                            }
+                                                                        />
+                                                                    ) : (
+                                                                    [{ val: 'C', label: 'Compliant (C)', color: 'bg-emerald-500' }, { val: 'OFI', label: 'Opportunity for Improvement', color: 'bg-amber-500' }, { val: 'Min', label: 'Minor Non-Conformity', color: 'bg-orange-600' }, { val: 'Maj', label: 'Major Non-Conformity', color: 'bg-red-600' }].map(opt => (
                                                                         <button
                                                                             key={opt.val}
                                                                             onClick={() => handleChecklistChange(index, 'findings', opt.val)}
@@ -1852,14 +1862,17 @@ const ExecuteAuditTemplate = () => {
                                                                         >
                                                                             {opt.val}
                                                                         </button>
-                                                                    ))}
+                                                                    ))
+                                                                    )}
                                                                 </div>
                                                             </TableCell>
 
                                                             {/* Evidence */}
                                                             <TableCell className="p-2 align-top bg-slate-50/30">
                                                                 <div className="flex flex-col h-full space-y-1">
-                                                                    {!['OFI', 'Min', 'Maj'].includes(checklistData[index]?.findings) && (
+                                                                    {(usesOkNotOkChecklistFindings(template)
+                                                                        ? checklistData[index]?.findings !== "NC"
+                                                                        : !['OFI', 'Min', 'Maj'].includes(checklistData[index]?.findings)) && (
                                                                         <>
                                                                             <Label className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">Audit Evidence</Label>
                                                                             <Textarea
@@ -1880,8 +1893,12 @@ const ExecuteAuditTemplate = () => {
                                                     )}
                                                 </TableRow>
 
-                                                {/* Conditionally rendered extended fields for OFI, Min, Maj */}
-                                                {!showEditMode && ['OFI', 'Min', 'Maj'].includes(checklistData[index]?.findings) && (
+                                                {/* Conditionally rendered extended fields for NC / OFI / Min / Maj */}
+                                                {!showEditMode &&
+                                                  ((usesOkNotOkChecklistFindings(template) &&
+                                                    checklistData[index]?.findings === "NC") ||
+                                                    (!usesOkNotOkChecklistFindings(template) &&
+                                                      ['OFI', 'Min', 'Maj'].includes(checklistData[index]?.findings))) && (
                                                     <TableRow className="bg-slate-50/80 border-b-2 border-slate-200">
                                                         <TableCell colSpan={4} className="p-0">
                                                             <div className="p-6 ml-6 mr-4 my-2 border-l-4 border-slate-300 bg-white rounded-r-lg shadow-sm">

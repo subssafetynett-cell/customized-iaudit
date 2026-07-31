@@ -82,6 +82,54 @@ export function usesYesNoChecklistFindings(
 }
 
 /**
+ * True when ISO / IMS checklists use OK / Not OK (Not OK → NC)
+ * instead of C / OFI / Min / Maj. EOSH/QFS modules and explicit yes-no stay excluded.
+ */
+export function usesOkNotOkChecklistFindings(
+    template?: Pick<AuditTemplate, "findingScale" | "module"> | null,
+): boolean {
+    if (!template) return false;
+    if (template.module === "EOSH" || template.module === "QFS KORE") return false;
+    if (template.findingScale === "yes-no") return false;
+    if (template.findingScale === "ok-not-ok") return true;
+    // ISO / IMS templates without an explicit scale default to OK / Not OK.
+    return true;
+}
+
+/** Normalize stored finding values for the OK / Not OK select. */
+export function normalizeOkNotOkFindingValue(
+    raw: string | undefined | null,
+): "" | "OK" | "NC" {
+    const t = String(raw ?? "").trim();
+    if (!t) return "";
+    const lower = t.toLowerCase();
+    if (
+        lower === "ok" ||
+        lower === "c" ||
+        lower === "compliant" ||
+        lower === "yes" ||
+        lower === "2"
+    ) {
+        return "OK";
+    }
+    if (
+        lower === "nc" ||
+        lower === "not ok" ||
+        lower === "notok" ||
+        lower === "no" ||
+        lower === "min" ||
+        lower === "maj" ||
+        lower === "minor" ||
+        lower === "major" ||
+        lower === "ofi" ||
+        lower === "0"
+    ) {
+        return "NC";
+    }
+    return "";
+}
+
+/**
  * When the audit program uses EOSH/QFS modules, lock the plan to the modules
  * scheduled for this execution (month). Returns null for ISO programs (free picker).
  */
@@ -283,6 +331,7 @@ export const auditTemplates: AuditTemplate[] = [
         standard: "ISO 45001",
         type: "checklist",
         alwaysAvailableInPlan: true,
+        findingScale: "ok-not-ok",
         description:
             "ISO 45001:2018 OH&S management system audit checklist (REQUIREMENT / QUESTION / OK / NOT OK / COMMENT). Covers clauses 4.4, 5.1–5.3, 6.1–6.2, 7.1–7.5, 8.1–8.2, 9.1.1, and 10.1–10.2.",
         content: [

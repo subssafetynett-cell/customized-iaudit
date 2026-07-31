@@ -13,7 +13,7 @@ import {
     getAuditPlanTemplateLabel,
     type AuditTemplate,
 } from "@/data/auditTemplates";
-import { FileText } from "lucide-react";
+import { FileText, Loader2 } from "lucide-react";
 
 type Props = {
     open: boolean;
@@ -25,9 +25,19 @@ type Props = {
     onSelectModule: (moduleId: string) => void;
     confirmLabel: string;
     onConfirm: () => void;
+    /** moduleId → 0–100 completion. */
+    progressByModuleId?: Record<string, number>;
+    /** True while full plan/auditData is loading for accurate %. */
+    progressLoading?: boolean;
     /** Optional second step actions (e.g. download formats). */
     footerExtra?: React.ReactNode;
 };
+
+function progressTone(percent: number): string {
+    if (percent >= 100) return "text-emerald-700 bg-emerald-100 border-emerald-200";
+    if (percent > 0) return "text-amber-800 bg-amber-50 border-amber-200";
+    return "text-slate-600 bg-slate-100 border-slate-200";
+}
 
 /**
  * Shared picker when an audit plan has multiple assigned checklists/modules.
@@ -42,6 +52,8 @@ export function AuditModuleSelectDialog({
     onSelectModule,
     confirmLabel,
     onConfirm,
+    progressByModuleId = {},
+    progressLoading = false,
     footerExtra,
 }: Props) {
     return (
@@ -59,6 +71,11 @@ export function AuditModuleSelectDialog({
                 <div className="space-y-2 max-h-[50vh] overflow-y-auto py-1">
                     {modules.map((mod) => {
                         const selected = selectedModuleId === mod.id;
+                        const percentRaw = progressByModuleId[mod.id];
+                        const percent =
+                            typeof percentRaw === "number" && Number.isFinite(percentRaw)
+                                ? Math.min(100, Math.max(0, Math.round(percentRaw)))
+                                : 0;
                         return (
                             <button
                                 key={mod.id}
@@ -78,15 +95,56 @@ export function AuditModuleSelectDialog({
                                             selected ? "text-emerald-600" : "text-slate-400",
                                         )}
                                     />
-                                    <div className="min-w-0">
-                                        <p className="text-sm font-bold leading-snug">
-                                            {getAuditPlanTemplateLabel(mod)}
-                                        </p>
-                                        {mod.module ? (
-                                            <p className="mt-0.5 text-xs text-slate-500">
-                                                {mod.module} checklist
+                                    <div className="min-w-0 flex-1">
+                                        <div className="flex items-start justify-between gap-3">
+                                            <p className="text-sm font-bold leading-snug">
+                                                {getAuditPlanTemplateLabel(mod)}
                                             </p>
-                                        ) : null}
+                                            <span
+                                                className={cn(
+                                                    "shrink-0 rounded-full border px-2 py-0.5 text-[11px] font-bold tabular-nums",
+                                                    progressLoading
+                                                        ? "text-slate-500 bg-slate-50 border-slate-200"
+                                                        : progressTone(percent),
+                                                )}
+                                            >
+                                                {progressLoading ? (
+                                                    <span className="inline-flex items-center gap-1">
+                                                        <Loader2 className="h-3 w-3 animate-spin" />
+                                                        …
+                                                    </span>
+                                                ) : (
+                                                    `${percent}%`
+                                                )}
+                                            </span>
+                                        </div>
+                                        <p className="mt-0.5 text-xs text-slate-500">
+                                            {mod.module ? `${mod.module} checklist` : "Checklist"}
+                                            {!progressLoading
+                                                ? percent >= 100
+                                                    ? " · Completed"
+                                                    : percent > 0
+                                                      ? " · In progress"
+                                                      : " · Not started"
+                                                : ""}
+                                        </p>
+                                        <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-slate-100">
+                                            <div
+                                                className={cn(
+                                                    "h-full rounded-full transition-all",
+                                                    percent >= 100
+                                                        ? "bg-emerald-500"
+                                                        : percent > 0
+                                                          ? "bg-amber-500"
+                                                          : "bg-slate-300",
+                                                )}
+                                                style={{
+                                                    width: progressLoading
+                                                        ? "0%"
+                                                        : `${percent}%`,
+                                                }}
+                                            />
+                                        </div>
                                     </div>
                                 </div>
                             </button>

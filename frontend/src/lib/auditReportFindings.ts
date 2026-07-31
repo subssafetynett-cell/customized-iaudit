@@ -192,6 +192,8 @@ function cellValue(value: unknown): string {
 export function formatChecklistFindingLabel(findings?: string | null): string {
     const raw = String(findings || "").trim();
     if (!raw) return "";
+    if (raw === "OK") return "OK";
+    if (raw === "Not OK" || raw === "NotOK") return "Not OK (NC)";
     if (raw === "2" || raw === "C") return "2 — Compliance";
     if (raw === "1" || raw === "OFI") return "1 — Exceptions / OFI";
     if (raw === "0" || raw === "NC" || raw === "Min" || raw === "Maj" || raw === "Minor" || raw === "Major") {
@@ -272,9 +274,12 @@ export function checklistRowHasFindingExtras(
 ): boolean {
     if (!record) return false;
     const findingType = cellValue(record.findingType);
-    if (["Minor", "Major", "OFI", "Min", "Maj"].includes(findingType)) return true;
+    if (["Minor", "Major", "OFI", "Min", "Maj", "NC"].includes(findingType)) return true;
 
     const findings = cellValue(record.findings);
+    if (["NC", "Not OK", "NotOK", "Min", "Maj", "OFI", "Minor", "Major"].includes(findings)) {
+        return true;
+    }
     const score = eoshScoreFromFindings(findings);
     if (options?.isEosh && (score === "0" || score === "1")) return true;
     if (options?.qfsScoreMode) {

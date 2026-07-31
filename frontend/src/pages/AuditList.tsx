@@ -52,6 +52,7 @@ import {
 import { resolveAuditModuleDisplayName } from "@/lib/auditFindings";
 import {
     getPlanModuleOptions,
+    getPlanModulesProgressMap,
     scopePlanToModule,
 } from "@/lib/auditPlanModules";
 import { AuditModuleSelectDialog } from "@/components/AuditModuleSelectDialog";
@@ -99,11 +100,20 @@ function isModuleAuditListPlan(plan: Parameters<typeof resolveAuditListTypeLabel
 }
 
 type AuditTypeFilter = "all" | "module" | "iso";
+type AuditStatusTab = "planned" | "in_progress" | "completed";
+
+const STATUS_TAB_TO_API: Record<AuditStatusTab, string> = {
+    planned: "PLANNED",
+    in_progress: "IN_PROGRESS",
+    completed: "COMPLETED",
+};
 
 const AuditList = () => {
     const [auditPlans, setAuditPlans] = useState<any[]>([]);
     const [searchQuery, setSearchQuery] = useState("");
     const [typeFilter, setTypeFilter] = useState<AuditTypeFilter>("all");
+    /** Status tab — default Planned; each click fetches that status from the API. */
+    const [statusTab, setStatusTab] = useState<AuditStatusTab>("planned");
     const [selectedSite, setSelectedSite] = useState("all");
     const [loading, setLoading] = useState(true);
     /** True while refetching after filters/page change — keep prior rows visible. */
@@ -117,6 +127,8 @@ const AuditList = () => {
         modules: AuditTemplate[];
         selectedModuleId: string | null;
         downloadFormat?: AuditReportFormat;
+        progressByModuleId: Record<string, number>;
+        progressLoading: boolean;
     } | null>(null);
     const navigate = useNavigate();
     const isAuditeeReadOnly = useAuditeeReadOnly();
@@ -177,7 +189,7 @@ const AuditList = () => {
 
     useEffect(() => {
         setCurrentPage(1);
-    }, [debouncedSearch, selectedSite, typeFilter]);
+    }, [debouncedSearch, selectedSite, typeFilter, statusTab]);
 
     const fetchPlans = async () => {
         const isInitial = !hasLoadedOnceRef.current;
@@ -191,6 +203,7 @@ const AuditList = () => {
                 search: debouncedSearch || undefined,
                 site: selectedSite !== "all" ? selectedSite : undefined,
                 type: typeFilter !== "all" ? typeFilter : undefined,
+                status: STATUS_TAB_TO_API[statusTab],
             });
             const res = await apiFetch(`/audit-plans${qs}`);
             const data = await res.json();
@@ -211,8 +224,8 @@ const AuditList = () => {
 
     useEffect(() => {
         void fetchPlans();
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [currentPage, debouncedSearch, selectedSite, typeFilter]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- fetch when tab/filters/page change
+    }, [currentPage, debouncedSearch, selectedSite, typeFilter, statusTab]);
 
     useEffect(() => {
         let cancelled = false;
@@ -283,18 +296,61 @@ const AuditList = () => {
         });
     };
 
-    const handlePerformAuditClick = (plan: any) => {
+    const openModulePicker = async (
+        mode: "perform" | "download",
+        plan: any,
+        downloadFormat?: AuditReportFormat,
+    ) => {
         const modules = getPlanModuleOptions(plan.templateId);
-        if (modules.length > 1) {
-            setModulePicker({
-                mode: "perform",
-                plan,
-                modules,
-                selectedModuleId: modules[0]?.id ?? null,
-            });
+        if (modules.length <= 1) {
+            if (mode === "perform") {
+                navigateToPerformAudit(plan, modules[0]?.id);
+                return;
+            }
+            if (downloadFormat) {
+                void handleDownloadReport(plan, downloadFormat, modules[0]?.id);
+            }
             return;
         }
-        navigateToPerformAudit(plan, modules[0]?.id);
+
+        setModulePicker({
+            mode,
+            plan,
+            modules,
+            selectedModuleId: modules[0]?.id ?? null,
+            downloadFormat,
+            progressByModuleId: getPlanModulesProgressMap(plan),
+            progressLoading: true,
+        });
+
+        try {
+            const res = await apiFetch(`/audit-plans/${plan.id}`);
+            if (!res.ok) {
+                setModulePicker((prev) =>
+                    prev ? { ...prev, progressLoading: false } : prev,
+                );
+                return;
+            }
+            const fullPlan = await res.json();
+            setModulePicker((prev) =>
+                prev && String(prev.plan?.id) === String(plan.id) && prev.mode === mode
+                    ? {
+                          ...prev,
+                          plan: fullPlan,
+                          progressByModuleId: getPlanModulesProgressMap(fullPlan),
+                          progressLoading: false,
+                      }
+                    : prev,
+            );
+        } catch {
+            setModulePicker((prev) =>
+                prev ? { ...prev, progressLoading: false } : prev,
+            );
+        }
+    };
+
+    const handlePerformAuditClick = (plan: any) => {
+        void openModulePicker("perform", plan);
     };
 
     const handleDownloadReport = async (
@@ -343,18 +399,7 @@ const AuditList = () => {
     };
 
     const handleDownloadFormatClick = (plan: any, format: AuditReportFormat) => {
-        const modules = getPlanModuleOptions(plan.templateId);
-        if (modules.length > 1) {
-            setModulePicker({
-                mode: "download",
-                plan,
-                modules,
-                selectedModuleId: modules[0]?.id ?? null,
-                downloadFormat: format,
-            });
-            return;
-        }
-        void handleDownloadReport(plan, format, modules[0]?.id);
+        void openModulePicker("download", plan, format);
     };
 
     const confirmModulePicker = () => {
@@ -427,6 +472,41 @@ const AuditList = () => {
                         </p>
                     </div>
                     <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+                        <div
+                            className="inline-flex h-12 items-center rounded-xl border border-slate-200 bg-slate-50 p-1 shadow-sm"
+                            role="tablist"
+                            aria-label="Filter by audit status"
+                        >
+                            {(
+                                [
+                                    { id: "planned", label: "Planned" },
+                                    { id: "in_progress", label: "In Progress" },
+                                    { id: "completed", label: "Completed" },
+                                ] as const
+                            ).map((opt) => (
+                                <button
+                                    key={opt.id}
+                                    type="button"
+                                    role="tab"
+                                    aria-selected={statusTab === opt.id}
+                                    onClick={() => {
+                                        if (statusTab === opt.id) return;
+                                        setAuditPlans([]);
+                                        setTotalItems(0);
+                                        hasLoadedOnceRef.current = false;
+                                        setStatusTab(opt.id);
+                                    }}
+                                    className={cn(
+                                        "h-10 rounded-lg px-3.5 text-sm font-semibold transition-colors whitespace-nowrap",
+                                        statusTab === opt.id
+                                            ? "bg-[#213847] text-white shadow-sm"
+                                            : "text-slate-600 hover:bg-white hover:text-slate-900",
+                                    )}
+                                >
+                                    {opt.label}
+                                </button>
+                            ))}
+                        </div>
                         <div
                             className="inline-flex h-12 items-center rounded-xl border border-slate-200 bg-slate-50 p-1 shadow-sm"
                             role="group"
@@ -720,6 +800,8 @@ const AuditList = () => {
                 }
                 modules={modulePicker?.modules ?? []}
                 selectedModuleId={modulePicker?.selectedModuleId ?? null}
+                progressByModuleId={modulePicker?.progressByModuleId}
+                progressLoading={modulePicker?.progressLoading}
                 onSelectModule={(moduleId) =>
                     setModulePicker((prev) =>
                         prev ? { ...prev, selectedModuleId: moduleId } : prev,

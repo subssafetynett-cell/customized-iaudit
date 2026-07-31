@@ -529,13 +529,21 @@ export function extractFindings(plan: {
             normalized === "c" ||
             normalized === "compliant" ||
             normalized === "compliance" ||
+            normalized === "ok" ||
             normalized === "2" ||
             normalized === ""
         ) {
             return null;
         }
         // EOSH scored checklists: 1 / OFI = Meet with Exceptions, 0 / NC = Non Compliance
-        if (normalized === "0" || normalized === "nc") return "NC";
+        if (
+            normalized === "0" ||
+            normalized === "nc" ||
+            normalized === "not ok" ||
+            normalized === "notok"
+        ) {
+            return "NC";
+        }
         if (normalized === "1") return "OFI";
         if (normalized.includes("ofi") || normalized.includes("opportunity")) return "OFI";
         if (normalized === "min" || normalized.includes("minor")) return "Minor";

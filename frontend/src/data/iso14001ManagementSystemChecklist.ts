@@ -7,6 +7,7 @@ export const ISO_14001_MANAGEMENT_SYSTEM_CHECKLIST: AuditTemplate = {
     standard: "ISO 14001",
     type: "checklist",
     alwaysAvailableInPlan: true,
+    findingScale: "ok-not-ok",
     description:
         "ISO 14001:2015 environmental management system audit checklist (REQUIREMENT / QUESTION / OK / NOT OK / COMMENTS). Covers clauses 4.1–4.4, 5.1–5.3, 6.1–6.2, 7.1–7.5, 8.1–8.2, 9.1–9.3, and 10–10.3.",
     content: [

@@ -35,6 +35,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { AutoResizeTextarea } from "@/components/ui/auto-resize-textarea";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import {
@@ -58,7 +59,9 @@ import {
   parseAuditPlanTemplateIds,
   resolveAuditTemplateId,
   usesYesNoChecklistFindings,
+  usesOkNotOkChecklistFindings,
 } from "@/data/auditTemplates";
+import { IsoOkNotOkFindingSelect } from "@/components/IsoOkNotOkFindingSelect";
 import { toast } from "sonner";
 import { format } from "date-fns";
 import * as XLSX from "xlsx";
@@ -226,7 +229,14 @@ function getLoggedInUserRaisedBy(): {
 
 function isActiveFindingFieldValue(field: string, value: unknown): boolean {
   const normalized = String(value ?? "").trim();
-  if (!normalized || normalized === "C") return false;
+  if (
+    !normalized ||
+    normalized === "C" ||
+    normalized === "OK" ||
+    normalized === "Yes"
+  ) {
+    return false;
+  }
   return field === "findingType" || field === "findings";
 }
 
@@ -1395,12 +1405,16 @@ const AuditExecute = () => {
 
     if (template?.type === "clause-checklist") {
       Object.entries(clauseData).forEach(([id, data]) => {
-        if (data.findingType && data.findingType !== "C") {
+        if (
+          data.findingType &&
+          data.findingType !== "C" &&
+          data.findingType !== "OK"
+        ) {
           findings.push({
             source: "clause",
             id,
             ref: `Clause ${id}`,
-            type: data.findingType,
+            type: data.findingType === "NC" ? "NC" : data.findingType,
             description: data.description || "",
             actionBy: data.actionBy || "",
             closeDate: data.closeDate || "",
@@ -1414,11 +1428,34 @@ const AuditExecute = () => {
 
     if (template?.type === "checklist" || template?.isTripleMapping) {
       const yesNoScale = usesYesNoChecklistFindings(template);
+      const okNotOkScale = usesOkNotOkChecklistFindings(template);
       Object.entries(checklistData).forEach(([idx, data]) => {
         const type = data.findings;
         // Yes/No checklists do not produce OFI/Minor/Major findings rows.
         if (yesNoScale) return;
-        if (type && type !== "C" && type !== "" && type !== "Yes" && type !== "No") {
+        if (okNotOkScale) {
+          if (type === "NC" || type === "Not OK" || type === "No") {
+            const item =
+              editableChecklist[Number(idx)] ||
+              (template?.content as ChecklistContent[])?.[Number(idx)];
+            findings.push({
+              source: "checklist",
+              id: idx,
+              ref: item?.clause
+                ? `Clause ${item.clause}`
+                : `Item ${Number(idx) + 1}`,
+              type: "NC",
+              description: data.description || "",
+              actionBy: data.actionBy || "",
+              closeDate: data.closeDate || "",
+              assignTo: data.assignTo || "",
+              assignToName: data.assignToName || "",
+              assignToEmail: data.assignToEmail || "",
+            });
+          }
+          return;
+        }
+        if (type && type !== "C" && type !== "" && type !== "Yes" && type !== "No" && type !== "OK") {
           const item =
             editableChecklist[Number(idx)] ||
             (template?.content as ChecklistContent[])?.[Number(idx)];
@@ -1451,12 +1488,16 @@ const AuditExecute = () => {
 
     if (template?.type === "process-audit") {
       processAudits.forEach((audit, idx) => {
-        if (audit.findingType && audit.findingType !== "C") {
+        if (
+          audit.findingType &&
+          audit.findingType !== "C" &&
+          audit.findingType !== "OK"
+        ) {
           findings.push({
             source: "process",
             id: idx.toString(),
             ref: `Process #${idx + 1}`,
-            type: audit.findingType,
+            type: audit.findingType === "NC" ? "NC" : audit.findingType,
             description: audit.description || "",
             actionBy: audit.actionBy || "",
             closeDate: audit.closeDate || "",
@@ -3365,7 +3406,10 @@ const AuditExecute = () => {
               }
 
               const showExtended =
-                type === "Minor" || type === "Major" || type === "OFI";
+                type === "Minor" ||
+                type === "Major" ||
+                type === "OFI" ||
+                type === "NC";
 
               return (
                 <Card
@@ -3469,8 +3513,18 @@ const AuditExecute = () => {
                     {/* Finding Type Selector */}
                     <div className="flex flex-wrap md:flex-nowrap items-center gap-4 bg-slate-50/50 p-4 rounded-xl border border-slate-100">
                       <span className="text-sm font-bold text-slate-600 uppercase tracking-wider whitespace-nowrap">
-                        Finding Type:
+                        Finding:
                       </span>
+                      {usesOkNotOkChecklistFindings(template) ? (
+                        <IsoOkNotOkFindingSelect
+                          value={type}
+                          onChange={(v) =>
+                            handleClauseChange(clause.id, "findingType", v)
+                          }
+                          disabled={isAuditeeReadOnly}
+                          className="max-w-[200px]"
+                        />
+                      ) : (
                       <div className="flex gap-2 flex-wrap">
                         {[
                           {
@@ -3508,6 +3562,7 @@ const AuditExecute = () => {
                           </button>
                         ))}
                       </div>
+                      )}
                     </div>
 
                     {/* Initial Finding Input */}
@@ -3539,7 +3594,7 @@ const AuditExecute = () => {
                             className={`px-2 py-0.5 rounded text-xs font-bold text-white uppercase tracking-wider
                                                     ${type === "OFI" ? "bg-amber-500" : type === "Minor" ? "bg-orange-600" : "bg-red-600"}`}
                           >
-                            {type} Details
+                            {type === "NC" ? "NC (Not OK)" : type} Details
                           </div>
                         </div>
 
@@ -4063,6 +4118,7 @@ const AuditExecute = () => {
                 type === "Minor" ||
                 type === "Major" ||
                 type === "OFI" ||
+                type === "NC" ||
                 type === "C";
 
               return (
@@ -4164,8 +4220,18 @@ const AuditExecute = () => {
                     <div className="p-5 border-t border-slate-100 flex flex-col gap-6 bg-slate-50/30">
                       <div className="flex flex-wrap md:flex-nowrap items-center gap-4 bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
                         <span className="text-sm font-bold text-slate-600 uppercase tracking-wider whitespace-nowrap">
-                          Category of Finding:
+                          Finding:
                         </span>
+                        {usesOkNotOkChecklistFindings(template) ? (
+                          <IsoOkNotOkFindingSelect
+                            value={type}
+                            onChange={(v) =>
+                              updateProcessAudit(index, "findingType", v as any)
+                            }
+                            disabled={isAuditeeReadOnly}
+                            className="max-w-[200px]"
+                          />
+                        ) : (
                         <div className="flex gap-2 flex-wrap">
                           {[
                             {
@@ -4209,6 +4275,7 @@ const AuditExecute = () => {
                             </button>
                           ))}
                         </div>
+                        )}
                       </div>
 
                       {showExtended && (
@@ -4416,7 +4483,7 @@ const AuditExecute = () => {
                     {!isEditMode && (
                       <>
                         <TableHead className="w-[16%] font-bold text-white text-center border-r border-slate-700 text-xs uppercase tracking-wider">
-                          Finding
+                          OK / Not OK
                         </TableHead>
                         <TableHead className="w-[30%] font-bold text-white text-center text-xs uppercase tracking-wider">
                           Audit Evidence
@@ -4432,7 +4499,7 @@ const AuditExecute = () => {
                     if (!isClauseSelected(row.id)) return null;
 
                     const type = checklistData[index]?.findings;
-                    if (focusFindings && !['OFI', 'Min', 'Maj', 'C'].includes(type as string)) {
+                    if (focusFindings && !['OFI', 'Min', 'Maj', 'C', 'NC', 'OK'].includes(type as string)) {
                       return null;
                     }
 
@@ -4551,6 +4618,17 @@ const AuditExecute = () => {
                               <>
                                 {/* Findings */}
                                 <TableCell className="p-3 align-top">
+                                  {usesOkNotOkChecklistFindings(template) ? (
+                                    <IsoOkNotOkFindingSelect
+                                      compact
+                                      value={type}
+                                      disabled={isAuditeeReadOnly}
+                                      onChange={(v) => {
+                                        handleChecklistChange(dataIndex, "findings", v);
+                                        handleChecklistChange(dataIndex, "clause", row.id);
+                                      }}
+                                    />
+                                  ) : (
                                   <div className="flex flex-wrap gap-1.5 justify-center">
                                     {[
                                       { val: "C", color: "bg-emerald-500" },
@@ -4576,14 +4654,17 @@ const AuditExecute = () => {
                                       </div>
                                     ))}
                                   </div>
+                                  )}
                                 </TableCell>
 
                                 {/* Evidence */}
                                 <TableCell className="p-2 align-top">
                                   <div className="flex flex-col gap-1">
-                                    {!["OFI", "Min", "Maj"].includes(type) && (
-                                      <Textarea
-                                        className="min-h-[80px] text-[11px] resize-y border-slate-200 bg-slate-50/50 focus:bg-white shadow-none p-2"
+                                    {(usesOkNotOkChecklistFindings(template)
+                                      ? type !== "NC"
+                                      : !["OFI", "Min", "Maj"].includes(type)) && (
+                                      <AutoResizeTextarea
+                                        className="min-h-[80px] text-[11px] border-slate-200 bg-slate-50/50 focus:bg-white shadow-none p-2"
                                         placeholder="Evidence..."
                                         value={checklistData[dataIndex]?.evidence || ""}
                                         onChange={(e) => handleChecklistChange(dataIndex, "evidence", e.target.value)}
@@ -4624,7 +4705,9 @@ const AuditExecute = () => {
 
 
                           {/* Extended findings for Mapping rows */}
-                          {["OFI", "Min", "Maj"].includes(type) && (
+                          {(usesOkNotOkChecklistFindings(template)
+                            ? type === "NC"
+                            : ["OFI", "Min", "Maj"].includes(type)) && (
                             <TableRow className="bg-slate-50 border-b-4 border-slate-200 text-sm">
                               <TableCell colSpan={5} className="p-0">
                                 <div className="p-5 m-3 border bg-white rounded-xl shadow-sm border-slate-200">
@@ -4815,10 +4898,17 @@ const AuditExecute = () => {
                       Audit Question
                     </TableHead>
                     <TableHead className="w-[20%] font-bold text-white text-center border-r border-slate-700">
-                      {usesYesNoChecklistFindings(template) ? "Yes / No" : "Finding"}
+                      {usesYesNoChecklistFindings(template)
+                        ? "Yes / No"
+                        : usesOkNotOkChecklistFindings(template)
+                          ? "OK / Not OK"
+                          : "Finding"}
                     </TableHead>
                     <TableHead className="w-[35%] font-bold text-white text-center">
-                      {usesYesNoChecklistFindings(template) ? "Comments" : "Audit Evidence"}
+                      {usesYesNoChecklistFindings(template) ||
+                      usesOkNotOkChecklistFindings(template)
+                        ? "Comments"
+                        : "Audit Evidence"}
                     </TableHead>
                   </TableRow>
                   )}
@@ -4846,7 +4936,7 @@ const AuditExecute = () => {
 
                       if (
                         focusFindings &&
-                        !["OFI", "Min", "Maj", "NC", "C", "2", "1", "0", "Yes", "No"].includes(type as string)
+                        !["OFI", "Min", "Maj", "NC", "C", "2", "1", "0", "Yes", "No", "OK", "Not OK"].includes(type as string)
                       ) {
                         return null;
                       }
@@ -4856,6 +4946,7 @@ const AuditExecute = () => {
                       const qfsLayout = usesQfsKoreScoredChecklistLayout(template) && !isEditMode;
                       const eoshLayout = usesEoshScoredChecklistLayout(template) && !isEditMode;
                       const yesNoFindings = usesYesNoChecklistFindings(template);
+                      const okNotOkFindings = usesOkNotOkChecklistFindings(template);
                       const showIntent = eoshChecklistShowsIntentColumn(templateId);
                       const eoshColSpan = showIntent ? 8 : 7;
                       const eoshScore = eoshScoreFromFindings(type);
@@ -4918,8 +5009,8 @@ const AuditExecute = () => {
                               </TableCell>
                             ))}
                             <TableCell className="border border-slate-300 align-top p-2">
-                              <Textarea
-                                className="min-h-[72px] text-xs resize-y border-slate-300"
+                              <AutoResizeTextarea
+                                className="min-h-[72px] text-xs border-slate-300"
                                 placeholder="Finding…"
                                 value={checklistData[index]?.ofi || ""}
                                 onChange={(e) => handleChecklistChange(index, "ofi", e.target.value)}
@@ -4928,8 +5019,8 @@ const AuditExecute = () => {
                             </TableCell>
                             <TableCell className="border border-slate-300 align-top p-2 min-w-[180px]">
                               <div className="flex flex-col gap-1">
-                                <Textarea
-                                  className="min-h-[72px] text-xs resize-y border-slate-300"
+                                <AutoResizeTextarea
+                                  className="min-h-[72px] text-xs border-slate-300"
                                   placeholder="Evidence…"
                                   value={checklistData[index]?.evidence || ""}
                                   onChange={(e) => handleChecklistChange(index, "evidence", e.target.value)}
@@ -5011,8 +5102,8 @@ const AuditExecute = () => {
                             ))}
                             <TableCell className="border border-slate-300 align-top p-2 min-w-[180px]">
                               <div className="flex flex-col gap-1">
-                                <Textarea
-                                  className="min-h-[72px] text-xs resize-y border-slate-300"
+                                <AutoResizeTextarea
+                                  className="min-h-[72px] text-xs border-slate-300"
                                   placeholder="Evidence reviewed…"
                                   value={checklistData[index]?.evidence || ""}
                                   onChange={(e) => handleChecklistChange(index, "evidence", e.target.value)}
@@ -5033,8 +5124,8 @@ const AuditExecute = () => {
                               </div>
                             </TableCell>
                             <TableCell className="border border-slate-300 align-top p-2">
-                              <Textarea
-                                className="min-h-[72px] text-xs resize-y border-slate-300"
+                              <AutoResizeTextarea
+                                className="min-h-[72px] text-xs border-slate-300"
                                 placeholder="Comment…"
                                 value={checklistData[index]?.ofi || ""}
                                 onChange={(e) => handleChecklistChange(index, "ofi", e.target.value)}
@@ -5170,6 +5261,17 @@ const AuditExecute = () => {
                               <>
                                 {/* Findings Selection */}
                                 <TableCell className="p-4 align-top">
+                                  {okNotOkFindings ? (
+                                    <IsoOkNotOkFindingSelect
+                                      compact
+                                      value={type}
+                                      disabled={isAuditeeReadOnly}
+                                      onChange={(v) => {
+                                        handleChecklistChange(index, "findings", v);
+                                        handleChecklistChange(index, "clause", item.clause);
+                                      }}
+                                    />
+                                  ) : (
                                   <div className="flex flex-wrap gap-2 justify-center">
                                     {(yesNoFindings
                                       ? [
@@ -5204,16 +5306,19 @@ const AuditExecute = () => {
                                       </div>
                                     ))}
                                   </div>
+                                  )}
                                 </TableCell>
 
                                 {/* Evidence / Comments */}
                                 <TableCell className="p-3 align-top">
                                   <div className="flex flex-col h-full gap-1">
-                                    {(yesNoFindings || !["OFI", "Min", "Maj"].includes(type)) && (
-                                      <Textarea
-                                        className="min-h-[100px] text-sm resize-y border-slate-200 bg-slate-50/50 focus:bg-white shadow-sm transition-colors placeholder:text-slate-400 p-3"
+                                    {(okNotOkFindings
+                                      ? type !== "NC"
+                                      : yesNoFindings || !["OFI", "Min", "Maj"].includes(type)) && (
+                                      <AutoResizeTextarea
+                                        className="min-h-[100px] text-sm border-slate-200 bg-slate-50/50 focus:bg-white shadow-sm transition-colors placeholder:text-slate-400 p-3"
                                         placeholder={
-                                          yesNoFindings
+                                          yesNoFindings || okNotOkFindings
                                             ? "Comments..."
                                             : "Documented info / records checked..."
                                         }
@@ -5245,8 +5350,11 @@ const AuditExecute = () => {
                             )}
                           </TableRow>
 
-                          {/* Extended findings conditionally — not used for Yes/No checklists */}
-                          {!yesNoFindings && ["OFI", "Min", "Maj"].includes(type) && (
+                          {/* Extended findings — NC for OK/Not OK; OFI/Min/Maj for legacy scales */}
+                          {((okNotOkFindings && type === "NC") ||
+                            (!okNotOkFindings &&
+                              !yesNoFindings &&
+                              ["OFI", "Min", "Maj"].includes(type))) && (
                             <TableRow className="bg-slate-50 border-b-4 border-slate-200 text-sm">
                               <TableCell colSpan={4} className="p-0">
                                 <div className="p-6 ml-6 mr-6 my-4 border bg-white rounded-xl shadow-[0_2px_10px_-3px_rgba(6,81,237,0.1)] border-slate-200">
@@ -5259,7 +5367,9 @@ const AuditExecute = () => {
                                         ? "Minor N/C"
                                         : type === "Maj"
                                           ? "Major N/C"
-                                          : "OFI"}{" "}
+                                          : type === "NC"
+                                            ? "NC (Not OK)"
+                                            : "OFI"}{" "}
                                       Details
                                     </div>
                                     <span className="text-slate-400 text-xs font-medium">
@@ -5470,6 +5580,21 @@ const AuditExecute = () => {
                                         </div>
                                       </TableCell>
                                       <TableCell className="p-4 align-top">
+                                        {okNotOkFindings ? (
+                                          <IsoOkNotOkFindingSelect
+                                            compact
+                                            value={eqType}
+                                            disabled={isAuditeeReadOnly}
+                                            onChange={(v) =>
+                                              handleExtraChecklistChange(
+                                                item.clause,
+                                                eqIdx,
+                                                "findings",
+                                                v,
+                                              )
+                                            }
+                                          />
+                                        ) : (
                                         <div className="flex flex-wrap gap-2 justify-center">
                                           {(usesYesNoChecklistFindings(template)
                                             ? [
@@ -5490,18 +5615,21 @@ const AuditExecute = () => {
                                             >{opt.val}</div>
                                           ))}
                                         </div>
+                                        )}
                                       </TableCell>
                                       <TableCell className="p-3 align-top">
-                                        <textarea
-                                          className="w-full min-h-[80px] text-sm resize-y border border-slate-200 rounded-md bg-slate-50/50 p-2 focus:outline-none focus:ring-1 focus:ring-blue-300 placeholder:text-slate-400"
+                                        <AutoResizeTextarea
+                                          className="w-full min-h-[80px] text-sm border border-slate-200 rounded-md bg-slate-50/50 p-2 focus:outline-none focus:ring-1 focus:ring-blue-300 placeholder:text-slate-400"
                                           placeholder="Evidence..."
                                           value={eq.evidence}
                                           onChange={(e) => handleExtraChecklistChange(item.clause, eqIdx, 'evidence', e.target.value)}
                                         />
                                       </TableCell>
                                     </TableRow>
-                                    {["OFI", "Min", "Maj", "C"].includes(eqType) &&
-                                      !usesYesNoChecklistFindings(template) && (
+                                    {((okNotOkFindings && eqType === "NC") ||
+                                      (!okNotOkFindings &&
+                                        ["OFI", "Min", "Maj", "C"].includes(eqType) &&
+                                        !usesYesNoChecklistFindings(template))) && (
                                       <TableRow className="bg-slate-50 border-b-2 border-slate-200 text-sm">
                                         <TableCell colSpan={4} className="p-0">
                                           <div className="p-4 ml-4 mr-4 my-3 border bg-white rounded-xl border-slate-200 grid grid-cols-2 gap-4">
