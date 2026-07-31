@@ -1330,11 +1330,13 @@ const AuditExecute = () => {
     });
   }, [plan, template, buildAuditDataPayload, progressValue]);
 
-  const { saveNow } = useAuditExecutionAutosave({
+  const { saveNow, flushSync } = useAuditExecutionAutosave({
     planId: id,
     buildAuditData: buildAuditDataPayload,
-    enabled: !!plan && !!template && !isAuditeeReadOnly,
-    deps: [buildAuditDataPayload, isAuditeeReadOnly],
+    // Wait until server answers are hydrated so we never PUT empty state over saved progress.
+    enabled: !!plan && !!template && !isAuditeeReadOnly && answersHydrated,
+    deps: [buildAuditDataPayload, isAuditeeReadOnly, answersHydrated],
+    debounceMs: 1500,
     onSaved: (result) => {
       // Keep React Query cache aligned with what we just persisted so remounts
       // never rehydrate stale pre-edit auditData.
@@ -5738,12 +5740,18 @@ const AuditExecute = () => {
             variant="outline"
             size="lg"
             className="bg-white"
-            onClick={() => navigate("/audit")}
+            onClick={() => {
+              if (!isAuditeeReadOnly) flushSync();
+              navigate("/audit");
+            }}
           >
             {isAuditeeReadOnly ? "Back" : "Cancel"}
           </Button>
           {!isAuditeeReadOnly && (
           <div className="flex items-center gap-3">
+            <span className="hidden sm:inline text-xs text-slate-500 font-medium max-w-[160px] text-right leading-snug">
+              Progress autosaves as you work
+            </span>
             {(template.type === 'checklist' || template.isTripleMapping || template.type === 'clause-checklist') && (
               <Button
                 variant={isEditMode ? "secondary" : "outline"}
