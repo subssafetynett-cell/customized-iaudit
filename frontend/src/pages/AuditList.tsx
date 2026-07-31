@@ -47,8 +47,14 @@ import {
     findAuditTemplates,
     getAuditPlanTemplateLabel,
     parseAuditPlanTemplateIds,
+    type AuditTemplate,
 } from "@/data/auditTemplates";
 import { resolveAuditModuleDisplayName } from "@/lib/auditFindings";
+import {
+    getPlanModuleOptions,
+    scopePlanToModule,
+} from "@/lib/auditPlanModules";
+import { AuditModuleSelectDialog } from "@/components/AuditModuleSelectDialog";
 import {
     MoreVertical, FileText, Trash2, Calendar, Search, Download, Loader2
 } from "lucide-react";
@@ -105,6 +111,13 @@ const AuditList = () => {
     const hasLoadedOnceRef = React.useRef(false);
     /** e.g. "42-pdf" while generating a report for plan 42 */
     const [downloadingKey, setDownloadingKey] = useState<string | null>(null);
+    const [modulePicker, setModulePicker] = useState<{
+        mode: "perform" | "download";
+        plan: any;
+        modules: AuditTemplate[];
+        selectedModuleId: string | null;
+        downloadFormat?: AuditReportFormat;
+    } | null>(null);
     const navigate = useNavigate();
     const isAuditeeReadOnly = useAuditeeReadOnly();
     const [searchParams, setSearchParams] = useSearchParams();
@@ -252,8 +265,44 @@ const AuditList = () => {
         excel: "Excel",
     };
 
-    const handleDownloadReport = async (planStub: { id: number; auditName?: string }, format: AuditReportFormat) => {
-        const key = `${planStub.id}-${format}`;
+    const navigateToPerformAudit = (plan: any, moduleId?: string) => {
+        const basePath = `/audit/execute/${plan.id}`;
+        const params = new URLSearchParams();
+        if (auditExecuteTourActive) {
+            params.set("auditExecuteTour", "true");
+            params.set("auditExecuteStep", "4");
+        }
+        if (moduleId) params.set("module", moduleId);
+        const qs = params.toString();
+        navigate(qs ? `${basePath}?${qs}` : basePath, {
+            state: {
+                plan,
+                activeModuleId: moduleId || undefined,
+                lockModule: Boolean(moduleId),
+            },
+        });
+    };
+
+    const handlePerformAuditClick = (plan: any) => {
+        const modules = getPlanModuleOptions(plan.templateId);
+        if (modules.length > 1) {
+            setModulePicker({
+                mode: "perform",
+                plan,
+                modules,
+                selectedModuleId: modules[0]?.id ?? null,
+            });
+            return;
+        }
+        navigateToPerformAudit(plan, modules[0]?.id);
+    };
+
+    const handleDownloadReport = async (
+        planStub: { id: number; auditName?: string; templateId?: string | null },
+        format: AuditReportFormat,
+        moduleId?: string,
+    ) => {
+        const key = `${planStub.id}-${format}${moduleId ? `-${moduleId}` : ""}`;
         if (downloadingKey) return;
 
         const toastId = toast.loading(`Preparing ${formatLabels[format]} report…`);
@@ -273,7 +322,10 @@ const AuditList = () => {
                     detail || `Could not load audit data for this report (HTTP ${res.status}).`,
                 );
             }
-            const plan = await res.json();
+            let plan = await res.json();
+            if (moduleId) {
+                plan = scopePlanToModule(plan, moduleId);
+            }
 
             toast.loading(`Generating ${formatLabels[format]} report…`, { id: toastId });
             await downloadAuditReport(plan, format);
@@ -287,6 +339,34 @@ const AuditList = () => {
             );
         } finally {
             setDownloadingKey(null);
+        }
+    };
+
+    const handleDownloadFormatClick = (plan: any, format: AuditReportFormat) => {
+        const modules = getPlanModuleOptions(plan.templateId);
+        if (modules.length > 1) {
+            setModulePicker({
+                mode: "download",
+                plan,
+                modules,
+                selectedModuleId: modules[0]?.id ?? null,
+                downloadFormat: format,
+            });
+            return;
+        }
+        void handleDownloadReport(plan, format, modules[0]?.id);
+    };
+
+    const confirmModulePicker = () => {
+        if (!modulePicker?.selectedModuleId) return;
+        const { mode, plan, selectedModuleId, downloadFormat } = modulePicker;
+        setModulePicker(null);
+        if (mode === "perform") {
+            navigateToPerformAudit(plan, selectedModuleId);
+            return;
+        }
+        if (downloadFormat) {
+            void handleDownloadReport(plan, downloadFormat, selectedModuleId);
         }
     };
 
@@ -528,15 +608,7 @@ const AuditList = () => {
                                                                     tourExecuteHighlight(3),
                                                             )}
                                                             title={isAuditeeReadOnly ? "View audit" : "Perform Audit"}
-                                                            onClick={() => {
-                                                                const path =
-                                                                    auditExecuteTourActive
-                                                                        ? `/audit/execute/${plan.id}?auditExecuteTour=true&auditExecuteStep=4`
-                                                                        : `/audit/execute/${plan.id}`;
-                                                                navigate(path, {
-                                                                    state: { plan },
-                                                                });
-                                                            }}
+                                                            onClick={() => handlePerformAuditClick(plan)}
                                                         >
                                                             {isAuditeeReadOnly ? "View Audit" : "Perform Audit"}
                                                         </Button>
@@ -559,21 +631,21 @@ const AuditList = () => {
                                                             <DropdownMenuContent align="end" className="w-48">
                                                                 <DropdownMenuItem
                                                                     disabled={!!downloadingKey}
-                                                                    onClick={() => void handleDownloadReport(plan, "pdf")}
+                                                                    onClick={() => handleDownloadFormatClick(plan, "pdf")}
                                                                     className="gap-2 cursor-pointer"
                                                                 >
                                                                     <FileText className="w-4 h-4 text-red-500" /> Download PDF
                                                                 </DropdownMenuItem>
                                                                 <DropdownMenuItem
                                                                     disabled={!!downloadingKey}
-                                                                    onClick={() => void handleDownloadReport(plan, "docx")}
+                                                                    onClick={() => handleDownloadFormatClick(plan, "docx")}
                                                                     className="gap-2 cursor-pointer"
                                                                 >
                                                                     <FileText className="w-4 h-4 text-blue-500" /> Download Word
                                                                 </DropdownMenuItem>
                                                                 <DropdownMenuItem
                                                                     disabled={!!downloadingKey}
-                                                                    onClick={() => void handleDownloadReport(plan, "excel")}
+                                                                    onClick={() => handleDownloadFormatClick(plan, "excel")}
                                                                     className="gap-2 cursor-pointer"
                                                                 >
                                                                     <FileText className="w-4 h-4 text-emerald-500" /> Download Excel
@@ -630,6 +702,38 @@ const AuditList = () => {
                     </AlertDialogFooter>
                 </AlertDialogContent>
             </AlertDialog>
+
+            <AuditModuleSelectDialog
+                open={Boolean(modulePicker)}
+                onOpenChange={(open) => {
+                    if (!open) setModulePicker(null);
+                }}
+                title={
+                    modulePicker?.mode === "download"
+                        ? "Select checklist to download"
+                        : "Select checklist to perform"
+                }
+                description={
+                    modulePicker?.mode === "download"
+                        ? `This audit has ${modulePicker?.modules.length ?? 0} modules. Choose one checklist to download separately.`
+                        : `This audit has ${modulePicker?.modules.length ?? 0} modules. Choose one checklist to perform separately.`
+                }
+                modules={modulePicker?.modules ?? []}
+                selectedModuleId={modulePicker?.selectedModuleId ?? null}
+                onSelectModule={(moduleId) =>
+                    setModulePicker((prev) =>
+                        prev ? { ...prev, selectedModuleId: moduleId } : prev,
+                    )
+                }
+                confirmLabel={
+                    modulePicker?.mode === "download"
+                        ? `Download ${modulePicker.downloadFormat ? formatLabels[modulePicker.downloadFormat] : "report"}`
+                        : isAuditeeReadOnly
+                          ? "View checklist"
+                          : "Perform checklist"
+                }
+                onConfirm={confirmModulePicker}
+            />
 
             {auditExecuteTourActive &&
                 auditExecuteTourStep <= 3 &&

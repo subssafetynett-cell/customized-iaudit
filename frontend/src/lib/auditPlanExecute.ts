@@ -14,7 +14,7 @@ export type AuditPlanExecutePayload = Record<string, unknown> & {
 export const auditPlanQueryKey = (id: string | number) =>
     ["audit-plan", String(id)] as const;
 
-export const AUDIT_PLAN_STALE_MS = 60_000;
+export const AUDIT_PLAN_STALE_MS = 5 * 60_000;
 export const AUDIT_PLAN_GC_MS = 30 * 60_000;
 
 export async function fetchAuditPlanForExecute(

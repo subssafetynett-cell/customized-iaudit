@@ -10,10 +10,19 @@ type AutosavePayload = {
 };
 
 /** Ignore volatile timestamps so unchanged answers don't re-PUT. */
-function fingerprintAuditData(auditData: Record<string, unknown>): string {
+export function fingerprintAuditData(auditData: Record<string, unknown>): string {
     const { lastSaved: _ls, completedAt: _ca, ...rest } = auditData;
     return JSON.stringify(rest);
 }
+
+export type AuditAutosaveResult = {
+    status?: string;
+    progress?: number;
+    auditCompleted?: boolean;
+    updatedAt?: string;
+    /** Exact payload that was persisted — callers must update React Query cache with this. */
+    auditData: Record<string, unknown>;
+};
 
 /**
  * Debounced PUT of auditData to the audit plan so progress survives refresh.
@@ -25,11 +34,7 @@ export function useAuditExecutionAutosave({
     deps = [],
     onSaved,
 }: AutosavePayload & {
-    onSaved?: (result: {
-        status?: string;
-        progress?: number;
-        auditCompleted?: boolean;
-    }) => void;
+    onSaved?: (result: AuditAutosaveResult) => void;
 }) {
     const buildRef = useRef(buildAuditData);
     buildRef.current = buildAuditData;
@@ -75,6 +80,13 @@ export function useAuditExecutionAutosave({
                             typeof body.auditCompleted === "boolean"
                                 ? body.auditCompleted
                                 : undefined,
+                        updatedAt:
+                            typeof body.updatedAt === "string"
+                                ? body.updatedAt
+                                : body.updatedAt != null
+                                  ? String(body.updatedAt)
+                                  : undefined,
+                        auditData,
                     });
                 }
                 return true;
@@ -102,6 +114,10 @@ export function useAuditExecutionAutosave({
             if (timerRef.current) clearTimeout(timerRef.current);
         };
     }, [planId, enabled, saveNow, ...deps]);
+
+    useEffect(() => {
+        lastFingerprintRef.current = "";
+    }, [planId]);
 
     useEffect(() => {
         if (!planId || !enabled) return;

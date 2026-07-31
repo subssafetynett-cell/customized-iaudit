@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useParams, useLocation, useNavigate, useSearchParams } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiFetch } from "@/lib/api";
 import {
   AUDIT_PLAN_GC_MS,
@@ -87,6 +87,7 @@ import {
   type AuditEvidenceMedia,
 } from "@/lib/evidenceImageUpload";
 import { generateAuditReportPdf, generateAuditReportDocx, downloadAuditReport } from "@/utils/auditReportExport";
+import { scopePlanToModule } from "@/lib/auditPlanModules";
 import {
   collectAuditFindingSources,
   syncNonConformancesFromSources,
@@ -305,13 +306,26 @@ const AuditExecute = () => {
       : "";
 
   // State for the loaded plan — seed from navigation so Perform Audit paints instantly
-  const navPlan = (location.state as { plan?: any } | null)?.plan;
+  const navPlan = (location.state as { plan?: any; activeModuleId?: string; lockModule?: boolean } | null)?.plan;
+  const navActiveModuleId =
+    typeof (location.state as { activeModuleId?: string } | null)?.activeModuleId === "string"
+      ? String((location.state as { activeModuleId?: string }).activeModuleId)
+      : "";
+  const moduleFromQuery = String(searchParams.get("module") || "").trim();
+  const lockedModuleId = navActiveModuleId || moduleFromQuery || "";
+  const lockToSelectedModule = Boolean(
+    (location.state as { lockModule?: boolean } | null)?.lockModule || moduleFromQuery,
+  );
   const [currentPlan, setCurrentPlan] = useState<any>(navPlan ?? null);
   const { companies: storeCompanies } = useCompanyStore();
   const companies = storeCompanies as any[];
   const [planLoadError, setPlanLoadError] = useState<string | null>(null);
   const [answersHydrated, setAnswersHydrated] = useState(false);
-  const hydrateSigRef = useRef<string>("");
+  /** Plan id for which answer fields have been applied from the server (once per mount). */
+  const answersAppliedForPlanRef = useRef<string | null>(null);
+  /** User has edited answers — block late stub→full hydrates from wiping input. */
+  const userEditedRef = useRef(false);
+  const queryClient = useQueryClient();
 
   const planQuery = useQuery({
     queryKey: auditPlanQueryKey(id || ""),
@@ -320,6 +334,7 @@ const AuditExecute = () => {
     staleTime: AUDIT_PLAN_STALE_MS,
     gcTime: AUDIT_PLAN_GC_MS,
     refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
     initialData: navPlan?.id && String(navPlan.id) === String(id) ? navPlan : undefined,
     placeholderData: (previous) =>
       previous ??
@@ -352,7 +367,9 @@ const AuditExecute = () => {
     () => findAuditTemplates(plan?.templateId),
     [plan?.templateId],
   );
-  const [activeModuleId, setActiveModuleId] = useState("");
+  const [activeModuleId, setActiveModuleId] = useState(
+    () => lockedModuleId || "",
+  );
   const [moduleDataByTemplateId, setModuleDataByTemplateId] = useState<
     Record<
       string,
@@ -366,10 +383,14 @@ const AuditExecute = () => {
 
   useEffect(() => {
     if (planTemplateIds.length === 0) return;
+    if (lockedModuleId && planTemplateIds.includes(lockedModuleId)) {
+      if (activeModuleId !== lockedModuleId) setActiveModuleId(lockedModuleId);
+      return;
+    }
     if (!activeModuleId || !planTemplateIds.includes(activeModuleId)) {
       setActiveModuleId(planTemplateIds[0]);
     }
-  }, [planTemplateIds, activeModuleId]);
+  }, [planTemplateIds, activeModuleId, lockedModuleId]);
 
   const templateId =
     resolveAuditTemplateId(activeModuleId || planTemplateIds[0]) ??
@@ -632,7 +653,15 @@ const AuditExecute = () => {
     setNcByFindingId((prev) => ({ ...prev, [nc.findingId]: nc }));
   }, []);
 
-  // Hydrate execute state from React Query plan (nav seed paints instantly; refresh is non-blocking)
+  // Reset hydrate guards when navigating to a different plan.
+  useEffect(() => {
+    answersAppliedForPlanRef.current = null;
+    userEditedRef.current = false;
+    setAnswersHydrated(false);
+  }, [id]);
+
+  // Hydrate execute state from React Query plan ONCE per plan while mounted.
+  // Never re-apply when updatedAt changes (autosave/refetch) — that wiped in-progress answers.
   useEffect(() => {
     if (planQuery.isError) {
       setPlanLoadError(
@@ -646,24 +675,46 @@ const AuditExecute = () => {
     if (!found?.id) return;
 
     setPlanLoadError(null);
-    setCurrentPlan(found);
+    const planKey = String(found.id);
 
-    const dataSig = `${found.id}:${String(found.updatedAt ?? "")}:${found.auditData != null ? "1" : "0"}`;
-    if (hydrateSigRef.current === dataSig) {
+    // Always refresh plan metadata (name, status, program) without touching answer fields.
+    setCurrentPlan((prev: any) => {
+      if (!prev || String(prev.id) !== planKey) return found;
+      return {
+        ...found,
+        // Keep the in-memory auditData blob aligned with what the user is editing
+        // once answers have been applied for this plan.
+        auditData:
+          answersAppliedForPlanRef.current === planKey && prev.auditData != null
+            ? prev.auditData
+            : found.auditData,
+      };
+    });
+
+    // Answers already applied for this plan — ignore subsequent query updates.
+    if (answersAppliedForPlanRef.current === planKey) {
       return;
     }
-    hydrateSigRef.current = dataSig;
 
     if (found.auditData) {
+      // User already typed while waiting for full plan — do not clobber local state.
+      if (userEditedRef.current) {
+        answersAppliedForPlanRef.current = planKey;
+        setAnswersHydrated(true);
+        return;
+      }
+
       const data =
         typeof found.auditData === "string"
           ? JSON.parse(found.auditData)
           : found.auditData;
       const ids = parseAuditPlanTemplateIds(found.templateId);
       const preferredActive =
-        typeof data.activeModuleId === "string" && ids.includes(data.activeModuleId)
-          ? data.activeModuleId
-          : ids[0] || "";
+        lockedModuleId && ids.includes(lockedModuleId)
+          ? lockedModuleId
+          : typeof data.activeModuleId === "string" && ids.includes(data.activeModuleId)
+            ? data.activeModuleId
+            : ids[0] || "";
       if (preferredActive) setActiveModuleId(preferredActive);
 
       if (data.moduleDataByTemplateId && typeof data.moduleDataByTemplateId === "object") {
@@ -759,19 +810,23 @@ const AuditExecute = () => {
       } else if (currentTemplate?.content) {
         setEditableChecklist(currentTemplate.content);
       }
+      answersAppliedForPlanRef.current = planKey;
       setAnswersHydrated(true);
     } else {
       setFindingsReportForm(buildFindingsReportDefaults(found));
       const ids = parseAuditPlanTemplateIds(found.templateId);
-      if (ids[0]) setActiveModuleId(ids[0]);
-      const currentTemplate = findAuditTemplate(ids[0] || found.templateId);
+      const preferred =
+        lockedModuleId && ids.includes(lockedModuleId) ? lockedModuleId : ids[0];
+      if (preferred) setActiveModuleId(preferred);
+      const currentTemplate = findAuditTemplate(preferred || found.templateId);
       if (currentTemplate?.content) {
         setEditableChecklist(currentTemplate.content);
       }
-      // List stub has no answers yet — keep placeholders until server auditData arrives
+      // List stub has no answers yet — keep placeholders until server auditData arrives.
+      // Do NOT mark answersApplied yet so the first full auditData can hydrate.
       setAnswersHydrated(false);
     }
-  }, [planQuery.data, planQuery.isError, planQuery.error]);
+  }, [planQuery.data, planQuery.isError, planQuery.error, lockedModuleId]);
 
   // NC list loads independently — never blocks first paint
   useEffect(() => {
@@ -1254,10 +1309,40 @@ const AuditExecute = () => {
     enabled: !!plan && !!template && !isAuditeeReadOnly,
     deps: [buildAuditDataPayload, isAuditeeReadOnly],
     onSaved: (result) => {
+      // Keep React Query cache aligned with what we just persisted so remounts
+      // never rehydrate stale pre-edit auditData.
+      if (id) {
+        queryClient.setQueryData(auditPlanQueryKey(id), (old: any) => {
+          if (!old || typeof old !== "object") {
+            return {
+              id: Number(id),
+              auditData: result.auditData,
+              ...(result.updatedAt ? { updatedAt: result.updatedAt } : {}),
+              ...(result.status ? { status: result.status } : {}),
+              ...(typeof result.progress === "number" ? { progress: result.progress } : {}),
+              ...(typeof result.auditCompleted === "boolean"
+                ? { auditCompleted: result.auditCompleted }
+                : {}),
+            };
+          }
+          return {
+            ...old,
+            auditData: result.auditData,
+            ...(result.updatedAt ? { updatedAt: result.updatedAt } : {}),
+            ...(result.status ? { status: result.status } : {}),
+            ...(typeof result.progress === "number" ? { progress: result.progress } : {}),
+            ...(typeof result.auditCompleted === "boolean"
+              ? { auditCompleted: result.auditCompleted }
+              : {}),
+          };
+        });
+      }
       setCurrentPlan((prev: any) =>
         prev
           ? {
               ...prev,
+              auditData: result.auditData,
+              ...(result.updatedAt ? { updatedAt: result.updatedAt } : {}),
               ...(result.status ? { status: result.status } : {}),
               ...(typeof result.progress === "number"
                 ? { progress: result.progress }
@@ -1270,6 +1355,29 @@ const AuditExecute = () => {
       );
     },
   });
+
+  // Track real user answer entry (not template scaffolding) so late server hydrates cannot wipe it.
+  useEffect(() => {
+    const payload = buildAuditDataPayload();
+    const checklist = payload.checklistData;
+    const clauses = payload.clauseData;
+    const sections = payload.sectionData;
+    const clauseFilesMap = payload.clauseFiles;
+    const genericFilesMap = payload.genericFiles;
+    const hasAnswers =
+      (checklist && typeof checklist === "object" && Object.keys(checklist as object).length > 0) ||
+      (clauses && typeof clauses === "object" && Object.keys(clauses as object).length > 0) ||
+      (sections && typeof sections === "object" && Object.keys(sections as object).length > 0) ||
+      (clauseFilesMap &&
+        typeof clauseFilesMap === "object" &&
+        Object.keys(clauseFilesMap as object).length > 0) ||
+      (genericFilesMap &&
+        typeof genericFilesMap === "object" &&
+        Object.keys(genericFilesMap as object).length > 0);
+    if (hasAnswers) {
+      userEditedRef.current = true;
+    }
+  }, [buildAuditDataPayload]);
 
   const collectFindings = () => {
     const findings: {
@@ -1988,11 +2096,27 @@ const AuditExecute = () => {
 
       if (res.ok) {
         const body = await res.json().catch(() => ({} as Record<string, unknown>));
+        if (id) {
+          queryClient.setQueryData(auditPlanQueryKey(id), (old: any) => ({
+            ...(old && typeof old === "object" ? old : { id: Number(id) }),
+            auditData,
+            ...(typeof body.updatedAt === "string" ? { updatedAt: body.updatedAt } : {}),
+            ...(typeof body.status === "string" ? { status: body.status } : {}),
+            ...(typeof body.progress === "number" ? { progress: body.progress } : {}),
+            ...(typeof body.auditCompleted === "boolean"
+              ? { auditCompleted: body.auditCompleted }
+              : {}),
+          }));
+        }
         if (body && typeof body === "object") {
           setCurrentPlan((prev: any) =>
             prev
               ? {
                   ...prev,
+                  auditData,
+                  ...(typeof body.updatedAt === "string"
+                    ? { updatedAt: body.updatedAt }
+                    : {}),
                   status:
                     typeof body.status === "string" ? body.status : prev.status,
                   progress:
@@ -2071,7 +2195,13 @@ const AuditExecute = () => {
     const exportToPDF = async () => {
         try {
             toast.loading("Generating PDF report…", { id: "audit-export" });
-            await generateAuditReportPdf({ ...plan, auditData: buildAuditDataPayload() });
+            const moduleId = activeModuleId || planTemplateIds[0];
+            const payload = { ...plan, auditData: buildAuditDataPayload() };
+            const scoped =
+              planTemplateIds.length > 1 && moduleId
+                ? scopePlanToModule(payload, moduleId)
+                : payload;
+            await generateAuditReportPdf(scoped);
             toast.success("PDF report downloaded", { id: "audit-export" });
         } catch (error) {
             console.error("PDF export error:", error);
@@ -2086,7 +2216,13 @@ const AuditExecute = () => {
     const exportToExcel = async () => {
         try {
             toast.loading("Generating Excel report…", { id: "audit-export" });
-            await downloadAuditReport({ ...plan, auditData: buildAuditDataPayload() }, "excel");
+            const moduleId = activeModuleId || planTemplateIds[0];
+            const payload = { ...plan, auditData: buildAuditDataPayload() };
+            const scoped =
+              planTemplateIds.length > 1 && moduleId
+                ? scopePlanToModule(payload, moduleId)
+                : payload;
+            await downloadAuditReport(scoped, "excel");
             toast.success("Excel report downloaded", { id: "audit-export" });
         } catch (error) {
             console.error("Excel export error:", error);
@@ -2100,7 +2236,13 @@ const AuditExecute = () => {
     const exportToWord = async () => {
         try {
             toast.loading("Generating Word report…", { id: "audit-export" });
-            await generateAuditReportDocx({ ...plan, auditData: buildAuditDataPayload() });
+            const moduleId = activeModuleId || planTemplateIds[0];
+            const payload = { ...plan, auditData: buildAuditDataPayload() };
+            const scoped =
+              planTemplateIds.length > 1 && moduleId
+                ? scopePlanToModule(payload, moduleId)
+                : payload;
+            await generateAuditReportDocx(scoped);
             toast.success("Word report downloaded", { id: "audit-export" });
         } catch (error) {
             console.error("Word export error:", error);
@@ -3126,21 +3268,32 @@ const AuditExecute = () => {
         {planTemplates.length > 1 && (
           <div className="rounded-xl border border-emerald-200 bg-emerald-50/40 p-3 space-y-2">
             <p className="text-xs font-bold uppercase tracking-wide text-emerald-800">
-              Assigned modules ({planTemplates.length})
+              {lockToSelectedModule
+                ? "Selected checklist"
+                : `Assigned modules (${planTemplates.length})`}
             </p>
             <div className="flex flex-wrap gap-2">
-              {planTemplates.map((mod) => {
+              {(lockToSelectedModule
+                ? planTemplates.filter(
+                    (mod) => mod.id === (activeModuleId || lockedModuleId || planTemplateIds[0]),
+                  )
+                : planTemplates
+              ).map((mod) => {
                 const isActive = (activeModuleId || planTemplateIds[0]) === mod.id;
                 return (
                   <button
                     key={mod.id}
                     type="button"
-                    onClick={() => switchActiveModule(mod.id)}
+                    disabled={lockToSelectedModule}
+                    onClick={() => {
+                      if (!lockToSelectedModule) switchActiveModule(mod.id);
+                    }}
                     className={cn(
                       "rounded-lg border px-3 py-2 text-left text-sm font-semibold transition-colors",
                       isActive
                         ? "border-emerald-500 bg-white text-emerald-900 shadow-sm"
                         : "border-emerald-100 bg-white/70 text-slate-700 hover:border-emerald-300",
+                      lockToSelectedModule && "cursor-default",
                     )}
                   >
                     {getAuditPlanTemplateLabel(mod)}
@@ -3148,6 +3301,11 @@ const AuditExecute = () => {
                 );
               })}
             </div>
+            {lockToSelectedModule && planTemplates.length > 1 ? (
+              <p className="text-xs text-slate-500">
+                Performing this checklist only. Return to Audit Plans and choose another module to audit separately.
+              </p>
+            ) : null}
           </div>
         )}
 

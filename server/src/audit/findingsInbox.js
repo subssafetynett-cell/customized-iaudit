@@ -1,9 +1,12 @@
 /**
  * Audit Findings inbox — ownership-scoped plan fetch for Assigned / Raised tabs.
  * Returns slim plan rows (heavy blobs stripped) so the client can extractFindings.
+ *
+ * Performance: never scan `auditData::text LIKE` (caused intermittent Coolify 504s).
+ * Prefer denormalized email arrays; fall back to a bounded recent-plan sample only.
  */
 
-import prisma from '../prisma.js';
+import prisma, { pool } from '../prisma.js';
 import { stripHeavyAuditListPayload } from '../textSanitize.js';
 
 export const FINDINGS_INBOX_PLAN_SELECT = {
@@ -27,6 +30,11 @@ export const FINDINGS_INBOX_PLAN_SELECT = {
         },
     },
 };
+
+const EMAIL_INDEX_LOOKBACK_DAYS = 180;
+const EMAIL_INDEX_SCAN_LIMIT = 80;
+const INBOX_PLAN_TAKE = 100;
+const EMAIL_LOOKUP_TIMEOUT_MS = 8_000;
 
 /** Collect assignToEmail values nested in audit execution JSON. */
 export function collectAssigneeEmailsFromAuditData(auditData) {
@@ -92,34 +100,99 @@ export function collectRaisedByEmailsFromAuditData(auditData) {
     return emails;
 }
 
-function escapeLikeLiteral(email) {
-    return String(email || '').replace(/"/g, '').replace(/%/g, '').replace(/_/g, '');
+function withTimeout(promise, ms, label) {
+    let timer;
+    return Promise.race([
+        promise.finally(() => clearTimeout(timer)),
+        new Promise((_, reject) => {
+            timer = setTimeout(
+                () => reject(new Error(`${label} timed out after ${ms}ms`)),
+                ms,
+            );
+        }),
+    ]);
 }
 
 /**
- * Scan AuditPlan.auditData JSON text for an email field (bounded, recent plans).
+ * Persist denormalized finding emails so inbox lookups stay index-friendly.
+ * Safe no-op if columns are not yet patched.
+ */
+export async function syncAuditPlanFindingEmails(planId, auditData) {
+    const id = Number(planId);
+    if (!Number.isInteger(id) || id < 1) return;
+    const assignees = [...collectAssigneeEmailsFromAuditData(auditData)];
+    const raised = [...collectRaisedByEmailsFromAuditData(auditData)];
+    try {
+        await pool.query(
+            `UPDATE "AuditPlan"
+             SET "assigneeEmails" = $1::text[],
+                 "raisedByEmails" = $2::text[]
+             WHERE id = $3`,
+            [assignees, raised, id],
+        );
+    } catch (err) {
+        // Column may not exist until bootstrap patch runs.
+        if (!/assigneeEmails|raisedByEmails|42703/i.test(String(err?.message || err))) {
+            console.warn('[FINDINGS-INBOX] sync emails failed:', err?.message || err);
+        }
+    }
+}
+
+/**
+ * Resolve plan ids for an email field via denormalized arrays (preferred),
+ * then a bounded recent-sample fallback — never a full-table text LIKE.
  * @param {'assignToEmail'|'raisedByEmail'} field
  */
-async function scanPlanIdsByAuditDataEmailField(field, email, limit = 150) {
-    const safeEmail = escapeLikeLiteral(email);
+async function scanPlanIdsByAuditDataEmailField(field, email, limit = EMAIL_INDEX_SCAN_LIMIT) {
+    const safeEmail = String(email || '').toLowerCase().trim();
     if (!safeEmail) return [];
-    const likePattern = `%"${field}":"${safeEmail}"%`;
+
+    const column = field === 'raisedByEmail' ? 'raisedByEmails' : 'assigneeEmails';
+
     try {
-        const rows = await prisma.$queryRawUnsafe(
-            `SELECT id FROM "AuditPlan"
-             WHERE "auditData" IS NOT NULL
-               AND "updatedAt" > NOW() - INTERVAL '3 years'
-               AND LOWER("auditData"::text) LIKE LOWER($1)
-             ORDER BY "updatedAt" DESC
-             LIMIT $2`,
-            likePattern,
-            limit,
+        const indexed = await withTimeout(
+            pool.query(
+                `SELECT id FROM "AuditPlan"
+                 WHERE $1 = ANY("${column}")
+                 ORDER BY "updatedAt" DESC
+                 LIMIT $2`,
+                [safeEmail, limit],
+            ),
+            EMAIL_LOOKUP_TIMEOUT_MS,
+            `findings ${column} index lookup`,
         );
-        return (Array.isArray(rows) ? rows : [])
+        const indexedIds = (indexed.rows || [])
+            .map((row) => Number(row.id))
+            .filter((id) => Number.isInteger(id) && id > 0);
+        if (indexedIds.length > 0) return indexedIds;
+    } catch (err) {
+        console.warn(`[FINDINGS-INBOX] ${column} index lookup skipped:`, err?.message || err);
+    }
+
+    // Legacy fallback: sample recent plans only (updatedAt index), filter in memory.
+    try {
+        const sample = await withTimeout(
+            pool.query(
+                `SELECT id, "auditData" FROM "AuditPlan"
+                 WHERE "auditData" IS NOT NULL
+                   AND "updatedAt" > NOW() - ($1::int * INTERVAL '1 day')
+                 ORDER BY "updatedAt" DESC
+                 LIMIT $2`,
+                [EMAIL_INDEX_LOOKBACK_DAYS, limit],
+            ),
+            EMAIL_LOOKUP_TIMEOUT_MS,
+            `findings ${field} sample fallback`,
+        );
+        const collect =
+            field === 'raisedByEmail'
+                ? collectRaisedByEmailsFromAuditData
+                : collectAssigneeEmailsFromAuditData;
+        return (sample.rows || [])
+            .filter((row) => collect(row.auditData).has(safeEmail))
             .map((row) => Number(row.id))
             .filter((id) => Number.isInteger(id) && id > 0);
     } catch (err) {
-        console.warn(`[FINDINGS-INBOX] ${field} scan skipped:`, err?.message || err);
+        console.warn(`[FINDINGS-INBOX] ${field} sample fallback skipped:`, err?.message || err);
         return [];
     }
 }
@@ -166,8 +239,8 @@ export async function loadFindingsInboxPlans(deps, actorId, ownership) {
                 distinct: ['auditPlanId'],
                 take: 200,
             }),
-            scanPlanIdsByAuditDataEmailField('assignToEmail', actorEmail, 150),
-            scanPlanIdsByAuditDataEmailField('raisedByEmail', actorEmail, 150),
+            scanPlanIdsByAuditDataEmailField('assignToEmail', actorEmail, EMAIL_INDEX_SCAN_LIMIT),
+            scanPlanIdsByAuditDataEmailField('raisedByEmail', actorEmail, EMAIL_INDEX_SCAN_LIMIT),
             prisma.auditPlan.findMany({
                 where: {
                     auditData: { not: null },
@@ -260,13 +333,25 @@ export async function loadFindingsInboxPlans(deps, actorId, ownership) {
                 },
             ],
         };
+    } else if (hintPlanIds.length > 0 && !ownsVisible) {
+        // Assigned tab: only hint plans (NC + email index) — avoid org-wide fat scans.
+        visibilityWhere = {
+            AND: [visibilityWhere, { id: { in: hintPlanIds } }],
+        };
     }
 
-    const plans = await prisma.auditPlan.findMany({
-        where: visibilityWhere,
-        select: FINDINGS_INBOX_PLAN_SELECT,
-        orderBy: { updatedAt: 'desc' },
-        take: 200,
+    const plans = await withTimeout(
+        prisma.auditPlan.findMany({
+            where: visibilityWhere,
+            select: FINDINGS_INBOX_PLAN_SELECT,
+            orderBy: { updatedAt: 'desc' },
+            take: INBOX_PLAN_TAKE,
+        }),
+        EMAIL_LOOKUP_TIMEOUT_MS + 4_000,
+        'findings inbox plan load',
+    ).catch((err) => {
+        console.warn('[FINDINGS-INBOX] plan load failed:', err?.message || err);
+        return [];
     });
 
     const filtered = plans.filter((plan) => {
