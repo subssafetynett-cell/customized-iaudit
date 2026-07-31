@@ -448,7 +448,15 @@ export function canSubmitNcReview(
 
 export function isNcEligibleSeverity(type: string | undefined | null): boolean {
     const t = String(type ?? "").trim().toLowerCase();
-    return t === "minor" || t === "min" || t === "major" || t === "maj";
+    return (
+        t === "minor" ||
+        t === "min" ||
+        t === "major" ||
+        t === "maj" ||
+        t === "nc" ||
+        t === "not ok" ||
+        t === "notok"
+    );
 }
 
 export function normalizeNcSeverity(
@@ -457,6 +465,8 @@ export function normalizeNcSeverity(
     const t = String(type ?? "").trim().toLowerCase();
     if (t === "minor" || t === "min") return "Minor";
     if (t === "major" || t === "maj") return "Major";
+    // ISO OK/Not OK → NC defaults to Minor for formal raise.
+    if (t === "nc" || t === "not ok" || t === "notok") return "Minor";
     return null;
 }
 

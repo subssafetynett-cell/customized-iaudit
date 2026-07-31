@@ -7,6 +7,7 @@ export const ISO_9001_MANAGEMENT_SYSTEM_CHECKLIST: AuditTemplate = {
     standard: "ISO 9001",
     type: "checklist",
     alwaysAvailableInPlan: true,
+    findingScale: "ok-not-ok",
     description:
         "ISO 9001:2015 quality management system audit checklist (SH-CP-FM-09 Rev 02). Clause / Requirement / OK-NOT OK / Auditor Notes & Evidence. Covers clauses 4–10.",
     content: [
