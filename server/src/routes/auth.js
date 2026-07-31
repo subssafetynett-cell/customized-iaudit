@@ -7,6 +7,7 @@ import prisma, {
 import {
     PERSON_NAME_MAX,
     sanitizePersonName,
+    personNameValidationError,
     sanitizePhoneField,
     phoneFieldValidationError
 } from '../textSanitize.js';
@@ -37,10 +38,11 @@ import {
     sendOtpToEmailAddress,
     sendPasswordChangedNotificationEmail
 } from '../auth/otpMail.js';
-
-const PASSWORD_REGEX = /^(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*(),.?":{}|<>_+=\-\[\]\\\/~^]).{8,}$/;
-const NEW_PASSWORD_SAME_AS_CURRENT_MESSAGE =
-    'The new password must be different from your current password.';
+import {
+    PASSWORD_REGEX,
+    PASSWORD_REQUIREMENTS_MESSAGE,
+    NEW_PASSWORD_SAME_AS_CURRENT_MESSAGE,
+} from '../passwordPolicy.js';
 
 async function handleVerifyOtpAndSignup(req, res) {
     const badKeys = getDisallowedExtraKeysError(req.body, SIGNUP_COMPLETE_ALLOWED_BODY_KEYS);
@@ -61,14 +63,16 @@ async function handleVerifyOtpAndSignup(req, res) {
     }
 
     if (!PASSWORD_REGEX.test(password)) {
-        return res.status(400).json({ error: 'Password must be at least 8 characters long and include at least one uppercase letter, one number, and one special character.' });
+        return res.status(400).json({ error: PASSWORD_REQUIREMENTS_MESSAGE });
     }
 
+    const fnErr = personNameValidationError(firstName, 'First name');
+    const lnErr = personNameValidationError(lastName, 'Last name');
+    if (fnErr || lnErr) {
+        return res.status(400).json({ error: fnErr || lnErr });
+    }
     const fn = sanitizePersonName(firstName, PERSON_NAME_MAX);
     const ln = sanitizePersonName(lastName, PERSON_NAME_MAX);
-    if (!fn || !ln) {
-        return res.status(400).json({ error: 'Valid first name and last name are required (letters and common punctuation only).' });
-    }
 
     const mobileDigits = sanitizePhoneField(mobile);
     if (!mobileDigits) {
@@ -512,14 +516,14 @@ async function handleResetPassword(req, res) {
     }
     if (!PASSWORD_REGEX.test(newPassword)) {
         return res.status(400).json({
-            error: 'Password must be at least 8 characters long and include at least one uppercase letter, one number, and one special character.'
+            error: PASSWORD_REQUIREMENTS_MESSAGE
         });
     }
 
     try {
         const user = await prisma.user.findFirst({
             where: { email },
-            select: { id: true, isActive: true, email: true, firstName: true, lastName: true },
+            select: { id: true, isActive: true, email: true, firstName: true, lastName: true, password: true },
         });
         if (!user || !user.isActive) {
             return res.status(400).json({ error: 'Invalid or expired verification code' });
@@ -535,6 +539,13 @@ async function handleResetPassword(req, res) {
         }
         if (!verificationCodesMatch(storedData.code, otpTrim)) {
             return res.status(400).json({ error: 'Invalid verification code' });
+        }
+
+        if (
+            user.password
+            && (await bcrypt.compare(String(newPassword), user.password))
+        ) {
+            return res.status(400).json({ error: NEW_PASSWORD_SAME_AS_CURRENT_MESSAGE });
         }
 
         const hashedPassword = await bcrypt.hash(newPassword, 10);

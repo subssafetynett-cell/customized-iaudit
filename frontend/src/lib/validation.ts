@@ -56,13 +56,27 @@ export function isTenDigitPhone(value: string, countryCode?: string): boolean {
 /** @deprecated Use getPhoneErrorMessage */
 export const PHONE_10_ERROR_MESSAGE = getPhoneErrorMessage();
 
-/** Person first/last name (matches server PERSON_NAME_MAX). */
+/** Person first/last name (matches server PERSON_NAME_MAX). PSZL-020: no dots/links. */
 export const PERSON_NAME_MAX = 100;
 
-export const PERSON_NAME_ERROR_MESSAGE = `Name must be at most ${PERSON_NAME_MAX} characters.`;
+export const PERSON_NAME_ERROR_MESSAGE =
+    "Name may only contain letters, spaces, hyphens, and apostrophes (no dots or links).";
 
+const PERSON_NAME_DISALLOWED = /[^\p{L}\p{M}\s\-']/u;
+const PERSON_NAME_VALID = /^[\p{L}\p{M}]+(?:[\s\-']+[\p{L}\p{M}]+)*$/u;
+
+/** Strip disallowed characters while typing (blocks dots that email clients auto-linkify). */
 export function normalizePersonNameInput(value: string): string {
-    return String(value || "").slice(0, PERSON_NAME_MAX);
+    return String(value || "")
+        .replace(/[^\p{L}\p{M}\s\-']/gu, "")
+        .replace(/\s+/g, " ")
+        .slice(0, PERSON_NAME_MAX);
+}
+
+export function isValidPersonName(value: string): boolean {
+    const t = String(value || "").trim().replace(/\s+/g, " ");
+    if (!t || t.length > PERSON_NAME_MAX) return false;
+    return !PERSON_NAME_DISALLOWED.test(t) && PERSON_NAME_VALID.test(t);
 }
 
 /** Department name (matches server DEPT_TEXT_LIMITS.name). */

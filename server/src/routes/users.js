@@ -13,6 +13,7 @@ import {
 import {
     PERSON_NAME_MAX,
     sanitizePersonName,
+    personNameValidationError,
     sanitizePhoneField,
     phoneFieldValidationError,
     sanitizePlainText,
@@ -55,6 +56,11 @@ import {
     actorCanManageAuditee
 } from '../orgAccess.js';
 import { deleteUserCompletely } from '../deleteUser.js';
+import {
+    PASSWORD_REGEX,
+    PASSWORD_REQUIREMENTS_MESSAGE,
+    NEW_PASSWORD_SAME_AS_CURRENT_MESSAGE,
+} from '../passwordPolicy.js';
 
 async function postUserEmailChangeSendOtp(req, res) {
     const targetId = Number.parseInt(req.params.id, 10);
@@ -827,7 +833,7 @@ export function createUsersRouter({ authenticateToken, checkTrialExpiration }) {
         }
         if (!PASSWORD_REGEX.test(password)) {
             return res.status(400).json({
-                error: 'Password must be at least 8 characters long and include at least one uppercase letter, one number, and one special character.',
+                error: PASSWORD_REQUIREMENTS_MESSAGE,
             });
         }
 
@@ -857,6 +863,14 @@ export function createUsersRouter({ authenticateToken, checkTrialExpiration }) {
         }
 
         const defaults = defaultAuditeeNamesFromEmail(emailNorm);
+        if (rawFirst != null && String(rawFirst).trim() !== '') {
+            const fnErr = personNameValidationError(rawFirst, 'First name');
+            if (fnErr) return res.status(400).json({ error: fnErr });
+        }
+        if (rawLast != null && String(rawLast).trim() !== '') {
+            const lnErr = personNameValidationError(rawLast, 'Last name');
+            if (lnErr) return res.status(400).json({ error: lnErr });
+        }
         const fn = sanitizePersonName(rawFirst, PERSON_NAME_MAX) || defaults.firstName;
         const ln = sanitizePersonName(rawLast, PERSON_NAME_MAX) || defaults.lastName;
 
@@ -1034,14 +1048,16 @@ export function createUsersRouter({ authenticateToken, checkTrialExpiration }) {
             return res.status(400).json({ error: 'Password is required' });
         }
         if (!PASSWORD_REGEX.test(password)) {
-            return res.status(400).json({ error: 'Password must be at least 8 characters long and include at least one uppercase letter, one number, and one special character.' });
+            return res.status(400).json({ error: PASSWORD_REQUIREMENTS_MESSAGE });
         }
 
+        const fnErr = personNameValidationError(firstName, 'First name');
+        const lnErr = personNameValidationError(lastName, 'Last name');
+        if (fnErr || lnErr) {
+            return res.status(400).json({ error: fnErr || lnErr });
+        }
         const fn = sanitizePersonName(firstName, PERSON_NAME_MAX);
         const ln = sanitizePersonName(lastName, PERSON_NAME_MAX);
-        if (!fn || !ln) {
-            return res.status(400).json({ error: 'First name and last name are required' });
-        }
 
         const emailNorm =
             typeof email === 'string' ? (sanitizePlainText(email.trim().toLowerCase(), 254) || '') : '';
@@ -1376,18 +1392,18 @@ export function createUsersRouter({ authenticateToken, checkTrialExpiration }) {
             }
 
             if (firstName !== undefined) {
-                const fn = sanitizePersonName(firstName, PERSON_NAME_MAX);
-                if (!fn) {
-                    return res.status(400).json({ error: 'Invalid first name' });
+                const fnErr = personNameValidationError(firstName, 'First name');
+                if (fnErr) {
+                    return res.status(400).json({ error: fnErr });
                 }
-                updateData.firstName = fn;
+                updateData.firstName = sanitizePersonName(firstName, PERSON_NAME_MAX);
             }
             if (lastName !== undefined) {
-                const ln = sanitizePersonName(lastName, PERSON_NAME_MAX);
-                if (!ln) {
-                    return res.status(400).json({ error: 'Invalid last name' });
+                const lnErr = personNameValidationError(lastName, 'Last name');
+                if (lnErr) {
+                    return res.status(400).json({ error: lnErr });
                 }
-                updateData.lastName = ln;
+                updateData.lastName = sanitizePersonName(lastName, PERSON_NAME_MAX);
             }
             if (mobile !== undefined) {
                 const raw = typeof mobile === 'string' ? mobile.trim() : '';
@@ -1448,7 +1464,7 @@ export function createUsersRouter({ authenticateToken, checkTrialExpiration }) {
 
             if (password) {
                 if (!PASSWORD_REGEX.test(password)) {
-                    return res.status(400).json({ error: 'Password must be at least 8 characters long and include at least one uppercase letter, one number, and one special character.' });
+                    return res.status(400).json({ error: PASSWORD_REQUIREMENTS_MESSAGE });
                 }
                 const pwdRow = await prisma.user.findUnique({
                     where: { id: targetId },

@@ -11,7 +11,7 @@ import { UserPlus, Mail, Lock, Shield, Eye, EyeOff, Edit2 } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { PhoneInputWithCountryCode } from "@/components/PhoneInputWithCountryCode";
 import { DEFAULT_PHONE_COUNTRY_CODE } from "@/lib/phoneCountries";
-import { PASSWORD_REGEX, PASSWORD_ERROR_MESSAGE, capitalizeFirstLetter, getPhoneErrorMessage, isValidPhone, normalizePhoneDigits } from "@/lib/validation";
+import { PASSWORD_REGEX, PASSWORD_ERROR_MESSAGE, capitalizeFirstLetter, getPhoneErrorMessage, isValidPhone, normalizePhoneDigits, normalizePersonNameInput, isValidPersonName, PERSON_NAME_ERROR_MESSAGE } from "@/lib/validation";
 import { formatUserRoleLabel, isAuditeeRole, USERS_PAGE_ROLE_OPTIONS } from "@/lib/userRoles";
 import {
     AuditeeSiteMultiSelect,
@@ -211,6 +211,10 @@ export default function UserModal({
             setError("Please fill in all required fields");
             return;
         }
+        if (!isValidPersonName(firstName) || !isValidPersonName(lastName)) {
+            setError(PERSON_NAME_ERROR_MESSAGE);
+            return;
+        }
 
         // Password is required only in create mode
         if (mode === "create" && !password.trim()) {
@@ -378,7 +382,7 @@ export default function UserModal({
                                 value={firstName}
                                 onChange={(e) => {
                                     e.stopPropagation();
-                                    setFirstName(capitalizeFirstLetter(e.target.value));
+                                    setFirstName(capitalizeFirstLetter(normalizePersonNameInput(e.target.value)));
                                 }}
                                 disabled={isViewMode}
                             />
@@ -391,7 +395,7 @@ export default function UserModal({
                                 value={lastName}
                                 onChange={(e) => {
                                     e.stopPropagation();
-                                    setLastName(capitalizeFirstLetter(e.target.value));
+                                    setLastName(capitalizeFirstLetter(normalizePersonNameInput(e.target.value)));
                                 }}
                                 disabled={isViewMode}
                             />

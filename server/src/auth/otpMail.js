@@ -2,7 +2,14 @@ import nodemailer from 'nodemailer';
 import crypto from 'node:crypto';
 import prisma from '../prisma.js';
 import { runOtpSendExclusive, withPgOtpAdvisoryLock } from '../otpSendLock.js';
-import { escapeHtml } from '../textSanitize.js';
+import { escapeHtml, sanitizePersonName } from '../textSanitize.js';
+
+function personDisplayNameForEmail(firstName, lastName, fallback = 'there') {
+    const cleaned = `${sanitizePersonName(firstName) || ''} ${sanitizePersonName(lastName) || ''}`.trim();
+    const raw = cleaned || fallback;
+    // Extra guard: break any leftover domain-like sequences email clients might auto-link.
+    return raw.replace(/\./g, '.\u200B');
+}
 
 const OTP_RESEND_COOLDOWN_MS = 60 * 1000;
 
@@ -276,7 +283,8 @@ async function sendPasswordChangedNotificationEmail({ toEmail, firstName, lastNa
         return { sent: false, skipped: true };
     }
 
-    const displayName = escapeHtml(`${firstName || ''} ${lastName || ''}`.trim() || 'there');
+    const displayNamePlain = personDisplayNameForEmail(firstName, lastName);
+    const displayName = escapeHtml(displayNamePlain);
     const safeEmail = escapeHtml(normalizedTo);
     const loginUrl = getAppLoginUrl();
     const changedAt = new Date().toLocaleString('en-US', {
@@ -319,7 +327,7 @@ async function sendPasswordChangedNotificationEmail({ toEmail, firstName, lastNa
         </div>
     `;
     const text = [
-        `Hello ${`${firstName || ''} ${lastName || ''}`.trim() || 'there'},`,
+        `Hello ${displayNamePlain},`,
         '',
         intro,
         '',
@@ -356,13 +364,14 @@ function buildUserInviteWelcomeMailContent({
     expireLabel
 }) {
     const loginUrl = getAppLoginUrl();
-    const safeName = escapeHtml(`${firstName} ${lastName}`.trim());
+    const displayNamePlain = personDisplayNameForEmail(firstName, lastName, 'there');
+    const safeName = escapeHtml(displayNamePlain);
     const safeEmail = escapeHtml(normalizedEmail);
     const safePassword = escapeHtml(password);
     const safeLoginUrl = escapeHtml(loginUrl);
     const subject = 'Welcome to iAudit Global — verify your email and sign in';
     const text = [
-        `Welcome to iAudit Global, ${firstName} ${lastName}!`,
+        `Welcome to iAudit Global, ${displayNamePlain}!`,
         '',
         'An administrator created an account for you. Complete these steps:',
         '1. Open the sign-in page and enter the verification code below to confirm your email.',

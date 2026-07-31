@@ -8,7 +8,7 @@ import { useNavigate } from "react-router-dom";
 import { apiFetch } from "@/lib/api";
 import { PhoneInputWithCountryCode } from "@/components/PhoneInputWithCountryCode";
 import { DEFAULT_PHONE_COUNTRY_CODE, getDialForCountryCode } from "@/lib/phoneCountries";
-import { getPhoneErrorMessage, isValidPhone, normalizePhoneDigits, normalizePersonNameInput, PERSON_NAME_MAX, PERSON_NAME_ERROR_MESSAGE, isWithinMaxLength } from "@/lib/validation";
+import { getPhoneErrorMessage, isValidPhone, normalizePhoneDigits, normalizePersonNameInput, isValidPersonName, PERSON_NAME_MAX, PERSON_NAME_ERROR_MESSAGE, isWithinMaxLength } from "@/lib/validation";
 
 export default function ProfileSettings() {
     const { toast } = useToast();
@@ -109,9 +109,11 @@ export default function ProfileSettings() {
         if (
             !isWithinMaxLength(firstName, PERSON_NAME_MAX)
             || !isWithinMaxLength(lastName, PERSON_NAME_MAX)
+            || !isValidPersonName(firstName)
+            || !isValidPersonName(lastName)
         ) {
             toast({
-                title: "Name too long",
+                title: "Invalid name",
                 description: PERSON_NAME_ERROR_MESSAGE,
                 variant: "destructive",
             });
