@@ -31,11 +31,39 @@ export function deriveAuditLifecycleStatus(counts = {}) {
     return AUDIT_LIFECYCLE.IN_PROGRESS;
 }
 
+/**
+ * True when a checklist/clause row has been answered for lifecycle progress.
+ * Counts finding selection (OK/NC/C/…) or comments / evidence text.
+ */
 function rowHasFindingAnswer(row) {
     if (!row || typeof row !== 'object') return false;
     if (String(row.findings ?? '').trim()) return true;
     if (String(row.findingType ?? '').trim()) return true;
+    if (String(row.evidence ?? '').trim()) return true;
+    if (String(row.comments ?? '').trim()) return true;
+    if (String(row.comment ?? '').trim()) return true;
     return false;
+}
+
+/**
+ * SQL CASE that derives PLANNED | IN_PROGRESS | COMPLETED from auditData (+ status fallback).
+ * Safe for use inside Postgres queries on "AuditPlan".
+ */
+export function lifecycleStatusSqlExpression() {
+    return `
+      CASE
+        WHEN "auditData" IS NULL THEN COALESCE(NULLIF(BTRIM(COALESCE(status, '')), ''), 'PLANNED')
+        WHEN COALESCE(("auditData"->>'totalItems')::numeric, 0) > 0 THEN
+          CASE
+            WHEN COALESCE(("auditData"->>'completedItems')::numeric, 0) <= 0 THEN 'PLANNED'
+            WHEN ("auditData"->>'completedItems')::numeric >= ("auditData"->>'totalItems')::numeric THEN 'COMPLETED'
+            ELSE 'IN_PROGRESS'
+          END
+        WHEN COALESCE(("auditData"->>'progress')::numeric, 0) <= 0 THEN 'PLANNED'
+        WHEN COALESCE(("auditData"->>'progress')::numeric, 0) >= 100 THEN 'COMPLETED'
+        ELSE 'IN_PROGRESS'
+      END
+    `;
 }
 
 /**
