@@ -47,15 +47,9 @@ import {
     type ClauseEvidenceSegment,
 } from "@/lib/reportClauseEvidence";
 import {
-    buildChecklistFindingExtrasReportTable,
     buildChecklistReportTable,
     buildFindingEvidenceText,
-    buildNonConformanceReportTable,
-    checklistRowHasFindingExtras,
     collectFindingAttachmentMedia,
-    extractFindingDetailFields,
-    findingDetailCells,
-    FINDING_DETAIL_HEADERS,
     hexToRgb,
     isModuleAuditPlan,
     normalizeReportNonConformances,
@@ -1020,23 +1014,8 @@ function renderSzlReportSummaryAndSignatures(doc: jsPDF, ctx: ReportContext, y: 
     y = checkPage(doc, y, 40, pageH);
     y = pdfBlueSectionHeading(doc, getSectionLabel(form, "auditSummary"), y);
 
-    if (ctx.nonConformances.length > 0) {
-        y = checkPage(doc, y, 20, pageH);
-        y = pdfSubHeading(doc, `${getSectionLabel(form, "nonConformitiesSummary")}:`, y);
-        const ncTable = buildNonConformanceReportTable(ctx.nonConformances, ctx.isModuleAudit);
-        if (ncTable.body.length > 0) {
-            pdfAutoTable(doc, {
-                startY: y,
-                head: [ncTable.headers],
-                body: ncTable.body,
-                theme: "grid",
-                styles: { font: FONT, fontSize: 9, cellPadding: 3, minCellHeight: 10, overflow: "linebreak" },
-                headStyles: { fontStyle: "bold", fillColor: [255, 255, 255], textColor: [0, 0, 0], fontSize: 8 },
-                columnStyles: { 0: { cellWidth: 16 } },
-            });
-            y = (doc as unknown as { lastAutoTable: { finalY: number } }).lastAutoTable.finalY + 8;
-        }
-    }
+    // Downloaded audit reports omit NC CAPA details (assign to, root cause, etc.).
+    // Keep evidence / comments / images only — see DETAILED AUDIT RECORD below.
 
     if (isFieldVisible(form, "generalComment")) {
         y = checkPage(doc, y, 20, pageH);
@@ -1256,31 +1235,7 @@ export async function generateAuditReportPdf(plan: Record<string, any>) {
             });
             y = (doc as unknown as { lastAutoTable: { finalY: number } }).lastAutoTable.finalY + 8;
 
-            const extrasTable = buildChecklistFindingExtrasReportTable({
-                content: checklistContent,
-                checklistData: (auditData.checklistData as Record<string, any>) || {},
-                isModule,
-                isEosh: planUsesEoshTotals(plan),
-                qfsScoreMode: resolveQfsScoreModeForPlan(plan),
-            });
-            if (extrasTable && extrasTable.body.length > 0) {
-                y = checkPage(doc, y, 20, pageH);
-                y = sectionHeading(
-                    isModule
-                        ? "Nonconformance / Exception Details"
-                        : "Finding / Nonconformance Details",
-                    y,
-                );
-                pdfAutoTable(doc, {
-                    startY: y,
-                    head: [extrasTable.headers],
-                    body: extrasTable.body,
-                    styles: { font: FONT, fontSize: 7, overflow: "linebreak" },
-                    headStyles: { fontSize: 7 },
-                    theme: "grid",
-                });
-                y = (doc as unknown as { lastAutoTable: { finalY: number } }).lastAutoTable.finalY + 8;
-            }
+            // Intentionally omit NC / exception detail tables (assign to, CAPA, etc.)
 
             if (planUsesEoshTotals(plan)) {
                 y = renderEoshTotalsPdf(
@@ -1297,7 +1252,6 @@ export async function generateAuditReportPdf(plan: Record<string, any>) {
 
     if (template?.type === "clause-checklist" && auditData.clauseData) {
         const checklistRows: string[][] = [];
-        const extrasRows: string[][] = [];
         (template.content as ClauseChecklistContent[]).forEach((item) => {
             const v = auditData.clauseData[item.clauseId] || {};
             const clauseKey = item.clauseId;
@@ -1310,7 +1264,6 @@ export async function generateAuditReportPdf(plan: Record<string, any>) {
                 v.findingDetails || v.evidence,
                 attached,
             );
-            const details = extractFindingDetailFields(v);
             const requirement = [item.title, ...(item.subClauses || [])].filter(Boolean).join('\n');
             checklistRows.push([
                 clauseKey,
@@ -1318,14 +1271,6 @@ export async function generateAuditReportPdf(plan: Record<string, any>) {
                 v.findingType || "",
                 evidenceText || "",
             ]);
-            if (checklistRowHasFindingExtras(v as Record<string, unknown>)) {
-                extrasRows.push([
-                    clauseKey,
-                    requirement,
-                    v.findingType || "",
-                    ...findingDetailCells(details, ""),
-                ]);
-            }
         });
         const baseHeaders = ["Clause", "Requirement", "Finding", "Evidence"];
         const keepIdx = baseHeaders.map((_, colIdx) => {
@@ -1347,31 +1292,11 @@ export async function generateAuditReportPdf(plan: Record<string, any>) {
             });
             y = (doc as unknown as { lastAutoTable: { finalY: number } }).lastAutoTable.finalY + 8;
         }
-        if (extrasRows.length > 0) {
-            const extrasHeaders = ["Clause", "Requirement", "Finding", ...FINDING_DETAIL_HEADERS];
-            const extrasKeep = extrasHeaders.map((_, colIdx) => {
-                if (colIdx <= 2) return true;
-                return extrasRows.some((row) => Boolean(String(row[colIdx] || "").trim()));
-            });
-            y = checkPage(doc, y, 20, pageH);
-            y = sectionHeading("Finding / Nonconformance Details", y);
-            pdfAutoTable(doc, {
-                startY: y,
-                head: [extrasHeaders.filter((_, i) => extrasKeep[i])],
-                body: extrasRows.map((row) => row.filter((_, i) => extrasKeep[i])),
-                styles: { font: FONT, fontSize: 7, overflow: "linebreak" },
-                headStyles: { fontSize: 7 },
-                theme: "grid",
-            });
-            y = (doc as unknown as { lastAutoTable: { finalY: number } }).lastAutoTable.finalY + 8;
-        }
     }
 
     if (template?.type === "process-audit" && auditData.processAudits) {
         const processRows: string[][] = [];
-        const extrasRows: string[][] = [];
         (auditData.processAudits as ProcessAuditContent[]).forEach((audit, index) => {
-            const details = extractFindingDetailFields(audit as unknown as Record<string, unknown>);
             processRows.push([
                 String(index + 1),
                 audit.processArea || "",
@@ -1380,14 +1305,6 @@ export async function generateAuditReportPdf(plan: Record<string, any>) {
                 audit.conclusion || "",
                 audit.findingType || "",
             ]);
-            if (checklistRowHasFindingExtras(audit as unknown as Record<string, unknown>)) {
-                extrasRows.push([
-                    String(index + 1),
-                    audit.processArea || "",
-                    audit.findingType || "",
-                    ...findingDetailCells(details, ""),
-                ]);
-            }
         });
         const baseHeaders = ["No.", "Process Area", "Auditee(s)", "Evidence", "Conclusion", "Finding"];
         const keepIdx = baseHeaders.map((_, colIdx) => {
@@ -1403,24 +1320,6 @@ export async function generateAuditReportPdf(plan: Record<string, any>) {
                 startY: y,
                 head: [headers],
                 body,
-                styles: { font: FONT, fontSize: 7, overflow: "linebreak" },
-                headStyles: { fontSize: 7 },
-                theme: "grid",
-            });
-            y = (doc as unknown as { lastAutoTable: { finalY: number } }).lastAutoTable.finalY + 8;
-        }
-        if (extrasRows.length > 0) {
-            const extrasHeaders = ["No.", "Process Area", "Finding", ...FINDING_DETAIL_HEADERS];
-            const extrasKeep = extrasHeaders.map((_, colIdx) => {
-                if (colIdx <= 2) return true;
-                return extrasRows.some((row) => Boolean(String(row[colIdx] || "").trim()));
-            });
-            y = checkPage(doc, y, 20, pageH);
-            y = sectionHeading("Finding / Nonconformance Details", y);
-            pdfAutoTable(doc, {
-                startY: y,
-                head: [extrasHeaders.filter((_, i) => extrasKeep[i])],
-                body: extrasRows.map((row) => row.filter((_, i) => extrasKeep[i])),
                 styles: { font: FONT, fontSize: 7, overflow: "linebreak" },
                 headStyles: { fontSize: 7 },
                 theme: "grid",
@@ -1694,23 +1593,6 @@ function docxSubHeading(text: string) {
     });
 }
 
-const DOCX_FINDING_COL_WIDTH = 8;
-
-function docxFindingDetailHeaderCells(): DocxTableCell[] {
-    return FINDING_DETAIL_HEADERS.map((header) =>
-        docxBorderedCell(
-            [new Paragraph({ children: [new TextRun({ text: header, bold: true, size: 16 })] })],
-            DOCX_FINDING_COL_WIDTH,
-        ),
-    );
-}
-
-function docxFindingDetailDataCells(fields: ReturnType<typeof extractFindingDetailFields>): DocxTableCell[] {
-    return findingDetailCells(fields, "—").map((text) =>
-        docxBorderedCell([new Paragraph({ children: [new TextRun({ text, size: 16 })] })], DOCX_FINDING_COL_WIDTH),
-    );
-}
-
 function buildSzlDocxHeaderRows(
     form: FindingsReportForm,
     ctx: Pick<ReportContext, "docNumber" | "reportTitle" | "revisionNo" | "issueDate">,
@@ -1929,64 +1811,7 @@ export async function generateAuditReportDocx(plan: Record<string, any>) {
                     }),
                 );
 
-                const extrasTable = buildChecklistFindingExtrasReportTable({
-                    content: checklistContent,
-                    checklistData: (auditData.checklistData as Record<string, any>) || {},
-                    isModule: ctx.isModuleAudit,
-                    isEosh: planUsesEoshTotals(plan),
-                    qfsScoreMode: resolveQfsScoreModeForPlan(plan),
-                });
-                if (extrasTable && extrasTable.body.length > 0) {
-                    const extrasWidth = Math.max(
-                        4,
-                        Math.floor(100 / Math.max(extrasTable.headers.length, 1)),
-                    );
-                    children.push(
-                        docxSubHeading(
-                            ctx.isModuleAudit
-                                ? "Nonconformance / Exception Details"
-                                : "Finding / Nonconformance Details",
-                        ),
-                    );
-                    children.push(
-                        new DocxTable({
-                            width: { size: 100, type: WidthType.PERCENTAGE },
-                            rows: [
-                                new DocxTableRow({
-                                    children: extrasTable.headers.map((h) =>
-                                        docxBorderedCell(
-                                            [
-                                                new Paragraph({
-                                                    children: [
-                                                        new TextRun({ text: h, bold: true, size: 16 }),
-                                                    ],
-                                                }),
-                                            ],
-                                            extrasWidth,
-                                        ),
-                                    ),
-                                }),
-                                ...extrasTable.body.map(
-                                    (row) =>
-                                        new DocxTableRow({
-                                            children: row.map((cell) =>
-                                                docxBorderedCell(
-                                                    [
-                                                        new Paragraph({
-                                                            children: [
-                                                                new TextRun({ text: cell, size: 16 }),
-                                                            ],
-                                                        }),
-                                                    ],
-                                                    extrasWidth,
-                                                ),
-                                            ),
-                                        }),
-                                ),
-                            ],
-                        }),
-                    );
-                }
+                // Intentionally omit NC / exception detail tables from downloads.
 
                 if (planUsesEoshTotals(plan)) {
                     const scores = computeEoshCapabilityScores(
@@ -2040,16 +1865,6 @@ export async function generateAuditReportDocx(plan: Record<string, any>) {
                     ],
                 }),
             ];
-            const extrasRows: DocxTableRow[] = [
-                new DocxTableRow({
-                    children: [
-                        docxBorderedCell([new Paragraph({ children: [new TextRun({ text: "Clause", bold: true })] })], 8),
-                        docxBorderedCell([new Paragraph({ children: [new TextRun({ text: "Requirement", bold: true })] })], 18),
-                        docxBorderedCell([new Paragraph({ children: [new TextRun({ text: "Finding", bold: true })] })], 8),
-                        ...docxFindingDetailHeaderCells(),
-                    ],
-                }),
-            ];
 
             (template.content as ClauseChecklistContent[]).forEach((item) => {
                 const v = auditData.clauseData[item.clauseId] || {};
@@ -2061,7 +1876,6 @@ export async function generateAuditReportDocx(plan: Record<string, any>) {
                     clauseKey,
                 );
                 const evidenceText = buildFindingEvidenceText(v.findingDetails || v.evidence, attached) || "";
-                const details = extractFindingDetailFields(v);
 
                 rows.push(
                     new DocxTableRow({
@@ -2073,18 +1887,6 @@ export async function generateAuditReportDocx(plan: Record<string, any>) {
                         ],
                     }),
                 );
-                if (checklistRowHasFindingExtras(v as Record<string, unknown>)) {
-                    extrasRows.push(
-                        new DocxTableRow({
-                            children: [
-                                docxBorderedCell([new Paragraph(clauseKey)], 8),
-                                docxBorderedCell([new Paragraph(requirement)], 18),
-                                docxBorderedCell([new Paragraph(v.findingType || "")], 8),
-                                ...docxFindingDetailDataCells(details),
-                            ],
-                        }),
-                    );
-                }
             });
 
             if (rows.length > 1) {
@@ -2093,15 +1895,6 @@ export async function generateAuditReportDocx(plan: Record<string, any>) {
                     new DocxTable({
                         width: { size: 100, type: WidthType.PERCENTAGE },
                         rows,
-                    }),
-                );
-            }
-            if (extrasRows.length > 1) {
-                children.push(docxSubHeading("Finding / Nonconformance Details"));
-                children.push(
-                    new DocxTable({
-                        width: { size: 100, type: WidthType.PERCENTAGE },
-                        rows: extrasRows,
                     }),
                 );
             }
@@ -2118,22 +1911,8 @@ export async function generateAuditReportDocx(plan: Record<string, any>) {
                     ],
                 }),
             ];
-            const extrasRows: DocxTableRow[] = [
-                new DocxTableRow({
-                    children: [
-                        docxBorderedCell([new Paragraph({ children: [new TextRun({ text: "No.", bold: true })] })], 6),
-                        docxBorderedCell([new Paragraph({ children: [new TextRun({ text: "Process Area", bold: true })] })], 14),
-                        docxBorderedCell([new Paragraph({ children: [new TextRun({ text: "Finding", bold: true })] })], 10),
-                        ...docxFindingDetailHeaderCells(),
-                    ],
-                }),
-            ];
 
             (auditData.processAudits as ProcessAuditContent[]).forEach((audit, index) => {
-                const details = extractFindingDetailFields(
-                    audit as unknown as Record<string, unknown>,
-                );
-
                 rows.push(
                     new DocxTableRow({
                         children: [
@@ -2146,18 +1925,6 @@ export async function generateAuditReportDocx(plan: Record<string, any>) {
                         ],
                     }),
                 );
-                if (checklistRowHasFindingExtras(audit as unknown as Record<string, unknown>)) {
-                    extrasRows.push(
-                        new DocxTableRow({
-                            children: [
-                                docxBorderedCell([new Paragraph(String(index + 1))], 6),
-                                docxBorderedCell([new Paragraph(audit.processArea || "")], 14),
-                                docxBorderedCell([new Paragraph(audit.findingType || "")], 10),
-                                ...docxFindingDetailDataCells(details),
-                            ],
-                        }),
-                    );
-                }
             });
 
             if (rows.length > 1) {
@@ -2166,15 +1933,6 @@ export async function generateAuditReportDocx(plan: Record<string, any>) {
                     new DocxTable({
                         width: { size: 100, type: WidthType.PERCENTAGE },
                         rows,
-                    }),
-                );
-            }
-            if (extrasRows.length > 1) {
-                children.push(docxSubHeading("Finding / Nonconformance Details"));
-                children.push(
-                    new DocxTable({
-                        width: { size: 100, type: WidthType.PERCENTAGE },
-                        rows: extrasRows,
                     }),
                 );
             }
@@ -2222,39 +1980,7 @@ export async function generateAuditReportDocx(plan: Record<string, any>) {
 
     // --- 4. AUDIT SUMMARY ---
     children.push(docxBlueSectionHeading(getSectionLabel(form, "auditSummary")));
-    if (ctx.nonConformances.length > 0) {
-        children.push(docxSubHeading(`${getSectionLabel(form, "nonConformitiesSummary")}:`));
-        const ncDocxTable = buildNonConformanceReportTable(ctx.nonConformances, ctx.isModuleAudit);
-        if (ncDocxTable.body.length > 0) {
-            const ncColWidth = Math.max(8, Math.floor(100 / Math.max(ncDocxTable.headers.length, 1)));
-            children.push(
-                new DocxTable({
-                    width: { size: 100, type: WidthType.PERCENTAGE },
-                    rows: [
-                        new DocxTableRow({
-                            children: ncDocxTable.headers.map((h) =>
-                                docxBorderedCell(
-                                    [new Paragraph({ children: [new TextRun({ text: h, bold: true })] })],
-                                    ncColWidth,
-                                ),
-                            ),
-                        }),
-                        ...ncDocxTable.body.map(
-                            (row) =>
-                                new DocxTableRow({
-                                    children: row.map((cell, idx) =>
-                                        docxBorderedCell(
-                                            [new Paragraph(cell)],
-                                            idx === 0 ? 12 : ncColWidth,
-                                        ),
-                                    ),
-                                }),
-                        ),
-                    ],
-                }),
-            );
-        }
-    }
+    // Omit nonconformity CAPA / assign-to tables from downloaded reports.
 
     if (isFieldVisible(form, "generalComment")) {
         children.push(docxSubHeading(`${getSectionLabel(form, "generalComment")}:`));
@@ -2366,11 +2092,7 @@ export async function generateAuditReportExcel(plan: Record<string, any>) {
         XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(pData), "Personnel");
     }
 
-    if (ctx.nonConformances.length > 0) {
-        const ncTable = buildNonConformanceReportTable(ctx.nonConformances, ctx.isModuleAudit);
-        const ncData = [ncTable.headers, ...ncTable.body];
-        XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(ncData), "Non-Conformities");
-    }
+    // Omit Non-Conformities / NC Details sheets from downloads (evidence & comments only).
 
     const clauseFilesForExcel = sanitizeAuditEvidenceMediaMap(
         auditData.clauseFiles as Record<string, AuditEvidenceMedia[]> | undefined,
@@ -2420,21 +2142,6 @@ export async function generateAuditReportExcel(plan: Record<string, any>) {
             ];
             XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(cData), "Checklist");
 
-            const extrasTable = buildChecklistFindingExtrasReportTable({
-                content: checklistContent,
-                checklistData: (auditData.checklistData as Record<string, any>) || {},
-                isModule: ctx.isModuleAudit,
-                isEosh: planUsesEoshTotals(plan),
-                qfsScoreMode: resolveQfsScoreModeForPlan(plan),
-            });
-            if (extrasTable && extrasTable.body.length > 0) {
-                XLSX.utils.book_append_sheet(
-                    wb,
-                    XLSX.utils.aoa_to_sheet([extrasTable.headers, ...extrasTable.body]),
-                    "NC Details",
-                );
-            }
-
             if (planUsesEoshTotals(plan)) {
                 const scores = computeEoshCapabilityScores(
                     (auditData.checklistData as Record<string, { findings?: string }>) || {},
@@ -2462,7 +2169,6 @@ export async function generateAuditReportExcel(plan: Record<string, any>) {
 
     if (template?.type === "clause-checklist" && auditData.clauseData) {
         const cData = [["Clause", "Requirement", "Finding", "Evidence"]];
-        const extrasData = [["Clause", "Requirement", "Finding", ...FINDING_DETAIL_HEADERS]];
         (template.content as ClauseChecklistContent[]).forEach((item) => {
             const v = auditData.clauseData[item.clauseId] || {};
             const requirement = [item.title, ...(item.subClauses || [])].filter(Boolean).join('\n');
@@ -2472,35 +2178,19 @@ export async function generateAuditReportExcel(plan: Record<string, any>) {
                 item.clauseId,
             );
             const evidenceText = buildFindingEvidenceText(v.findingDetails || v.evidence, attached);
-            const details = extractFindingDetailFields(v);
             cData.push([
                 item.clauseId,
                 requirement,
                 v.findingType || "",
                 evidenceText,
             ]);
-            if (checklistRowHasFindingExtras(v as Record<string, unknown>)) {
-                extrasData.push([
-                    item.clauseId,
-                    requirement,
-                    v.findingType || "",
-                    ...findingDetailCells(details),
-                ]);
-            }
         });
         if (cData.length > 1) XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(cData), "Checklist");
-        if (extrasData.length > 1) {
-            XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(extrasData), "NC Details");
-        }
     }
 
     if (template?.type === "process-audit" && auditData.processAudits) {
         const cData = [["No.", "Process Area", "Auditee(s)", "Evidence", "Conclusion", "Finding"]];
-        const extrasData = [["No.", "Process Area", "Finding", ...FINDING_DETAIL_HEADERS]];
         (auditData.processAudits as ProcessAuditContent[]).forEach((audit, index) => {
-            const details = extractFindingDetailFields(
-                audit as unknown as Record<string, unknown>,
-            );
             cData.push([
                 String(index + 1),
                 audit.processArea || "",
@@ -2509,19 +2199,8 @@ export async function generateAuditReportExcel(plan: Record<string, any>) {
                 audit.conclusion || "",
                 audit.findingType || "",
             ]);
-            if (checklistRowHasFindingExtras(audit as unknown as Record<string, unknown>)) {
-                extrasData.push([
-                    String(index + 1),
-                    audit.processArea || "",
-                    audit.findingType || "",
-                    ...findingDetailCells(details),
-                ]);
-            }
         });
         if (cData.length > 1) XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(cData), "Process Audit");
-        if (extrasData.length > 1) {
-            XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(extrasData), "NC Details");
-        }
     }
 
     const evidenceList = collectReportEvidenceFileList(auditData);
