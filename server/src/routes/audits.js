@@ -49,6 +49,7 @@ import {
 import {
     AUDIT_LIFECYCLE,
     lifecycleStatusFromAuditData,
+    lifecycleStatusSqlExpression,
 } from '../audit/lifecycleStatus.js';
 import {
     loadFindingsInboxPlans,
@@ -580,18 +581,54 @@ export function createAuditsRouter({ authenticateToken, checkTrialExpiration }) 
                 });
             }
             // Lifecycle status tabs: Planned | In Progress | Completed
-            if (statusFilter === 'PLANNED') {
-                andFilters.push({
-                    OR: [
-                        { status: 'PLANNED' },
-                        { status: null },
-                        { status: '' },
-                    ],
-                });
-            } else if (statusFilter === 'IN_PROGRESS') {
-                andFilters.push({ status: 'IN_PROGRESS' });
-            } else if (statusFilter === 'COMPLETED') {
-                andFilters.push({ status: 'COMPLETED' });
+            // Filter by derived progress (completedItems/totalItems/progress), not only the status column.
+            if (
+                statusFilter === 'PLANNED' ||
+                statusFilter === 'IN_PROGRESS' ||
+                statusFilter === 'COMPLETED'
+            ) {
+                const derivedExpr = lifecycleStatusSqlExpression();
+                try {
+                    await pool.query(
+                        `WITH stale AS (
+                            SELECT id, (${derivedExpr}) AS derived
+                            FROM "AuditPlan"
+                            WHERE status IS DISTINCT FROM (${derivedExpr})
+                            ORDER BY "updatedAt" DESC
+                            LIMIT 500
+                         )
+                         UPDATE "AuditPlan" AS ap
+                         SET status = stale.derived
+                         FROM stale
+                         WHERE ap.id = stale.id`,
+                    );
+                } catch (syncErr) {
+                    console.warn(
+                        '[audit-plans] lifecycle status sync failed:',
+                        syncErr?.message || syncErr,
+                    );
+                }
+                try {
+                    const idResult = await pool.query(
+                        `SELECT id FROM "AuditPlan"
+                         WHERE (${derivedExpr}) = $1
+                         ORDER BY "updatedAt" DESC
+                         LIMIT 5000`,
+                        [statusFilter],
+                    );
+                    const matchingIds = idResult.rows
+                        .map((row) => Number(row.id))
+                        .filter((id) => Number.isInteger(id) && id > 0);
+                    andFilters.push({
+                        id: { in: matchingIds.length > 0 ? matchingIds : [-1] },
+                    });
+                } catch (filterErr) {
+                    console.warn(
+                        '[audit-plans] lifecycle status filter failed, falling back to status column:',
+                        filterErr?.message || filterErr,
+                    );
+                    andFilters.push({ status: statusFilter });
+                }
             }
 
             const listWhere =
@@ -680,6 +717,8 @@ export function createAuditsRouter({ authenticateToken, checkTrialExpiration }) 
                         `SELECT
                             id,
                             COALESCE(("auditData"->>'progress')::double precision, 0) AS progress,
+                            COALESCE(("auditData"->>'completedItems')::double precision, 0) AS "completedItems",
+                            COALESCE(("auditData"->>'totalItems')::double precision, 0) AS "totalItems",
                             COALESCE(("auditData"->>'auditCompleted')::boolean, false) AS "auditCompleted"
                          FROM "AuditPlan"
                          WHERE id = ANY($1::int[])`,
@@ -688,10 +727,23 @@ export function createAuditsRouter({ authenticateToken, checkTrialExpiration }) 
                     for (const row of metaResult.rows) {
                         const id = Number(row.id);
                         const progressNum = Number(row.progress);
+                        const completedNum = Number(row.completedItems);
+                        const totalNum = Number(row.totalItems);
+                        let progress = Number.isFinite(progressNum)
+                            ? Math.min(100, Math.max(0, Math.round(progressNum)))
+                            : 0;
+                        if (
+                            Number.isFinite(completedNum) &&
+                            Number.isFinite(totalNum) &&
+                            totalNum > 0
+                        ) {
+                            progress = Math.min(
+                                100,
+                                Math.max(0, Math.round((completedNum / totalNum) * 100)),
+                            );
+                        }
                         progressById.set(id, {
-                            progress: Number.isFinite(progressNum)
-                                ? Math.min(100, Math.max(0, Math.round(progressNum)))
-                                : 0,
+                            progress,
                             auditCompleted: row.auditCompleted === true,
                         });
                     }
@@ -726,9 +778,18 @@ export function createAuditsRouter({ authenticateToken, checkTrialExpiration }) 
                     }
                 }
 
+                // Badge / tabs: prefer progress-derived lifecycle so UI matches answer state.
+                const derivedStatus =
+                    progress <= 0
+                        ? AUDIT_LIFECYCLE.PLANNED
+                        : progress >= 100
+                          ? AUDIT_LIFECYCLE.COMPLETED
+                          : AUDIT_LIFECYCLE.IN_PROGRESS;
+
                 if (!includeData) {
                     return {
                         ...plan,
+                        status: derivedStatus,
                         progress,
                         auditCompleted,
                     };
@@ -737,6 +798,7 @@ export function createAuditsRouter({ authenticateToken, checkTrialExpiration }) 
                 // Strip evidence/base64 so list payloads stay small (findings pages still work).
                 return {
                     ...plan,
+                    status: derivedStatus,
                     auditData: stripHeavyAuditListPayload(plan.auditData),
                     findingsData: stripHeavyAuditListPayload(plan.findingsData),
                     progress,

@@ -461,115 +461,132 @@ const AuditList = () => {
             {auditExecuteTourActive && (
                 <div className="fixed inset-0 bg-slate-900/10 z-[40] pointer-events-none" />
             )}
-            <div className="w-full max-w-[1800px] mx-auto space-y-8 animate-in fade-in duration-500">
-                <div className="flex flex-col md:flex-row md:items-center justify-between gap-6 relative z-10 w-full">
-                    <div className="space-y-1">
-                        <h2 className="text-2xl font-semibold tracking-tight text-foreground flex items-center gap-2">
-                            Audit Active List
-                        </h2>
-                        <p className="text-sm text-[#64748B] font-medium">
-                            View and manage all your verified audit plans.
-                        </p>
+            <div className="w-full max-w-[1800px] mx-auto space-y-6 animate-in fade-in duration-500">
+                {/* 1. Heading */}
+                <div className="space-y-1 relative z-10">
+                    <h2 className="text-2xl font-semibold tracking-tight text-foreground">
+                        Audit Active List
+                    </h2>
+                    <p className="text-sm text-[#64748B] font-medium">
+                        View and manage all your verified audit plans.
+                    </p>
+                </div>
+
+                {/* 2. Search + type filters (All / Modules / ISO Standards) */}
+                <div className="flex flex-col sm:flex-row sm:items-center gap-3 relative z-10 w-full">
+                    <div className="relative flex-1 min-w-0 max-w-md">
+                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
+                        <Input
+                            placeholder="Search audits..."
+                            className="pl-9 w-full h-12 rounded-xl border-slate-200 bg-white shadow-sm focus-visible:ring-1 focus-visible:ring-[#213847]/40"
+                            value={searchQuery}
+                            onChange={(e) => setSearchQuery(e.target.value)}
+                        />
                     </div>
-                    <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
-                        <div
-                            className="inline-flex h-12 items-center rounded-xl border border-slate-200 bg-slate-50 p-1 shadow-sm"
-                            role="tablist"
-                            aria-label="Filter by audit status"
+                    <Select value={selectedSite} onValueChange={setSelectedSite}>
+                        <SelectTrigger
+                            className="w-full sm:w-[180px] h-12 rounded-2xl border-slate-200 bg-white shadow-sm hover:border-slate-300 focus:ring-[#213847]/40"
+                            aria-label="Filter by site"
                         >
-                            {(
-                                [
-                                    { id: "planned", label: "Planned" },
-                                    { id: "in_progress", label: "In Progress" },
-                                    { id: "completed", label: "Completed" },
-                                ] as const
-                            ).map((opt) => (
-                                <button
-                                    key={opt.id}
-                                    type="button"
-                                    role="tab"
-                                    aria-selected={statusTab === opt.id}
-                                    onClick={() => {
-                                        if (statusTab === opt.id) return;
-                                        setAuditPlans([]);
-                                        setTotalItems(0);
-                                        hasLoadedOnceRef.current = false;
-                                        setStatusTab(opt.id);
-                                    }}
-                                    className={cn(
-                                        "h-10 rounded-lg px-3.5 text-sm font-semibold transition-colors whitespace-nowrap",
-                                        statusTab === opt.id
-                                            ? "bg-[#213847] text-white shadow-sm"
-                                            : "text-slate-600 hover:bg-white hover:text-slate-900",
-                                    )}
-                                >
-                                    {opt.label}
-                                </button>
-                            ))}
-                        </div>
-                        <div
-                            className="inline-flex h-12 items-center rounded-xl border border-slate-200 bg-slate-50 p-1 shadow-sm"
-                            role="group"
-                            aria-label="Filter by audit type"
-                        >
-                            {(
-                                [
-                                    { id: "all", label: "All" },
-                                    { id: "module", label: "Modules" },
-                                    { id: "iso", label: "ISO Standards" },
-                                ] as const
-                            ).map((opt) => (
-                                <button
-                                    key={opt.id}
-                                    type="button"
-                                    onClick={() => setTypeFilter(opt.id)}
-                                    className={cn(
-                                        "h-10 rounded-lg px-3.5 text-sm font-semibold transition-colors whitespace-nowrap",
-                                        typeFilter === opt.id
-                                            ? "bg-[#213847] text-white shadow-sm"
-                                            : "text-slate-600 hover:bg-white hover:text-slate-900",
-                                    )}
-                                >
-                                    {opt.label}
-                                </button>
-                            ))}
-                        </div>
-                        <Select value={selectedSite} onValueChange={setSelectedSite}>
-                            <SelectTrigger
-                                className="w-full sm:w-[180px] h-12 rounded-2xl border-slate-200 bg-white shadow-sm hover:border-slate-300 focus:ring-[#213847]/40"
-                                aria-label="Filter by site"
+                            <SelectValue placeholder="All Sites" />
+                        </SelectTrigger>
+                        <SelectContent className="rounded-xl border-slate-200 shadow-lg max-h-72">
+                            <SelectItem value="all" className="rounded-lg cursor-pointer">
+                                All Sites
+                            </SelectItem>
+                            {uniqueSites
+                                .filter((site) => site !== "all")
+                                .map((site) => (
+                                    <SelectItem
+                                        key={site}
+                                        value={site}
+                                        className="rounded-lg cursor-pointer"
+                                    >
+                                        {site}
+                                    </SelectItem>
+                                ))}
+                        </SelectContent>
+                    </Select>
+                    <div
+                        className="inline-flex h-12 items-center rounded-xl border border-slate-200 bg-slate-50 p-1 shadow-sm sm:ml-auto"
+                        role="group"
+                        aria-label="Filter by audit type"
+                    >
+                        {(
+                            [
+                                { id: "all", label: "All" },
+                                { id: "module", label: "Modules" },
+                                { id: "iso", label: "ISO Standards" },
+                            ] as const
+                        ).map((opt) => (
+                            <button
+                                key={opt.id}
+                                type="button"
+                                onClick={() => setTypeFilter(opt.id)}
+                                className={cn(
+                                    "h-10 rounded-lg px-3.5 text-sm font-semibold transition-colors whitespace-nowrap",
+                                    typeFilter === opt.id
+                                        ? "bg-[#213847] text-white shadow-sm"
+                                        : "text-slate-600 hover:bg-white hover:text-slate-900",
+                                )}
                             >
-                                <SelectValue placeholder="All Sites" />
-                            </SelectTrigger>
-                            <SelectContent className="rounded-xl border-slate-200 shadow-lg max-h-72">
-                                <SelectItem value="all" className="rounded-lg cursor-pointer">
-                                    All Sites
-                                </SelectItem>
-                                {uniqueSites
-                                    .filter((site) => site !== "all")
-                                    .map((site) => (
-                                        <SelectItem
-                                            key={site}
-                                            value={site}
-                                            className="rounded-lg cursor-pointer"
-                                        >
-                                            {site}
-                                        </SelectItem>
-                                    ))}
-                            </SelectContent>
-                        </Select>
-                        <div className="relative">
-                            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
-                            <Input
-                                placeholder="Search audits..."
-                                className="pl-9 w-full sm:w-[250px] h-12 rounded-xl border-slate-200 bg-white shadow-sm focus-visible:ring-1 focus-visible:ring-[#213847]/40"
-                                value={searchQuery}
-                                onChange={(e) => setSearchQuery(e.target.value)}
-                            />
-                        </div>
+                                {opt.label}
+                            </button>
+                        ))}
                     </div>
                 </div>
 
+                {/* 3. Colored status tabs */}
+                <div
+                    className="inline-flex h-12 items-center gap-1 rounded-xl border border-slate-200 bg-white p-1 shadow-sm relative z-10"
+                    role="tablist"
+                    aria-label="Filter by audit status"
+                >
+                    {(
+                        [
+                            {
+                                id: "planned" as const,
+                                label: "Planned",
+                                active: "bg-blue-600 text-white shadow-sm",
+                                idle: "text-blue-700 hover:bg-blue-50",
+                            },
+                            {
+                                id: "in_progress" as const,
+                                label: "In Progress",
+                                active: "bg-amber-500 text-white shadow-sm",
+                                idle: "text-amber-700 hover:bg-amber-50",
+                            },
+                            {
+                                id: "completed" as const,
+                                label: "Completed",
+                                active: "bg-emerald-600 text-white shadow-sm",
+                                idle: "text-emerald-700 hover:bg-emerald-50",
+                            },
+                        ]
+                    ).map((opt) => (
+                        <button
+                            key={opt.id}
+                            type="button"
+                            role="tab"
+                            aria-selected={statusTab === opt.id}
+                            onClick={() => {
+                                if (statusTab === opt.id) return;
+                                setAuditPlans([]);
+                                setTotalItems(0);
+                                hasLoadedOnceRef.current = false;
+                                setStatusTab(opt.id);
+                            }}
+                            className={cn(
+                                "h-10 rounded-lg px-4 text-sm font-semibold transition-colors whitespace-nowrap",
+                                statusTab === opt.id ? opt.active : opt.idle,
+                            )}
+                        >
+                            {opt.label}
+                        </button>
+                    ))}
+                </div>
+
+                {/* 4. Audits for the selected status */}
                 <div className="w-full relative z-10 space-y-6">
                     <div
                         id="tour-step-audit-plans-list"

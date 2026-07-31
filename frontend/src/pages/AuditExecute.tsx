@@ -1154,13 +1154,25 @@ const AuditExecute = () => {
       completedItems = Object.keys(checklistData).filter((key) => {
         const itemIndex = Number(key);
         const item = template.content[itemIndex] as ChecklistContent;
-        return activeItems.includes(item) && checklistData[itemIndex]?.findings;
+        if (!activeItems.includes(item)) return false;
+        const row = checklistData[itemIndex];
+        // Answered = finding selected (OK/NC/…) OR comments/evidence filled.
+        return Boolean(
+          String(row?.findings ?? "").trim() ||
+            String(row?.evidence ?? "").trim(),
+        );
       }).length;
     } else if (template.type === "clause-checklist") {
       totalItems = clausesToRender.length;
-      completedItems = clausesToRender.filter(
-        (clause) => !!clauseData[clause.id]?.findingType,
-      ).length;
+      completedItems = clausesToRender.filter((clause) => {
+        const row = clauseData[clause.id];
+        return Boolean(
+          String(row?.findingType ?? "").trim() ||
+            String(row?.findingDetails ?? "").trim() ||
+            String(row?.evidence ?? "").trim() ||
+            String(row?.description ?? "").trim(),
+        );
+      }).length;
     } else if (template.type === "section" && Array.isArray(template.content)) {
       totalItems = template.content.length;
       completedItems = Object.keys(sectionData).filter(
@@ -1168,9 +1180,14 @@ const AuditExecute = () => {
       ).length;
     } else if (template.type === "process-audit") {
       totalItems = processAudits.length;
-      completedItems = processAudits.filter(
-        (pa) => pa.processArea?.trim() !== "" && pa.auditees?.trim() !== "",
-      ).length;
+      completedItems = processAudits.filter((pa) => {
+        return Boolean(
+          String(pa.findingType ?? "").trim() ||
+            String(pa.evidence ?? "").trim() ||
+            String(pa.conclusion ?? "").trim() ||
+            (pa.processArea?.trim() && pa.auditees?.trim()),
+        );
+      }).length;
     }
 
     return {
