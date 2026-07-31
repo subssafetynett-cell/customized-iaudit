@@ -54,9 +54,25 @@ export function formatUserRoleLabel(
         .join(" ");
 }
 
-/** Users who may be assigned as lead auditor or team auditor (excludes auditees). */
-export function usersEligibleAsAuditors<T extends { role?: string }>(users: T[]): T[] {
-    return users.filter((u) => !isAuditeeRole(u.role));
+/** True when the account is active and has completed email verification (not pending). */
+export function isUserActiveAndVerified(user: {
+    isActive?: boolean | null;
+    emailVerifiedAt?: string | Date | null;
+} | null | undefined): boolean {
+    if (!user) return false;
+    if (user.isActive !== true) return false;
+    return user.emailVerifiedAt != null && String(user.emailVerifiedAt).trim() !== "";
+}
+
+/** Users who may be assigned as lead auditor or team auditor (excludes auditees, inactive, and pending verification). */
+export function usersEligibleAsAuditors<
+    T extends {
+        role?: string;
+        isActive?: boolean | null;
+        emailVerifiedAt?: string | Date | null;
+    },
+>(users: T[]): T[] {
+    return users.filter((u) => !isAuditeeRole(u.role) && isUserActiveAndVerified(u));
 }
 
 export function formatUserDisplayName(

@@ -171,14 +171,36 @@ export function syncOpportunitiesFromSources(
 ): OpportunityRow[] {
     const ofiSources = sources.filter((source) => source.findingType === "OFI");
     const manualRows = current.filter((row) => !row.sourceKey);
+    const existingByKey = new Map(
+        current.filter((row) => row.sourceKey).map((row) => [row.sourceKey!, row]),
+    );
 
-    const syncedRows: OpportunityRow[] = ofiSources.map((source) => ({
-        sourceKey: source.sourceKey,
-        id: "",
-        standardClause: source.standardClause,
-        areaProcess: source.areaProcess,
-        opportunity: source.statement,
-    }));
+    // Preserve non-empty user edits on synced rows; only fill blanks from checklist sources.
+    const syncedRows: OpportunityRow[] = ofiSources.map((source) => {
+        const existing = existingByKey.get(source.sourceKey);
+        if (existing) {
+            return {
+                sourceKey: source.sourceKey,
+                id: existing.id || "",
+                standardClause: existing.standardClause.trim()
+                    ? existing.standardClause
+                    : source.standardClause,
+                areaProcess: existing.areaProcess.trim()
+                    ? existing.areaProcess
+                    : source.areaProcess,
+                opportunity: existing.opportunity.trim()
+                    ? existing.opportunity
+                    : source.statement,
+            };
+        }
+        return {
+            sourceKey: source.sourceKey,
+            id: "",
+            standardClause: source.standardClause,
+            areaProcess: source.areaProcess,
+            opportunity: source.statement,
+        };
+    });
 
     const merged = renumberOpportunityRows([...syncedRows, ...manualRows]);
     if (merged.length === 0) {
@@ -195,16 +217,39 @@ export function syncNonConformancesFromSources(
         (source) => source.findingType === "Min" || source.findingType === "Maj",
     );
     const manualRows = current.filter((row) => !row.sourceKey);
+    const existingByKey = new Map(
+        current.filter((row) => row.sourceKey).map((row) => [row.sourceKey!, row]),
+    );
 
-    const syncedRows: NonConformanceRow[] = ncrSources.map((source) => ({
-        sourceKey: source.sourceKey,
-        id: "",
-        standardClause: source.standardClause,
-        areaProcess: source.areaProcess,
-        statement: source.statement,
-        dueDate: source.dueDate,
-        actionBy: source.actionBy,
-    }));
+    const syncedRows: NonConformanceRow[] = ncrSources.map((source) => {
+        const existing = existingByKey.get(source.sourceKey);
+        if (existing) {
+            return {
+                sourceKey: source.sourceKey,
+                id: existing.id || "",
+                standardClause: existing.standardClause.trim()
+                    ? existing.standardClause
+                    : source.standardClause,
+                areaProcess: existing.areaProcess.trim()
+                    ? existing.areaProcess
+                    : source.areaProcess,
+                statement: existing.statement.trim()
+                    ? existing.statement
+                    : source.statement,
+                dueDate: existing.dueDate.trim() ? existing.dueDate : source.dueDate,
+                actionBy: existing.actionBy.trim() ? existing.actionBy : source.actionBy,
+            };
+        }
+        return {
+            sourceKey: source.sourceKey,
+            id: "",
+            standardClause: source.standardClause,
+            areaProcess: source.areaProcess,
+            statement: source.statement,
+            dueDate: source.dueDate,
+            actionBy: source.actionBy,
+        };
+    });
 
     const merged = renumberNcrRows([...syncedRows, ...manualRows]);
     if (merged.length === 0) {

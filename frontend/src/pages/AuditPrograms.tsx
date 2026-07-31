@@ -1,10 +1,15 @@
-import React, { useState, useEffect, useRef } from "react";
-import { useSearchParams, useNavigate } from "react-router-dom";
+import React, { useState, useEffect, useRef, useMemo } from "react";
+import { useSearchParams, useNavigate, Link } from "react-router-dom";
 import { TopNav } from "@/components/TopNav";
 import { apiFetch } from "@/lib/api";
 import { sitesFromCompanies } from "@/lib/orgSites";
 import { useAuditeeReadOnly } from "@/lib/auditeeAccess";
-import { isAuditeeRole, usersEligibleAsAuditors } from "@/lib/userRoles";
+import {
+    formatUserDisplayName,
+    formatUserRoleLabel,
+    isAuditeeRole,
+    usersEligibleAsAuditors,
+} from "@/lib/userRoles";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -12,7 +17,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Calendar, Check, ChevronDown, Plus, Save, Edit, Trash2, Eye, ArrowLeft, MoreHorizontal, Search, Star, FileText, Download } from "lucide-react";
+import { Calendar, Check, ChevronDown, Plus, Save, Edit, Trash2, Eye, ArrowLeft, MoreHorizontal, Search, Star, FileText, Download, Building2, Users, X } from "lucide-react";
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { Document, Packer, Paragraph, Table as DocxTable, TableCell as DocxTableCell, TableRow as DocxTableRow, WidthType, TextRun, HeadingLevel, AlignmentType, BorderStyle, ImageRun, Header } from 'docx';
@@ -536,6 +541,8 @@ const AuditPrograms = () => {
     const [selectedDepartmentIds, setSelectedDepartmentIds] = useState<string[]>([]);
     const [selectedAuditors, setSelectedAuditors] = useState<string[]>([]);
     const [leadAuditorId, setLeadAuditorId] = useState<string | null>(null);
+    const [departmentSearch, setDepartmentSearch] = useState("");
+    const [auditorSearch, setAuditorSearch] = useState("");
     const [selectedCells, setSelectedCells] = useState<Record<string, boolean>>({});
     const [customRows, setCustomRows] = useState<{ id: string, text: string }[]>([]);
     const [programStartDate, setProgramStartDate] = useState<Date>(new Date());
@@ -693,6 +700,14 @@ const AuditPrograms = () => {
     const siteDepartments = selectedSite
         ? allDepartments.filter((dept) => String(dept.siteId) === String(selectedSite))
         : [];
+    const departmentQuery = departmentSearch.trim().toLowerCase();
+    const filteredSiteDepartments = useMemo(() => {
+        if (!departmentQuery) return siteDepartments;
+        return siteDepartments.filter((dept) => {
+            const haystack = `${dept.name} ${dept.siteName || ""} ${dept.companyName || ""}`.toLowerCase();
+            return haystack.includes(departmentQuery);
+        });
+    }, [siteDepartments, departmentQuery]);
     const allDepartmentsSelected =
         siteDepartments.length > 0 &&
         siteDepartments.every((dept) => selectedDepartmentIds.includes(dept.id));
@@ -702,6 +717,16 @@ const AuditPrograms = () => {
     const selectedDepartments = resolveDepartmentsByIds(selectedDepartmentIds, companies).filter(
         (dept) => !selectedSite || String(dept.siteId) === String(selectedSite),
     );
+    const auditorQuery = auditorSearch.trim().toLowerCase();
+    const filteredAuditors = useMemo(() => {
+        if (!auditorQuery) return auditors;
+        return auditors.filter((user) => {
+            const name = formatUserDisplayName(user).toLowerCase();
+            const email = String(user.email || "").toLowerCase();
+            const role = formatUserRoleLabel(user.role, user.customRoleName).toLowerCase();
+            return name.includes(auditorQuery) || email.includes(auditorQuery) || role.includes(auditorQuery);
+        });
+    }, [auditors, auditorQuery]);
 
     const isPeriodActive = (colIndex: number) => {
         return Object.keys(selectedCells).some(key => {
@@ -1032,6 +1057,8 @@ const AuditPrograms = () => {
         setSelectedDepartmentIds([]);
         setSelectedAuditors([]);
         setLeadAuditorId(null);
+        setDepartmentSearch("");
+        setAuditorSearch("");
         setSelectedCells({});
         setCustomRows([]);
         setProgramStartDate(new Date());
@@ -2046,6 +2073,7 @@ const AuditPrograms = () => {
                                 <Select
                                     onValueChange={(val) => {
                                         setSelectedSite(val);
+                                        setDepartmentSearch("");
                                         setSelectedDepartmentIds((prev) =>
                                             prev.filter((id) =>
                                                 allDepartments.some(
@@ -2077,11 +2105,16 @@ const AuditPrograms = () => {
                                 </Select>
                             </div>
 
-                            <div className="space-y-2 md:col-span-2">
-                                <div className="flex items-center justify-between gap-3">
-                                    <Label>Departments</Label>
+                            <div className="space-y-3 md:col-span-2">
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                    <div>
+                                        <Label className="text-slate-800">Departments</Label>
+                                        <p className="text-xs text-slate-500 mt-0.5">
+                                            Choose which departments this audit program covers
+                                        </p>
+                                    </div>
                                     {siteDepartments.length > 0 && view !== "view" && (
-                                        <label className="flex items-center gap-2 text-sm text-slate-600 cursor-pointer">
+                                        <label className="flex items-center gap-2 text-sm text-slate-600 cursor-pointer rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 hover:bg-slate-50">
                                             <Checkbox
                                                 checked={allDepartmentsSelected}
                                                 onCheckedChange={(checked) => {
@@ -2093,142 +2126,278 @@ const AuditPrograms = () => {
                                                 }}
                                                 className="data-[state=checked]:bg-emerald-600 data-[state=checked]:border-emerald-600"
                                             />
-                                            <span>Select all</span>
+                                            <span className="font-medium">Select all ({siteDepartments.length})</span>
                                         </label>
                                     )}
                                 </div>
-                                <div className="rounded-lg border border-slate-200 bg-white p-3 max-h-48 overflow-y-auto space-y-2">
+
+                                {selectedSite && siteDepartments.length > 4 && view !== "view" && (
+                                    <div className="relative">
+                                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
+                                        <Input
+                                            value={departmentSearch}
+                                            onChange={(e) => setDepartmentSearch(e.target.value)}
+                                            placeholder="Search departments…"
+                                            className="pl-9 h-10 rounded-xl border-slate-200"
+                                        />
+                                    </div>
+                                )}
+
+                                <div className="rounded-xl border border-slate-200 bg-slate-50/60 overflow-hidden">
                                     {!selectedSite ? (
-                                        <p className="text-sm text-slate-500">
-                                            Select a site to choose departments
-                                        </p>
+                                        <div className="flex flex-col items-center justify-center gap-2 px-4 py-8 text-center">
+                                            <div className="h-10 w-10 rounded-full bg-slate-100 flex items-center justify-center">
+                                                <Building2 className="h-5 w-5 text-slate-400" />
+                                            </div>
+                                            <p className="text-sm font-semibold text-slate-700">Select a site first</p>
+                                            <p className="text-xs text-slate-500 max-w-sm">
+                                                Departments are listed for the site you pick above.
+                                            </p>
+                                        </div>
                                     ) : siteDepartments.length === 0 ? (
-                                        <p className="text-sm text-slate-500">
-                                            No departments for this site — add departments under Companies first
-                                        </p>
+                                        <div className="flex flex-col items-center justify-center gap-3 px-4 py-8 text-center">
+                                            <div className="h-10 w-10 rounded-full bg-amber-50 flex items-center justify-center">
+                                                <Building2 className="h-5 w-5 text-amber-600" />
+                                            </div>
+                                            <div>
+                                                <p className="text-sm font-semibold text-slate-800">No departments for this site</p>
+                                                <p className="text-xs text-slate-500 mt-1 max-w-sm">
+                                                    Add departments under Companies → Sites, then return here to select them.
+                                                </p>
+                                            </div>
+                                            {view !== "view" && (
+                                                <Button asChild variant="outline" size="sm" className="rounded-lg border-emerald-200 text-emerald-700 hover:bg-emerald-50">
+                                                    <Link to="/companies">Open Companies</Link>
+                                                </Button>
+                                            )}
+                                        </div>
+                                    ) : filteredSiteDepartments.length === 0 ? (
+                                        <div className="px-4 py-6 text-center text-sm text-slate-500">
+                                            No departments match “{departmentSearch.trim()}”
+                                        </div>
                                     ) : (
-                                        siteDepartments.map((dept) => {
-                                            const isChecked = selectedDepartmentIds.includes(dept.id);
-                                            return (
-                                                <label
-                                                    key={dept.id}
-                                                    className={cn(
-                                                        "flex items-center gap-3 rounded-md px-2 py-2 cursor-pointer hover:bg-slate-50",
-                                                        view === "view" && "cursor-default opacity-80",
-                                                        isChecked && "bg-emerald-50/60",
-                                                    )}
-                                                >
-                                                    <Checkbox
-                                                        checked={isChecked}
-                                                        disabled={view === "view"}
-                                                        onCheckedChange={(checked) => {
-                                                            if (view === "view") return;
-                                                            const nextChecked = checked === true;
-                                                            setSelectedDepartmentIds((prev) =>
-                                                                nextChecked
-                                                                    ? prev.includes(dept.id)
-                                                                        ? prev
-                                                                        : [...prev, dept.id]
-                                                                    : prev.filter((id) => id !== dept.id),
-                                                            );
-                                                        }}
-                                                        className="data-[state=checked]:bg-emerald-600 data-[state=checked]:border-emerald-600"
-                                                    />
-                                                    <div className="flex-1 min-w-0">
-                                                        <p className="text-sm font-medium text-slate-800 truncate">
-                                                            {dept.name}
-                                                        </p>
-                                                        <p className="text-xs text-slate-500 truncate">
-                                                            {dept.companyName} · {dept.siteName}
-                                                        </p>
-                                                    </div>
-                                                </label>
-                                            );
-                                        })
+                                        <div className="max-h-56 overflow-y-auto divide-y divide-slate-100 bg-white">
+                                            {filteredSiteDepartments.map((dept) => {
+                                                const isChecked = selectedDepartmentIds.includes(dept.id);
+                                                return (
+                                                    <label
+                                                        key={dept.id}
+                                                        className={cn(
+                                                            "flex items-center gap-3 px-3 py-3 cursor-pointer transition-colors",
+                                                            view === "view" && "cursor-default",
+                                                            isChecked
+                                                                ? "bg-emerald-50/80"
+                                                                : "hover:bg-slate-50",
+                                                        )}
+                                                    >
+                                                        <Checkbox
+                                                            checked={isChecked}
+                                                            disabled={view === "view"}
+                                                            onCheckedChange={(checked) => {
+                                                                if (view === "view") return;
+                                                                const nextChecked = checked === true;
+                                                                setSelectedDepartmentIds((prev) =>
+                                                                    nextChecked
+                                                                        ? prev.includes(dept.id)
+                                                                            ? prev
+                                                                            : [...prev, dept.id]
+                                                                        : prev.filter((id) => id !== dept.id),
+                                                                );
+                                                            }}
+                                                            className="data-[state=checked]:bg-emerald-600 data-[state=checked]:border-emerald-600"
+                                                        />
+                                                        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-slate-100 text-slate-500">
+                                                            <Building2 className="h-4 w-4" />
+                                                        </div>
+                                                        <div className="flex-1 min-w-0">
+                                                            <p className="text-sm font-semibold text-slate-800 truncate">
+                                                                {dept.name}
+                                                            </p>
+                                                            <p className="text-xs text-slate-500 truncate">
+                                                                {dept.siteName}
+                                                                {dept.companyName ? ` · ${dept.companyName}` : ""}
+                                                            </p>
+                                                        </div>
+                                                        {isChecked && (
+                                                            <Check className="h-4 w-4 shrink-0 text-emerald-600" />
+                                                        )}
+                                                    </label>
+                                                );
+                                            })}
+                                        </div>
                                     )}
                                 </div>
+
                                 {selectedDepartments.length > 0 && (
-                                    <p className="text-xs text-slate-500">
-                                        {selectedDepartments.length} department
-                                        {selectedDepartments.length === 1 ? "" : "s"} selected
-                                        {someDepartmentsSelected && !allDepartmentsSelected && siteDepartments.length > 0
-                                            ? " (partial selection)"
-                                            : ""}
-                                    </p>
-                                )}
-                                {selectedDepartments.length > 0 && (
-                                    <div className="flex flex-wrap gap-2 pt-1">
-                                        {selectedDepartments.map((dept) => (
-                                            <Badge
-                                                key={dept.id}
-                                                variant="outline"
-                                                className="text-xs font-medium bg-emerald-50 border-emerald-200 text-emerald-800"
-                                            >
-                                                {dept.name}
-                                            </Badge>
-                                        ))}
+                                    <div className="space-y-2">
+                                        <p className="text-xs font-medium text-slate-600">
+                                            {selectedDepartments.length} department
+                                            {selectedDepartments.length === 1 ? "" : "s"} selected
+                                            {someDepartmentsSelected && !allDepartmentsSelected && siteDepartments.length > 0
+                                                ? " · partial"
+                                                : allDepartmentsSelected && siteDepartments.length > 0
+                                                  ? " · all for this site"
+                                                  : ""}
+                                        </p>
+                                        <div className="flex flex-wrap gap-2">
+                                            {selectedDepartments.map((dept) => (
+                                                <Badge
+                                                    key={dept.id}
+                                                    variant="outline"
+                                                    className="gap-1.5 pl-2.5 pr-1 py-1 text-xs font-medium bg-emerald-50 border-emerald-200 text-emerald-800"
+                                                >
+                                                    <span className="truncate max-w-[10rem]">{dept.name}</span>
+                                                    {view !== "view" && (
+                                                        <button
+                                                            type="button"
+                                                            aria-label={`Remove ${dept.name}`}
+                                                            className="rounded-full p-0.5 hover:bg-emerald-100 text-emerald-700"
+                                                            onClick={() =>
+                                                                setSelectedDepartmentIds((prev) =>
+                                                                    prev.filter((id) => id !== dept.id),
+                                                                )
+                                                            }
+                                                        >
+                                                            <X className="h-3 w-3" />
+                                                        </button>
+                                                    )}
+                                                </Badge>
+                                            ))}
+                                        </div>
                                     </div>
                                 )}
                             </div>
 
-                            <div className="space-y-2 md:col-span-2">
-                                <Label>Auditors</Label>
-                                <div className="rounded-lg border border-slate-200 bg-white p-3 max-h-48 overflow-y-auto space-y-2">
+                            <div className="space-y-3 md:col-span-2">
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                    <div>
+                                        <Label className="text-slate-800">Auditors</Label>
+                                        <p className="text-xs text-slate-500 mt-0.5">
+                                            Only active, verified users (pending invitations are hidden)
+                                        </p>
+                                    </div>
+                                    {auditors.length > 0 && (
+                                        <Badge variant="outline" className="text-[10px] font-semibold border-slate-200 text-slate-600">
+                                            {auditors.length} available
+                                        </Badge>
+                                    )}
+                                </div>
+
+                                {auditors.length > 4 && view !== "view" && (
+                                    <div className="relative">
+                                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
+                                        <Input
+                                            value={auditorSearch}
+                                            onChange={(e) => setAuditorSearch(e.target.value)}
+                                            placeholder="Search by name, email, or role…"
+                                            className="pl-9 h-10 rounded-xl border-slate-200"
+                                        />
+                                    </div>
+                                )}
+
+                                <div className="rounded-xl border border-slate-200 bg-slate-50/60 overflow-hidden">
                                     {auditors.length === 0 ? (
-                                        <p className="text-sm text-slate-500">No users available</p>
+                                        <div className="flex flex-col items-center justify-center gap-2 px-4 py-8 text-center">
+                                            <div className="h-10 w-10 rounded-full bg-slate-100 flex items-center justify-center">
+                                                <Users className="h-5 w-5 text-slate-400" />
+                                            </div>
+                                            <p className="text-sm font-semibold text-slate-700">No eligible auditors</p>
+                                            <p className="text-xs text-slate-500 max-w-sm">
+                                                Invite users and ensure they are active and have verified their email before assigning them here.
+                                            </p>
+                                        </div>
+                                    ) : filteredAuditors.length === 0 ? (
+                                        <div className="px-4 py-6 text-center text-sm text-slate-500">
+                                            No auditors match “{auditorSearch.trim()}”
+                                        </div>
                                     ) : (
-                                        auditors.map((user) => {
-                                            const userId = user.id.toString();
-                                            const isChecked = selectedAuditors.includes(userId);
-                                            const isLead = leadAuditorId === userId;
-                                            return (
-                                                <label
-                                                    key={user.id}
-                                                    className={cn(
-                                                        "flex items-center gap-3 rounded-md px-2 py-2 cursor-pointer hover:bg-slate-50",
-                                                        view === "view" && "cursor-default opacity-80",
-                                                        isChecked && "bg-emerald-50/60",
-                                                    )}
-                                                >
-                                                    <Checkbox
-                                                        checked={isChecked}
-                                                        disabled={view === "view"}
-                                                        onCheckedChange={(checked) => {
-                                                            if (view === "view") return;
-                                                            const nextChecked = checked === true;
-                                                            if (nextChecked) {
-                                                                setSelectedAuditors((prev) => {
-                                                                    const next = prev.includes(userId) ? prev : [...prev, userId];
-                                                                    if (next.length === 1) setLeadAuditorId(userId);
-                                                                    return next;
-                                                                });
-                                                            } else {
-                                                                setSelectedAuditors((prev) => {
-                                                                    const next = prev.filter((id) => id !== userId);
-                                                                    if (leadAuditorId === userId) {
-                                                                        setLeadAuditorId(next[0] ?? null);
-                                                                    }
-                                                                    return next;
-                                                                });
-                                                            }
-                                                        }}
-                                                    />
-                                                    <span className="text-sm font-medium text-slate-800 flex-1">
-                                                        {user.firstName} {user.lastName}
-                                                    </span>
-                                                    {isChecked && isLead && (
-                                                        <Badge variant="outline" className="text-[10px] border-amber-300 bg-amber-50 text-amber-800">
-                                                            Lead
-                                                        </Badge>
-                                                    )}
-                                                </label>
-                                            );
-                                        })
+                                        <div className="max-h-56 overflow-y-auto divide-y divide-slate-100 bg-white">
+                                            {filteredAuditors.map((user) => {
+                                                const userId = user.id.toString();
+                                                const isChecked = selectedAuditors.includes(userId);
+                                                const isLead = leadAuditorId === userId;
+                                                const displayName = formatUserDisplayName(user);
+                                                const initials =
+                                                    `${String(user.firstName || "").charAt(0)}${String(user.lastName || "").charAt(0)}`.toUpperCase() ||
+                                                    displayName.charAt(0).toUpperCase() ||
+                                                    "?";
+                                                return (
+                                                    <label
+                                                        key={user.id}
+                                                        className={cn(
+                                                            "flex items-center gap-3 px-3 py-3 cursor-pointer transition-colors",
+                                                            view === "view" && "cursor-default",
+                                                            isChecked
+                                                                ? "bg-emerald-50/80"
+                                                                : "hover:bg-slate-50",
+                                                        )}
+                                                    >
+                                                        <Checkbox
+                                                            checked={isChecked}
+                                                            disabled={view === "view"}
+                                                            onCheckedChange={(checked) => {
+                                                                if (view === "view") return;
+                                                                const nextChecked = checked === true;
+                                                                if (nextChecked) {
+                                                                    setSelectedAuditors((prev) => {
+                                                                        const next = prev.includes(userId) ? prev : [...prev, userId];
+                                                                        if (next.length === 1) setLeadAuditorId(userId);
+                                                                        return next;
+                                                                    });
+                                                                } else {
+                                                                    setSelectedAuditors((prev) => {
+                                                                        const next = prev.filter((id) => id !== userId);
+                                                                        if (leadAuditorId === userId) {
+                                                                            setLeadAuditorId(next[0] ?? null);
+                                                                        }
+                                                                        return next;
+                                                                    });
+                                                                }
+                                                            }}
+                                                            className="data-[state=checked]:bg-emerald-600 data-[state=checked]:border-emerald-600"
+                                                        />
+                                                        <div
+                                                            className={cn(
+                                                                "flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-[11px] font-bold",
+                                                                isChecked
+                                                                    ? "bg-emerald-600 text-white"
+                                                                    : "bg-slate-100 text-slate-600",
+                                                            )}
+                                                        >
+                                                            {initials}
+                                                        </div>
+                                                        <div className="flex-1 min-w-0">
+                                                            <p className="text-sm font-semibold text-slate-800 truncate">
+                                                                {displayName}
+                                                            </p>
+                                                            <p className="text-xs text-slate-500 truncate">
+                                                                {user.email || "No email"}
+                                                                {" · "}
+                                                                {formatUserRoleLabel(user.role, user.customRoleName)}
+                                                            </p>
+                                                        </div>
+                                                        {isChecked && isLead && (
+                                                            <Badge variant="outline" className="shrink-0 text-[10px] border-amber-300 bg-amber-50 text-amber-800">
+                                                                Lead
+                                                            </Badge>
+                                                        )}
+                                                        {isChecked && !isLead && (
+                                                            <Check className="h-4 w-4 shrink-0 text-emerald-600" />
+                                                        )}
+                                                    </label>
+                                                );
+                                            })}
+                                        </div>
                                     )}
                                 </div>
                                 {selectedAuditors.length > 0 && view !== "view" && (
-                                    <p className="text-xs text-slate-500">
+                                    <p className="text-xs font-medium text-slate-600">
                                         {selectedAuditors.length} auditor{selectedAuditors.length === 1 ? "" : "s"} selected
+                                        {leadAuditorId
+                                            ? ` · Lead: ${formatUserDisplayName(
+                                                  auditors.find((a) => String(a.id) === leadAuditorId),
+                                              ) || "—"}`
+                                            : ""}
                                     </p>
                                 )}
                                  {selectedAuditors.length > 1 && (

@@ -23,6 +23,8 @@ export const transporter = nodemailer.createTransport({
     ...transporterConfig,
     connectionTimeout: 5000,
     greetingTimeout: 5000,
+    // Abort hung SMTP transfers before Coolify/proxy gateway timeouts.
+    socketTimeout: Number.parseInt(process.env.SMTP_SOCKET_TIMEOUT_MS || '10000', 10) || 10000,
 });
 
 export function isSmtpConfigured() {

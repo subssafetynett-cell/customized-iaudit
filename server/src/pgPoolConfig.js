@@ -28,13 +28,15 @@ export function buildPgPoolConfig() {
     const config = {
         connectionString,
         // Fail fast under pressure so /health and requests don't hang → proxy 504.
+        // Prefer failing a single request (~3s) over queuing until Coolify's gateway timeout.
         connectionTimeoutMillis: Number.parseInt(
-            process.env.PG_CONNECTION_TIMEOUT_MS || "5000",
+            process.env.PG_CONNECTION_TIMEOUT_MS || "3000",
             10,
         ),
-        // Keep pool modest on small Hostinger VPS / shared Postgres max_connections.
-        max: Number.parseInt(process.env.PG_POOL_MAX || "10", 10),
-        idleTimeoutMillis: Number.parseInt(process.env.PG_IDLE_TIMEOUT_MS || "10000", 10),
+        // Default raised from 10 — per-request session auth + list queries starved easily under Coolify concurrency.
+        // Override down via PG_POOL_MAX if Postgres max_connections is tight.
+        max: Number.parseInt(process.env.PG_POOL_MAX || "25", 10),
+        idleTimeoutMillis: Number.parseInt(process.env.PG_IDLE_TIMEOUT_MS || "20000", 10),
         allowExitOnIdle: false,
     };
 

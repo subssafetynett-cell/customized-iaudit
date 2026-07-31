@@ -1,20 +1,25 @@
 /**
  * Shared list pagination helpers for Express list routes.
  * When `page` is present in the query, callers should return a paginated envelope.
- * When absent, keep legacy array responses for dashboards / older clients.
+ * When absent, keep legacy array responses for dashboards / older clients —
+ * but always enforce a hard take cap so unbounded findMany cannot cause 504s.
  *
  * Envelope shape (primary):
  *   { data, page, pageSize, total, totalPages }
  * Also includes `items` / `limit` aliases for older clients.
  */
 
+/** Hard ceiling for legacy (no ?page=) list responses — prevents multi‑MB payloads / DB scans. */
+export const LEGACY_LIST_HARD_CAP = 100;
+
 /**
  * @param {import('express').Request['query']} query
- * @param {{ defaultLimit?: number, maxLimit?: number }} [opts]
+ * @param {{ defaultLimit?: number, maxLimit?: number, legacyHardCap?: number }} [opts]
  */
 export function parsePaginationQuery(query, opts = {}) {
     const defaultLimit = opts.defaultLimit ?? 8;
     const maxLimit = opts.maxLimit ?? 100;
+    const legacyHardCap = opts.legacyHardCap ?? LEGACY_LIST_HARD_CAP;
     const rawPage = query?.page;
     const hasPage =
         rawPage !== undefined &&
@@ -30,7 +35,9 @@ export function parsePaginationQuery(query, opts = {}) {
     if (!Number.isFinite(page) || page < 1) page = 1;
 
     const skip = (page - 1) * limit;
-    return { page, limit, pageSize: limit, skip, paginate: hasPage };
+    // Legacy mode still gets a bounded take so list routes never scan/return unbounded rows.
+    const take = hasPage ? limit : Math.min(legacyHardCap, Math.max(limit, legacyHardCap));
+    return { page, limit, pageSize: limit, skip, paginate: hasPage, take, legacyHardCap };
 }
 
 /**

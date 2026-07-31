@@ -2,6 +2,10 @@ import { v2 as cloudinary } from 'cloudinary';
 
 const COMPANY_LOGO_MAX_BYTES = 10 * 1024 * 1024;
 const AUDIT_EVIDENCE_MAX_BYTES = 10 * 1024 * 1024;
+const CLOUDINARY_UPLOAD_TIMEOUT_MS = Number.parseInt(
+    process.env.CLOUDINARY_UPLOAD_TIMEOUT_MS || '25000',
+    10,
+) || 25000;
 
 /** @returns {boolean} */
 export function isCloudinaryConfigured() {
@@ -28,6 +32,20 @@ function ensureCloudinaryConfig() {
     });
 }
 
+function withUploadTimeout(promise, label) {
+    let timer;
+    return Promise.race([
+        promise.finally(() => clearTimeout(timer)),
+        new Promise((_, reject) => {
+            timer = setTimeout(() => {
+                const err = new Error(`${label} timed out after ${CLOUDINARY_UPLOAD_TIMEOUT_MS}ms`);
+                err.code = 'UPLOAD_TIMEOUT';
+                reject(err);
+            }, CLOUDINARY_UPLOAD_TIMEOUT_MS);
+        }),
+    ]);
+}
+
 /**
  * Upload an image buffer to Cloudinary.
  * @param {Buffer} buffer
@@ -42,7 +60,7 @@ export async function uploadImageBuffer(buffer, options = {}) {
 
     const folder = process.env.CLOUDINARY_UPLOAD_FOLDER?.trim() || 'iaudit/company-logos';
 
-    return new Promise((resolve, reject) => {
+    const uploadPromise = new Promise((resolve, reject) => {
         const uploadStream = cloudinary.uploader.upload_stream(
             {
                 folder,
@@ -58,6 +76,8 @@ export async function uploadImageBuffer(buffer, options = {}) {
         );
         uploadStream.end(buffer);
     });
+
+    return withUploadTimeout(uploadPromise, 'Cloudinary image upload');
 }
 
 /**
@@ -79,7 +99,7 @@ export async function uploadEvidenceBuffer(buffer, options = {}) {
         || process.env.CLOUDINARY_EVIDENCE_FOLDER?.trim()
         || 'iaudit/audit-evidence';
 
-    return new Promise((resolve, reject) => {
+    const uploadPromise = new Promise((resolve, reject) => {
         const uploadStream = cloudinary.uploader.upload_stream(
             {
                 folder,
@@ -108,6 +128,8 @@ export async function uploadEvidenceBuffer(buffer, options = {}) {
         );
         uploadStream.end(buffer);
     });
+
+    return withUploadTimeout(uploadPromise, 'Cloudinary evidence upload');
 }
 
 export { COMPANY_LOGO_MAX_BYTES, AUDIT_EVIDENCE_MAX_BYTES };

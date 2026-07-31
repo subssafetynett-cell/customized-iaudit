@@ -287,6 +287,10 @@ model AuditPlan {
   auditData      Json?
   userId         Int?
   findingsData   Json?
+  /// Denormalized finding assignee emails (lowercased) — inbox lookups without JSON text scans.
+  assigneeEmails String[]     @default([])
+  /// Denormalized finding raised-by emails (lowercased).
+  raisedByEmails String[]     @default([])
   /// Answer-progress lifecycle: PLANNED | IN_PROGRESS | COMPLETED
   status         String       @default("PLANNED")
   auditProgram   AuditProgram @relation(fields: [auditProgramId], references: [id])
