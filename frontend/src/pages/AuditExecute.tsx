@@ -94,6 +94,8 @@ import {
   scopePlanToModule,
   toActiveModuleLocalEvidenceMap,
   toModuleScopedEvidenceMap,
+  ensureModuleStorePreservesTopLevel,
+  moduleStoreEntryFromTopLevel,
 } from "@/lib/auditPlanModules";
 import {
   collectAuditFindingSources,
@@ -393,6 +395,7 @@ const AuditExecute = () => {
         extraChecklistItems?: Record<string, any[]>;
         sectionData?: Record<number, string>;
         genericFiles?: Record<string, AuditEvidenceMedia[]>;
+        findingsReportForm?: FindingsReportForm;
       }
     >
   >({});
@@ -435,10 +438,27 @@ const AuditExecute = () => {
   const [editableChecklist, setEditableChecklist] = useState<any[]>([]);
   const [sectionData, setSectionData] = useState<Record<number, string>>({});
   const [genericFiles, setGenericFiles] = useState<Record<string, AuditEvidenceMedia[]>>({});
+  const [findingsReportForm, setFindingsReportForm] = useState<FindingsReportForm>(
+    defaultFindingsReportForm(),
+  );
   const sectionDataRef = useRef(sectionData);
   const genericFilesRef = useRef(genericFiles);
+  const findingsReportFormRef = useRef(findingsReportForm);
+  const checklistDataRef = useRef(checklistData);
+  const editableChecklistRef = useRef(editableChecklist);
+  const extraChecklistItemsRef = useRef(extraChecklistItems);
+  const moduleDataByTemplateIdRef = useRef(moduleDataByTemplateId);
   sectionDataRef.current = sectionData;
   genericFilesRef.current = genericFiles;
+  findingsReportFormRef.current = findingsReportForm;
+  checklistDataRef.current = checklistData;
+  editableChecklistRef.current = editableChecklist;
+  extraChecklistItemsRef.current = extraChecklistItems;
+  // Merge so a briefly-stale React state never drops other modules from the ref.
+  moduleDataByTemplateIdRef.current = {
+    ...moduleDataByTemplateIdRef.current,
+    ...moduleDataByTemplateId,
+  };
 
   const switchActiveModule = (nextId: string) => {
     if (!nextId || nextId === activeModuleId) return;
@@ -457,15 +477,17 @@ const AuditExecute = () => {
       ),
     ) as Record<string, AuditEvidenceMedia[]>;
     const snapshot = {
-      checklistData,
-      editableChecklist,
-      extraChecklistItems,
+      checklistData: checklistDataRef.current,
+      editableChecklist: editableChecklistRef.current,
+      extraChecklistItems: extraChecklistItemsRef.current,
       sectionData: sectionDataRef.current,
       genericFiles: sanitizeAuditEvidenceMediaMap(moduleOnlyFiles),
+      findingsReportForm: findingsReportFormRef.current,
     };
     const updatedStore = currentId
-      ? { ...moduleDataByTemplateId, [currentId]: snapshot }
-      : { ...moduleDataByTemplateId };
+      ? { ...moduleDataByTemplateIdRef.current, [currentId]: snapshot }
+      : { ...moduleDataByTemplateIdRef.current };
+    moduleDataByTemplateIdRef.current = updatedStore;
     setModuleDataByTemplateId(updatedStore);
 
     const stored = updatedStore[nextId];
@@ -489,6 +511,15 @@ const AuditExecute = () => {
           )
         : sanitizeAuditEvidenceMediaMap(stored?.genericFiles || {})),
     });
+    // Signatures / acknowledgement stay with the module that captured them.
+    if (stored?.findingsReportForm) {
+      setFindingsReportForm(stored.findingsReportForm);
+      setExecutiveSummary(stored.findingsReportForm.generalComment || "");
+    } else {
+      const freshForm = buildFindingsReportDefaults(plan || currentPlan || {});
+      setFindingsReportForm(freshForm);
+      setExecutiveSummary(freshForm.generalComment || "");
+    }
     setActiveModuleId(nextId);
   };
 
@@ -694,9 +725,10 @@ const AuditExecute = () => {
 
 
 
-  const [findingsReportForm, setFindingsReportForm] = useState<FindingsReportForm>(
-    defaultFindingsReportForm(),
-  );
+
+
+
+
   const [auditeeOptions, setAuditeeOptions] = useState<AuditeeOption[]>([]);
   const eoshOrgUsers = useEoshOrgUsers();
   const [showExceptionFollowUpErrors, setShowExceptionFollowUpErrors] = useState(false);
@@ -773,20 +805,22 @@ const AuditExecute = () => {
             : ids[0] || "";
       if (preferredActive) setActiveModuleId(preferredActive);
 
-      const store =
-        data.moduleDataByTemplateId && typeof data.moduleDataByTemplateId === "object"
-          ? (data.moduleDataByTemplateId as Record<string, any>)
-          : {};
-      if (Object.keys(store).length > 0) {
-        setModuleDataByTemplateId(store);
-      }
+      const previousActive =
+        typeof data.activeModuleId === "string" && ids.includes(data.activeModuleId)
+          ? data.activeModuleId
+          : "";
+      // Migrate last-active top-level blob into the per-module store so it is not
+      // lost when opening / saving a different checklist module.
+      const store = ensureModuleStorePreservesTopLevel(data, ids);
+      setModuleDataByTemplateId(store);
+      moduleDataByTemplateIdRef.current = store;
 
       const mod = preferredActive ? store[preferredActive] : null;
       // Multi-module: never reuse another module's top-level answers/evidence.
       const canUseTopLevelAnswers =
         !multiModule ||
-        data.activeModuleId === preferredActive ||
-        (!data.activeModuleId && !Object.keys(store).length);
+        previousActive === preferredActive ||
+        (!previousActive && !Object.keys(store).length);
 
       if (mod?.checklistData) setChecklistData(mod.checklistData);
       else if (canUseTopLevelAnswers && data.checklistData) setChecklistData(data.checklistData);
@@ -801,21 +835,19 @@ const AuditExecute = () => {
         setExtraChecklistItems(data.extraChecklistItems);
       } else if (multiModule) setExtraChecklistItems({});
 
-      if (!Object.keys(store).length && preferredActive && (data.checklistData || data.editableChecklist)) {
-        setModuleDataByTemplateId({
-          [preferredActive]: {
-            checklistData: data.checklistData,
-            editableChecklist: data.editableChecklist,
-            extraChecklistItems: data.extraChecklistItems,
-            sectionData: data.sectionData,
-            genericFiles: data.genericFiles
-              ? toActiveModuleLocalEvidenceMap(
-                  sanitizeAuditEvidenceMediaMap(data.genericFiles),
-                  preferredActive,
-                )
-              : undefined,
-          },
-        });
+      // Only seed preferred module from top-level when that blob actually belongs to it.
+      if (
+        !store[preferredActive] &&
+        preferredActive &&
+        canUseTopLevelAnswers &&
+        (data.checklistData || data.editableChecklist || data.findingsReportForm)
+      ) {
+        const seeded = {
+          ...store,
+          [preferredActive]: moduleStoreEntryFromTopLevel(data, preferredActive),
+        };
+        setModuleDataByTemplateId(seeded);
+        moduleDataByTemplateIdRef.current = seeded;
       }
 
       if (data.clauseData) setClauseData(data.clauseData);
@@ -904,7 +936,19 @@ const AuditExecute = () => {
         setGenericFiles({});
       }
 
-      setFindingsReportForm(buildFindingsReportDefaults(found, data));
+      // Prefer per-module signatures / acknowledgement when present.
+      if (mod?.findingsReportForm && typeof mod.findingsReportForm === "object") {
+        setFindingsReportForm(mod.findingsReportForm as FindingsReportForm);
+        const comment = (mod.findingsReportForm as FindingsReportForm).generalComment;
+        if (typeof comment === "string") setExecutiveSummary(comment);
+      } else if (canUseTopLevelAnswers) {
+        setFindingsReportForm(buildFindingsReportDefaults(found, data));
+      } else if (multiModule) {
+        // Do not reuse another module's signatures on this checklist.
+        setFindingsReportForm(buildFindingsReportDefaults(found));
+      } else {
+        setFindingsReportForm(buildFindingsReportDefaults(found, data));
+      }
       const currentTemplate = preferredActive
         ? findAuditTemplate(preferredActive)
         : findAuditTemplate(found.templateId);
@@ -1324,18 +1368,28 @@ const AuditExecute = () => {
             key.startsWith("clause_checklist_") || key.startsWith("section_"),
         ),
       ) as Record<string, AuditEvidenceMedia[]>;
+      // Always merge into the latest store ref so other modules are never dropped on save.
+      const baseStore = {
+        ...moduleDataByTemplateIdRef.current,
+        ...moduleDataByTemplateId,
+      };
       const syncedModuleStore = currentModuleId
         ? {
-            ...moduleDataByTemplateId,
+            ...baseStore,
             [currentModuleId]: {
               checklistData,
               editableChecklist,
               extraChecklistItems,
               sectionData,
               genericFiles: activeModuleOnlyFiles,
+              findingsReportForm: {
+                ...findingsReportForm,
+                generalComment: syncedGeneralComment,
+              },
             },
           }
-        : moduleDataByTemplateId;
+        : baseStore;
+      moduleDataByTemplateIdRef.current = syncedModuleStore;
 
       // Persist module-scoped evidence keys so modules never share index-based slots.
       let persistedGenericFiles = activeLocalFiles;

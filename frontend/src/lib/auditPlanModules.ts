@@ -181,7 +181,104 @@ export type ModuleStoreEntry = {
     sectionData?: Record<string | number, string | null | undefined>;
     /** Module-scoped evidence map (keys may be local or namespaced). */
     genericFiles?: Record<string, AuditEvidenceMedia[]>;
+    /** Per-module findings report (includes auditee/auditor signatures). */
+    findingsReportForm?: unknown;
 };
+
+/** Build a per-module store entry from top-level auditData fields. */
+export function moduleStoreEntryFromTopLevel(
+    auditData: Record<string, unknown>,
+    moduleId: string,
+): ModuleStoreEntry {
+    const mid = String(moduleId || "").trim();
+    const topFiles = auditData.genericFiles as
+        | Record<string, AuditEvidenceMedia[]>
+        | undefined;
+    return {
+        checklistData: auditData.checklistData as ModuleStoreEntry["checklistData"],
+        editableChecklist: auditData.editableChecklist as unknown[],
+        extraChecklistItems: auditData.extraChecklistItems,
+        sectionData: auditData.sectionData as ModuleStoreEntry["sectionData"],
+        genericFiles: mid
+            ? toActiveModuleLocalEvidenceMap(
+                  filterEvidenceMapForModule(topFiles, mid),
+                  mid,
+              )
+            : (topFiles as ModuleStoreEntry["genericFiles"]),
+        findingsReportForm: auditData.findingsReportForm,
+    };
+}
+
+/**
+ * Ensure top-level answers (legacy / last-active blob) are copied into
+ * moduleDataByTemplateId under activeModuleId so switching modules cannot wipe them.
+ */
+export function ensureModuleStorePreservesTopLevel(
+    auditData: Record<string, unknown>,
+    planTemplateIds: string[],
+): Record<string, ModuleStoreEntry> {
+    const storeRaw =
+        auditData.moduleDataByTemplateId &&
+        typeof auditData.moduleDataByTemplateId === "object"
+            ? (auditData.moduleDataByTemplateId as Record<string, ModuleStoreEntry>)
+            : {};
+    const store: Record<string, ModuleStoreEntry> = { ...storeRaw };
+    const multiModule = planTemplateIds.length > 1;
+    if (!multiModule) return store;
+
+    const previousActive =
+        typeof auditData.activeModuleId === "string"
+            ? auditData.activeModuleId.trim()
+            : "";
+    const ownerId =
+        (previousActive && planTemplateIds.includes(previousActive)
+            ? previousActive
+            : "") || "";
+
+    const hasTopLevelBlob = Boolean(
+        auditData.checklistData ||
+            auditData.editableChecklist ||
+            auditData.sectionData ||
+            auditData.extraChecklistItems ||
+            auditData.findingsReportForm ||
+            (auditData.genericFiles &&
+                typeof auditData.genericFiles === "object" &&
+                Object.keys(auditData.genericFiles as object).length > 0),
+    );
+
+    if (ownerId && hasTopLevelBlob) {
+        const existing = store[ownerId];
+        const existingEmpty =
+            !existing ||
+            (!existing.checklistData &&
+                !existing.findingsReportForm &&
+                !existing.genericFiles &&
+                !existing.sectionData);
+        if (existingEmpty) {
+            store[ownerId] = moduleStoreEntryFromTopLevel(auditData, ownerId);
+        } else {
+            // Fill gaps only — never wipe richer per-module data with empty top-level.
+            store[ownerId] = {
+                checklistData: existing.checklistData ?? (auditData.checklistData as ModuleStoreEntry["checklistData"]),
+                editableChecklist:
+                    existing.editableChecklist ??
+                    (auditData.editableChecklist as unknown[]),
+                extraChecklistItems:
+                    existing.extraChecklistItems ?? auditData.extraChecklistItems,
+                sectionData:
+                    existing.sectionData ??
+                    (auditData.sectionData as ModuleStoreEntry["sectionData"]),
+                genericFiles:
+                    existing.genericFiles ??
+                    moduleStoreEntryFromTopLevel(auditData, ownerId).genericFiles,
+                findingsReportForm:
+                    existing.findingsReportForm ?? auditData.findingsReportForm,
+            };
+        }
+    }
+
+    return store;
+}
 
 function getModuleStoreEntry(
     auditData: Record<string, unknown>,
@@ -202,6 +299,7 @@ function getModuleStoreEntry(
             sectionData: auditData.sectionData as ModuleStoreEntry["sectionData"],
             genericFiles: auditData.genericFiles as ModuleStoreEntry["genericFiles"],
             extraChecklistItems: auditData.extraChecklistItems,
+            findingsReportForm: auditData.findingsReportForm,
         };
     }
     if (store || multiModule) return null;
@@ -212,6 +310,7 @@ function getModuleStoreEntry(
         sectionData: auditData.sectionData as ModuleStoreEntry["sectionData"],
         genericFiles: auditData.genericFiles as ModuleStoreEntry["genericFiles"],
         extraChecklistItems: auditData.extraChecklistItems,
+        findingsReportForm: auditData.findingsReportForm,
     };
 }
 
@@ -326,15 +425,15 @@ export function scopePlanToModule(
 
     const auditData = parseAuditDataBlob(plan?.auditData);
     const multiModule = ids.length > 1;
-    const store =
-        auditData.moduleDataByTemplateId &&
-        typeof auditData.moduleDataByTemplateId === "object"
-            ? (auditData.moduleDataByTemplateId as Record<string, ModuleStoreEntry>)
-            : {};
+    const store = ensureModuleStorePreservesTopLevel(auditData, ids);
     const mod =
         store[resolvedId] ||
         store[moduleId] ||
-        getModuleStoreEntry(auditData, resolvedId, multiModule);
+        getModuleStoreEntry(
+            { ...auditData, moduleDataByTemplateId: store },
+            resolvedId,
+            multiModule,
+        );
 
     const moduleGenericFiles =
         (mod?.genericFiles as Record<string, AuditEvidenceMedia[]> | undefined) ||
@@ -381,6 +480,11 @@ export function scopePlanToModule(
                 ? auditData.sectionData
                 : {}),
         genericFiles: localGenericFiles,
+        findingsReportForm:
+            mod?.findingsReportForm ??
+            (auditData.activeModuleId === resolvedId || !multiModule
+                ? auditData.findingsReportForm
+                : undefined),
         moduleDataByTemplateId: store,
     };
 

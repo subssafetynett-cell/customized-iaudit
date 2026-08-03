@@ -482,15 +482,14 @@ const Index = () => {
     [auditPlans],
   );
 
-  // Dynamic Trend Data: Show months from Jan to July
+  // Dynamic Trend Data: full calendar year Jan–Dec
   const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   const now = new Date();
   const currentYear = now.getFullYear();
 
-  // Create an array for Jan to July (7 months)
   const trendData = useMemo(
     () =>
-      Array.from({ length: 7 }, (_, i) => {
+      Array.from({ length: 12 }, (_, i) => {
         const monthName = months[i];
         const auditsInMonth = auditPlans.filter((p) => {
           const created = new Date(p.createdAt);
