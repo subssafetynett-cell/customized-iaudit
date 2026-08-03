@@ -583,7 +583,11 @@ export function extractFindings(plan: {
     const collectClauseMedia = (
         auditData: Record<string, unknown>,
         clauseKey: string,
-        options?: { checklistIndex?: number; processAuditIndex?: number },
+        options?: {
+            checklistIndex?: number;
+            processAuditIndex?: number;
+            moduleId?: string;
+        },
     ) => collectAuditEvidenceFromData(auditData, clauseKey, options);
 
     const clauseData = safeParse(data.clauseData);
@@ -650,6 +654,8 @@ export function extractFindings(plan: {
                   {
                       checklistData?: Record<string, Record<string, unknown>>;
                       editableChecklist?: unknown;
+                      extraChecklistItems?: unknown;
+                      genericFiles?: unknown;
                   }
               >)
             : {};
@@ -758,9 +764,11 @@ export function extractFindings(plan: {
                     mediaFromFindingEntry(entry),
                     collectClauseMedia(data, String(clauseKey), {
                         checklistIndex: itemIndex,
+                        moduleId: source.templateId,
                     }),
                     collectClauseMedia(data, String(itemIndex), {
                         checklistIndex: itemIndex,
+                        moduleId: source.templateId,
                     }),
                 ),
             });
@@ -768,8 +776,43 @@ export function extractFindings(plan: {
     }
 
     const extraItems = safeParse(data.extraChecklistItems);
-    if (extraItems && typeof extraItems === "object") {
-        Object.entries(extraItems as Record<string, unknown[]>).forEach(([clause, items]) => {
+    const extraSources: Array<{
+        templateId: string;
+        extraItems: Record<string, unknown[]>;
+    }> = [];
+    if (moduleStoreKeys.length > 0) {
+        for (const templateId of moduleStoreKeys) {
+            const modExtra = safeParse(
+                (moduleStore[templateId] as { extraChecklistItems?: unknown })
+                    ?.extraChecklistItems,
+            );
+            if (modExtra && typeof modExtra === "object") {
+                extraSources.push({
+                    templateId,
+                    extraItems: modExtra as Record<string, unknown[]>,
+                });
+            }
+        }
+        if (
+            extraItems &&
+            typeof extraItems === "object" &&
+            activeModuleId &&
+            moduleStoreKeys.includes(activeModuleId)
+        ) {
+            const idx = extraSources.findIndex((s) => s.templateId === activeModuleId);
+            const activeExtras = extraItems as Record<string, unknown[]>;
+            if (idx >= 0) extraSources[idx] = { templateId: activeModuleId, extraItems: activeExtras };
+            else extraSources.push({ templateId: activeModuleId, extraItems: activeExtras });
+        }
+    } else if (extraItems && typeof extraItems === "object") {
+        extraSources.push({
+            templateId: activeModuleId || String(plan.templateId || ""),
+            extraItems: extraItems as Record<string, unknown[]>,
+        });
+    }
+
+    for (const source of extraSources) {
+        Object.entries(source.extraItems).forEach(([clause, items]) => {
             if (Array.isArray(items)) {
                 items.forEach((item, idx) => {
                     const row =
@@ -779,11 +822,16 @@ export function extractFindings(plan: {
                     const ft = getFT(row);
                     if (ft) {
                         const fields = buildStructuredFindingFields(row);
+                        const moduleName = resolveAuditModuleDisplayName(source.templateId);
                         results.push({
-                            id: `extra-${plan.id}-${clause}-${idx}`,
+                            id:
+                                planTemplateIds.length > 1
+                                    ? `extra-${plan.id}-${source.templateId}-${clause}-${idx}`
+                                    : `extra-${plan.id}-${clause}-${idx}`,
                             auditId: plan.id,
                             auditName,
                             clauseRef: `Clause ${clause} (Custom)`,
+                            moduleName: moduleName || undefined,
                             type: ft,
                             ...fields,
                             description:
@@ -792,7 +840,10 @@ export function extractFindings(plan: {
                                 "",
                             media: mergeFindingMedia(
                                 mediaFromFindingEntry(row),
-                                collectClauseMedia(data, clause, { checklistIndex: idx }),
+                                collectClauseMedia(data, clause, {
+                                    checklistIndex: idx,
+                                    moduleId: source.templateId,
+                                }),
                             ),
                         });
                     }

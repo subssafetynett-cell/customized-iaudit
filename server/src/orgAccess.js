@@ -967,10 +967,18 @@ async function clearLegacySiteUserIds(client = prisma, ownerUserIds = null) {
 
 function defaultAuditeeNamesFromEmail(email) {
     const local = String(email || '').split('@')[0] || 'auditee';
-    const parts = local.replace(/[^a-zA-Z0-9._-]/g, ' ').split(/\s+/).filter(Boolean);
+    // Split on separators so john.doe becomes John / Doe (no dots left for email auto-linkify).
+    const parts = local
+        .replace(/[^a-zA-Z0-9._-]/g, ' ')
+        .replace(/[._-]+/g, ' ')
+        .split(/\s+/)
+        .filter(Boolean);
     const cap = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1).toLowerCase() : '');
-    const firstName = cap(parts[0] || 'Auditee');
-    const lastName = parts.length > 1 ? parts.slice(1).map(cap).join(' ') : 'User';
+    const firstName = cap((parts[0] || 'Auditee').replace(/[^a-zA-Z]/g, '')) || 'Auditee';
+    const lastName =
+        parts.length > 1
+            ? parts.slice(1).map((p) => cap(p.replace(/[^a-zA-Z]/g, ''))).filter(Boolean).join(' ') || 'User'
+            : 'User';
     return { firstName, lastName };
 }
 

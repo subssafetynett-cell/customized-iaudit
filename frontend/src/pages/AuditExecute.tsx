@@ -90,7 +90,11 @@ import {
   type AuditEvidenceMedia,
 } from "@/lib/evidenceImageUpload";
 import { generateAuditReportPdf, generateAuditReportDocx, downloadAuditReport } from "@/utils/auditReportExport";
-import { scopePlanToModule } from "@/lib/auditPlanModules";
+import {
+  scopePlanToModule,
+  toActiveModuleLocalEvidenceMap,
+  toModuleScopedEvidenceMap,
+} from "@/lib/auditPlanModules";
 import {
   collectAuditFindingSources,
   syncNonConformancesFromSources,
@@ -387,20 +391,125 @@ const AuditExecute = () => {
         checklistData?: Record<number, any>;
         editableChecklist?: any[];
         extraChecklistItems?: Record<string, any[]>;
+        sectionData?: Record<number, string>;
+        genericFiles?: Record<string, AuditEvidenceMedia[]>;
       }
     >
   >({});
 
+  const [checklistData, setChecklistData] = useState<
+    Record<
+      number,
+      {
+        findings: string;
+        evidence: string;
+        ofi: string;
+        description?: string;
+        correction?: string;
+        rootCause?: string;
+        correctiveAction?: string;
+        actionBy?: string;
+        closeDate?: string;
+        assignTo?: string;
+        assignToName?: string;
+        assignToEmail?: string;
+        clause?: string;
+        raisedBy?: string;
+        raisedByName?: string;
+        raisedByEmail?: string;
+        targetDate?: string;
+        escalationTo?: string;
+        escalationToName?: string;
+        escalationToEmail?: string;
+        escalationDate?: string;
+      }
+    >
+  >({});
+  // Extra questions added per clause during the audit (not in original template)
+  const [extraChecklistItems, setExtraChecklistItems] = useState<
+    Record<string, { question: string; findings: string; evidence: string; description?: string; correction?: string; rootCause?: string; correctiveAction?: string }[]>
+  >({});
+
+  // Editable checklist state for modifying original template questions
+  const [isEditMode, setIsEditMode] = useState(false);
+  const [editableChecklist, setEditableChecklist] = useState<any[]>([]);
+  const [sectionData, setSectionData] = useState<Record<number, string>>({});
+  const [genericFiles, setGenericFiles] = useState<Record<string, AuditEvidenceMedia[]>>({});
+  const sectionDataRef = useRef(sectionData);
+  const genericFilesRef = useRef(genericFiles);
+  sectionDataRef.current = sectionData;
+  genericFilesRef.current = genericFiles;
+
+  const switchActiveModule = (nextId: string) => {
+    if (!nextId || nextId === activeModuleId) return;
+    const currentId = activeModuleId || planTemplateIds[0];
+    const currentFiles = genericFilesRef.current || {};
+    const moduleOnlyFiles = Object.fromEntries(
+      Object.entries(currentFiles).filter(
+        ([key]) =>
+          key.startsWith("clause_checklist_") || key.startsWith("section_"),
+      ),
+    ) as Record<string, AuditEvidenceMedia[]>;
+    const sharedFiles = Object.fromEntries(
+      Object.entries(currentFiles).filter(
+        ([key]) =>
+          !key.startsWith("clause_checklist_") && !key.startsWith("section_"),
+      ),
+    ) as Record<string, AuditEvidenceMedia[]>;
+    const snapshot = {
+      checklistData,
+      editableChecklist,
+      extraChecklistItems,
+      sectionData: sectionDataRef.current,
+      genericFiles: sanitizeAuditEvidenceMediaMap(moduleOnlyFiles),
+    };
+    const updatedStore = currentId
+      ? { ...moduleDataByTemplateId, [currentId]: snapshot }
+      : { ...moduleDataByTemplateId };
+    setModuleDataByTemplateId(updatedStore);
+
+    const stored = updatedStore[nextId];
+    const nextTemplate = findAuditTemplate(nextId);
+    setChecklistData(stored?.checklistData || {});
+    setEditableChecklist(
+      stored?.editableChecklist && stored.editableChecklist.length > 0
+        ? stored.editableChecklist
+        : Array.isArray(nextTemplate?.content)
+          ? [...nextTemplate.content]
+          : [],
+    );
+    setExtraChecklistItems(stored?.extraChecklistItems || {});
+    setSectionData(stored?.sectionData || {});
+    setGenericFiles({
+      ...sanitizeAuditEvidenceMediaMap(sharedFiles),
+      ...(nextId
+        ? toActiveModuleLocalEvidenceMap(
+            sanitizeAuditEvidenceMediaMap(stored?.genericFiles || {}),
+            nextId,
+          )
+        : sanitizeAuditEvidenceMediaMap(stored?.genericFiles || {})),
+    });
+    setActiveModuleId(nextId);
+  };
+
   useEffect(() => {
     if (planTemplateIds.length === 0) return;
     if (lockedModuleId && planTemplateIds.includes(lockedModuleId)) {
-      if (activeModuleId !== lockedModuleId) setActiveModuleId(lockedModuleId);
+      if (activeModuleId !== lockedModuleId) {
+        // After answers are loaded, fully switch so we don't keep another module's answers.
+        if (answersHydrated) {
+          switchActiveModule(lockedModuleId);
+        } else {
+          setActiveModuleId(lockedModuleId);
+        }
+      }
       return;
     }
     if (!activeModuleId || !planTemplateIds.includes(activeModuleId)) {
       setActiveModuleId(planTemplateIds[0]);
     }
-  }, [planTemplateIds, activeModuleId, lockedModuleId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- switchActiveModule closes over latest answers
+  }, [planTemplateIds, activeModuleId, lockedModuleId, answersHydrated]);
 
   const templateId =
     resolveAuditTemplateId(activeModuleId || planTemplateIds[0]) ??
@@ -457,70 +566,6 @@ const AuditExecute = () => {
         c.id.startsWith(cleanId + ".") ||
         cleanId.startsWith(c.id + "."),
     );
-  };
-
-  const [checklistData, setChecklistData] = useState<
-    Record<
-      number,
-      {
-        findings: string;
-        evidence: string;
-        ofi: string;
-        description?: string;
-        correction?: string;
-        rootCause?: string;
-        correctiveAction?: string;
-        actionBy?: string;
-        closeDate?: string;
-        assignTo?: string;
-        assignToName?: string;
-        assignToEmail?: string;
-        clause?: string;
-        raisedBy?: string;
-        raisedByName?: string;
-        raisedByEmail?: string;
-        targetDate?: string;
-        escalationTo?: string;
-        escalationToName?: string;
-        escalationToEmail?: string;
-        escalationDate?: string;
-      }
-    >
-  >({});
-  // Extra questions added per clause during the audit (not in original template)
-  const [extraChecklistItems, setExtraChecklistItems] = useState<
-    Record<string, { question: string; findings: string; evidence: string; description?: string; correction?: string; rootCause?: string; correctiveAction?: string }[]>
-  >({});
-
-  // Editable checklist state for modifying original template questions
-  const [isEditMode, setIsEditMode] = useState(false);
-  const [editableChecklist, setEditableChecklist] = useState<any[]>([]);
-
-  const switchActiveModule = (nextId: string) => {
-    if (!nextId || nextId === activeModuleId) return;
-    const currentId = activeModuleId || planTemplateIds[0];
-    const snapshot = {
-      checklistData,
-      editableChecklist,
-      extraChecklistItems,
-    };
-    const updatedStore = currentId
-      ? { ...moduleDataByTemplateId, [currentId]: snapshot }
-      : { ...moduleDataByTemplateId };
-    setModuleDataByTemplateId(updatedStore);
-
-    const stored = updatedStore[nextId];
-    const nextTemplate = findAuditTemplate(nextId);
-    setChecklistData(stored?.checklistData || {});
-    setEditableChecklist(
-      stored?.editableChecklist && stored.editableChecklist.length > 0
-        ? stored.editableChecklist
-        : Array.isArray(nextTemplate?.content)
-          ? [...nextTemplate.content]
-          : [],
-    );
-    setExtraChecklistItems(stored?.extraChecklistItems || {});
-    setActiveModuleId(nextId);
   };
 
   const activeStandards = {
@@ -719,6 +764,7 @@ const AuditExecute = () => {
           ? JSON.parse(found.auditData)
           : found.auditData;
       const ids = parseAuditPlanTemplateIds(found.templateId);
+      const multiModule = ids.length > 1;
       const preferredActive =
         lockedModuleId && ids.includes(lockedModuleId)
           ? lockedModuleId
@@ -727,30 +773,49 @@ const AuditExecute = () => {
             : ids[0] || "";
       if (preferredActive) setActiveModuleId(preferredActive);
 
-      if (data.moduleDataByTemplateId && typeof data.moduleDataByTemplateId === "object") {
-        setModuleDataByTemplateId(data.moduleDataByTemplateId);
-        const mod = preferredActive
-          ? data.moduleDataByTemplateId[preferredActive]
-          : null;
-        if (mod?.checklistData) setChecklistData(mod.checklistData);
-        else if (data.checklistData) setChecklistData(data.checklistData);
-        if (mod?.sectionData) setSectionData(mod.sectionData);
-        else if (data.sectionData) setSectionData(data.sectionData);
-        if (mod?.extraChecklistItems) setExtraChecklistItems(mod.extraChecklistItems);
-        else if (data.extraChecklistItems) setExtraChecklistItems(data.extraChecklistItems);
-      } else {
-        if (data.checklistData) setChecklistData(data.checklistData);
-        if (data.sectionData) setSectionData(data.sectionData);
-        if (data.extraChecklistItems) setExtraChecklistItems(data.extraChecklistItems);
-        if (preferredActive && (data.checklistData || data.editableChecklist)) {
-          setModuleDataByTemplateId({
-            [preferredActive]: {
-              checklistData: data.checklistData,
-              editableChecklist: data.editableChecklist,
-              extraChecklistItems: data.extraChecklistItems,
-            },
-          });
-        }
+      const store =
+        data.moduleDataByTemplateId && typeof data.moduleDataByTemplateId === "object"
+          ? (data.moduleDataByTemplateId as Record<string, any>)
+          : {};
+      if (Object.keys(store).length > 0) {
+        setModuleDataByTemplateId(store);
+      }
+
+      const mod = preferredActive ? store[preferredActive] : null;
+      // Multi-module: never reuse another module's top-level answers/evidence.
+      const canUseTopLevelAnswers =
+        !multiModule ||
+        data.activeModuleId === preferredActive ||
+        (!data.activeModuleId && !Object.keys(store).length);
+
+      if (mod?.checklistData) setChecklistData(mod.checklistData);
+      else if (canUseTopLevelAnswers && data.checklistData) setChecklistData(data.checklistData);
+      else if (multiModule) setChecklistData({});
+
+      if (mod?.sectionData) setSectionData(mod.sectionData);
+      else if (canUseTopLevelAnswers && data.sectionData) setSectionData(data.sectionData);
+      else if (multiModule) setSectionData({});
+
+      if (mod?.extraChecklistItems) setExtraChecklistItems(mod.extraChecklistItems);
+      else if (canUseTopLevelAnswers && data.extraChecklistItems) {
+        setExtraChecklistItems(data.extraChecklistItems);
+      } else if (multiModule) setExtraChecklistItems({});
+
+      if (!Object.keys(store).length && preferredActive && (data.checklistData || data.editableChecklist)) {
+        setModuleDataByTemplateId({
+          [preferredActive]: {
+            checklistData: data.checklistData,
+            editableChecklist: data.editableChecklist,
+            extraChecklistItems: data.extraChecklistItems,
+            sectionData: data.sectionData,
+            genericFiles: data.genericFiles
+              ? toActiveModuleLocalEvidenceMap(
+                  sanitizeAuditEvidenceMediaMap(data.genericFiles),
+                  preferredActive,
+                )
+              : undefined,
+          },
+        });
       }
 
       if (data.clauseData) setClauseData(data.clauseData);
@@ -772,13 +837,44 @@ const AuditExecute = () => {
       if (data.showExecutiveSummary !== undefined) setShowExecutiveSummary(data.showExecutiveSummary);
       if (data.showAuditFindings !== undefined) setShowAuditFindings(data.showAuditFindings);
       if (data.clauseFiles) setClauseFiles(sanitizeAuditEvidenceMediaMap(data.clauseFiles));
-      if (data.genericFiles) {
-        const sanitized = sanitizeAuditEvidenceMediaMap(data.genericFiles);
-        setGenericFiles(sanitized);
+
+      const evidenceSource =
+        (mod?.genericFiles && typeof mod.genericFiles === "object"
+          ? mod.genericFiles
+          : null) ||
+        (canUseTopLevelAnswers && data.genericFiles ? data.genericFiles : null) ||
+        {};
+      const sharedFromTop =
+        data.genericFiles && typeof data.genericFiles === "object"
+          ? (Object.fromEntries(
+              Object.entries(
+                sanitizeAuditEvidenceMediaMap(data.genericFiles),
+              ).filter(
+                ([key]) =>
+                  !key.startsWith("clause_checklist_") &&
+                  !key.startsWith("section_"),
+              ),
+            ) as Record<string, AuditEvidenceMedia[]>)
+          : {};
+      if (
+        (evidenceSource && typeof evidenceSource === "object") ||
+        Object.keys(sharedFromTop).length > 0
+      ) {
+        const sanitized = sanitizeAuditEvidenceMediaMap(evidenceSource || {});
+        const localFiles = preferredActive
+          ? toActiveModuleLocalEvidenceMap(
+              multiModule && !mod?.genericFiles && data.genericFiles
+                ? sanitizeAuditEvidenceMediaMap(data.genericFiles)
+                : sanitized,
+              preferredActive,
+            )
+          : sanitized;
+        const combined = { ...sharedFromTop, ...localFiles };
+        setGenericFiles(combined);
         setChecklistData((prev) => {
           let next = prev;
           let changed = false;
-          for (const [key, files] of Object.entries(sanitized)) {
+          for (const [key, files] of Object.entries(localFiles)) {
             const m = /^clause_checklist_(\d+)$/.exec(key);
             if (!m || !Array.isArray(files) || files.length === 0) continue;
             const idx = Number(m[1]);
@@ -804,18 +900,24 @@ const AuditExecute = () => {
           }
           return changed ? next : prev;
         });
+      } else if (multiModule) {
+        setGenericFiles({});
       }
+
       setFindingsReportForm(buildFindingsReportDefaults(found, data));
       const currentTemplate = preferredActive
         ? findAuditTemplate(preferredActive)
         : findAuditTemplate(found.templateId);
 
       const modEditable =
-        preferredActive &&
-        data.moduleDataByTemplateId?.[preferredActive]?.editableChecklist;
+        preferredActive && store[preferredActive]?.editableChecklist;
       if (Array.isArray(modEditable) && modEditable.length > 0) {
         setEditableChecklist(modEditable);
-      } else if (data.editableChecklist && data.editableChecklist.length > 0) {
+      } else if (
+        canUseTopLevelAnswers &&
+        data.editableChecklist &&
+        data.editableChecklist.length > 0
+      ) {
         setEditableChecklist(data.editableChecklist);
       } else if (currentTemplate?.content) {
         setEditableChecklist(currentTemplate.content);
@@ -1007,10 +1109,8 @@ const AuditExecute = () => {
   ) => {
     handleAssigneeEmailChange(fieldKey, email, onEmailChange, onNameChange, notifyMeta);
   };
-  const [sectionData, setSectionData] = useState<Record<number, string>>({});
   const [signatureData, setSignatureData] = useState<string | null>(null);
   const [clauseFiles, setClauseFiles] = useState<Record<string, AuditEvidenceMedia[]>>({});
-  const [genericFiles, setGenericFiles] = useState<Record<string, AuditEvidenceMedia[]>>({});
 
   // --------------------------------------------------------------------------
   // HANDLERS
@@ -1216,6 +1316,14 @@ const AuditExecute = () => {
       const syncedGeneralComment =
         findingsReportForm.generalComment || executiveSummary;
       const currentModuleId = activeModuleId || planTemplateIds[0] || "";
+      const multiModule = planTemplateIds.length > 1;
+      const activeLocalFiles = sanitizeAuditEvidenceMediaMap(genericFiles);
+      const activeModuleOnlyFiles = Object.fromEntries(
+        Object.entries(activeLocalFiles).filter(
+          ([key]) =>
+            key.startsWith("clause_checklist_") || key.startsWith("section_"),
+        ),
+      ) as Record<string, AuditEvidenceMedia[]>;
       const syncedModuleStore = currentModuleId
         ? {
             ...moduleDataByTemplateId,
@@ -1223,9 +1331,38 @@ const AuditExecute = () => {
               checklistData,
               editableChecklist,
               extraChecklistItems,
+              sectionData,
+              genericFiles: activeModuleOnlyFiles,
             },
           }
         : moduleDataByTemplateId;
+
+      // Persist module-scoped evidence keys so modules never share index-based slots.
+      let persistedGenericFiles = activeLocalFiles;
+      if (multiModule && currentModuleId) {
+        const merged: Record<string, AuditEvidenceMedia[]> = {};
+        for (const [mid, entry] of Object.entries(syncedModuleStore)) {
+          Object.assign(
+            merged,
+            toModuleScopedEvidenceMap(
+              sanitizeAuditEvidenceMediaMap(entry?.genericFiles || {}),
+              mid,
+            ),
+          );
+        }
+        // Keep non-checklist keys from the active editor (process_audit_*, etc.).
+        for (const [key, list] of Object.entries(activeLocalFiles)) {
+          if (
+            key.startsWith("clause_checklist_") ||
+            key.startsWith("section_")
+          ) {
+            continue;
+          }
+          merged[key] = list;
+        }
+        persistedGenericFiles = merged;
+      }
+
       const payload = {
         checklistData,
         sectionData,
@@ -1254,7 +1391,7 @@ const AuditExecute = () => {
         completedItems,
         editableChecklist,
         clauseFiles: sanitizeAuditEvidenceMediaMap(clauseFiles),
-        genericFiles: sanitizeAuditEvidenceMediaMap(genericFiles),
+        genericFiles: persistedGenericFiles,
         activeModuleId: currentModuleId || undefined,
         moduleDataByTemplateId: syncedModuleStore,
       };

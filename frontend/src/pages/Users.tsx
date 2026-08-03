@@ -69,7 +69,7 @@ import {
     AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 
-import { apiFetch } from "@/lib/api";
+import { apiFetch, parseApiJson, readApiErrorJson } from "@/lib/api";
 
 type UsersAccessResponse = {
     allowed?: boolean;
@@ -387,7 +387,7 @@ function UsersPage() {
             });
 
             if (response.ok) {
-                const updatedUser = await response.json();
+                const updatedUser = await parseApiJson<any>(response);
                 if (modalMode === "create") {
                     // Optimistic insert — avoid full list reload.
                     setUsers((prev) => {
@@ -442,7 +442,7 @@ function UsersPage() {
                     toast.success("User updated successfully!");
                 }
             } else {
-                const errorData = await response.json();
+                const errorData = await readApiErrorJson(response);
                 console.error("Server error data:", errorData);
                 const errorMsg =
                     errorData.error ||

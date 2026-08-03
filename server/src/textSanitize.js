@@ -1,9 +1,9 @@
 /** Escape for safe HTML interpolation (email templates, etc.). */
 import {
-    getPhoneLengthForCountry,
     PHONE_MAX_DIGITS,
     phoneLengthErrorMessage,
-} from './phoneLengthRules.js';
+    isValidPhoneForCountry,
+} from './phoneValidation.js';
 import { resolveCountryIsoFromName } from './worldCountries.js';
 
 export function escapeHtml(value) {
@@ -95,9 +95,17 @@ export function sanitizeStringArray(arr, { maxItems = 40, maxItemLen = 120 } = {
 
 export const PERSON_NAME_MAX = 100;
 
+/** PSZL-020: letters (any language) + combining marks, spaces, hyphen, apostrophe — no dots/URLs. */
+const PERSON_NAME_DISALLOWED_CHAR = /[^\p{L}\p{M}\s\-']/u;
+const PERSON_NAME_DISALLOWED_GLOBAL = /[^\p{L}\p{M}\s\-']/gu;
+const PERSON_NAME_VALID_RE = /^[\p{L}\p{M}]+(?:[\s\-']+[\p{L}\p{M}]+)*$/u;
+
+export const PERSON_NAME_REQUIREMENTS_MESSAGE =
+    'Name may only contain letters, spaces, hyphens, and apostrophes (no dots or links).';
+
 /**
- * Single-line given/family name: strip markup, control chars, and characters outside letters/marks/digits
- * plus space, hyphen, apostrophe, period, comma (covers most real names; blocks HTML/template junk).
+ * Single-line given/family name: strip markup/control chars and disallow dots/digits/URLs
+ * so email clients cannot auto-linkify names (PSZL-020 hyperlink injection).
  */
 export function sanitizePersonName(value, maxLen = PERSON_NAME_MAX) {
     if (value === undefined) return undefined;
@@ -107,10 +115,28 @@ export function sanitizePersonName(value, maxLen = PERSON_NAME_MAX) {
     let s = sanitizePlainText(oneLine, maxLen);
     if (s === undefined || s === null) return s;
     s = s.replace(/[`\\]/g, '');
-    s = s.replace(/[^\p{L}\p{M}\p{N}\s\-'.,]/gu, '');
+    s = s.replace(PERSON_NAME_DISALLOWED_GLOBAL, '');
     s = s.trim().replace(/\s+/g, ' ');
     if (s.length > maxLen) s = s.slice(0, maxLen);
     return s;
+}
+
+/** Returns an error message when the name is empty or contains disallowed characters (e.g. dots). */
+export function personNameValidationError(value, fieldLabel = 'Name') {
+    if (value === undefined || value === null || String(value).trim() === '') {
+        return `${fieldLabel} is required.`;
+    }
+    if (typeof value !== 'string') {
+        return `Valid ${fieldLabel.toLowerCase()} is required.`;
+    }
+    const oneLine = String(value).replace(/[\r\n\t]+/g, ' ').trim().replace(/\s+/g, ' ');
+    if (oneLine.length > PERSON_NAME_MAX) {
+        return `${fieldLabel} must be at most ${PERSON_NAME_MAX} characters.`;
+    }
+    if (PERSON_NAME_DISALLOWED_CHAR.test(oneLine) || !PERSON_NAME_VALID_RE.test(oneLine)) {
+        return `${fieldLabel} may only contain letters, spaces, hyphens, and apostrophes (no dots or links).`;
+    }
+    return null;
 }
 
 /** Short label (e.g. custom role): single line, no markup. */
@@ -137,8 +163,7 @@ export function sanitizePhoneField(value, options = {}) {
     const digits = String(value).replace(/\D/g, '');
     if (digits.length === 0) return '';
     const countryIso = resolvePhoneCountryIso(options);
-    const { min, max } = getPhoneLengthForCountry(countryIso);
-    if (digits.length < min || digits.length > max) return null;
+    if (!isValidPhoneForCountry(digits, countryIso)) return null;
     return digits;
 }
 
@@ -147,9 +172,8 @@ export function phoneFieldValidationError(value, options = {}, fieldLabel = 'Pho
     const digits = String(value).replace(/\D/g, '');
     if (digits.length === 0) return `${fieldLabel} is required.`;
     const countryIso = resolvePhoneCountryIso(options);
-    const { min, max } = getPhoneLengthForCountry(countryIso);
-    if (digits.length < min || digits.length > max) {
-        return phoneLengthErrorMessage(countryIso, fieldLabel);
+    if (!isValidPhoneForCountry(digits, countryIso)) {
+        return phoneLengthErrorMessage(countryIso, fieldLabel, digits);
     }
     return null;
 }

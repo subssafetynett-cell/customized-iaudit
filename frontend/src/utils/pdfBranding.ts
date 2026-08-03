@@ -48,10 +48,15 @@ export async function loadImageAsset(src: string, maxDim = 120): Promise<PdfImag
                 canvas.width = width;
                 canvas.height = height;
                 const ctx = canvas.getContext("2d")!;
-                ctx.fillStyle = "#ffffff";
-                ctx.fillRect(0, 0, width, height);
-                ctx.drawImage(img, 0, 0, width, height);
                 const usePng = src.startsWith("data:image/png") || /\.png(\?|$)/i.test(src);
+                // Keep PNG transparency so the footer logo never paints a white box over table lines.
+                if (!usePng) {
+                    ctx.fillStyle = "#ffffff";
+                    ctx.fillRect(0, 0, width, height);
+                } else {
+                    ctx.clearRect(0, 0, width, height);
+                }
+                ctx.drawImage(img, 0, 0, width, height);
                 resolve({
                     dataUrl: canvas.toDataURL(usePng ? "image/png" : "image/jpeg", 0.85),
                     format: usePng ? "PNG" : "JPEG",

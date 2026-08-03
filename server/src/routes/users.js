@@ -13,6 +13,7 @@ import {
 import {
     PERSON_NAME_MAX,
     sanitizePersonName,
+    personNameValidationError,
     sanitizePhoneField,
     phoneFieldValidationError,
     sanitizePlainText,
@@ -55,6 +56,11 @@ import {
     actorCanManageAuditee
 } from '../orgAccess.js';
 import { deleteUserCompletely } from '../deleteUser.js';
+import {
+    PASSWORD_REGEX,
+    PASSWORD_REQUIREMENTS_MESSAGE,
+    NEW_PASSWORD_SAME_AS_CURRENT_MESSAGE,
+} from '../passwordPolicy.js';
 
 async function postUserEmailChangeSendOtp(req, res) {
     const targetId = Number.parseInt(req.params.id, 10);
@@ -814,6 +820,7 @@ export function createUsersRouter({ authenticateToken, checkTrialExpiration }) {
         const {
             email,
             mobile,
+            phoneCountry,
             password,
             siteId,
             siteIds: rawSiteIds,
@@ -827,7 +834,7 @@ export function createUsersRouter({ authenticateToken, checkTrialExpiration }) {
         }
         if (!PASSWORD_REGEX.test(password)) {
             return res.status(400).json({
-                error: 'Password must be at least 8 characters long and include at least one uppercase letter, one number, and one special character.',
+                error: PASSWORD_REQUIREMENTS_MESSAGE,
             });
         }
 
@@ -838,10 +845,11 @@ export function createUsersRouter({ authenticateToken, checkTrialExpiration }) {
             return res.status(400).json({ error: 'Please enter a valid email address' });
         }
 
-        const userMobile = sanitizePhoneField(mobile);
+        const phoneOpts = { countryCode: phoneCountry };
+        const userMobile = sanitizePhoneField(mobile, phoneOpts);
         if (!userMobile) {
             return res.status(400).json({
-                error: phoneFieldValidationError(mobile, {}, 'Mobile number') || 'Mobile number is required.',
+                error: phoneFieldValidationError(mobile, phoneOpts, 'Mobile number') || 'Mobile number is required.',
             });
         }
 
@@ -857,6 +865,14 @@ export function createUsersRouter({ authenticateToken, checkTrialExpiration }) {
         }
 
         const defaults = defaultAuditeeNamesFromEmail(emailNorm);
+        if (rawFirst != null && String(rawFirst).trim() !== '') {
+            const fnErr = personNameValidationError(rawFirst, 'First name');
+            if (fnErr) return res.status(400).json({ error: fnErr });
+        }
+        if (rawLast != null && String(rawLast).trim() !== '') {
+            const lnErr = personNameValidationError(rawLast, 'Last name');
+            if (lnErr) return res.status(400).json({ error: lnErr });
+        }
         const fn = sanitizePersonName(rawFirst, PERSON_NAME_MAX) || defaults.firstName;
         const ln = sanitizePersonName(rawLast, PERSON_NAME_MAX) || defaults.lastName;
 
@@ -1018,7 +1034,7 @@ export function createUsersRouter({ authenticateToken, checkTrialExpiration }) {
     });
 
     router.post('/users', authenticateToken, async (req, res) => {
-        const { firstName, lastName, email, mobile, role, customRoleName, password, sendWelcomeEmail, siteId, siteIds: rawSiteIds } = req.body;
+        const { firstName, lastName, email, mobile, phoneCountry, role, customRoleName, password, sendWelcomeEmail, siteId, siteIds: rawSiteIds } = req.body;
         const creatorId = req.user.id;
         const [canManageUsers, canInvite] = await Promise.all([
             actorCanManageOrgUsers(creatorId),
@@ -1034,14 +1050,16 @@ export function createUsersRouter({ authenticateToken, checkTrialExpiration }) {
             return res.status(400).json({ error: 'Password is required' });
         }
         if (!PASSWORD_REGEX.test(password)) {
-            return res.status(400).json({ error: 'Password must be at least 8 characters long and include at least one uppercase letter, one number, and one special character.' });
+            return res.status(400).json({ error: PASSWORD_REQUIREMENTS_MESSAGE });
         }
 
+        const fnErr = personNameValidationError(firstName, 'First name');
+        const lnErr = personNameValidationError(lastName, 'Last name');
+        if (fnErr || lnErr) {
+            return res.status(400).json({ error: fnErr || lnErr });
+        }
         const fn = sanitizePersonName(firstName, PERSON_NAME_MAX);
         const ln = sanitizePersonName(lastName, PERSON_NAME_MAX);
-        if (!fn || !ln) {
-            return res.status(400).json({ error: 'First name and last name are required' });
-        }
 
         const emailNorm =
             typeof email === 'string' ? (sanitizePlainText(email.trim().toLowerCase(), 254) || '') : '';
@@ -1050,10 +1068,10 @@ export function createUsersRouter({ authenticateToken, checkTrialExpiration }) {
             return res.status(400).json({ error: 'Please enter a valid email address' });
         }
 
-        const userMobile = sanitizePhoneField(mobile);
+        const userMobile = sanitizePhoneField(mobile, { countryCode: phoneCountry });
         if (!userMobile) {
             return res.status(400).json({
-                error: phoneFieldValidationError(mobile, {}, 'Mobile number') || 'Mobile number is required.',
+                error: phoneFieldValidationError(mobile, { countryCode: phoneCountry }, 'Mobile number') || 'Mobile number is required.',
             });
         }
 
@@ -1248,7 +1266,7 @@ export function createUsersRouter({ authenticateToken, checkTrialExpiration }) {
         if (Number.isNaN(targetId)) {
             return res.status(400).json({ error: 'Invalid user id' });
         }
-        const { firstName, lastName, email, mobile, role, customRoleName, isActive, password, onboardingCompleted, emailChangeOtp, siteId, siteIds: rawSiteIds } = req.body;
+        const { firstName, lastName, email, mobile, phoneCountry, role, customRoleName, isActive, password, onboardingCompleted, emailChangeOtp, siteId, siteIds: rawSiteIds } = req.body;
         const actorId = Number(req.user.id);
         try {
             const [canAccess, canManageUsers, canManageAuditee, targetUser] = await Promise.all([
@@ -1376,28 +1394,29 @@ export function createUsersRouter({ authenticateToken, checkTrialExpiration }) {
             }
 
             if (firstName !== undefined) {
-                const fn = sanitizePersonName(firstName, PERSON_NAME_MAX);
-                if (!fn) {
-                    return res.status(400).json({ error: 'Invalid first name' });
+                const fnErr = personNameValidationError(firstName, 'First name');
+                if (fnErr) {
+                    return res.status(400).json({ error: fnErr });
                 }
-                updateData.firstName = fn;
+                updateData.firstName = sanitizePersonName(firstName, PERSON_NAME_MAX);
             }
             if (lastName !== undefined) {
-                const ln = sanitizePersonName(lastName, PERSON_NAME_MAX);
-                if (!ln) {
-                    return res.status(400).json({ error: 'Invalid last name' });
+                const lnErr = personNameValidationError(lastName, 'Last name');
+                if (lnErr) {
+                    return res.status(400).json({ error: lnErr });
                 }
-                updateData.lastName = ln;
+                updateData.lastName = sanitizePersonName(lastName, PERSON_NAME_MAX);
             }
             if (mobile !== undefined) {
                 const raw = typeof mobile === 'string' ? mobile.trim() : '';
                 if (raw === '') {
                     updateData.mobile = null;
                 } else {
-                    const m = sanitizePhoneField(mobile);
+                    const phoneOpts = { countryCode: phoneCountry };
+                    const m = sanitizePhoneField(mobile, phoneOpts);
                     if (!m) {
                         return res.status(400).json({
-                            error: phoneFieldValidationError(mobile, {}, 'Mobile number') || 'Mobile number is required.',
+                            error: phoneFieldValidationError(mobile, phoneOpts, 'Mobile number') || 'Mobile number is required.',
                         });
                     }
                     updateData.mobile = m;
@@ -1448,7 +1467,7 @@ export function createUsersRouter({ authenticateToken, checkTrialExpiration }) {
 
             if (password) {
                 if (!PASSWORD_REGEX.test(password)) {
-                    return res.status(400).json({ error: 'Password must be at least 8 characters long and include at least one uppercase letter, one number, and one special character.' });
+                    return res.status(400).json({ error: PASSWORD_REQUIREMENTS_MESSAGE });
                 }
                 const pwdRow = await prisma.user.findUnique({
                     where: { id: targetId },

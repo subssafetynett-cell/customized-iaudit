@@ -1,8 +1,17 @@
 import { sanitizeAuditEvidenceMediaMap, type AuditEvidenceMedia } from "@/lib/evidenceImageUpload";
+import {
+    checklistEvidenceStorageKey,
+    parseChecklistEvidenceStorageKey,
+    parseSectionEvidenceStorageKey,
+    sectionEvidenceStorageKey,
+    toActiveModuleLocalEvidenceMap,
+} from "@/lib/auditPlanModules";
 
 export type AuditEvidenceLookupOptions = {
     checklistIndex?: number;
     processAuditIndex?: number;
+    /** When set, only match evidence for this checklist module (multi-module plans). */
+    moduleId?: string;
 };
 
 function buildEvidenceStorageKeys(
@@ -19,14 +28,23 @@ function buildEvidenceStorageKeys(
     }
 
     const checklistIndex = options?.checklistIndex;
+    const moduleId = options?.moduleId?.trim();
     if (checklistIndex !== undefined && Number.isFinite(checklistIndex)) {
         keys.add(String(checklistIndex));
         keys.add(`clause_checklist_${checklistIndex}`);
         keys.add(`section_${checklistIndex}`);
+        if (moduleId) {
+            keys.add(checklistEvidenceStorageKey(moduleId, checklistIndex));
+            keys.add(sectionEvidenceStorageKey(moduleId, checklistIndex));
+        }
     } else if (/^\d+$/.test(String(clauseKey))) {
         const n = Number(clauseKey);
         keys.add(`clause_checklist_${n}`);
         keys.add(`section_${n}`);
+        if (moduleId) {
+            keys.add(checklistEvidenceStorageKey(moduleId, n));
+            keys.add(sectionEvidenceStorageKey(moduleId, n));
+        }
     }
 
     const processAuditIndex = options?.processAuditIndex;
@@ -45,14 +63,19 @@ function matchesEvidenceStorageKey(
     const keys = buildEvidenceStorageKeys(clauseKey, options);
     if (keys.has(storageKey)) return true;
 
+    const moduleId = options?.moduleId?.trim() || null;
     const checklistIndex = options?.checklistIndex;
-    if (
-        checklistIndex !== undefined &&
-        Number.isFinite(checklistIndex) &&
-        (storageKey === `clause_checklist_${checklistIndex}` ||
-            storageKey === `section_${checklistIndex}`)
-    ) {
-        return true;
+    if (checklistIndex !== undefined && Number.isFinite(checklistIndex)) {
+        const checklist = parseChecklistEvidenceStorageKey(storageKey);
+        if (checklist && checklist.index === checklistIndex) {
+            if (!moduleId) return checklist.moduleId == null;
+            return checklist.moduleId == null || checklist.moduleId === moduleId;
+        }
+        const section = parseSectionEvidenceStorageKey(storageKey);
+        if (section && section.index === checklistIndex) {
+            if (!moduleId) return section.moduleId == null;
+            return section.moduleId == null || section.moduleId === moduleId;
+        }
     }
 
     const processAuditIndex = options?.processAuditIndex;
@@ -125,8 +148,26 @@ export function collectAuditEvidenceFromData(
     const clauseFiles = sanitizeAuditEvidenceMediaMap(
         parseMaybeJson<Record<string, AuditEvidenceMedia[]>>(data.clauseFiles) ?? undefined,
     );
-    const genericFiles = sanitizeAuditEvidenceMediaMap(
+    let genericFiles = sanitizeAuditEvidenceMediaMap(
         parseMaybeJson<Record<string, AuditEvidenceMedia[]>>(data.genericFiles) ?? undefined,
     );
+
+    const moduleId = options?.moduleId?.trim();
+    if (moduleId) {
+        const storeRaw = parseMaybeJson<Record<string, { genericFiles?: unknown }>>(
+            data.moduleDataByTemplateId,
+        );
+        const modFiles = sanitizeAuditEvidenceMediaMap(
+            parseMaybeJson<Record<string, AuditEvidenceMedia[]>>(
+                storeRaw?.[moduleId]?.genericFiles,
+            ) ?? undefined,
+        );
+        // Prefer per-module store, then filter top-level to this module only.
+        genericFiles = {
+            ...toActiveModuleLocalEvidenceMap(genericFiles, moduleId),
+            ...toActiveModuleLocalEvidenceMap(modFiles, moduleId),
+        };
+    }
+
     return collectAuditEvidenceMedia(clauseFiles, genericFiles, clauseKey, options);
 }

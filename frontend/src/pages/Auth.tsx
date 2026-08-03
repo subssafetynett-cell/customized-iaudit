@@ -9,7 +9,7 @@ import { Eye, EyeOff } from "lucide-react";
 import gsap from "gsap";
 import { PhoneInputWithCountryCode } from "@/components/PhoneInputWithCountryCode";
 import { DEFAULT_PHONE_COUNTRY_CODE } from "@/lib/phoneCountries";
-import { PASSWORD_REGEX, PASSWORD_ERROR_MESSAGE, capitalizeFirstLetter, getPhoneErrorMessage, isValidPhone, normalizePhoneDigits } from "@/lib/validation";
+import { PASSWORD_REGEX, PASSWORD_ERROR_MESSAGE, capitalizeFirstLetter, getPhoneErrorMessage, isValidPhone, normalizePhoneDigits, normalizePersonNameInput, isValidPersonName, PERSON_NAME_ERROR_MESSAGE } from "@/lib/validation";
 
 /** Must match server PASSWORD_RESET_CODE_MIN_LENGTH (high-entropy reset token). */
 const PASSWORD_RESET_CODE_MIN_LENGTH = 20;
@@ -492,7 +492,9 @@ export default function Auth() {
         // Comprehensive field-level validation
         const errors: Record<string, string> = {};
         if (!signupFirstName.trim()) errors.firstName = "First name is required";
+        else if (!isValidPersonName(signupFirstName)) errors.firstName = PERSON_NAME_ERROR_MESSAGE;
         if (!signupLastName.trim()) errors.lastName = "Last name is required";
+        else if (!isValidPersonName(signupLastName)) errors.lastName = PERSON_NAME_ERROR_MESSAGE;
         if (!signupEmail.trim()) {
             errors.email = "Email address is required";
         } else if (!/\S+@\S+\.\S+/.test(signupEmail)) {
@@ -501,7 +503,7 @@ export default function Auth() {
         if (!signupPhone.trim()) {
             errors.phone = "Phone number is required";
         } else if (!isValidPhone(signupPhone, signupPhoneCountry)) {
-            errors.phone = getPhoneErrorMessage(signupPhoneCountry);
+            errors.phone = getPhoneErrorMessage(signupPhoneCountry, signupPhone);
         }
         if (!signupPassword) {
             errors.password = "Password is required";
@@ -608,6 +610,7 @@ export default function Auth() {
                     firstName: signupFirstName,
                     lastName: signupLastName,
                     mobile: normalizePhoneDigits(signupPhone, signupPhoneCountry),
+                    phoneCountry: signupPhoneCountry,
                     password: signupPassword,
                 })
             });
@@ -683,7 +686,7 @@ export default function Auth() {
                                                 placeholder="John"
                                                 value={signupFirstName}
                                                 onChange={(e) => {
-                                                    setSignupFirstName(capitalizeFirstLetter(e.target.value));
+                                                    setSignupFirstName(capitalizeFirstLetter(normalizePersonNameInput(e.target.value)));
                                                     if (signupErrors.firstName) setSignupErrors(prev => ({ ...prev, firstName: "" }));
                                                 }}
                                                 className={`h-11 bg-[#F9FAFB] border-[#E5E7EB] rounded-lg text-sm text-[#111827] placeholder:text-[#9CA3AF] focus:ring-1 focus:ring-[#00875B] ${signupErrors.firstName ? "border-red-500 focus:ring-red-500" : ""}`}
@@ -696,7 +699,7 @@ export default function Auth() {
                                                 placeholder="Doe"
                                                 value={signupLastName}
                                                 onChange={(e) => {
-                                                    setSignupLastName(capitalizeFirstLetter(e.target.value));
+                                                    setSignupLastName(capitalizeFirstLetter(normalizePersonNameInput(e.target.value)));
                                                     if (signupErrors.lastName) setSignupErrors(prev => ({ ...prev, lastName: "" }));
                                                 }}
                                                 className={`h-11 bg-[#F9FAFB] border-[#E5E7EB] rounded-lg text-sm text-[#111827] placeholder:text-[#9CA3AF] focus:ring-1 focus:ring-[#00875B] ${signupErrors.lastName ? "border-red-500 focus:ring-red-500" : ""}`}

@@ -76,14 +76,52 @@ export function applySessionExpiryFromResponse(response: Response) {
 
 export async function parseApiJson<T = unknown>(response: Response): Promise<T> {
     const contentType = response.headers.get("content-type") || "";
-    if (!contentType.includes("application/json")) {
-        const text = await response.text();
-        if (response.status === 502 || response.status === 503 || response.status === 504) {
-            throw new Error("The API is temporarily unavailable. Please wait a moment and try again.");
+    const text = await response.text();
+    const looksLikeHtml =
+        /^\s*</.test(text) ||
+        text.includes("<!DOCTYPE") ||
+        text.includes("<html");
+
+    if (!contentType.includes("application/json") || looksLikeHtml) {
+        if (
+            response.status === 502 ||
+            response.status === 503 ||
+            response.status === 504 ||
+            looksLikeHtml
+        ) {
+            throw new Error(
+                "The API is temporarily unavailable (database or server). Please wait a moment and try again.",
+            );
         }
         throw new Error(text?.slice(0, 200) || `Unexpected response (${response.status})`);
     }
-    return response.json() as Promise<T>;
+
+    if (!text) {
+        return {} as T;
+    }
+
+    try {
+        return JSON.parse(text) as T;
+    } catch {
+        throw new Error(
+            "The API returned an invalid response. Please try again in a moment.",
+        );
+    }
+}
+
+/** Read JSON safely; on HTML/empty error bodies return a structured fallback (does not throw). */
+export async function readApiErrorJson(
+    response: Response,
+): Promise<{ error?: string; message?: string; details?: string; detail?: string; hint?: string }> {
+    try {
+        return await parseApiJson(response);
+    } catch (err: unknown) {
+        const message =
+            err instanceof Error
+                ? err.message
+                : "The API is temporarily unavailable. Please try again.";
+        return { error: message };
+    }
 }
 
 /** Coalesce identical in-flight GETs so React Strict Mode / dual mounts don't double-fetch. */

@@ -10,7 +10,7 @@ import { Country, State as StateCity } from "country-state-city";
 import { CountrySelect } from "@/components/CountrySelect";
 import { StateSelect } from "@/components/StateSelect";
 import { resolveCountryIsoFromName } from "@/lib/worldCountries";
-import { getPhoneLengthForCountry } from "@/lib/phoneCountries";
+import { getPhoneLengthForCountry, getPhonePlaceholder } from "@/lib/phoneCountries";
 import {
     capitalizeFirstLetter,
     getPhoneErrorMessage,
@@ -145,7 +145,7 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
         if (!trimmedContactNumber) {
             errors.contactNumber = "Contact number is required";
         } else if (!isValidPhone(trimmedContactNumber, countryIso)) {
-            errors.contactNumber = getPhoneErrorMessage(countryIso);
+            errors.contactNumber = getPhoneErrorMessage(countryIso, trimmedContactNumber);
         }
         if (!trimmedEmail) {
             errors.email = "Email is required";
@@ -438,7 +438,7 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
                                     type="tel"
                                     inputMode="numeric"
                                     maxLength={contactPhoneMaxLength}
-                                    placeholder="Phone number"
+                                    placeholder={getPhonePlaceholder(countryIso)}
                                     className={fieldErrorClass("contactNumber")}
                                     value={contactNumber}
                                     onChange={(e) => {

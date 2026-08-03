@@ -57,11 +57,17 @@ function collectMediaForChecklistIndex(
     genericFiles: Record<string, AuditEvidenceMedia[]>,
     clauseKey: string,
     itemIndex: number,
+    moduleId?: string,
 ): AuditEvidenceMedia[] {
     const fromLookup = collectAuditEvidenceMedia(clauseFiles, genericFiles, clauseKey, {
         checklistIndex: itemIndex,
+        moduleId,
     });
-    const direct = genericFiles[`clause_checklist_${itemIndex}`] || [];
+    const direct =
+        genericFiles[`clause_checklist_${itemIndex}`] ||
+        (moduleId
+            ? genericFiles[`clause_checklist_${moduleId}__${itemIndex}`] || []
+            : []);
     const merged = [...fromLookup];
     for (const file of direct) {
         if (!merged.some((item) => item.data === file.data)) {
@@ -100,6 +106,11 @@ export function buildChecklistEvidenceSegments(
 
     if (!contentList.length) return [];
 
+    const moduleId =
+        typeof auditData.activeModuleId === "string"
+            ? auditData.activeModuleId.trim()
+            : undefined;
+
     const segments: ClauseEvidenceSegment[] = [];
     const deferredBuckets: Record<string, ReportEvidenceSource[]> = {};
 
@@ -124,6 +135,7 @@ export function buildChecklistEvidenceSegments(
             genericFiles,
             clauseKey,
             itemIndex,
+            moduleId,
         );
         if (hasFinding || media.length > 0) {
             activeIndices.push(itemIndex);
@@ -139,6 +151,7 @@ export function buildChecklistEvidenceSegments(
             genericFiles,
             clauseKey,
             itemIndex,
+            moduleId,
         );
         const sources = mediaToReportSources(media, `Clause ${clauseKey}`);
         if (!sources.length) return;
