@@ -820,6 +820,7 @@ export function createUsersRouter({ authenticateToken, checkTrialExpiration }) {
         const {
             email,
             mobile,
+            phoneCountry,
             password,
             siteId,
             siteIds: rawSiteIds,
@@ -844,10 +845,11 @@ export function createUsersRouter({ authenticateToken, checkTrialExpiration }) {
             return res.status(400).json({ error: 'Please enter a valid email address' });
         }
 
-        const userMobile = sanitizePhoneField(mobile);
+        const phoneOpts = { countryCode: phoneCountry };
+        const userMobile = sanitizePhoneField(mobile, phoneOpts);
         if (!userMobile) {
             return res.status(400).json({
-                error: phoneFieldValidationError(mobile, {}, 'Mobile number') || 'Mobile number is required.',
+                error: phoneFieldValidationError(mobile, phoneOpts, 'Mobile number') || 'Mobile number is required.',
             });
         }
 
@@ -1032,7 +1034,7 @@ export function createUsersRouter({ authenticateToken, checkTrialExpiration }) {
     });
 
     router.post('/users', authenticateToken, async (req, res) => {
-        const { firstName, lastName, email, mobile, role, customRoleName, password, sendWelcomeEmail, siteId, siteIds: rawSiteIds } = req.body;
+        const { firstName, lastName, email, mobile, phoneCountry, role, customRoleName, password, sendWelcomeEmail, siteId, siteIds: rawSiteIds } = req.body;
         const creatorId = req.user.id;
         const [canManageUsers, canInvite] = await Promise.all([
             actorCanManageOrgUsers(creatorId),
@@ -1066,10 +1068,10 @@ export function createUsersRouter({ authenticateToken, checkTrialExpiration }) {
             return res.status(400).json({ error: 'Please enter a valid email address' });
         }
 
-        const userMobile = sanitizePhoneField(mobile);
+        const userMobile = sanitizePhoneField(mobile, { countryCode: phoneCountry });
         if (!userMobile) {
             return res.status(400).json({
-                error: phoneFieldValidationError(mobile, {}, 'Mobile number') || 'Mobile number is required.',
+                error: phoneFieldValidationError(mobile, { countryCode: phoneCountry }, 'Mobile number') || 'Mobile number is required.',
             });
         }
 
@@ -1264,7 +1266,7 @@ export function createUsersRouter({ authenticateToken, checkTrialExpiration }) {
         if (Number.isNaN(targetId)) {
             return res.status(400).json({ error: 'Invalid user id' });
         }
-        const { firstName, lastName, email, mobile, role, customRoleName, isActive, password, onboardingCompleted, emailChangeOtp, siteId, siteIds: rawSiteIds } = req.body;
+        const { firstName, lastName, email, mobile, phoneCountry, role, customRoleName, isActive, password, onboardingCompleted, emailChangeOtp, siteId, siteIds: rawSiteIds } = req.body;
         const actorId = Number(req.user.id);
         try {
             const [canAccess, canManageUsers, canManageAuditee, targetUser] = await Promise.all([
@@ -1410,10 +1412,11 @@ export function createUsersRouter({ authenticateToken, checkTrialExpiration }) {
                 if (raw === '') {
                     updateData.mobile = null;
                 } else {
-                    const m = sanitizePhoneField(mobile);
+                    const phoneOpts = { countryCode: phoneCountry };
+                    const m = sanitizePhoneField(mobile, phoneOpts);
                     if (!m) {
                         return res.status(400).json({
-                            error: phoneFieldValidationError(mobile, {}, 'Mobile number') || 'Mobile number is required.',
+                            error: phoneFieldValidationError(mobile, phoneOpts, 'Mobile number') || 'Mobile number is required.',
                         });
                     }
                     updateData.mobile = m;

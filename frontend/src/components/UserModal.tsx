@@ -260,11 +260,11 @@ export default function UserModal({
         const mobileDigits = normalizePhoneDigits(mobile, mobileCountry);
         if (mode === "create") {
             if (!isValidPhone(mobile, mobileCountry)) {
-                setError(getPhoneErrorMessage(mobileCountry));
+                setError(getPhoneErrorMessage(mobileCountry, mobile));
                 return;
             }
         } else if (mobile.trim() !== "" && !isValidPhone(mobile, mobileCountry)) {
-            setError(getPhoneErrorMessage(mobileCountry));
+            setError(getPhoneErrorMessage(mobileCountry, mobile));
             return;
         }
 
@@ -273,6 +273,7 @@ export default function UserModal({
             lastName,
             email,
             mobile: mode === "create" ? mobileDigits : mobile.trim() === "" ? "" : mobileDigits,
+            phoneCountry: mobileCountry,
             sendWelcomeEmail,
         };
 

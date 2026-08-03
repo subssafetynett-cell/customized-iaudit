@@ -380,7 +380,7 @@ const LOGIN_ALLOWED_BODY_KEYS = new Set(['email', 'password']);
 
 /** Signup-complete JSON must use only these keys (no client-supplied user id or token). */
 const SIGNUP_COMPLETE_ALLOWED_BODY_KEYS = new Set([
-    'email', 'otp', 'firstName', 'lastName', 'mobile', 'password',
+    'email', 'otp', 'firstName', 'lastName', 'mobile', 'phoneCountry', 'password',
 ]);
 
 const FORGOT_PASSWORD_ALLOWED_BODY_KEYS = new Set(['email']);

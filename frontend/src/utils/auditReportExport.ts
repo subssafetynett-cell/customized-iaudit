@@ -90,6 +90,13 @@ import {
     getSectionLabel as getExecuteSectionLabel,
     type AuditExecuteLayout,
 } from "@/lib/auditExecuteLayout";
+import {
+    addBuiltWithIauditPdfFooter,
+    IAUDIT_FOOTER_LOGO_SRC,
+    IAUDIT_FOOTER_RESERVE_MM,
+    loadImageAsset,
+    type PdfImageAsset,
+} from "@/utils/pdfBranding";
 
 const DEFAULT_DOC_NUMBER = "SH-CP-FM-11";
 const DEFAULT_REPORT_TITLE = "Audit Findings Report";
@@ -97,6 +104,8 @@ const DEFAULT_REVISION_NO = "03";
 const SZL_LOGO_PATH = "/szl-logo.png";
 const MARGIN = 14;
 const FONT = "times";
+/** Space reserved at page bottom for footer line + Built-with branding. */
+const PDF_FOOTER_RESERVE_MM = IAUDIT_FOOTER_RESERVE_MM;
 const PDF_HEADER_TOP_ROW_H = 10;
 const PDF_HEADER_LOGO_ROW_H = 32;
 const PDF_HEADER_BOTTOM_GAP = 8;
@@ -429,7 +438,7 @@ function computeSzlPdfHeaderContentStartY(form: FindingsReportForm, hasLogo: boo
 }
 
 function checkPage(doc: jsPDF, y: number, need: number, pageH: number): number {
-    if (y + need > pageH - 20) {
+    if (y + need > pageH - PDF_FOOTER_RESERVE_MM) {
         doc.addPage();
         const layout = activePdfPageLayout;
         if (layout) {
@@ -441,26 +450,50 @@ function checkPage(doc: jsPDF, y: number, need: number, pageH: number): number {
     return y;
 }
 
+function mergePdfTableMargins(
+    options: Parameters<typeof autoTable>[1] | undefined,
+    layoutTop?: number,
+): {
+    top?: number;
+    left?: number;
+    right?: number;
+    bottom: number;
+} {
+    const base =
+        options && typeof options.margin === "object" && options.margin !== null
+            ? (options.margin as {
+                  top?: number;
+                  left?: number;
+                  right?: number;
+                  bottom?: number;
+              })
+            : {};
+    return {
+        top: layoutTop ?? base.top,
+        left: base.left ?? MARGIN,
+        right: base.right ?? MARGIN,
+        // Always keep room for the footer so table borders are never clipped.
+        bottom: Math.max(Number(base.bottom) || 0, PDF_FOOTER_RESERVE_MM),
+    };
+}
+
 function pdfAutoTable(doc: jsPDF, options: Parameters<typeof autoTable>[1]) {
     const layout = activePdfPageLayout;
     if (!layout) {
-        autoTable(doc, options);
+        autoTable(doc, {
+            ...options,
+            margin: mergePdfTableMargins(options),
+            // Keep whole rows together when possible — avoids cut-off borders at page end.
+            rowPageBreak: options?.rowPageBreak ?? "avoid",
+        });
         return;
     }
 
-    const baseMargin =
-        options && typeof options.margin === "object" && options.margin !== null
-            ? options.margin
-            : {};
-
     autoTable(doc, {
         ...options,
-        margin: {
-            top: layout.contentStartY,
-            left: MARGIN,
-            right: MARGIN,
-            ...baseMargin,
-        },
+        margin: mergePdfTableMargins(options, layout.contentStartY),
+        rowPageBreak: options?.rowPageBreak ?? "avoid",
+        showHead: options?.showHead ?? "everyPage",
         didDrawPage: (data) => {
             drawSzlPdfHeader(doc, layout.logo, layout.form);
             if (typeof options.didDrawPage === "function") {
@@ -1167,7 +1200,7 @@ export async function generateAuditReportPdf(plan: Record<string, any>) {
 
     const contentTop = activePdfPageLayout.contentStartY;
     const blueSectionHeading = (title: string, startY: number) => {
-        if (startY > pageH - 40) {
+        if (startY > pageH - PDF_FOOTER_RESERVE_MM - 24) {
             doc.addPage();
             drawSzlPdfHeader(doc, logo, form);
             startY = contentTop;
@@ -1175,7 +1208,7 @@ export async function generateAuditReportPdf(plan: Record<string, any>) {
         return pdfBlueSectionHeading(doc, title, startY);
     };
     const sectionHeading = (title: string, startY: number) => {
-        if (startY > pageH - 40) {
+        if (startY > pageH - PDF_FOOTER_RESERVE_MM - 24) {
             doc.addPage();
             drawSzlPdfHeader(doc, logo, form);
             startY = contentTop;
@@ -1473,16 +1506,23 @@ export async function generateAuditReportPdf(plan: Record<string, any>) {
     // Now render 4. AUDIT SUMMARY and 5. ACKNOWLEDGEMENT OF FINDINGS (Signatures)
     y = renderSzlReportSummaryAndSignatures(doc, ctx, y);
 
+    const iauditFooterAsset: PdfImageAsset | null = await loadImageAsset(
+        IAUDIT_FOOTER_LOGO_SRC,
+        100,
+    );
     const totalPages = doc.getNumberOfPages();
     for (let i = 1; i <= totalPages; i++) {
         doc.setPage(i);
         drawSzlPdfHeader(doc, logo, form);
+        addBuiltWithIauditPdfFooter(doc, iauditFooterAsset, MARGIN);
         doc.setFont(FONT, "normal");
-        doc.setFontSize(8);
-        doc.setTextColor(120, 120, 120);
-        doc.line(MARGIN, pageH - 12, pageW - MARGIN, pageH - 12);
-        doc.text(`${ctx.docNumber} — ${ctx.reportTitle}`, MARGIN, pageH - 7);
-        doc.text(`Page ${i} of ${totalPages}`, pageW - MARGIN, pageH - 7, { align: "right" });
+        doc.setFontSize(7);
+        doc.setTextColor(100, 100, 100);
+        doc.text(
+            `${ctx.docNumber} — Page ${i} of ${totalPages}`,
+            MARGIN,
+            pageH - 8,
+        );
     }
     } finally {
         activePdfPageLayout = null;

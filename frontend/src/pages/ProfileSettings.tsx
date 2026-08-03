@@ -88,7 +88,7 @@ export default function ProfileSettings() {
         if (formData.mobile.trim() !== "" && !isValidPhone(formData.mobile, mobileCountry)) {
             toast({
                 title: "Invalid phone number",
-                description: getPhoneErrorMessage(mobileCountry),
+                description: getPhoneErrorMessage(mobileCountry, formData.mobile),
                 variant: "destructive",
             });
             setIsLoading(false);
@@ -130,7 +130,8 @@ export default function ProfileSettings() {
                     firstName,
                     lastName,
                     email: formData.email,
-                    mobile: mobileDigits.length === 10 ? mobileDigits : "",
+                    mobile: formData.mobile.trim() === "" ? "" : mobileDigits,
+                    phoneCountry: mobileCountry,
                     role: user.role, // Preserve existing role
                     isActive: user.isActive // Preserve existing status
                 }),

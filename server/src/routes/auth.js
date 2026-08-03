@@ -50,7 +50,7 @@ async function handleVerifyOtpAndSignup(req, res) {
         return res.status(400).json({ error: badKeys });
     }
 
-    let { email, otp, firstName, lastName, mobile, password } = req.body;
+    let { email, otp, firstName, lastName, mobile, phoneCountry, password } = req.body;
     console.log(`[AUTH] Signup attempt for ${email}, password length: ${password?.length}`);
 
     if (!email || !otp || typeof email !== 'string') {
@@ -74,10 +74,11 @@ async function handleVerifyOtpAndSignup(req, res) {
     const fn = sanitizePersonName(firstName, PERSON_NAME_MAX);
     const ln = sanitizePersonName(lastName, PERSON_NAME_MAX);
 
-    const mobileDigits = sanitizePhoneField(mobile);
+    const phoneOpts = { countryCode: phoneCountry };
+    const mobileDigits = sanitizePhoneField(mobile, phoneOpts);
     if (!mobileDigits) {
         return res.status(400).json({
-            error: phoneFieldValidationError(mobile, {}, 'Mobile number') || 'Mobile number is required.',
+            error: phoneFieldValidationError(mobile, phoneOpts, 'Mobile number') || 'Mobile number is required.',
         });
     }
 

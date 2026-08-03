@@ -514,7 +514,7 @@ export default function Auth() {
         if (!signupPhone.trim()) {
             errors.phone = "Phone number is required";
         } else if (!isValidPhone(signupPhone, signupPhoneCountry)) {
-            errors.phone = getPhoneErrorMessage(signupPhoneCountry);
+            errors.phone = getPhoneErrorMessage(signupPhoneCountry, signupPhone);
         }
         if (!signupPassword) {
             errors.password = "Password is required";
@@ -621,6 +621,7 @@ export default function Auth() {
                     firstName: signupFirstName,
                     lastName: signupLastName,
                     mobile: normalizePhoneDigits(signupPhone, signupPhoneCountry),
+                    phoneCountry: signupPhoneCountry,
                     password: signupPassword,
                 })
             });

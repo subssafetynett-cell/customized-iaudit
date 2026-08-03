@@ -20,7 +20,7 @@ import {
     getPhonePlaceholder,
     PHONE_COUNTRIES,
 } from "@/lib/phoneCountries";
-import { normalizePhoneDigits } from "@/lib/validation";
+import { normalizePhoneDigits } from "@/lib/phoneValidation";
 
 export interface PhoneInputWithCountryCodeProps {
     /** ISO-style country code (e.g. IN, US). */
@@ -56,6 +56,16 @@ export function PhoneInputWithCountryCode({
     const dial = getDialForCountryCode(countryCode);
     const placeholder = getPhonePlaceholder(countryCode);
     const { max: phoneMaxLength } = getPhoneLengthForCountry(countryCode);
+
+    const handleCountryChange = (nextCode: string) => {
+        onCountryCodeChange?.(nextCode);
+        // Re-clamp national digits to the new country's length rules.
+        const nextDigits = normalizePhoneDigits(value, nextCode);
+        if (nextDigits !== value) {
+            onChange(nextDigits);
+        }
+        setOpen(false);
+    };
 
     return (
         <div className={cn("flex gap-2", className)}>
@@ -97,10 +107,7 @@ export function PhoneInputWithCountryCode({
                                     <CommandItem
                                         key={country.code}
                                         value={`${country.name} ${country.dial} ${country.code}`}
-                                        onSelect={() => {
-                                            onCountryCodeChange?.(country.code);
-                                            setOpen(false);
-                                        }}
+                                        onSelect={() => handleCountryChange(country.code)}
                                         className="cursor-pointer"
                                     >
                                         <span className="mr-2 text-lg leading-none" aria-hidden>

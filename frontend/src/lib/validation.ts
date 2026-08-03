@@ -2,7 +2,17 @@
  * Common validation utilities for the iAudit application.
  */
 
-import { getPhoneLengthForCountry, PHONE_MAX_DIGITS } from "@/lib/phoneCountries";
+export {
+    PHONE_MAX_DIGITS,
+    normalizePhoneDigits,
+    isValidPhone,
+    getPhoneErrorMessage,
+    getPhoneLengthForCountry,
+    getPhoneInputPlaceholder,
+    toE164,
+} from "@/lib/phoneValidation";
+
+import { normalizePhoneDigits as _normalizePhoneDigits, isValidPhone as _isValidPhone } from "@/lib/phoneValidation";
 
 /** Minimum length for new passwords (account creation & updates). */
 export const PASSWORD_MIN_LENGTH = 8;
@@ -21,41 +31,20 @@ export const validatePassword = (password: string): boolean => {
 export const PASSWORD_ERROR_MESSAGE = `Password must be at least ${PASSWORD_MIN_LENGTH} characters and include at least one uppercase letter, one number, and one special character.`;
 
 /** @deprecated Use PHONE_MAX_DIGITS — kept for older imports. */
-export const PHONE_DIGITS_LENGTH = PHONE_MAX_DIGITS;
-
-export function normalizePhoneDigits(value: string, countryCode?: string): string {
-    const { max } = getPhoneLengthForCountry(countryCode);
-    return String(value || "").replace(/\D/g, "").slice(0, max);
-}
-
-export function isValidPhone(value: string, countryCode?: string): boolean {
-    const digits = String(value || "").replace(/\D/g, "");
-    if (!digits) return false;
-    const { min, max } = getPhoneLengthForCountry(countryCode);
-    return digits.length >= min && digits.length <= max;
-}
-
-export function getPhoneErrorMessage(countryCode?: string): string {
-    const { min, max } = getPhoneLengthForCountry(countryCode);
-    if (min === max) {
-        return `Phone number must be exactly ${min} digits.`;
-    }
-    return `Phone number must be between ${min} and ${max} digits.`;
-}
+export const PHONE_DIGITS_LENGTH = 15;
 
 /** @deprecated Use normalizePhoneDigits */
 export function normalizePhone10Digits(value: string, countryCode?: string): string {
-    return normalizePhoneDigits(value, countryCode);
+    return _normalizePhoneDigits(value, countryCode);
 }
 
 /** @deprecated Use isValidPhone */
 export function isTenDigitPhone(value: string, countryCode?: string): boolean {
-    return isValidPhone(value, countryCode);
+    return _isValidPhone(value, countryCode);
 }
 
-/** @deprecated Use getPhoneErrorMessage */
-export const PHONE_10_ERROR_MESSAGE = getPhoneErrorMessage();
-
+/** @deprecated Prefer getPhoneErrorMessage(countryCode, value) */
+export const PHONE_10_ERROR_MESSAGE = "Enter a valid phone number for the selected country.";
 /** Person first/last name (matches server PERSON_NAME_MAX). PSZL-020: no dots/links. */
 export const PERSON_NAME_MAX = 100;
 

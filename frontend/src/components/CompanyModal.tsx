@@ -6,7 +6,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Company } from "@/types/company";
 import { Building2, Phone, MapPin, Info, Pencil } from "lucide-react";
-import { getPhoneLengthForCountry } from "@/lib/phoneCountries";
+import { getPhoneLengthForCountry, getPhonePlaceholder } from "@/lib/phoneCountries";
 import {
   capitalizeFirstLetter,
   getPhoneErrorMessage,
@@ -214,7 +214,7 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
     }
     if (!industry) errors.industry = "Industry is required";
     if (!contactNumber.trim()) errors.contactNumber = "Contact number is required";
-    else if (!isValidPhone(contactNumber, countryIso)) errors.contactNumber = getPhoneErrorMessage(countryIso);
+    else if (!isValidPhone(contactNumber, countryIso)) errors.contactNumber = getPhoneErrorMessage(countryIso, contactNumber);
     if (!trimmedAddress) errors.streetAddress = "Street address is required";
     else if (!isWithinMaxLength(trimmedAddress, STREET_ADDRESS_MAX)) {
       errors.streetAddress = STREET_ADDRESS_ERROR_MESSAGE;
@@ -393,7 +393,7 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
                   type="tel"
                   inputMode="numeric"
                   maxLength={contactPhoneMaxLength}
-                  placeholder="Phone number"
+                  placeholder={getPhonePlaceholder(countryIso)}
                   className={`pl-9 ${fieldErrors.contactNumber ? "border-red-500 focus:ring-red-500" : ""}`}
                   value={contactNumber}
                   onChange={(e) => {

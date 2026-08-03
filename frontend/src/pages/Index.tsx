@@ -49,7 +49,7 @@ import {
 import {
   getAuditAssessmentProgress,
   getAuditPlanStatusLabel,
-  isAuditPlanCompleted,
+  isAuditLifecycleCompleted,
 } from "@/lib/auditCompletion";
 import { getMergedPlanFindings } from "@/lib/auditFindings";
 
@@ -379,7 +379,7 @@ const Index = () => {
 
   const upcomingAudits = useMemo(() =>
     [...auditPlans]
-      .filter((p) => !isAuditPlanCompleted(p))
+      .filter((p) => !isAuditLifecycleCompleted(p))
       .sort((a, b) => {
         const aTime = a.date ? new Date(a.date).getTime() : Number.MAX_SAFE_INTEGER;
         const bTime = b.date ? new Date(b.date).getTime() : Number.MAX_SAFE_INTEGER;
@@ -392,7 +392,7 @@ const Index = () => {
 
   const completedAudits = useMemo(() =>
     [...auditPlans]
-      .filter((p) => isAuditPlanCompleted(p))
+      .filter((p) => isAuditLifecycleCompleted(p))
       .sort((a, b) => {
         const parseCompletedAt = (plan: (typeof auditPlans)[0]) => {
           try {
@@ -473,12 +473,12 @@ const Index = () => {
   const totalScheduledCount = useMemo(
     () =>
       auditPlans.filter(
-        (p) => !isAuditPlanCompleted(p) && getProgress(p) === 0,
+        (p) => !isAuditLifecycleCompleted(p) && getProgress(p) === 0,
       ).length,
     [auditPlans],
   );
   const totalCompletedCount = useMemo(
-    () => auditPlans.filter((p) => isAuditPlanCompleted(p)).length,
+    () => auditPlans.filter((p) => isAuditLifecycleCompleted(p)).length,
     [auditPlans],
   );
 
@@ -499,7 +499,7 @@ const Index = () => {
         return {
           month: monthName,
           scheduled: auditsInMonth.length,
-          completed: auditsInMonth.filter((p) => isAuditPlanCompleted(p)).length,
+          completed: auditsInMonth.filter((p) => isAuditLifecycleCompleted(p)).length,
         };
       }),
     [auditPlans, currentYear],
@@ -709,7 +709,7 @@ const Index = () => {
               <div>
                 <h2 className="text-lg font-bold text-[#111827]">Completed Audits</h2>
                 <p className="text-xs text-[#9CA3AF]">
-                  Audits where all clauses are assessed and findings are closed
+                  Audits where all checklist items have been assessed
                 </p>
               </div>
             </div>
@@ -751,7 +751,7 @@ const Index = () => {
                     <ClipboardCheck className="w-6 h-6" />
                   </div>
                   <p className="text-xs font-medium text-slate-400">
-                    Completed audits appear here when all clauses are assessed and findings are closed
+                    Completed audits appear here when all checklist items have been assessed
                   </p>
                 </div>
               )}

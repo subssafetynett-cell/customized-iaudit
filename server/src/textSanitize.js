@@ -1,9 +1,9 @@
 /** Escape for safe HTML interpolation (email templates, etc.). */
 import {
-    getPhoneLengthForCountry,
     PHONE_MAX_DIGITS,
     phoneLengthErrorMessage,
-} from './phoneLengthRules.js';
+    isValidPhoneForCountry,
+} from './phoneValidation.js';
 import { resolveCountryIsoFromName } from './worldCountries.js';
 
 export function escapeHtml(value) {
@@ -163,8 +163,7 @@ export function sanitizePhoneField(value, options = {}) {
     const digits = String(value).replace(/\D/g, '');
     if (digits.length === 0) return '';
     const countryIso = resolvePhoneCountryIso(options);
-    const { min, max } = getPhoneLengthForCountry(countryIso);
-    if (digits.length < min || digits.length > max) return null;
+    if (!isValidPhoneForCountry(digits, countryIso)) return null;
     return digits;
 }
 
@@ -173,9 +172,8 @@ export function phoneFieldValidationError(value, options = {}, fieldLabel = 'Pho
     const digits = String(value).replace(/\D/g, '');
     if (digits.length === 0) return `${fieldLabel} is required.`;
     const countryIso = resolvePhoneCountryIso(options);
-    const { min, max } = getPhoneLengthForCountry(countryIso);
-    if (digits.length < min || digits.length > max) {
-        return phoneLengthErrorMessage(countryIso, fieldLabel);
+    if (!isValidPhoneForCountry(digits, countryIso)) {
+        return phoneLengthErrorMessage(countryIso, fieldLabel, digits);
     }
     return null;
 }

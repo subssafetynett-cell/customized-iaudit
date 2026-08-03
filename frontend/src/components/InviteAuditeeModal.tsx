@@ -89,7 +89,7 @@ export function InviteAuditeeModal({
             return;
         }
         if (!isValidPhone(mobile, mobileCountry)) {
-            setError(getPhoneErrorMessage(mobileCountry));
+            setError(getPhoneErrorMessage(mobileCountry, mobile));
             return;
         }
         if (password !== confirmPassword) {
@@ -109,6 +109,7 @@ export function InviteAuditeeModal({
                     email: trimmedEmail,
                     password,
                     mobile: normalizePhoneDigits(mobile, mobileCountry),
+                    phoneCountry: mobileCountry,
                     siteIds: siteIds.map((id) => Number(id)),
                     sendWelcomeEmail: true,
                 }),
