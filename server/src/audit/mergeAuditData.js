@@ -39,21 +39,29 @@ function countGlobalInfo(info) {
 
 function countEvidenceKeys(genericFiles) {
     if (!genericFiles || typeof genericFiles !== 'object') return 0;
-    let n = 0;
+    // Performance: don't sum list lengths (each list may contain many photo objects).
+    // We only care whether evidence exists for a key, not how many items.
+    let keysWithEvidence = 0;
     for (const list of Object.values(genericFiles)) {
-        if (Array.isArray(list) && list.length > 0) n += list.length;
+        if (Array.isArray(list) && list.length > 0) keysWithEvidence += 1;
     }
-    return n;
+    return keysWithEvidence;
 }
 
 export function countModuleStoreAnswers(entry) {
     if (!entry || typeof entry !== 'object') return 0;
-    return (
-        countChecklistRowAnswers(entry.checklistData) +
-        countSectionAnswers(entry.sectionData) +
-        countGlobalInfo(entry.auditGlobalInfo) +
-        countEvidenceKeys(entry.genericFiles)
-    );
+    // Cap the score so we can bail out early on huge payloads.
+    // This keeps merge decisions fast and avoids gateway timeouts.
+    const MAX_SCORE = 2500;
+    let score = 0;
+    score += countChecklistRowAnswers(entry.checklistData);
+    if (score >= MAX_SCORE) return MAX_SCORE;
+    score += countSectionAnswers(entry.sectionData);
+    if (score >= MAX_SCORE) return MAX_SCORE;
+    score += countGlobalInfo(entry.auditGlobalInfo);
+    if (score >= MAX_SCORE) return MAX_SCORE;
+    score += countEvidenceKeys(entry.genericFiles);
+    return score >= MAX_SCORE ? MAX_SCORE : score;
 }
 
 export function countAuditDataAnswers(auditData) {
