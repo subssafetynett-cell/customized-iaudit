@@ -430,8 +430,7 @@ const Index = () => {
       { name: "Minor N/C", value: totalMinor, color: "#F97316", percentage: totalFindings > 0 ? `${Math.round((totalMinor / totalFindings) * 100)}%` : "0%" },
       { name: "Major N/C", value: totalMajor, color: "#E11D48", percentage: totalFindings > 0 ? `${Math.round((totalMajor / totalFindings) * 100)}%` : "0%" },
     ];
-    const nonZeroDist = dist.filter((item) => item.value > 0);
-    return { findingDistribution: nonZeroDist, findingPieData: nonZeroDist, totalFindings };
+    return { findingDistribution: dist, findingPieData: dist.filter((item) => item.value > 0), totalFindings };
   }, [allFindings]);
 
   const getProgress = (plan: { id: number; auditData?: unknown; progress?: number }) =>
@@ -817,7 +816,7 @@ const Index = () => {
             <div className="flex items-center justify-between mb-6">
               <div>
                 <h2 className="text-lg font-bold text-[#111827]">Finding Distribution</h2>
-                <p className="text-xs text-[#9CA3AF]">OFI, Minor and Major N/C across all audits</p>
+                <p className="text-xs text-[#9CA3AF]">OFI and Minor N/C across all audits</p>
               </div>
               <Button
                 variant="ghost"

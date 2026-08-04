@@ -147,7 +147,7 @@ export function sanitizeShortLabel(value, maxLen = 120) {
     return sanitizePlainText(oneLine, maxLen);
 }
 
-/** National phone digits; strips formatting. Empty optional input → `''`. Invalid length → `null` (reject). */
+/** National phone digits; strips formatting. Empty optional input → `''`. */
 export const PHONE_DIGITS_LENGTH = PHONE_MAX_DIGITS;
 
 function resolvePhoneCountryIso(options = {}) {
@@ -162,8 +162,6 @@ export function sanitizePhoneField(value, options = {}) {
     if (value === null) return null;
     const digits = String(value).replace(/\D/g, '');
     if (digits.length === 0) return '';
-    const countryIso = resolvePhoneCountryIso(options);
-    if (!isValidPhoneForCountry(digits, countryIso)) return null;
     return digits;
 }
 
@@ -171,10 +169,6 @@ export function phoneFieldValidationError(value, options = {}, fieldLabel = 'Pho
     if (value === undefined || value === null) return null;
     const digits = String(value).replace(/\D/g, '');
     if (digits.length === 0) return `${fieldLabel} is required.`;
-    const countryIso = resolvePhoneCountryIso(options);
-    if (!isValidPhoneForCountry(digits, countryIso)) {
-        return phoneLengthErrorMessage(countryIso, fieldLabel, digits);
-    }
     return null;
 }
 

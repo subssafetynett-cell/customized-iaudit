@@ -11,7 +11,7 @@ import { UserPlus, Mail, Lock, Shield, Eye, EyeOff, Edit2 } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { PhoneInputWithCountryCode } from "@/components/PhoneInputWithCountryCode";
 import { DEFAULT_PHONE_COUNTRY_CODE } from "@/lib/phoneCountries";
-import { PASSWORD_REGEX, PASSWORD_ERROR_MESSAGE, capitalizeFirstLetter, getPhoneErrorMessage, isValidPhone, normalizePhoneDigits, normalizePersonNameInput, isValidPersonName, PERSON_NAME_ERROR_MESSAGE } from "@/lib/validation";
+import { PASSWORD_REGEX, PASSWORD_ERROR_MESSAGE, capitalizeFirstLetter, normalizePersonNameInput, isValidPersonName, PERSON_NAME_ERROR_MESSAGE } from "@/lib/validation";
 import { formatUserRoleLabel, isAuditeeRole, USERS_PAGE_ROLE_OPTIONS } from "@/lib/userRoles";
 import {
     AuditeeSiteMultiSelect,
@@ -257,14 +257,9 @@ export default function UserModal({
             }
         }
 
-        const mobileDigits = normalizePhoneDigits(mobile, mobileCountry);
-        if (mode === "create") {
-            if (!isValidPhone(mobile, mobileCountry)) {
-                setError(getPhoneErrorMessage(mobileCountry, mobile));
-                return;
-            }
-        } else if (mobile.trim() !== "" && !isValidPhone(mobile, mobileCountry)) {
-            setError(getPhoneErrorMessage(mobileCountry, mobile));
+        const mobileDigits = String(mobile || "").replace(/\D/g, "");
+        if (mode === "create" && !mobileDigits) {
+            setError("Mobile number is required");
             return;
         }
 
@@ -479,6 +474,7 @@ export default function UserModal({
                                 onCountryCodeChange={setMobileCountry}
                                 value={mobile}
                                 onChange={setMobile}
+                                unlimited
                                 disabled={isViewMode}
                                 inputClassName="bg-background border-input focus:ring-ring"
                                 selectClassName="h-10 bg-background border-input focus:ring-ring"
