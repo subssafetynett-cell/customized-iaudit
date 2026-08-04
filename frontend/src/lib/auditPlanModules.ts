@@ -3,6 +3,7 @@ import {
     findAuditTemplates,
     getAuditPlanTemplateLabel,
     parseAuditPlanTemplateIds,
+    resolveAuditTemplateId,
     type AuditTemplate,
 } from "@/data/auditTemplates";
 import { isQfsKoreSectionHeader } from "@/lib/qfsKoreChecklistUi";
@@ -183,7 +184,268 @@ export type ModuleStoreEntry = {
     genericFiles?: Record<string, AuditEvidenceMedia[]>;
     /** Per-module findings report (includes auditee/auditor signatures). */
     findingsReportForm?: unknown;
+    /** Per-module header fields (auditee name, audit done by, dept, etc.). */
+    auditGlobalInfo?: Record<string, string>;
 };
+
+/** True when a module store entry has checklist / section / NC header answers. */
+export function moduleStoreEntryHasAnswers(
+    entry: ModuleStoreEntry | null | undefined,
+): boolean {
+    if (!entry) return false;
+    const checklist = entry.checklistData;
+    if (checklist && typeof checklist === "object") {
+        for (const row of Object.values(checklist)) {
+            if (row && typeof row === "object") {
+                const findings = (row as { findings?: unknown }).findings;
+                if (typeof findings === "string" && findings.trim()) return true;
+                const details = (row as { details?: unknown }).details;
+                if (typeof details === "string" && details.trim()) return true;
+            }
+        }
+    }
+    const sections = entry.sectionData;
+    if (sections && typeof sections === "object") {
+        if (Object.values(sections).some((v) => String(v ?? "").trim())) return true;
+    }
+    const info = entry.auditGlobalInfo;
+    if (info && typeof info === "object") {
+        if (
+            ["auditeeName", "auditDoneBy", "auditeeDept"].some(
+                (k) => String((info as Record<string, string>)[k] ?? "").trim(),
+            )
+        ) {
+            return true;
+        }
+    }
+    const files = entry.genericFiles;
+    if (files && typeof files === "object" && Object.keys(files).length > 0) {
+        return true;
+    }
+    return false;
+}
+
+/** Count answered checklist findings in a module entry (for richer-data comparisons). */
+export function countModuleStoreAnswers(
+    entry: ModuleStoreEntry | null | undefined,
+): number {
+    if (!entry || typeof entry !== "object") return 0;
+    let n = 0;
+    if (entry.checklistData && typeof entry.checklistData === "object") {
+        for (const row of Object.values(entry.checklistData)) {
+            if (!row || typeof row !== "object") continue;
+            const r = row as Record<string, unknown>;
+            if (typeof r.findings === "string" && r.findings.trim()) n += 1;
+            if (typeof r.details === "string" && r.details.trim()) n += 1;
+            for (const k of [
+                "ofi",
+                "description",
+                "correction",
+                "rootCause",
+                "correctiveAction",
+            ] as const) {
+                if (typeof r[k] === "string" && r[k].trim()) n += 1;
+            }
+        }
+    }
+    if (entry.sectionData && typeof entry.sectionData === "object") {
+        for (const v of Object.values(entry.sectionData)) {
+            if (String(v ?? "").trim()) n += 1;
+        }
+    }
+    const info = entry.auditGlobalInfo;
+    if (info && typeof info === "object") {
+        for (const k of ["auditeeName", "auditDoneBy", "auditeeDept"] as const) {
+            if (String(info[k] ?? "").trim()) n += 1;
+        }
+    }
+    if (entry.genericFiles && typeof entry.genericFiles === "object") {
+        for (const list of Object.values(entry.genericFiles)) {
+            if (Array.isArray(list) && list.length > 0) n += list.length;
+        }
+    }
+    const form = entry.findingsReportForm;
+    if (form && typeof form === "object") {
+        for (const v of Object.values(form as Record<string, unknown>)) {
+            if (typeof v === "string" && v.trim()) n += 1;
+        }
+    }
+    return n;
+}
+
+/** Total answered items across a full auditData blob (all modules + top-level). */
+export function countAuditDataAnswers(auditData: Record<string, unknown> | null | undefined): number {
+    if (!auditData || typeof auditData !== "object") return 0;
+    let n = 0;
+    const store =
+        auditData.moduleDataByTemplateId &&
+        typeof auditData.moduleDataByTemplateId === "object"
+            ? (auditData.moduleDataByTemplateId as Record<string, ModuleStoreEntry>)
+            : {};
+    const counted = new Set<string>();
+    for (const [key, entry] of Object.entries(store)) {
+        const resolved = resolveAuditTemplateId(key) || key;
+        if (counted.has(resolved)) continue;
+        counted.add(resolved);
+        n += countModuleStoreAnswers(entry);
+    }
+    // Top-level checklist answers (legacy / active blob).
+    n += countModuleStoreAnswers({
+        checklistData: auditData.checklistData as ModuleStoreEntry["checklistData"],
+        sectionData: auditData.sectionData as ModuleStoreEntry["sectionData"],
+        auditGlobalInfo: auditData.auditGlobalInfo as ModuleStoreEntry["auditGlobalInfo"],
+    });
+    const clauseData = auditData.clauseData;
+    if (clauseData && typeof clauseData === "object") {
+        for (const row of Object.values(clauseData as Record<string, { findingType?: string }>)) {
+            if (typeof row?.findingType === "string" && row.findingType.trim()) n += 1;
+        }
+    }
+    return n;
+}
+
+/**
+ * Merge two full auditData blobs, keeping every module's richest answers.
+ * Used to prevent autosave/flush from wiping previously saved checklist work.
+ */
+export function mergeAuditDataPreferRicher(
+    baseline: Record<string, unknown> | null | undefined,
+    incoming: Record<string, unknown> | null | undefined,
+): Record<string, unknown> {
+    if (!baseline || typeof baseline !== "object") return { ...(incoming || {}) };
+    if (!incoming || typeof incoming !== "object") return { ...baseline };
+
+    const baseStore =
+        baseline.moduleDataByTemplateId &&
+        typeof baseline.moduleDataByTemplateId === "object"
+            ? (baseline.moduleDataByTemplateId as Record<string, ModuleStoreEntry>)
+            : {};
+    const inStore =
+        incoming.moduleDataByTemplateId &&
+        typeof incoming.moduleDataByTemplateId === "object"
+            ? (incoming.moduleDataByTemplateId as Record<string, ModuleStoreEntry>)
+            : {};
+
+    const mergedStore: Record<string, ModuleStoreEntry> = { ...baseStore };
+    for (const [key, entry] of Object.entries(inStore)) {
+        const existing = lookupModuleStoreEntry(mergedStore, key);
+        const merged = mergeModuleStoreEntries(existing, entry);
+        // Write under canonical key when possible.
+        const resolved = resolveAuditTemplateId(key) || key;
+        mergedStore[resolved] = merged;
+        if (key !== resolved && mergedStore[key]) {
+            // Keep alias key in sync too.
+            mergedStore[key] = merged;
+        }
+    }
+
+    const incomingTop = countModuleStoreAnswers({
+        checklistData: incoming.checklistData as ModuleStoreEntry["checklistData"],
+        sectionData: incoming.sectionData as ModuleStoreEntry["sectionData"],
+        auditGlobalInfo: incoming.auditGlobalInfo as ModuleStoreEntry["auditGlobalInfo"],
+    });
+    const baselineTop = countModuleStoreAnswers({
+        checklistData: baseline.checklistData as ModuleStoreEntry["checklistData"],
+        sectionData: baseline.sectionData as ModuleStoreEntry["sectionData"],
+        auditGlobalInfo: baseline.auditGlobalInfo as ModuleStoreEntry["auditGlobalInfo"],
+    });
+    const useIncomingTop = incomingTop >= baselineTop;
+
+    return {
+        ...baseline,
+        ...incoming,
+        checklistData: useIncomingTop
+            ? incoming.checklistData ?? baseline.checklistData
+            : baseline.checklistData ?? incoming.checklistData,
+        sectionData: useIncomingTop
+            ? incoming.sectionData ?? baseline.sectionData
+            : baseline.sectionData ?? incoming.sectionData,
+        auditGlobalInfo: useIncomingTop
+            ? incoming.auditGlobalInfo ?? baseline.auditGlobalInfo
+            : baseline.auditGlobalInfo ?? incoming.auditGlobalInfo,
+        editableChecklist:
+            Array.isArray(incoming.editableChecklist) &&
+            (incoming.editableChecklist as unknown[]).length > 0
+                ? incoming.editableChecklist
+                : baseline.editableChecklist ?? incoming.editableChecklist,
+        findingsReportForm:
+            incoming.findingsReportForm ?? baseline.findingsReportForm,
+        clauseData: incoming.clauseData ?? baseline.clauseData,
+        genericFiles: (() => {
+            const a =
+                baseline.genericFiles && typeof baseline.genericFiles === "object"
+                    ? (baseline.genericFiles as Record<string, unknown>)
+                    : {};
+            const b =
+                incoming.genericFiles && typeof incoming.genericFiles === "object"
+                    ? (incoming.genericFiles as Record<string, unknown>)
+                    : {};
+            return { ...a, ...b };
+        })(),
+        moduleDataByTemplateId: mergedStore,
+        activeModuleId: incoming.activeModuleId ?? baseline.activeModuleId,
+    };
+}
+
+/**
+ * Find a module's store entry even when keys used aliases vs canonical ids.
+ */
+export function lookupModuleStoreEntry(
+    store: Record<string, ModuleStoreEntry> | null | undefined,
+    moduleId: string,
+): ModuleStoreEntry | null {
+    if (!store || !moduleId) return null;
+    if (store[moduleId]) return store[moduleId];
+    const resolved = resolveAuditTemplateId(moduleId) || moduleId;
+    if (store[resolved]) return store[resolved];
+    for (const [key, entry] of Object.entries(store)) {
+        if ((resolveAuditTemplateId(key) || key) === resolved) return entry;
+    }
+    return null;
+}
+
+/** Prefer non-empty fields when merging two module snapshots (never wipe answers with {}). */
+export function mergeModuleStoreEntries(
+    existing: ModuleStoreEntry | null | undefined,
+    incoming: ModuleStoreEntry | null | undefined,
+): ModuleStoreEntry {
+    if (!existing) return { ...(incoming || {}) };
+    if (!incoming) return { ...existing };
+    const existingCount = countModuleStoreAnswers(existing);
+    const incomingCount = countModuleStoreAnswers(incoming);
+    const checklistData =
+        incomingCount > existingCount
+            ? incoming.checklistData ?? existing.checklistData
+            : incomingCount < existingCount
+              ? existing.checklistData ?? incoming.checklistData
+              : incoming.checklistData ?? existing.checklistData;
+    return {
+        checklistData,
+        editableChecklist:
+            (Array.isArray(incoming.editableChecklist) &&
+            incoming.editableChecklist.length > 0
+                ? incoming.editableChecklist
+                : existing.editableChecklist) ?? incoming.editableChecklist,
+        extraChecklistItems:
+            incoming.extraChecklistItems ?? existing.extraChecklistItems,
+        sectionData:
+            incoming.sectionData && Object.keys(incoming.sectionData).length > 0
+                ? incoming.sectionData
+                : existing.sectionData ?? incoming.sectionData,
+        genericFiles:
+            Object.keys(incoming.genericFiles || {}).length >=
+            Object.keys(existing.genericFiles || {}).length
+                ? incoming.genericFiles ?? existing.genericFiles
+                : existing.genericFiles ?? incoming.genericFiles,
+        findingsReportForm:
+            incoming.findingsReportForm ?? existing.findingsReportForm,
+        auditGlobalInfo:
+            incoming.auditGlobalInfo &&
+            Object.values(incoming.auditGlobalInfo).some((v) => String(v || "").trim())
+                ? incoming.auditGlobalInfo
+                : existing.auditGlobalInfo ?? incoming.auditGlobalInfo,
+    };
+}
 
 /** Build a per-module store entry from top-level auditData fields. */
 export function moduleStoreEntryFromTopLevel(
@@ -206,6 +468,7 @@ export function moduleStoreEntryFromTopLevel(
               )
             : (topFiles as ModuleStoreEntry["genericFiles"]),
         findingsReportForm: auditData.findingsReportForm,
+        auditGlobalInfo: auditData.auditGlobalInfo as Record<string, string> | undefined,
     };
 }
 
@@ -230,10 +493,15 @@ export function ensureModuleStorePreservesTopLevel(
         typeof auditData.activeModuleId === "string"
             ? auditData.activeModuleId.trim()
             : "";
+    const previousResolved =
+        (previousActive && (resolveAuditTemplateId(previousActive) || previousActive)) ||
+        "";
     const ownerId =
-        (previousActive && planTemplateIds.includes(previousActive)
-            ? previousActive
-            : "") || "";
+        (previousResolved && planTemplateIds.includes(previousResolved)
+            ? previousResolved
+            : previousActive && planTemplateIds.includes(previousActive)
+              ? previousActive
+              : "") || "";
 
     const hasTopLevelBlob = Boolean(
         auditData.checklistData ||
@@ -241,6 +509,7 @@ export function ensureModuleStorePreservesTopLevel(
             auditData.sectionData ||
             auditData.extraChecklistItems ||
             auditData.findingsReportForm ||
+            auditData.auditGlobalInfo ||
             (auditData.genericFiles &&
                 typeof auditData.genericFiles === "object" &&
                 Object.keys(auditData.genericFiles as object).length > 0),
@@ -252,6 +521,7 @@ export function ensureModuleStorePreservesTopLevel(
             !existing ||
             (!existing.checklistData &&
                 !existing.findingsReportForm &&
+                !existing.auditGlobalInfo &&
                 !existing.genericFiles &&
                 !existing.sectionData);
         if (existingEmpty) {
@@ -273,6 +543,9 @@ export function ensureModuleStorePreservesTopLevel(
                     moduleStoreEntryFromTopLevel(auditData, ownerId).genericFiles,
                 findingsReportForm:
                     existing.findingsReportForm ?? auditData.findingsReportForm,
+                auditGlobalInfo:
+                    existing.auditGlobalInfo ??
+                    (auditData.auditGlobalInfo as Record<string, string> | undefined),
             };
         }
     }
@@ -290,9 +563,20 @@ function getModuleStoreEntry(
         typeof auditData.moduleDataByTemplateId === "object"
             ? (auditData.moduleDataByTemplateId as Record<string, ModuleStoreEntry>)
             : null;
-    if (store?.[moduleId]) return store[moduleId];
+    const fromStore = lookupModuleStoreEntry(store, moduleId);
+    if (fromStore) return fromStore;
+    const resolved = resolveAuditTemplateId(moduleId) || moduleId;
+    const activeResolved =
+        resolveAuditTemplateId(
+            typeof auditData.activeModuleId === "string"
+                ? auditData.activeModuleId
+                : "",
+        ) ||
+        (typeof auditData.activeModuleId === "string"
+            ? auditData.activeModuleId
+            : "");
     // Legacy single-active blob: treat top-level answers as this module's data.
-    if (auditData.activeModuleId === moduleId) {
+    if (activeResolved && activeResolved === resolved) {
         return {
             checklistData: auditData.checklistData as ModuleStoreEntry["checklistData"],
             editableChecklist: auditData.editableChecklist as unknown[],
@@ -300,6 +584,7 @@ function getModuleStoreEntry(
             genericFiles: auditData.genericFiles as ModuleStoreEntry["genericFiles"],
             extraChecklistItems: auditData.extraChecklistItems,
             findingsReportForm: auditData.findingsReportForm,
+            auditGlobalInfo: auditData.auditGlobalInfo as Record<string, string> | undefined,
         };
     }
     if (store || multiModule) return null;
@@ -311,6 +596,7 @@ function getModuleStoreEntry(
         genericFiles: auditData.genericFiles as ModuleStoreEntry["genericFiles"],
         extraChecklistItems: auditData.extraChecklistItems,
         findingsReportForm: auditData.findingsReportForm,
+        auditGlobalInfo: auditData.auditGlobalInfo as Record<string, string> | undefined,
     };
 }
 
@@ -484,6 +770,11 @@ export function scopePlanToModule(
             mod?.findingsReportForm ??
             (auditData.activeModuleId === resolvedId || !multiModule
                 ? auditData.findingsReportForm
+                : undefined),
+        auditGlobalInfo:
+            mod?.auditGlobalInfo ??
+            (auditData.activeModuleId === resolvedId || !multiModule
+                ? auditData.auditGlobalInfo
                 : undefined),
         moduleDataByTemplateId: store,
     };

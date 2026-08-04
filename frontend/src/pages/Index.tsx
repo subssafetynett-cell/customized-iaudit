@@ -1,7 +1,13 @@
 import { useState, useEffect, useMemo, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
+import { useQueryClient } from "@tanstack/react-query";
 import { useCompanyStore } from "@/hooks/useCompanyStore";
 import { apiFetch } from "@/lib/api";
+import { auditPlanQueryKey } from "@/lib/auditPlanExecute";
+import {
+    getPlanModuleOptions,
+    getPlanModulesProgressMap,
+} from "@/lib/auditPlanModules";
 import {
     fetchGapAnalysesPersisted,
     fetchSelfAssessmentsPersisted,
@@ -117,6 +123,7 @@ function PieLegendSkeleton() {
 
 const Index = () => {
     const navigate = useNavigate();
+    const queryClient = useQueryClient();
     const { companies, hasFetchedCompanies, addCompany, addSite } = useCompanyStore();
     const [auditPlans, setAuditPlans] = useState<any[]>([]);
     const [findingsPlans, setFindingsPlans] = useState<any[]>([]);
@@ -124,6 +131,7 @@ const Index = () => {
     const [selfAssessments, setSelfAssessments] = useState<any[]>([]);
     const [gapAnalyses, setGapAnalyses] = useState<any[]>([]);
     const [currentUser, setCurrentUser] = useState<any>(null);
+    const [openingCompletedId, setOpeningCompletedId] = useState<number | null>(null);
     /** Independent widget loaders — never block the whole page. */
     const [loadState, setLoadState] = useState({
       plans: true,
@@ -405,6 +413,65 @@ const Index = () => {
       })
       .slice(0, 5),
     [auditPlans],
+  );
+
+  /** Dashboard list omits auditData — fetch full plan before opening execute. */
+  const openCompletedAudit = useCallback(
+    async (planStub: { id: number; auditName?: string; templateId?: string | null }) => {
+      if (!planStub?.id || openingCompletedId != null) return;
+      setOpeningCompletedId(planStub.id);
+      const toastId = toast.loading("Opening completed audit…");
+      try {
+        const res = await apiFetch(`/audit-plans/${planStub.id}`);
+        if (!res.ok) {
+          throw new Error(
+            res.status === 404 ? "Audit not found" : "Failed to load audit details",
+          );
+        }
+        const plan = await res.json();
+        queryClient.setQueryData(auditPlanQueryKey(plan.id), plan);
+
+        const modules = getPlanModuleOptions(plan.templateId);
+        if (modules.length > 1) {
+          const progress = getPlanModulesProgressMap(plan);
+          const best =
+            modules.find((m) => (progress[m.id] || 0) > 0) || modules[0];
+          navigate(
+            `/audit/execute/${plan.id}?module=${encodeURIComponent(best.id)}`,
+            {
+              state: {
+                plan,
+                activeModuleId: best.id,
+                lockModule: true,
+              },
+            },
+          );
+        } else {
+          const moduleId = modules[0]?.id;
+          navigate(
+            moduleId
+              ? `/audit/execute/${plan.id}?module=${encodeURIComponent(moduleId)}`
+              : `/audit/execute/${plan.id}`,
+            {
+              state: {
+                plan,
+                activeModuleId: moduleId,
+                lockModule: Boolean(moduleId),
+              },
+            },
+          );
+        }
+        toast.dismiss(toastId);
+      } catch (error) {
+        toast.error(
+          error instanceof Error ? error.message : "Failed to open audit",
+          { id: toastId },
+        );
+      } finally {
+        setOpeningCompletedId(null);
+      }
+    },
+    [navigate, openingCompletedId, queryClient],
   );
 
   const stats = useMemo(
@@ -725,7 +792,8 @@ const Index = () => {
                     <div
                       key={plan.id}
                       className="flex items-center justify-between p-3 rounded-xl hover:bg-slate-50 transition-colors group cursor-pointer"
-                      onClick={() => navigate(`/audit/execute/${plan.id}`, { state: { plan } })}
+                      onClick={() => void openCompletedAudit(plan)}
+                      aria-busy={openingCompletedId === plan.id}
                     >
                       <div className="flex items-center gap-4">
                         <div className="w-10 h-10 rounded-full bg-emerald-100 flex items-center justify-center text-emerald-600">
@@ -858,12 +926,9 @@ const Index = () => {
           </Card>
 
           <Card className="lg:col-span-7 border-none shadow-sm rounded-xl bg-white p-6">
-            <div className="flex items-center justify-between mb-8">
-              <div>
-                <h2 className="text-lg font-bold text-[#111827]">Audit Status Overview</h2>
-                <p className="text-xs text-[#9CA3AF]">Monthly breakdown by status</p>
-              </div>
-              <button className="text-[#9CA3AF] hover:text-[#111827]">...</button>
+            <div className="mb-8">
+              <h2 className="text-lg font-bold text-[#111827]">Audit Status Overview</h2>
+              <p className="text-xs text-[#9CA3AF]">Monthly breakdown by status</p>
             </div>
 
             <div className="h-[300px] w-full mt-4">

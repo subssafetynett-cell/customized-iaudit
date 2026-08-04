@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useRef } from "react";
 import { apiFetch, resolveApiUrl } from "@/lib/api";
+import {
+    countAuditDataAnswers,
+    mergeAuditDataPreferRicher,
+} from "@/lib/auditPlanModules";
+import {
+    clearAuditExecuteDraft,
+    saveAuditExecuteDraft,
+} from "@/lib/auditExecuteDraft";
 
 type AutosavePayload = {
     planId: string | undefined;
@@ -9,6 +17,11 @@ type AutosavePayload = {
     deps?: unknown[];
     /** Debounce idle time before autosave (ms). */
     debounceMs?: number;
+    /**
+     * Known-good auditData from the server (hydrate). Autosave will never
+     * persist a payload that drops answers below this baseline.
+     */
+    baselineAuditData?: Record<string, unknown> | null;
 };
 
 /** Ignore volatile timestamps so unchanged answers don't re-PUT. */
@@ -42,7 +55,9 @@ function putAuditDataKeepalive(planId: string, auditData: Record<string, unknown
 
 /**
  * Debounced PUT of auditData so perform-audit progress survives refresh / navigation.
- * - Saves ~1.5s after edits stop
+ * - Saves ~0.8s after edits stop
+ * - Writes a local draft on every dirty change (survives crash / failed network)
+ * - Never overwrites richer saved answers with an emptier payload
  * - Re-saves if answers change during an in-flight PUT
  * - Flushes on tab hide, page unload, and React unmount (SPA navigation)
  */
@@ -51,7 +66,8 @@ export function useAuditExecutionAutosave({
     buildAuditData,
     enabled = true,
     deps = [],
-    debounceMs = 1500,
+    debounceMs = 800,
+    baselineAuditData = null,
     onSaved,
 }: AutosavePayload & {
     onSaved?: (result: AuditAutosaveResult) => void;
@@ -63,12 +79,16 @@ export function useAuditExecutionAutosave({
     const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     /** Fingerprint of last successfully persisted payload. */
     const lastSavedFingerprintRef = useRef<string>("");
+    /** Richest auditData we have seen (hydrate baseline ∪ last successful save). */
+    const lastGoodAuditDataRef = useRef<Record<string, unknown> | null>(null);
     const inFlightRef = useRef<Promise<boolean> | null>(null);
     const dirtyRef = useRef(false);
     const enabledRef = useRef(enabled);
     enabledRef.current = enabled;
     const planIdRef = useRef(planId);
     planIdRef.current = planId;
+    /** Skip the first schedule after enable — that would re-PUT hydrate data. */
+    const skipNextScheduleRef = useRef(false);
 
     const clearTimer = () => {
         if (timerRef.current) {
@@ -76,6 +96,30 @@ export function useAuditExecutionAutosave({
             timerRef.current = null;
         }
     };
+
+    /** Merge with last-good so we never drop checklist / module answers on save. */
+    const protectPayload = useCallback((raw: Record<string, unknown>): Record<string, unknown> => {
+        const baseline = lastGoodAuditDataRef.current;
+        if (!baseline) return raw;
+        const rawCount = countAuditDataAnswers(raw);
+        const goodCount = countAuditDataAnswers(baseline);
+        if (rawCount >= goodCount) {
+            // Still merge module store so sibling modules are never dropped.
+            return mergeAuditDataPreferRicher(baseline, raw);
+        }
+        // Incoming is emptier — keep richer answers from last good.
+        console.warn(
+            "[autosave] Refusing emptier auditData payload",
+            { rawCount, goodCount },
+        );
+        return mergeAuditDataPreferRicher(baseline, raw);
+    }, []);
+
+    const persistLocalDraft = useCallback((auditData: Record<string, unknown>) => {
+        const id = planIdRef.current;
+        if (!id) return;
+        saveAuditExecuteDraft(id, auditData);
+    }, []);
 
     const saveNow = useCallback(async (
         auditDataOverrides?: Record<string, unknown>,
@@ -92,12 +136,16 @@ export function useAuditExecutionAutosave({
             let ok = true;
             // Loop so edits made during a PUT are not lost.
             for (let attempt = 0; attempt < 3; attempt += 1) {
-                const auditData = auditDataOverrides && attempt === 0
+                const built = auditDataOverrides && attempt === 0
                     ? { ...buildRef.current(), ...auditDataOverrides }
                     : buildRef.current();
+                const auditData = protectPayload(built);
+                // Always keep a local draft before/while talking to the server.
+                persistLocalDraft(auditData);
                 const fingerprint = fingerprintAuditData(auditData);
                 if (fingerprint === lastSavedFingerprintRef.current) {
                     dirtyRef.current = false;
+                    clearAuditExecuteDraft(id);
                     return ok;
                 }
                 dirtyRef.current = false;
@@ -109,6 +157,7 @@ export function useAuditExecutionAutosave({
                     if (!res.ok) {
                         console.warn("Audit autosave failed", await res.text());
                         dirtyRef.current = true;
+                        persistLocalDraft(auditData);
                         ok = false;
                         // One retry after a short pause on server/network errors.
                         if (attempt < 2) {
@@ -119,6 +168,11 @@ export function useAuditExecutionAutosave({
                     }
                     const body = await res.json().catch(() => ({}));
                     lastSavedFingerprintRef.current = fingerprint;
+                    lastGoodAuditDataRef.current = mergeAuditDataPreferRicher(
+                        lastGoodAuditDataRef.current,
+                        auditData,
+                    );
+                    clearAuditExecuteDraft(id);
                     if (body && typeof body === "object") {
                         onSavedRef.current?.({
                             status: typeof body.status === "string" ? body.status : undefined,
@@ -137,7 +191,9 @@ export function useAuditExecutionAutosave({
                         });
                     }
                     // If the user edited while this PUT was in flight, save again.
-                    const latest = fingerprintAuditData(buildRef.current());
+                    const latest = fingerprintAuditData(
+                        protectPayload(buildRef.current()),
+                    );
                     if (latest !== lastSavedFingerprintRef.current || dirtyRef.current) {
                         continue;
                     }
@@ -145,6 +201,7 @@ export function useAuditExecutionAutosave({
                 } catch (e) {
                     console.warn("Audit autosave error", e);
                     dirtyRef.current = true;
+                    persistLocalDraft(auditData);
                     ok = false;
                     if (attempt < 2) {
                         await new Promise((r) => setTimeout(r, 600));
@@ -161,50 +218,100 @@ export function useAuditExecutionAutosave({
             if (inFlightRef.current === promise) inFlightRef.current = null;
         });
         return promise;
-    }, []);
+    }, [protectPayload, persistLocalDraft]);
 
     const scheduleSave = useCallback(() => {
         if (!planIdRef.current || !enabledRef.current) return;
+        if (skipNextScheduleRef.current) {
+            skipNextScheduleRef.current = false;
+            return;
+        }
         dirtyRef.current = true;
+        // Snapshot immediately so a crash before debounce still has answers.
+        try {
+            persistLocalDraft(protectPayload(buildRef.current()));
+        } catch {
+            /* ignore */
+        }
         clearTimer();
         timerRef.current = setTimeout(() => {
             timerRef.current = null;
             void saveNow();
         }, Math.max(400, debounceMs));
-    }, [debounceMs, saveNow]);
+    }, [debounceMs, saveNow, persistLocalDraft, protectPayload]);
 
     /** Best-effort immediate persist (SPA leave / tab hide). */
     const flushSync = useCallback(() => {
         const id = planIdRef.current;
         if (!id || !enabledRef.current) return;
         clearTimer();
-        const auditData = buildRef.current();
+        const auditData = protectPayload(buildRef.current());
         const fingerprint = fingerprintAuditData(auditData);
         if (fingerprint === lastSavedFingerprintRef.current && !dirtyRef.current) return;
-        dirtyRef.current = false;
-        lastSavedFingerprintRef.current = fingerprint;
+        // Always park a local draft — keepalive may not complete.
+        persistLocalDraft(auditData);
+        // Never flush an emptier blob than what we already know is good.
+        if (
+            lastGoodAuditDataRef.current &&
+            countAuditDataAnswers(auditData) <
+                countAuditDataAnswers(lastGoodAuditDataRef.current)
+        ) {
+            const protectedData = mergeAuditDataPreferRicher(
+                lastGoodAuditDataRef.current,
+                auditData,
+            );
+            persistLocalDraft(protectedData);
+            // Keep dirty=true until a successful awaited save acknowledges —
+            // only update last-good so the next mount can restore.
+            lastGoodAuditDataRef.current = protectedData;
+            putAuditDataKeepalive(id, protectedData);
+            return;
+        }
+        lastGoodAuditDataRef.current = mergeAuditDataPreferRicher(
+            lastGoodAuditDataRef.current,
+            auditData,
+        );
+        // Do not clear dirty / fingerprint as "saved" — keepalive is unverified.
+        // Local draft + server merge protect against loss; next session reconciles.
         putAuditDataKeepalive(id, auditData);
-    }, []);
+    }, [protectPayload, persistLocalDraft]);
 
-    // Debounce after edits.
+    // Keep hydrate baseline as the floor for answer protection.
     useEffect(() => {
-        if (!planId || !enabled) return;
-        scheduleSave();
-        return clearTimer;
-        // eslint-disable-next-line react-hooks/exhaustive-deps -- deps provided by caller
-    }, [planId, enabled, scheduleSave, ...deps]);
+        if (!baselineAuditData || typeof baselineAuditData !== "object") return;
+        lastGoodAuditDataRef.current = mergeAuditDataPreferRicher(
+            lastGoodAuditDataRef.current,
+            baselineAuditData,
+        );
+    }, [baselineAuditData]);
 
     // After hydrate / enable, treat current payload as already saved so we don't
     // immediately PUT identical data (and risk racing an empty pre-hydrate state).
+    // MUST run before the schedule-save effect so the first tick is skipped.
     useEffect(() => {
         if (!planId || !enabled) {
             lastSavedFingerprintRef.current = "";
             dirtyRef.current = false;
             return;
         }
-        lastSavedFingerprintRef.current = fingerprintAuditData(buildRef.current());
+        const seeded = protectPayload(buildRef.current());
+        lastSavedFingerprintRef.current = fingerprintAuditData(seeded);
+        lastGoodAuditDataRef.current = mergeAuditDataPreferRicher(
+            lastGoodAuditDataRef.current,
+            seeded,
+        );
         dirtyRef.current = false;
-    }, [planId, enabled]);
+        // The enable+deps effects also fire — ignore that first schedule.
+        skipNextScheduleRef.current = true;
+    }, [planId, enabled, protectPayload]);
+
+    // Debounce after edits (skip the immediate post-enable tick).
+    useEffect(() => {
+        if (!planId || !enabled) return;
+        scheduleSave();
+        return clearTimer;
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- deps provided by caller
+    }, [planId, enabled, scheduleSave, ...deps]);
 
     // Flush when leaving the page / switching tabs / SPA unmount.
     useEffect(() => {

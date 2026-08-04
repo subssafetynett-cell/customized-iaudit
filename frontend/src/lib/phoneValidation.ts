@@ -16,7 +16,7 @@ import examples from "libphonenumber-js/mobile/examples";
 /** ITU upper bound for national significant numbers. */
 export const PHONE_MAX_DIGITS = 15;
 
-const FALLBACK_LENGTH = { min: 6, max: PHONE_MAX_DIGITS };
+const FALLBACK_LENGTH = { min: 6, max: 15 };
 
 function asCountryCode(countryCode?: string | null): CountryCode | undefined {
     if (!countryCode) return undefined;
@@ -26,21 +26,38 @@ function asCountryCode(countryCode?: string | null): CountryCode | undefined {
 }
 
 /**
- * Soft length hints for UX (maxLength / placeholders).
- * Acceptance always uses isValidPhone() — not these ranges alone.
+ * Exact national-digit length range for a country (from libphonenumber).
+ * Used for maxLength / placeholders so users cannot type past the country max.
  */
 export function getPhoneLengthForCountry(countryCode?: string): { min: number; max: number } {
     const country = asCountryCode(countryCode);
     if (!country) return { ...FALLBACK_LENGTH };
 
+    const validLengths: number[] = [];
+    for (let len = 1; len <= PHONE_MAX_DIGITS; len++) {
+        // Digit shape doesn't matter for length checks — only count does.
+        const result = validatePhoneNumberLength("9".repeat(len), country);
+        if (result === undefined) {
+            // `undefined` => this length is possible for the country.
+            validLengths.push(len);
+        } else if (result === "TOO_LONG") {
+            break;
+        }
+    }
+
+    if (validLengths.length > 0) {
+        return {
+            min: validLengths[0],
+            max: validLengths[validLengths.length - 1],
+        };
+    }
+
+    // Fallback: example mobile number length (strict — no +3 padding).
     try {
         const example = getExampleNumber(country, examples);
         if (example?.nationalNumber) {
             const len = String(example.nationalNumber).length;
-            // Allow variance for landline vs mobile / area codes.
-            const min = Math.max(4, len - 3);
-            const max = Math.min(PHONE_MAX_DIGITS, Math.max(len + 3, len));
-            return { min, max };
+            return { min: len, max: len };
         }
     } catch {
         // fall through
@@ -48,7 +65,7 @@ export function getPhoneLengthForCountry(countryCode?: string): { min: number; m
     return { ...FALLBACK_LENGTH };
 }
 
-/** Digits only, capped to a safe national max for the country. */
+/** Digits only, capped to the selected country's max national length. */
 export function normalizePhoneDigits(value: string, countryCode?: string): string {
     const digits = String(value || "").replace(/\D/g, "");
     const { max } = getPhoneLengthForCountry(countryCode);
@@ -80,6 +97,17 @@ export function getPhoneErrorMessage(countryCode?: string, value?: string): stri
     }
 
     if (country) {
+        const { min, max } = getPhoneLengthForCountry(country);
+        if (digits.length < min) {
+            return min === max
+                ? `Phone number must be ${min} digits for the selected country.`
+                : `Phone number must be at least ${min} digits for the selected country.`;
+        }
+        if (digits.length > max) {
+            return min === max
+                ? `Phone number must be ${max} digits for the selected country.`
+                : `Phone number must be at most ${max} digits for the selected country.`;
+        }
         const lengthResult = validatePhoneNumberLength(digits, country);
         if (lengthResult === "TOO_SHORT") {
             return "Phone number is too short for the selected country.";
@@ -88,7 +116,9 @@ export function getPhoneErrorMessage(countryCode?: string, value?: string): stri
             return "Phone number is too long for the selected country.";
         }
         if (lengthResult === "INVALID_LENGTH") {
-            return "Phone number length is invalid for the selected country.";
+            return min === max
+                ? `Phone number must be ${min} digits for the selected country.`
+                : `Phone number must be ${min}–${max} digits for the selected country.`;
         }
         if (!isValidPhoneNumber(digits, country)) {
             return "Enter a valid phone number for the selected country.";
@@ -103,19 +133,10 @@ export function getPhoneErrorMessage(countryCode?: string, value?: string): stri
     return "Enter a valid phone number.";
 }
 
-/** Placeholder updates when the country changes (no hardcoded 10-digit text). */
+/** Placeholder matches the country length limit enforced by maxLength. */
 export function getPhoneInputPlaceholder(countryCode?: string): string {
     const country = asCountryCode(countryCode);
     if (!country) return "Phone number";
-    try {
-        const example = getExampleNumber(country, examples);
-        if (example?.nationalNumber) {
-            const len = String(example.nationalNumber).length;
-            return `${len}-digit number`;
-        }
-    } catch {
-        // fall through
-    }
     const { min, max } = getPhoneLengthForCountry(country);
     if (min === max) return `${min}-digit number`;
     return `${min}–${max} digit number`;

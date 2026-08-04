@@ -12,6 +12,7 @@ import {
     stripHeavyAuditListPayload,
     escapeHtml
 } from '../textSanitize.js';
+import { mergeAuditDataPreferRicher } from '../audit/mergeAuditData.js';
 import {
     collectOrgSubtreeUserIds,
     actorCanAccessTargetUser,
@@ -1089,7 +1090,25 @@ export function createAuditsRouter({ authenticateToken, checkTrialExpiration }) 
             }
             if (itinerary !== undefined) updateData.itinerary = itinerary;
             if (req.body.auditData !== undefined) {
-                updateData.auditData = sanitizeAuditDataPayload(req.body.auditData);
+                const incoming = sanitizeAuditDataPayload(req.body.auditData);
+                // Merge with existing blob so a racing/emptier PUT cannot wipe modules.
+                // Clients may pass forceReplaceAuditData: true for intentional full replace.
+                if (req.body.forceReplaceAuditData === true) {
+                    updateData.auditData = incoming;
+                } else {
+                    let existingData = existing.auditData;
+                    if (typeof existingData === 'string') {
+                        try {
+                            existingData = JSON.parse(existingData);
+                        } catch {
+                            existingData = null;
+                        }
+                    }
+                    updateData.auditData =
+                        existingData && typeof existingData === 'object'
+                            ? mergeAuditDataPreferRicher(existingData, incoming)
+                            : incoming;
+                }
             }
             if (req.body.findingsData !== undefined) updateData.findingsData = req.body.findingsData;
             updateData.updatedAt = new Date();

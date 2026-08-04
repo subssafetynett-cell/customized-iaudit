@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
+import { useQueryClient } from "@tanstack/react-query";
 import { apiFetch } from "@/lib/api";
+import { auditPlanQueryKey } from "@/lib/auditPlanExecute";
 import { TopNav } from "@/components/TopNav";
 import { Button } from "@/components/ui/button";
 import {
@@ -131,6 +133,7 @@ const AuditList = () => {
         progressLoading: boolean;
     } | null>(null);
     const navigate = useNavigate();
+    const queryClient = useQueryClient();
     const isAuditeeReadOnly = useAuditeeReadOnly();
     const [searchParams, setSearchParams] = useSearchParams();
     const auditExecuteTourActive = searchParams.get("auditExecuteTour") === "true";
@@ -287,6 +290,11 @@ const AuditList = () => {
         }
         if (moduleId) params.set("module", moduleId);
         const qs = params.toString();
+        // Seed execute query cache with the freshly fetched plan so reopen never
+        // hydrates from a stale empty/partial cache.
+        if (plan?.id && plan.auditData) {
+            queryClient.setQueryData(auditPlanQueryKey(plan.id), plan);
+        }
         navigate(qs ? `${basePath}?${qs}` : basePath, {
             state: {
                 plan,
@@ -302,9 +310,30 @@ const AuditList = () => {
         downloadFormat?: AuditReportFormat,
     ) => {
         const modules = getPlanModuleOptions(plan.templateId);
+        // List payloads omit auditData — always load the full plan before opening/downloading.
         if (modules.length <= 1) {
             if (mode === "perform") {
-                navigateToPerformAudit(plan, modules[0]?.id);
+                const toastId = toast.loading("Opening audit…");
+                try {
+                    const res = await apiFetch(`/audit-plans/${plan.id}`);
+                    if (!res.ok) {
+                        throw new Error(
+                            res.status === 404
+                                ? "Audit not found"
+                                : "Failed to load audit details",
+                        );
+                    }
+                    const fullPlan = await res.json();
+                    toast.dismiss(toastId);
+                    navigateToPerformAudit(fullPlan, modules[0]?.id);
+                } catch (error) {
+                    toast.error(
+                        error instanceof Error
+                            ? error.message
+                            : "Failed to open audit",
+                        { id: toastId },
+                    );
+                }
                 return;
             }
             if (downloadFormat) {
