@@ -293,15 +293,6 @@ export function checklistRowHasFindingExtras(
     return detailFieldsHaveValues(details);
 }
 
-const MODULE_DETAIL_COLUMNS: ChecklistReportColumn[] = [
-    { key: "details", header: "Details" },
-    { key: "raisedBy", header: "Raised by" },
-    { key: "assignTo", header: "Assign to" },
-    { key: "targetDate", header: "Target date" },
-    { key: "escalationTo", header: "Escalation to" },
-    { key: "escalationDate", header: "Escalation date" },
-];
-
 const ISO_DETAIL_COLUMNS: ChecklistReportColumn[] = [
     { key: "description", header: "Description" },
     { key: "correction", header: "Correction" },
@@ -332,7 +323,7 @@ function qfsScoreColumnsForMode(mode: QfsScoreMode): ChecklistReportColumn[] {
  * - includes every question
  * - optional columns only appear when at least one row has a value
  * - NC / CAPA / exception detail columns are NOT inlined on every question
- *   (see buildChecklistFindingExtrasReportTable)
+ *   (see buildChecklistFindingExtraBlocks — rendered under the raised question)
  * - EOSH uses Compliance(2) / Exceptions(1) / Non-Compliance(0) with point values
  * - QFS uses green / amber / red filled cells for the selected score (no ticks)
  */
@@ -485,17 +476,87 @@ export function buildChecklistReportTable(options: {
     return { headers, rows, headerCells, bodyCells, columns };
 }
 
+export type ChecklistFindingExtraField = {
+    label: string;
+    value: string;
+};
+
+/** One NC / exception block to render under its checklist question. */
+export type ChecklistFindingExtraBlock = {
+    itemIndex: number;
+    clause: string;
+    question: string;
+    finding: string;
+    /** Primary follow-up fields (matches execute UI order). */
+    fields: ChecklistFindingExtraField[];
+    /** Optional escalation — shown under an Escalation heading when present. */
+    escalationFields: ChecklistFindingExtraField[];
+    title: string;
+};
+
+function pushDetailField(
+    list: ChecklistFindingExtraField[],
+    details: ChecklistRowValues,
+    key: string,
+    label: string,
+) {
+    const value = details[key]?.trim();
+    if (value) list.push({ label, value });
+}
+
+function moduleExtrasFieldsFromDetails(details: ChecklistRowValues): {
+    fields: ChecklistFindingExtraField[];
+    escalationFields: ChecklistFindingExtraField[];
+} {
+    const fields: ChecklistFindingExtraField[] = [];
+    const escalationFields: ChecklistFindingExtraField[] = [];
+    // Same order as the in-app exception follow-up panel.
+    pushDetailField(fields, details, "raisedBy", "Raised by");
+    pushDetailField(fields, details, "assignTo", "Assign to");
+    pushDetailField(fields, details, "targetDate", "Target date");
+    pushDetailField(fields, details, "details", "Details");
+    pushDetailField(escalationFields, details, "escalationTo", "Escalation to");
+    pushDetailField(escalationFields, details, "escalationDate", "Escalation date");
+    return { fields, escalationFields };
+}
+
+function isoExtrasFieldsFromDetails(details: ChecklistRowValues): ChecklistFindingExtraField[] {
+    const fields: ChecklistFindingExtraField[] = [];
+    for (const col of ISO_DETAIL_COLUMNS) {
+        pushDetailField(fields, details, col.key, col.header);
+    }
+    return fields;
+}
+
+/** Readable multiline text for PDF / Excel cells (label: value per line). */
+export function formatFindingExtrasBlockText(block: ChecklistFindingExtraBlock): string {
+    const lines: string[] = [block.title];
+    if (block.finding.trim()) {
+        lines.push(`Finding: ${block.finding}`);
+    }
+    for (const field of block.fields) {
+        lines.push(`${field.label}: ${field.value}`);
+    }
+    if (block.escalationFields.length > 0) {
+        lines.push("");
+        lines.push("Escalation");
+        for (const field of block.escalationFields) {
+            lines.push(`${field.label}: ${field.value}`);
+        }
+    }
+    return lines.join("\n");
+}
+
 /**
- * NC / exception / CAPA extras — only rows where a finding was raised
- * (not repeated across every checklist question).
+ * NC / exception / CAPA extras as per-question blocks (inline under the raised question).
  */
-export function buildChecklistFindingExtrasReportTable(options: {
+export function buildChecklistFindingExtraBlocks(options: {
     content: ChecklistContent[];
     checklistData: Record<string, Record<string, unknown>> | Record<string, any>;
     isModule: boolean;
     isEosh?: boolean;
     qfsScoreMode?: QfsScoreMode | null;
-}): { headers: string[]; body: string[][] } | null {
+}): ChecklistFindingExtraBlock[] {
     const {
         content,
         checklistData,
@@ -504,9 +565,7 @@ export function buildChecklistFindingExtrasReportTable(options: {
         qfsScoreMode = null,
     } = options;
 
-    const detailColumns = isModule ? MODULE_DETAIL_COLUMNS : ISO_DETAIL_COLUMNS;
-    const extraRows: ChecklistRowValues[] = [];
-
+    const blocks: ChecklistFindingExtraBlock[] = [];
     content.forEach((item, itemIndex) => {
         const raw = (checklistData?.[itemIndex] || {}) as Record<string, unknown>;
         if (
@@ -525,39 +584,69 @@ export function buildChecklistFindingExtrasReportTable(options: {
         if (!detailFieldsHaveValues(details) && !findingRaw && !cellValue(raw.findingType)) {
             return;
         }
-        extraRows.push({
+        const finding = isModule
+            ? formatChecklistFindingLabel(findingRaw) ||
+              cellValue(raw.findingType) ||
+              findingRaw
+            : cellValue(raw.findingType) || findingRaw;
+        const { fields, escalationFields } = isModule
+            ? moduleExtrasFieldsFromDetails(details)
+            : { fields: isoExtrasFieldsFromDetails(details), escalationFields: [] };
+        if (fields.length === 0 && escalationFields.length === 0 && !finding) {
+            return;
+        }
+        blocks.push({
+            itemIndex,
             clause: cellValue(raw.clause) || item.clause || String(itemIndex + 1),
             question: item.question || "",
-            finding: isModule
-                ? formatChecklistFindingLabel(findingRaw) ||
-                  cellValue(raw.findingType) ||
-                  findingRaw
-                : cellValue(raw.findingType) || findingRaw,
-            ...details,
+            finding,
+            fields,
+            escalationFields,
+            title: isModule
+                ? "Nonconformance / Exception Details"
+                : "Finding / Nonconformance Details",
         });
     });
+    return blocks;
+}
 
-    if (extraRows.length === 0) return null;
+/**
+ * Flat / stacked table for Excel. Prefer buildChecklistFindingExtraBlocks for PDF/DOCX.
+ */
+export function buildChecklistFindingExtrasReportTable(options: {
+    content: ChecklistContent[];
+    checklistData: Record<string, Record<string, unknown>> | Record<string, any>;
+    isModule: boolean;
+    isEosh?: boolean;
+    qfsScoreMode?: QfsScoreMode | null;
+}): { headers: string[]; body: string[][] } | null {
+    const blocks = buildChecklistFindingExtraBlocks(options);
+    if (blocks.length === 0) return null;
 
-    const presentDetails = detailColumns.filter((col) =>
-        extraRows.some((row) => Boolean(row[col.key]?.trim())),
-    );
-    const columns: ChecklistReportColumn[] = [
-        { key: "clause", header: "Clause" },
-        { key: "question", header: "Question" },
-        { key: "finding", header: "Finding" },
-        ...presentDetails,
-    ].filter((col) =>
-        col.key === "clause" ||
-        col.key === "question" ||
-        col.key === "finding" ||
-        extraRows.some((row) => Boolean(row[col.key]?.trim())),
-    );
-
-    return {
-        headers: columns.map((c) => c.header),
-        body: extraRows.map((row) => columns.map((c) => row[c.key] || "")),
-    };
+    // Stacked rows (not a wide multi-column layout) so long questions stay readable.
+    const headers = ["Clause", "Finding", "Field", "Value"];
+    const body: string[][] = [];
+    for (const block of blocks) {
+        const allFields = [
+            ...block.fields,
+            ...(block.escalationFields.length > 0
+                ? [{ label: "Escalation", value: "" }, ...block.escalationFields]
+                : []),
+        ];
+        if (allFields.length === 0) {
+            body.push([block.clause, block.finding, "", ""]);
+            continue;
+        }
+        allFields.forEach((field, idx) => {
+            body.push([
+                idx === 0 ? block.clause : "",
+                idx === 0 ? block.finding : "",
+                field.label,
+                field.value,
+            ]);
+        });
+    }
+    return { headers, body };
 }
 
 /** NC summary table — module shows module NC columns; omit empty columns.

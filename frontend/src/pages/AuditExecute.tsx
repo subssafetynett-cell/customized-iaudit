@@ -75,6 +75,11 @@ import { useAuditeeReadOnly } from "@/lib/auditeeAccess";
 import { findingIdToExecuteDomId } from "@/lib/auditFindings";
 import { computeAuditCompletionStatus } from "@/lib/auditCompletion";
 import { useAuditExecutionAutosave } from "@/hooks/useAuditExecutionAutosave";
+import {
+  clearAuditExecuteDraft,
+  mergeServerAuditDataWithLocalDraft,
+  saveAuditExecuteDraft,
+} from "@/lib/auditExecuteDraft";
 import { useAssigneeEmailLookup } from "@/hooks/useAssigneeEmailLookup";
 import { AssigneeEmailFields } from "@/components/AssigneeEmailFields";
 import { AuditEvidenceAttachmentList } from "@/components/AuditEvidenceAttachmentList";
@@ -96,6 +101,13 @@ import {
   toModuleScopedEvidenceMap,
   ensureModuleStorePreservesTopLevel,
   moduleStoreEntryFromTopLevel,
+  lookupModuleStoreEntry,
+  mergeModuleStoreEntries,
+  moduleStoreEntryHasAnswers,
+  countModuleStoreAnswers,
+  countAuditDataAnswers,
+  mergeAuditDataPreferRicher,
+  type ModuleStoreEntry,
 } from "@/lib/auditPlanModules";
 import {
   collectAuditFindingSources,
@@ -341,7 +353,23 @@ const AuditExecute = () => {
   const answersAppliedForPlanRef = useRef<string | null>(null);
   /** User has edited answers — block late stub→full hydrates from wiping input. */
   const userEditedRef = useRef(false);
+  /** Server/hydrate baseline — autosave must never persist emptier than this. */
+  const [autosaveBaseline, setAutosaveBaseline] = useState<Record<
+    string,
+    unknown
+  > | null>(null);
+  /** After switching checklist modules, force an immediate server + local persist. */
+  const pendingModuleSaveRef = useRef(false);
   const queryClient = useQueryClient();
+
+  // Only seed React Query from navigation when the plan includes audit answers.
+  // Dashboard/list stubs omit auditData and must not lock an empty hydrate.
+  const navPlanHasAnswers = Boolean(
+    navPlan?.id &&
+      String(navPlan.id) === String(id) &&
+      navPlan.auditData != null &&
+      String(navPlan.auditData).length > 2,
+  );
 
   const planQuery = useQuery({
     queryKey: auditPlanQueryKey(id || ""),
@@ -351,11 +379,62 @@ const AuditExecute = () => {
     gcTime: AUDIT_PLAN_GC_MS,
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
-    initialData: navPlan?.id && String(navPlan.id) === String(id) ? navPlan : undefined,
+    initialData: navPlanHasAnswers ? navPlan : undefined,
     placeholderData: (previous) =>
-      previous ??
-      (navPlan?.id && String(navPlan.id) === String(id) ? navPlan : undefined),
+      previous ?? (navPlanHasAnswers ? navPlan : undefined),
   });
+
+  // Prefer the Perform-Audit navigation payload when it has richer module answers
+  // than a stale React Query cache (cache can block fresh hydrate otherwise).
+  useEffect(() => {
+    if (!id || !navPlan?.id || String(navPlan.id) !== String(id)) return;
+    if (!navPlan.auditData) return;
+    queryClient.setQueryData(auditPlanQueryKey(id), (old: any) => {
+      if (!old || typeof old !== "object") return navPlan;
+      const oldData =
+        typeof old.auditData === "string"
+          ? (() => {
+              try {
+                return JSON.parse(old.auditData);
+              } catch {
+                return {};
+              }
+            })()
+          : old.auditData && typeof old.auditData === "object"
+            ? old.auditData
+            : {};
+      const navData =
+        typeof navPlan.auditData === "string"
+          ? (() => {
+              try {
+                return JSON.parse(navPlan.auditData);
+              } catch {
+                return {};
+              }
+            })()
+          : navPlan.auditData && typeof navPlan.auditData === "object"
+            ? navPlan.auditData
+            : {};
+      const oldStore =
+        (oldData.moduleDataByTemplateId as Record<string, ModuleStoreEntry>) || {};
+      const navStore =
+        (navData.moduleDataByTemplateId as Record<string, ModuleStoreEntry>) || {};
+      const oldAnswers = Object.values(oldStore).reduce(
+        (n, e) => n + countModuleStoreAnswers(e),
+        countModuleStoreAnswers(
+          moduleStoreEntryFromTopLevel(oldData as Record<string, unknown>, ""),
+        ),
+      );
+      const navAnswers = Object.values(navStore).reduce(
+        (n, e) => n + countModuleStoreAnswers(e),
+        countModuleStoreAnswers(
+          moduleStoreEntryFromTopLevel(navData as Record<string, unknown>, ""),
+        ),
+      );
+      if (navAnswers > oldAnswers) return { ...old, ...navPlan };
+      return old;
+    });
+  }, [id, navPlan, queryClient]);
 
   const isLoadingPlan = planQuery.isLoading && !currentPlan && !planQuery.data;
   const isRefreshing = planQuery.isFetching && Boolean(currentPlan || planQuery.data);
@@ -396,9 +475,28 @@ const AuditExecute = () => {
         sectionData?: Record<number, string>;
         genericFiles?: Record<string, AuditEvidenceMedia[]>;
         findingsReportForm?: FindingsReportForm;
+        auditGlobalInfo?: {
+          refNo: string;
+          clauseNo: string;
+          department: string;
+          auditeeName: string;
+          auditDoneBy: string;
+          auditeeDept: string;
+          auditDate: string;
+        };
       }
     >
   >({});
+
+  const emptyAuditGlobalInfo = () => ({
+    refNo: "",
+    clauseNo: "",
+    department: "",
+    auditeeName: "",
+    auditDoneBy: "",
+    auditeeDept: "",
+    auditDate: "",
+  });
 
   const [checklistData, setChecklistData] = useState<
     Record<
@@ -441,9 +539,11 @@ const AuditExecute = () => {
   const [findingsReportForm, setFindingsReportForm] = useState<FindingsReportForm>(
     defaultFindingsReportForm(),
   );
+  const [auditGlobalInfo, setAuditGlobalInfo] = useState(emptyAuditGlobalInfo);
   const sectionDataRef = useRef(sectionData);
   const genericFilesRef = useRef(genericFiles);
   const findingsReportFormRef = useRef(findingsReportForm);
+  const auditGlobalInfoRef = useRef(auditGlobalInfo);
   const checklistDataRef = useRef(checklistData);
   const editableChecklistRef = useRef(editableChecklist);
   const extraChecklistItemsRef = useRef(extraChecklistItems);
@@ -451,6 +551,7 @@ const AuditExecute = () => {
   sectionDataRef.current = sectionData;
   genericFilesRef.current = genericFiles;
   findingsReportFormRef.current = findingsReportForm;
+  auditGlobalInfoRef.current = auditGlobalInfo;
   checklistDataRef.current = checklistData;
   editableChecklistRef.current = editableChecklist;
   extraChecklistItemsRef.current = extraChecklistItems;
@@ -476,32 +577,42 @@ const AuditExecute = () => {
           !key.startsWith("clause_checklist_") && !key.startsWith("section_"),
       ),
     ) as Record<string, AuditEvidenceMedia[]>;
-    const snapshot = {
+    const snapshot: ModuleStoreEntry = {
       checklistData: checklistDataRef.current,
       editableChecklist: editableChecklistRef.current,
       extraChecklistItems: extraChecklistItemsRef.current,
       sectionData: sectionDataRef.current,
       genericFiles: sanitizeAuditEvidenceMediaMap(moduleOnlyFiles),
       findingsReportForm: findingsReportFormRef.current,
+      auditGlobalInfo: auditGlobalInfoRef.current,
     };
+    // Never replace a richer saved module blob with an empty in-memory snapshot.
     const updatedStore = currentId
-      ? { ...moduleDataByTemplateIdRef.current, [currentId]: snapshot }
+      ? {
+          ...moduleDataByTemplateIdRef.current,
+          [currentId]: mergeModuleStoreEntries(
+            lookupModuleStoreEntry(moduleDataByTemplateIdRef.current, currentId),
+            snapshot,
+          ),
+        }
       : { ...moduleDataByTemplateIdRef.current };
     moduleDataByTemplateIdRef.current = updatedStore;
     setModuleDataByTemplateId(updatedStore);
 
-    const stored = updatedStore[nextId];
+    const stored = lookupModuleStoreEntry(updatedStore, nextId);
     const nextTemplate = findAuditTemplate(nextId);
-    setChecklistData(stored?.checklistData || {});
+    setChecklistData((stored?.checklistData as Record<number, any>) || {});
     setEditableChecklist(
       stored?.editableChecklist && stored.editableChecklist.length > 0
-        ? stored.editableChecklist
+        ? (stored.editableChecklist as any[])
         : Array.isArray(nextTemplate?.content)
           ? [...nextTemplate.content]
           : [],
     );
-    setExtraChecklistItems(stored?.extraChecklistItems || {});
-    setSectionData(stored?.sectionData || {});
+    setExtraChecklistItems(
+      (stored?.extraChecklistItems as Record<string, any[]>) || {},
+    );
+    setSectionData((stored?.sectionData as Record<number, string>) || {});
     setGenericFiles({
       ...sanitizeAuditEvidenceMediaMap(sharedFiles),
       ...(nextId
@@ -513,25 +624,51 @@ const AuditExecute = () => {
     });
     // Signatures / acknowledgement stay with the module that captured them.
     if (stored?.findingsReportForm) {
-      setFindingsReportForm(stored.findingsReportForm);
-      setExecutiveSummary(stored.findingsReportForm.generalComment || "");
+      setFindingsReportForm(stored.findingsReportForm as FindingsReportForm);
+      setExecutiveSummary(
+        (stored.findingsReportForm as FindingsReportForm).generalComment || "",
+      );
     } else {
       const freshForm = buildFindingsReportDefaults(plan || currentPlan || {});
       setFindingsReportForm(freshForm);
       setExecutiveSummary(freshForm.generalComment || "");
     }
+    // Auditee name / done by / dept stay with the module that filled them.
+    if (stored?.auditGlobalInfo && typeof stored.auditGlobalInfo === "object") {
+      setAuditGlobalInfo({ ...emptyAuditGlobalInfo(), ...stored.auditGlobalInfo });
+    } else {
+      setAuditGlobalInfo(emptyAuditGlobalInfo());
+    }
     setActiveModuleId(nextId);
+    // Persist the module we just left on the next tick (saveNow is wired below).
+    pendingModuleSaveRef.current = true;
   };
 
   useEffect(() => {
     if (planTemplateIds.length === 0) return;
-    if (lockedModuleId && planTemplateIds.includes(lockedModuleId)) {
-      if (activeModuleId !== lockedModuleId) {
+    const lockedResolved =
+      resolveAuditTemplateId(lockedModuleId) || lockedModuleId;
+    const lockedInPlan =
+      lockedModuleId &&
+      (planTemplateIds.includes(lockedModuleId) ||
+        planTemplateIds.includes(lockedResolved) ||
+        planTemplateIds.some(
+          (id) => (resolveAuditTemplateId(id) || id) === lockedResolved,
+        ));
+    const targetLocked = planTemplateIds.includes(lockedModuleId)
+      ? lockedModuleId
+      : planTemplateIds.includes(lockedResolved)
+        ? lockedResolved
+        : planTemplateIds.find(
+            (id) => (resolveAuditTemplateId(id) || id) === lockedResolved,
+          ) || lockedModuleId;
+    if (lockedInPlan && targetLocked) {
+      if (activeModuleId !== targetLocked) {
         // After answers are loaded, fully switch so we don't keep another module's answers.
         if (answersHydrated) {
-          switchActiveModule(lockedModuleId);
+          switchActiveModule(targetLocked);
         } else {
-          setActiveModuleId(lockedModuleId);
+          setActiveModuleId(targetLocked);
         }
       }
       return;
@@ -745,6 +882,7 @@ const AuditExecute = () => {
     answersAppliedForPlanRef.current = null;
     userEditedRef.current = false;
     setAnswersHydrated(false);
+    setAutosaveBaseline(null);
   }, [id]);
 
   // Hydrate execute state from React Query plan ONCE per plan while mounted.
@@ -778,69 +916,193 @@ const AuditExecute = () => {
       };
     });
 
-    // Answers already applied for this plan — ignore subsequent query updates.
+    // Answers already applied for this plan — ignore subsequent query updates
+    // unless richer server data arrived before the user edited anything.
     if (answersAppliedForPlanRef.current === planKey) {
-      return;
+      if (userEditedRef.current || !found.auditData) {
+        return;
+      }
+      const incoming =
+        typeof found.auditData === "string"
+          ? (() => {
+              try {
+                return JSON.parse(found.auditData);
+              } catch {
+                return null;
+              }
+            })()
+          : found.auditData;
+      if (!incoming || typeof incoming !== "object") return;
+      const idsProbe = parseAuditPlanTemplateIds(found.templateId);
+      const preferredProbe =
+        (lockedModuleId &&
+          (idsProbe.includes(lockedModuleId)
+            ? lockedModuleId
+            : idsProbe.find(
+                (id) =>
+                  (resolveAuditTemplateId(id) || id) ===
+                  (resolveAuditTemplateId(lockedModuleId) || lockedModuleId),
+              ))) ||
+        (typeof incoming.activeModuleId === "string" &&
+        idsProbe.includes(incoming.activeModuleId)
+          ? incoming.activeModuleId
+          : idsProbe[0] || "");
+      const incomingStore = ensureModuleStorePreservesTopLevel(
+        incoming as Record<string, unknown>,
+        idsProbe,
+      );
+      const incomingMod = preferredProbe
+        ? lookupModuleStoreEntry(incomingStore, preferredProbe)
+        : null;
+      const currentMod = preferredProbe
+        ? lookupModuleStoreEntry(moduleDataByTemplateIdRef.current, preferredProbe)
+        : null;
+      if (
+        countModuleStoreAnswers(incomingMod) <= countModuleStoreAnswers(currentMod)
+      ) {
+        return;
+      }
+      // Fall through and re-apply richer answers.
     }
 
     if (found.auditData) {
       // User already typed while waiting for full plan — do not clobber local state.
-      if (userEditedRef.current) {
-        answersAppliedForPlanRef.current = planKey;
+      if (userEditedRef.current && answersAppliedForPlanRef.current === planKey) {
         setAnswersHydrated(true);
         return;
       }
 
-      const data =
+      const dataRaw =
         typeof found.auditData === "string"
           ? JSON.parse(found.auditData)
           : found.auditData;
+      // Restore any richer local draft (crash / failed keepalive) before applying UI state.
+      const data = mergeServerAuditDataWithLocalDraft(
+        planKey,
+        dataRaw && typeof dataRaw === "object"
+          ? (dataRaw as Record<string, unknown>)
+          : {},
+      );
       const ids = parseAuditPlanTemplateIds(found.templateId);
       const multiModule = ids.length > 1;
+      const lockedResolved =
+        resolveAuditTemplateId(lockedModuleId) || lockedModuleId;
       const preferredActive =
         lockedModuleId && ids.includes(lockedModuleId)
           ? lockedModuleId
-          : typeof data.activeModuleId === "string" && ids.includes(data.activeModuleId)
-            ? data.activeModuleId
-            : ids[0] || "";
+          : lockedResolved && ids.includes(lockedResolved)
+            ? lockedResolved
+            : lockedModuleId
+              ? ids.find(
+                  (id) =>
+                    (resolveAuditTemplateId(id) || id) === lockedResolved,
+                ) || ""
+              : typeof data.activeModuleId === "string" &&
+                  ids.includes(data.activeModuleId)
+                ? data.activeModuleId
+                : ids[0] || "";
       if (preferredActive) setActiveModuleId(preferredActive);
 
       const previousActive =
         typeof data.activeModuleId === "string" && ids.includes(data.activeModuleId)
           ? data.activeModuleId
-          : "";
+          : typeof data.activeModuleId === "string"
+            ? resolveAuditTemplateId(data.activeModuleId) || data.activeModuleId
+            : "";
       // Migrate last-active top-level blob into the per-module store so it is not
       // lost when opening / saving a different checklist module.
-      const store = ensureModuleStorePreservesTopLevel(data, ids);
+      const storeFromServer = ensureModuleStorePreservesTopLevel(data, ids);
+      // Preserve any richer in-memory module answers (typed before full hydrate).
+      const store: Record<string, ModuleStoreEntry> = { ...storeFromServer };
+      for (const [key, entry] of Object.entries(moduleDataByTemplateIdRef.current)) {
+        const resolved = resolveAuditTemplateId(key) || key;
+        store[resolved] = mergeModuleStoreEntries(
+          lookupModuleStoreEntry(storeFromServer, key),
+          entry,
+        );
+      }
       setModuleDataByTemplateId(store);
       moduleDataByTemplateIdRef.current = store;
+      setAutosaveBaseline(data as Record<string, unknown>);
 
-      const mod = preferredActive ? store[preferredActive] : null;
+      const mod = preferredActive
+        ? lookupModuleStoreEntry(store, preferredActive)
+        : null;
+
+      // Still fetching and this module looks empty — wait for full plan before
+      // locking empty UI (stale cache must not block real answers).
+      if (
+        multiModule &&
+        preferredActive &&
+        !moduleStoreEntryHasAnswers(mod) &&
+        planQuery.isFetching
+      ) {
+        setAnswersHydrated(false);
+        return;
+      }
+
       // Multi-module: never reuse another module's top-level answers/evidence.
+      const previousResolved =
+        resolveAuditTemplateId(previousActive) || previousActive;
+      const preferredResolved =
+        resolveAuditTemplateId(preferredActive) || preferredActive;
       const canUseTopLevelAnswers =
         !multiModule ||
+        previousResolved === preferredResolved ||
         previousActive === preferredActive ||
         (!previousActive && !Object.keys(store).length);
 
-      if (mod?.checklistData) setChecklistData(mod.checklistData);
-      else if (canUseTopLevelAnswers && data.checklistData) setChecklistData(data.checklistData);
-      else if (multiModule) setChecklistData({});
+      const incomingChecklist =
+        (mod?.checklistData as Record<number, any> | undefined) ||
+        (canUseTopLevelAnswers && data.checklistData
+          ? data.checklistData
+          : multiModule &&
+              preferredResolved &&
+              previousResolved === preferredResolved &&
+              data.checklistData
+            ? data.checklistData
+            : !multiModule && data.checklistData
+              ? data.checklistData
+              : null);
 
-      if (mod?.sectionData) setSectionData(mod.sectionData);
+      setChecklistData((prev) => {
+        const prevCount = countModuleStoreAnswers({ checklistData: prev });
+        const nextCount = countModuleStoreAnswers({
+          checklistData: incomingChecklist || undefined,
+        });
+        // Never replace filled answers with an empty hydrate for the same module.
+        if (prevCount > 0 && nextCount < prevCount) return prev;
+        if (incomingChecklist) return incomingChecklist as Record<number, any>;
+        if (multiModule && prevCount > 0) return prev;
+        if (multiModule) return {};
+        return prev;
+      });
+
+      if (mod?.sectionData) setSectionData(mod.sectionData as Record<number, string>);
       else if (canUseTopLevelAnswers && data.sectionData) setSectionData(data.sectionData);
-      else if (multiModule) setSectionData({});
+      else if (multiModule) {
+        setSectionData((prev) => (Object.keys(prev).length > 0 ? prev : {}));
+      }
 
-      if (mod?.extraChecklistItems) setExtraChecklistItems(mod.extraChecklistItems);
-      else if (canUseTopLevelAnswers && data.extraChecklistItems) {
+      if (mod?.extraChecklistItems) {
+        setExtraChecklistItems(mod.extraChecklistItems as Record<string, any[]>);
+      } else if (canUseTopLevelAnswers && data.extraChecklistItems) {
         setExtraChecklistItems(data.extraChecklistItems);
-      } else if (multiModule) setExtraChecklistItems({});
+      } else if (multiModule) {
+        setExtraChecklistItems((prev) =>
+          Object.keys(prev).length > 0 ? prev : {},
+        );
+      }
 
       // Only seed preferred module from top-level when that blob actually belongs to it.
       if (
-        !store[preferredActive] &&
+        !lookupModuleStoreEntry(store, preferredActive || "") &&
         preferredActive &&
         canUseTopLevelAnswers &&
-        (data.checklistData || data.editableChecklist || data.findingsReportForm)
+        (data.checklistData ||
+          data.editableChecklist ||
+          data.findingsReportForm ||
+          data.auditGlobalInfo)
       ) {
         const seeded = {
           ...store,
@@ -862,8 +1124,16 @@ const AuditExecute = () => {
       if (data.executiveSummary) setExecutiveSummary(data.executiveSummary);
       if (data.summaryCounts) setSummaryCounts(data.summaryCounts);
       if (data.auditFindings) setAuditFindings(data.auditFindings);
-      if (data.auditGlobalInfo) {
+      // Prefer per-module header fields; never bleed another module's auditee info.
+      if (mod?.auditGlobalInfo && typeof mod.auditGlobalInfo === "object") {
+        setAuditGlobalInfo({
+          ...emptyAuditGlobalInfo(),
+          ...(mod.auditGlobalInfo as Record<string, string>),
+        });
+      } else if (canUseTopLevelAnswers && data.auditGlobalInfo) {
         setAuditGlobalInfo((prev) => ({ ...prev, ...data.auditGlobalInfo }));
+      } else if (multiModule) {
+        setAuditGlobalInfo(emptyAuditGlobalInfo());
       }
       if (data.processAudits) setProcessAudits(data.processAudits);
       if (data.showExecutiveSummary !== undefined) setShowExecutiveSummary(data.showExecutiveSummary);
@@ -954,7 +1224,8 @@ const AuditExecute = () => {
         : findAuditTemplate(found.templateId);
 
       const modEditable =
-        preferredActive && store[preferredActive]?.editableChecklist;
+        preferredActive &&
+        lookupModuleStoreEntry(store, preferredActive)?.editableChecklist;
       if (Array.isArray(modEditable) && modEditable.length > 0) {
         setEditableChecklist(modEditable);
       } else if (
@@ -971,8 +1242,14 @@ const AuditExecute = () => {
     } else {
       setFindingsReportForm(buildFindingsReportDefaults(found));
       const ids = parseAuditPlanTemplateIds(found.templateId);
+      const lockedResolved =
+        resolveAuditTemplateId(lockedModuleId) || lockedModuleId;
       const preferred =
-        lockedModuleId && ids.includes(lockedModuleId) ? lockedModuleId : ids[0];
+        lockedModuleId && ids.includes(lockedModuleId)
+          ? lockedModuleId
+          : lockedResolved && ids.includes(lockedResolved)
+            ? lockedResolved
+            : ids[0];
       if (preferred) setActiveModuleId(preferred);
       const currentTemplate = findAuditTemplate(preferred || found.templateId);
       if (currentTemplate?.content) {
@@ -982,7 +1259,13 @@ const AuditExecute = () => {
       // Do NOT mark answersApplied yet so the first full auditData can hydrate.
       setAnswersHydrated(false);
     }
-  }, [planQuery.data, planQuery.isError, planQuery.error, lockedModuleId]);
+  }, [
+    planQuery.data,
+    planQuery.isError,
+    planQuery.error,
+    planQuery.isFetching,
+    lockedModuleId,
+  ]);
 
   // NC list loads independently — never blocks first paint
   useEffect(() => {
@@ -1219,16 +1502,6 @@ const AuditExecute = () => {
     { refNo: "", clauseNo: "", details: "", category: "" },
   ]);
 
-  const [auditGlobalInfo, setAuditGlobalInfo] = useState({
-    refNo: "",
-    clauseNo: "",
-    department: "",
-    auditeeName: "",
-    auditDoneBy: "",
-    auditeeDept: "",
-    auditDate: "",
-  });
-
   const [processAudits, setProcessAudits] = useState<ProcessAuditContent[]>([
     {
       id: "1",
@@ -1373,20 +1646,36 @@ const AuditExecute = () => {
         ...moduleDataByTemplateIdRef.current,
         ...moduleDataByTemplateId,
       };
+      // Also keep any modules from the hydrate baseline that aren't in memory yet.
+      if (autosaveBaseline?.moduleDataByTemplateId && typeof autosaveBaseline.moduleDataByTemplateId === "object") {
+        for (const [key, entry] of Object.entries(
+          autosaveBaseline.moduleDataByTemplateId as Record<string, ModuleStoreEntry>,
+        )) {
+          const resolved = resolveAuditTemplateId(key) || key;
+          baseStore[resolved] = mergeModuleStoreEntries(
+            lookupModuleStoreEntry(baseStore, key),
+            entry,
+          );
+        }
+      }
       const syncedModuleStore = currentModuleId
         ? {
             ...baseStore,
-            [currentModuleId]: {
-              checklistData,
-              editableChecklist,
-              extraChecklistItems,
-              sectionData,
-              genericFiles: activeModuleOnlyFiles,
-              findingsReportForm: {
-                ...findingsReportForm,
-                generalComment: syncedGeneralComment,
+            [currentModuleId]: mergeModuleStoreEntries(
+              lookupModuleStoreEntry(baseStore, currentModuleId),
+              {
+                checklistData,
+                editableChecklist,
+                extraChecklistItems,
+                sectionData,
+                genericFiles: activeModuleOnlyFiles,
+                findingsReportForm: {
+                  ...findingsReportForm,
+                  generalComment: syncedGeneralComment,
+                },
+                auditGlobalInfo,
               },
-            },
+            ),
           }
         : baseStore;
       moduleDataByTemplateIdRef.current = syncedModuleStore;
@@ -1500,6 +1789,7 @@ const AuditExecute = () => {
       activeModuleId,
       planTemplateIds,
       moduleDataByTemplateId,
+      autosaveBaseline,
     ],
   );
 
@@ -1527,7 +1817,8 @@ const AuditExecute = () => {
     // Wait until server answers are hydrated so we never PUT empty state over saved progress.
     enabled: !!plan && !!template && !isAuditeeReadOnly && answersHydrated,
     deps: [buildAuditDataPayload, isAuditeeReadOnly, answersHydrated],
-    debounceMs: 1500,
+    debounceMs: 800,
+    baselineAuditData: autosaveBaseline,
     onSaved: (result) => {
       // Keep React Query cache aligned with what we just persisted so remounts
       // never rehydrate stale pre-edit auditData.
@@ -1545,9 +1836,15 @@ const AuditExecute = () => {
                 : {}),
             };
           }
+          const merged = mergeAuditDataPreferRicher(
+            typeof old.auditData === "object" && old.auditData
+              ? (old.auditData as Record<string, unknown>)
+              : null,
+            result.auditData as Record<string, unknown>,
+          );
           return {
             ...old,
-            auditData: result.auditData,
+            auditData: merged,
             ...(result.updatedAt ? { updatedAt: result.updatedAt } : {}),
             ...(result.status ? { status: result.status } : {}),
             ...(typeof result.progress === "number" ? { progress: result.progress } : {}),
@@ -1557,11 +1854,19 @@ const AuditExecute = () => {
           };
         });
       }
+      setAutosaveBaseline((prev) =>
+        mergeAuditDataPreferRicher(prev, result.auditData as Record<string, unknown>),
+      );
       setCurrentPlan((prev: any) =>
         prev
           ? {
               ...prev,
-              auditData: result.auditData,
+              auditData: mergeAuditDataPreferRicher(
+                typeof prev.auditData === "object" && prev.auditData
+                  ? (prev.auditData as Record<string, unknown>)
+                  : null,
+                result.auditData as Record<string, unknown>,
+              ),
               ...(result.updatedAt ? { updatedAt: result.updatedAt } : {}),
               ...(result.status ? { status: result.status } : {}),
               ...(typeof result.progress === "number"
@@ -1576,28 +1881,36 @@ const AuditExecute = () => {
     },
   });
 
+  // Force-save after module switch so the previous module's answers hit the server promptly.
+  useEffect(() => {
+    if (!pendingModuleSaveRef.current) return;
+    if (!answersHydrated || isAuditeeReadOnly || !plan || !template) return;
+    pendingModuleSaveRef.current = false;
+    try {
+      saveAuditExecuteDraft(id, buildAuditDataPayload());
+    } catch {
+      /* ignore */
+    }
+    void saveNow();
+  }, [
+    activeModuleId,
+    answersHydrated,
+    isAuditeeReadOnly,
+    plan,
+    template,
+    id,
+    buildAuditDataPayload,
+    saveNow,
+  ]);
+
   // Track real user answer entry (not template scaffolding) so late server hydrates cannot wipe it.
   useEffect(() => {
+    if (!answersHydrated) return;
     const payload = buildAuditDataPayload();
-    const checklist = payload.checklistData;
-    const clauses = payload.clauseData;
-    const sections = payload.sectionData;
-    const clauseFilesMap = payload.clauseFiles;
-    const genericFilesMap = payload.genericFiles;
-    const hasAnswers =
-      (checklist && typeof checklist === "object" && Object.keys(checklist as object).length > 0) ||
-      (clauses && typeof clauses === "object" && Object.keys(clauses as object).length > 0) ||
-      (sections && typeof sections === "object" && Object.keys(sections as object).length > 0) ||
-      (clauseFilesMap &&
-        typeof clauseFilesMap === "object" &&
-        Object.keys(clauseFilesMap as object).length > 0) ||
-      (genericFilesMap &&
-        typeof genericFilesMap === "object" &&
-        Object.keys(genericFilesMap as object).length > 0);
-    if (hasAnswers) {
+    if (countAuditDataAnswers(payload) > 0) {
       userEditedRef.current = true;
     }
-  }, [buildAuditDataPayload]);
+  }, [buildAuditDataPayload, answersHydrated]);
 
   const collectFindings = () => {
     const findings: {
@@ -2339,6 +2652,7 @@ const AuditExecute = () => {
     const toastId = toast.loading("Saving audit…");
     try {
       const auditData = buildAuditDataPayload();
+      saveAuditExecuteDraft(id, auditData);
 
       const res = await apiFetch(`/audit-plans/${id}`, {
         method: "PUT",
@@ -2347,24 +2661,37 @@ const AuditExecute = () => {
 
       if (res.ok) {
         const body = await res.json().catch(() => ({} as Record<string, unknown>));
+        clearAuditExecuteDraft(id);
         if (id) {
-          queryClient.setQueryData(auditPlanQueryKey(id), (old: any) => ({
-            ...(old && typeof old === "object" ? old : { id: Number(id) }),
-            auditData,
-            ...(typeof body.updatedAt === "string" ? { updatedAt: body.updatedAt } : {}),
-            ...(typeof body.status === "string" ? { status: body.status } : {}),
-            ...(typeof body.progress === "number" ? { progress: body.progress } : {}),
-            ...(typeof body.auditCompleted === "boolean"
-              ? { auditCompleted: body.auditCompleted }
-              : {}),
-          }));
+          queryClient.setQueryData(auditPlanQueryKey(id), (old: any) => {
+            const prevData =
+              old && typeof old === "object" && old.auditData && typeof old.auditData === "object"
+                ? (old.auditData as Record<string, unknown>)
+                : null;
+            const merged = mergeAuditDataPreferRicher(prevData, auditData as Record<string, unknown>);
+            return {
+              ...(old && typeof old === "object" ? old : { id: Number(id) }),
+              auditData: merged,
+              ...(typeof body.updatedAt === "string" ? { updatedAt: body.updatedAt } : {}),
+              ...(typeof body.status === "string" ? { status: body.status } : {}),
+              ...(typeof body.progress === "number" ? { progress: body.progress } : {}),
+              ...(typeof body.auditCompleted === "boolean"
+                ? { auditCompleted: body.auditCompleted }
+                : {}),
+            };
+          });
         }
         if (body && typeof body === "object") {
           setCurrentPlan((prev: any) =>
             prev
               ? {
                   ...prev,
-                  auditData,
+                  auditData: mergeAuditDataPreferRicher(
+                    typeof prev.auditData === "object" && prev.auditData
+                      ? (prev.auditData as Record<string, unknown>)
+                      : null,
+                    auditData as Record<string, unknown>,
+                  ),
                   ...(typeof body.updatedAt === "string"
                     ? { updatedAt: body.updatedAt }
                     : {}),
@@ -2380,6 +2707,9 @@ const AuditExecute = () => {
                       : prev.auditCompleted,
                 }
               : prev,
+          );
+          setAutosaveBaseline((prev) =>
+            mergeAuditDataPreferRicher(prev, auditData as Record<string, unknown>),
           );
         }
         const savedPayload = buildAuditDataPayload();
