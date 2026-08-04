@@ -23,7 +23,6 @@ import {
   AlertCircle,
   AlertOctagon,
   Info,
-  TrendingUp,
   Activity,
   FileText,
   Briefcase, 
@@ -165,6 +164,58 @@ const Index = () => {
     [companies],
   );
   const sitesLoading = !hasFetchedCompanies;
+
+  const stats = useMemo(
+    () => [
+      {
+        label: "Sites",
+        value: totalSites,
+        loading: sitesLoading,
+        icon: MapPin,
+        iconColor: "text-emerald-600 bg-emerald-50",
+      },
+      {
+        label: "Gap Analyses",
+        value: gapAnalyses.length,
+        loading: loadState.gap,
+        icon: Search,
+        iconColor: "text-emerald-600 bg-emerald-50",
+      },
+      {
+        label: "Self Assessments",
+        value: selfAssessments.length,
+        loading: loadState.sa,
+        icon: ShieldCheck,
+        iconColor: "text-emerald-600 bg-emerald-50",
+      },
+      {
+        label: "Audit Programs",
+        value: auditPrograms.length,
+        loading: loadState.programs,
+        icon: ClipboardCheck,
+        iconColor: "text-emerald-600 bg-emerald-50",
+      },
+      {
+        label: "Total Audits",
+        value: auditPlans.length,
+        loading: loadState.plans,
+        icon: BarChart3,
+        iconColor: "text-emerald-600 bg-emerald-50",
+      },
+    ],
+    [
+      totalSites,
+      sitesLoading,
+      gapAnalyses.length,
+      selfAssessments.length,
+      auditPrograms.length,
+      auditPlans.length,
+      loadState.gap,
+      loadState.sa,
+      loadState.programs,
+      loadState.plans,
+    ],
+  );
 
   useEffect(() => {
     const onTrialDismissed = () => {
@@ -474,68 +525,6 @@ const Index = () => {
     [navigate, openingCompletedId, queryClient],
   );
 
-  const stats = useMemo(
-    () => [
-      {
-        label: "Sites",
-        value: totalSites,
-        loading: sitesLoading,
-        icon: MapPin,
-        trend: "+5%",
-        trendColor: "text-emerald-500 bg-emerald-50",
-        iconColor: "text-emerald-600 bg-emerald-50",
-      },
-      {
-        label: "Gap Analyses",
-        value: gapAnalyses.length,
-        loading: loadState.gap,
-        icon: Search,
-        trend: "+10%",
-        trendColor: "text-emerald-500 bg-emerald-50",
-        iconColor: "text-emerald-600 bg-emerald-50",
-      },
-      {
-        label: "Self Assessments",
-        value: selfAssessments.length,
-        loading: loadState.sa,
-        icon: ShieldCheck,
-        trend: "+22%",
-        trendColor: "text-emerald-500 bg-emerald-50",
-        iconColor: "text-emerald-600 bg-emerald-50",
-      },
-      {
-        label: "Audit Programs",
-        value: auditPrograms.length,
-        loading: loadState.programs,
-        icon: ClipboardCheck,
-        trend: "+8%",
-        trendColor: "text-emerald-500 bg-emerald-50",
-        iconColor: "text-emerald-600 bg-emerald-50",
-      },
-      {
-        label: "Total Audits",
-        value: auditPlans.length,
-        loading: loadState.plans,
-        icon: BarChart3,
-        trend: "0%",
-        trendColor: "text-red-400 bg-red-50",
-        iconColor: "text-emerald-600 bg-emerald-50",
-      },
-    ],
-    [
-      totalSites,
-      sitesLoading,
-      gapAnalyses.length,
-      loadState.gap,
-      loadState.sa,
-      loadState.programs,
-      loadState.plans,
-      selfAssessments.length,
-      auditPrograms.length,
-      auditPlans.length,
-    ],
-  );
-
   // Status Calculations
   const totalScheduledCount = useMemo(
     () =>
@@ -594,18 +583,13 @@ const Index = () => {
                   <div className={`p-2.5 rounded-[12px] ${stat.iconColor}`}>
                     <stat.icon className="w-5 h-5" />
                   </div>
-                  <div className={`px-2 py-0.5 rounded-full text-[10px] font-bold flex items-center gap-1 ${stat.trendColor}`}>
-                    <TrendingUp className="w-3 h-3" />
-                    {stat.trend}
-                  </div>
                 </div>
                 {stat.loading ? (
                   <KpiValueSkeleton />
                 ) : (
                   <h3 className="text-2xl font-extrabold text-[#111827] mb-1">{stat.value}</h3>
                 )}
-                <p className="text-xs font-semibold text-[#6B7280] mb-2">{stat.label}</p>
-                <p className="text-[10px] text-[#9CA3AF]">from last month</p>
+                <p className="text-xs font-semibold text-[#6B7280]">{stat.label}</p>
               </CardContent>
             </Card>
           ))}
