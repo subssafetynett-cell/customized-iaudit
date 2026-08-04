@@ -430,7 +430,8 @@ const Index = () => {
       { name: "Minor N/C", value: totalMinor, color: "#F97316", percentage: totalFindings > 0 ? `${Math.round((totalMinor / totalFindings) * 100)}%` : "0%" },
       { name: "Major N/C", value: totalMajor, color: "#E11D48", percentage: totalFindings > 0 ? `${Math.round((totalMajor / totalFindings) * 100)}%` : "0%" },
     ];
-    return { findingDistribution: dist, findingPieData: dist.filter((item) => item.value > 0), totalFindings };
+    const nonZeroDist = dist.filter((item) => item.value > 0);
+    return { findingDistribution: nonZeroDist, findingPieData: nonZeroDist, totalFindings };
   }, [allFindings]);
 
   const getProgress = (plan: { id: number; auditData?: unknown; progress?: number }) =>
