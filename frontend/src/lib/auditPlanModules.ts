@@ -225,6 +225,54 @@ export function moduleStoreEntryHasAnswers(
     return false;
 }
 
+function isNonEmptyString(v: unknown): v is string {
+    return typeof v === "string" && v.trim().length > 0;
+}
+
+function countFindingsReportFormAnswers(form: unknown): number {
+    if (!form || typeof form !== "object") return 0;
+    const f = form as Record<string, any>;
+    let n = 0;
+
+    // Count only fields users actually enter (avoid defaults like docNumber/reportTitle/revisionNo).
+    const fieldKeys = [
+        "generalComment",
+        "managementSystem",
+        "department",
+        "auditDate",
+        "auditors",
+        "auditees",
+        "auditScope",
+        "auditCriteriaAndMethod",
+        "issueDate",
+    ] as const;
+    for (const k of fieldKeys) {
+        if (isNonEmptyString(f[k])) n += 1;
+    }
+
+    const kp = f.keyPersonnel;
+    if (Array.isArray(kp)) {
+        for (const row of kp) {
+            if (!row || typeof row !== "object") continue;
+            const r = row as Record<string, unknown>;
+            if (isNonEmptyString(r.name)) n += 1;
+            if (isNonEmptyString(r.position)) n += 1;
+            if (isNonEmptyString(r.department)) n += 1;
+        }
+    }
+
+    const ack = f.acknowledgement;
+    if (ack && typeof ack === "object") {
+        const a = ack as Record<string, unknown>;
+        if (isNonEmptyString(a.auditeeSignature)) n += 1;
+        if (isNonEmptyString(a.auditeeDate)) n += 1;
+        if (isNonEmptyString(a.auditorSignature)) n += 1;
+        if (isNonEmptyString(a.auditorDate)) n += 1;
+    }
+
+    return n;
+}
+
 /** Count answered checklist findings in a module entry (for richer-data comparisons). */
 export function countModuleStoreAnswers(
     entry: ModuleStoreEntry | null | undefined,
@@ -261,15 +309,10 @@ export function countModuleStoreAnswers(
     }
     if (entry.genericFiles && typeof entry.genericFiles === "object") {
         for (const list of Object.values(entry.genericFiles)) {
-            if (Array.isArray(list) && list.length > 0) n += list.length;
+            if (Array.isArray(list) && list.length > 0) n += 1;
         }
     }
-    const form = entry.findingsReportForm;
-    if (form && typeof form === "object") {
-        for (const v of Object.values(form as Record<string, unknown>)) {
-            if (typeof v === "string" && v.trim()) n += 1;
-        }
-    }
+    n += countFindingsReportFormAnswers(entry.findingsReportForm);
     return n;
 }
 
@@ -349,7 +392,43 @@ export function mergeAuditDataPreferRicher(
         sectionData: baseline.sectionData as ModuleStoreEntry["sectionData"],
         auditGlobalInfo: baseline.auditGlobalInfo as ModuleStoreEntry["auditGlobalInfo"],
     });
-    const useIncomingTop = incomingTop >= baselineTop;
+    // On ties, keep baseline to avoid overwriting filled data with emptier objects.
+    const useIncomingTop = incomingTop > baselineTop;
+
+    const mergeEvidenceMapsPreferNonEmpty = (
+        a: Record<string, AuditEvidenceMedia[]> | undefined,
+        b: Record<string, AuditEvidenceMedia[]> | undefined,
+    ): Record<string, AuditEvidenceMedia[]> => {
+        const out: Record<string, AuditEvidenceMedia[]> = {
+            ...(a || {}),
+        };
+        if (!b || typeof b !== "object") return out;
+        for (const [key, list] of Object.entries(b)) {
+            if (Array.isArray(list) && list.length > 0) {
+                out[key] = list;
+            }
+        }
+        return out;
+    };
+
+    const mergeStringMapPreferNonEmpty = (
+        a: Record<string, string> | undefined,
+        b: Record<string, string> | undefined,
+    ): Record<string, string> => {
+        const out: Record<string, string> = { ...(a || {}) };
+        if (!b || typeof b !== "object") return out;
+        for (const [key, val] of Object.entries(b)) {
+            if (isNonEmptyString(val)) out[key] = val;
+        }
+        return out;
+    };
+
+    const baselineFormCount = countFindingsReportFormAnswers(baseline.findingsReportForm);
+    const incomingFormCount = countFindingsReportFormAnswers(incoming.findingsReportForm);
+    const chosenFindingsReportForm =
+        incomingFormCount > baselineFormCount
+            ? incoming.findingsReportForm
+            : baseline.findingsReportForm ?? incoming.findingsReportForm;
 
     return {
         ...baseline,
@@ -360,28 +439,26 @@ export function mergeAuditDataPreferRicher(
         sectionData: useIncomingTop
             ? incoming.sectionData ?? baseline.sectionData
             : baseline.sectionData ?? incoming.sectionData,
-        auditGlobalInfo: useIncomingTop
-            ? incoming.auditGlobalInfo ?? baseline.auditGlobalInfo
-            : baseline.auditGlobalInfo ?? incoming.auditGlobalInfo,
+        // Never let empty strings wipe already-filled header answers.
+        auditGlobalInfo: mergeStringMapPreferNonEmpty(
+            baseline.auditGlobalInfo as Record<string, string> | undefined,
+            incoming.auditGlobalInfo as Record<string, string> | undefined,
+        ),
         editableChecklist:
             Array.isArray(incoming.editableChecklist) &&
             (incoming.editableChecklist as unknown[]).length > 0
                 ? incoming.editableChecklist
                 : baseline.editableChecklist ?? incoming.editableChecklist,
-        findingsReportForm:
-            incoming.findingsReportForm ?? baseline.findingsReportForm,
+        findingsReportForm: chosenFindingsReportForm,
         clauseData: incoming.clauseData ?? baseline.clauseData,
-        genericFiles: (() => {
-            const a =
-                baseline.genericFiles && typeof baseline.genericFiles === "object"
-                    ? (baseline.genericFiles as Record<string, unknown>)
-                    : {};
-            const b =
-                incoming.genericFiles && typeof incoming.genericFiles === "object"
-                    ? (incoming.genericFiles as Record<string, unknown>)
-                    : {};
-            return { ...a, ...b };
-        })(),
+        genericFiles: mergeEvidenceMapsPreferNonEmpty(
+            baseline.genericFiles as Record<string, AuditEvidenceMedia[]> | undefined,
+            incoming.genericFiles as Record<string, AuditEvidenceMedia[]> | undefined,
+        ),
+        clauseFiles: mergeEvidenceMapsPreferNonEmpty(
+            baseline.clauseFiles as Record<string, AuditEvidenceMedia[]> | undefined,
+            incoming.clauseFiles as Record<string, AuditEvidenceMedia[]> | undefined,
+        ),
         moduleDataByTemplateId: mergedStore,
         activeModuleId: incoming.activeModuleId ?? baseline.activeModuleId,
     };
@@ -416,9 +493,58 @@ export function mergeModuleStoreEntries(
     const checklistData =
         incomingCount > existingCount
             ? incoming.checklistData ?? existing.checklistData
-            : incomingCount < existingCount
-              ? existing.checklistData ?? incoming.checklistData
-              : incoming.checklistData ?? existing.checklistData;
+            : existing.checklistData ?? incoming.checklistData;
+
+    const mergeEvidenceMapsPreferNonEmpty = (
+        a: Record<string, AuditEvidenceMedia[]> | undefined,
+        b: Record<string, AuditEvidenceMedia[]> | undefined,
+    ): Record<string, AuditEvidenceMedia[]> => {
+        const out: Record<string, AuditEvidenceMedia[]> = { ...(a || {}) };
+        if (!b || typeof b !== "object") return out;
+        for (const [key, list] of Object.entries(b)) {
+            if (Array.isArray(list) && list.length > 0) out[key] = list;
+        }
+        return out;
+    };
+
+    const mergeStringMapPreferNonEmpty = (
+        a: Record<string, string> | undefined,
+        b: Record<string, string> | undefined,
+    ): Record<string, string> => {
+        const out: Record<string, string> = { ...(a || {}) };
+        if (!b || typeof b !== "object") return out;
+        for (const [key, val] of Object.entries(b)) {
+            if (isNonEmptyString(val)) out[key] = val;
+        }
+        return out;
+    };
+
+    const baselineFormCount = countFindingsReportFormAnswers(existing.findingsReportForm);
+    const incomingFormCount = countFindingsReportFormAnswers(incoming.findingsReportForm);
+    const chosenFindingsReportForm =
+        incomingFormCount > baselineFormCount
+            ? incoming.findingsReportForm
+            : existing.findingsReportForm ?? incoming.findingsReportForm;
+
+    const mergeSectionDataPreferNonEmpty = (
+        a: Record<string | number, string | null | undefined> | undefined,
+        b: Record<string | number, string | null | undefined> | undefined,
+    ): Record<string | number, string | null | undefined> | undefined => {
+        const out: Record<string | number, string | null | undefined> = { ...(a || {}) };
+        if (!b || typeof b !== "object") return out;
+        for (const [key, val] of Object.entries(b)) {
+            if (isNonEmptyString(val)) {
+                out[key] = val;
+            }
+        }
+        return out;
+    };
+
+    const mergedSectionData = mergeSectionDataPreferNonEmpty(
+        existing.sectionData,
+        incoming.sectionData,
+    );
+
     return {
         checklistData,
         editableChecklist:
@@ -428,22 +554,13 @@ export function mergeModuleStoreEntries(
                 : existing.editableChecklist) ?? incoming.editableChecklist,
         extraChecklistItems:
             incoming.extraChecklistItems ?? existing.extraChecklistItems,
-        sectionData:
-            incoming.sectionData && Object.keys(incoming.sectionData).length > 0
-                ? incoming.sectionData
-                : existing.sectionData ?? incoming.sectionData,
-        genericFiles:
-            Object.keys(incoming.genericFiles || {}).length >=
-            Object.keys(existing.genericFiles || {}).length
-                ? incoming.genericFiles ?? existing.genericFiles
-                : existing.genericFiles ?? incoming.genericFiles,
-        findingsReportForm:
-            incoming.findingsReportForm ?? existing.findingsReportForm,
-        auditGlobalInfo:
-            incoming.auditGlobalInfo &&
-            Object.values(incoming.auditGlobalInfo).some((v) => String(v || "").trim())
-                ? incoming.auditGlobalInfo
-                : existing.auditGlobalInfo ?? incoming.auditGlobalInfo,
+        sectionData: mergedSectionData ?? existing.sectionData ?? incoming.sectionData,
+        genericFiles: mergeEvidenceMapsPreferNonEmpty(existing.genericFiles, incoming.genericFiles),
+        findingsReportForm: chosenFindingsReportForm,
+        auditGlobalInfo: mergeStringMapPreferNonEmpty(
+            existing.auditGlobalInfo as Record<string, string> | undefined,
+            incoming.auditGlobalInfo as Record<string, string> | undefined,
+        ),
     };
 }
 
