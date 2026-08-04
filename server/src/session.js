@@ -252,7 +252,7 @@ function resetPasswordVerifyRateLimit(req, res, next) {
 /**
  * Create a new opaque session for this login under a single-active-session policy.
  * - At most one non-expired Session row per user.
- * - If another device already has an active session → throws SESSION_ALREADY_ACTIVE (no new row).
+ * - If another device already has an active session → revoke it and create a new session here.
  * - If this request already presents that same session cookie → renew and reuse (same browser).
  * @param {number} userId
  * @param {{ existingToken?: string | null }} [opts]
@@ -274,57 +274,53 @@ async function createSessionTokenForUser(userId, opts = {}) {
         where: { userId: uid, expiresAt: { lt: now } },
     }).catch(() => {});
 
-    let sessionPayload;
-    try {
-        sessionPayload = await prisma.$transaction(async (tx) => {
-            await tx.session.deleteMany({
-                where: { userId: uid, expiresAt: { lt: now } },
-            });
+    const sessionPayload = await prisma.$transaction(async (tx) => {
+        await tx.session.deleteMany({
+            where: { userId: uid, expiresAt: { lt: now } },
+        });
 
-            const actives = await tx.session.findMany({
-                where: { userId: uid, expiresAt: { gt: now } },
-                orderBy: { createdAt: 'desc' },
-                select: { token: true },
-            });
+        const actives = await tx.session.findMany({
+            where: { userId: uid, expiresAt: { gt: now } },
+            orderBy: { createdAt: 'desc' },
+            select: { token: true },
+        });
 
-            // Legacy multi-session rows: keep newest only so the policy is consistent.
+        const active = actives[0] ?? null;
+
+        // Same browser/device already signed in — renew that session.
+        if (active && existingToken && existingToken === active.token) {
+            // Drop any legacy extra rows for this user.
             if (actives.length > 1) {
                 await tx.session.deleteMany({
                     where: {
-                        token: { in: actives.slice(1).map((s) => s.token) },
+                        userId: uid,
+                        token: { not: active.token },
                     },
                 });
             }
-
-            const active = actives[0] ?? null;
-            if (active) {
-                if (existingToken && existingToken === active.token) {
-                    const expiresAt = new Date(Date.now() + SESSION_MAX_AGE_MS);
-                    await tx.session.update({
-                        where: { token: active.token },
-                        data: { expiresAt },
-                    });
-                    return {
-                        token: active.token,
-                        sessionExpiresAt: expiresAt.toISOString(),
-                    };
-                }
-                const err = new Error('SESSION_ALREADY_ACTIVE');
-                err.code = 'SESSION_ALREADY_ACTIVE';
-                throw err;
-            }
-
-            const token = crypto.randomBytes(48).toString('base64url');
             const expiresAt = new Date(Date.now() + SESSION_MAX_AGE_MS);
-            await tx.session.create({
-                data: { token, userId: uid, expiresAt },
+            await tx.session.update({
+                where: { token: active.token },
+                data: { expiresAt },
             });
-            return { token, sessionExpiresAt: expiresAt.toISOString() };
+            return {
+                token: active.token,
+                sessionExpiresAt: expiresAt.toISOString(),
+            };
+        }
+
+        // New login on another device/system — revoke every other session for this user.
+        if (actives.length > 0) {
+            await tx.session.deleteMany({ where: { userId: uid } });
+        }
+
+        const token = crypto.randomBytes(48).toString('base64url');
+        const expiresAt = new Date(Date.now() + SESSION_MAX_AGE_MS);
+        await tx.session.create({
+            data: { token, userId: uid, expiresAt },
         });
-    } catch (error) {
-        if (error?.code === 'SESSION_ALREADY_ACTIVE') throw error;
-        throw error;
-    }
+        return { token, sessionExpiresAt: expiresAt.toISOString() };
+    });
 
     const loginStamp = await prisma.user.findUnique({
         where: { id: uid },

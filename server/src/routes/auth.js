@@ -134,14 +134,6 @@ async function handleVerifyOtpAndSignup(req, res) {
         res.status(201).json(sendAuthenticatedSession(res, profile, session));
     } catch (error) {
         console.error('Error creating user during OTP verification:', error);
-        if (error?.code === 'SESSION_ALREADY_ACTIVE') {
-            return res.status(409).json({
-                success: false,
-                code: 'SESSION_ALREADY_ACTIVE',
-                message: 'This account is already logged in on another device.',
-                error: 'This account is already logged in on another device. Please log out from the other device before signing in.',
-            });
-        }
         if (isPrismaUniqueViolation(error)) {
             return res.status(400).json({ error: 'Email already exists' });
         }
@@ -429,14 +421,6 @@ async function handleAuthLogin(req, res) {
         res.status(200).json(sendAuthenticatedSession(res, profile, session));
 
     } catch (error) {
-        if (error?.code === 'SESSION_ALREADY_ACTIVE') {
-            return res.status(409).json({
-                success: false,
-                code: 'SESSION_ALREADY_ACTIVE',
-                message: 'This account is already logged in on another device.',
-                error: 'This account is already logged in on another device. Please log out from the other device before signing in.',
-            });
-        }
         handlePrismaError(error, 'login');
         res.status(500).json({ error: 'An error occurred during login' });
     }
@@ -588,7 +572,7 @@ async function handleLogout(req, res) {
             return res.status(204).send();
         }
         const { count } = await prisma.session.deleteMany({ where: { token } });
-        // Also sweep expired rows so a blocked login is not held by stale sessions.
+        // Sweep expired rows for this token path; avoid leaving stale cookies confused.
         await prisma.session.deleteMany({
             where: { expiresAt: { lt: new Date() } },
         }).catch(() => {});
