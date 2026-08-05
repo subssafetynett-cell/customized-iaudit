@@ -68,6 +68,7 @@ import {
 function resolveAuditListTypeLabel(plan: {
     templateId?: string | null;
     auditProgram?: {
+        isoStandard?: string | null;
         scheduleData?: {
             criteriaType?: string;
             moduleFamily?: string | null;
@@ -90,6 +91,10 @@ function resolveAuditListTypeLabel(plan: {
         return [...new Set(fromIds)].join("; ");
     }
 
+    const iso = String(plan.auditProgram?.isoStandard || "");
+    if (iso.includes("EOSH Module:")) return "EOSH";
+    if (iso.includes("QFS KORE Module:")) return "QFS KORE";
+
     const schedule = plan.auditProgram?.scheduleData;
     if (schedule?.criteriaType === "module") {
         if (schedule.moduleFamily === "eosh") return "EOSH";
@@ -97,11 +102,40 @@ function resolveAuditListTypeLabel(plan: {
         return "Module";
     }
 
+    // Prefer named ISO checklist titles when present.
+    const isoTemplates = templates.filter(
+        (t) => t.module !== "EOSH" && t.module !== "QFS KORE",
+    );
+    if (isoTemplates.length > 0) {
+        const labels = isoTemplates.map((t) => t.standard || t.title).filter(Boolean);
+        if (labels.length > 0) return [...new Set(labels)].join("; ");
+    }
+    if (iso.trim()) return iso.trim();
+
     return "ISO Standards";
 }
 
 function isModuleAuditListPlan(plan: Parameters<typeof resolveAuditListTypeLabel>[0]): boolean {
-    return resolveAuditListTypeLabel(plan) !== "ISO Standards";
+    const templates = findAuditTemplates(plan.templateId);
+    if (templates.some((t) => t.module === "EOSH" || t.module === "QFS KORE")) {
+        return true;
+    }
+    const ids = parseAuditPlanTemplateIds(plan.templateId);
+    if (
+        ids.some(
+            (id) =>
+                id.toLowerCase().includes("eosh-") ||
+                id.toLowerCase().includes("qfs-kore"),
+        )
+    ) {
+        return true;
+    }
+    const iso = String(plan.auditProgram?.isoStandard || "");
+    if (iso.includes("EOSH Module:") || iso.includes("QFS KORE Module:")) {
+        return true;
+    }
+    const schedule = plan.auditProgram?.scheduleData;
+    return schedule?.criteriaType === "module";
 }
 
 type AuditTypeFilter = "all" | "module" | "iso";
@@ -517,6 +551,18 @@ const AuditList = () => {
     const paginatedPlans = auditPlans;
     const uniqueSites = siteOptions;
 
+    const modulePlans = paginatedPlans.filter((p) => isModuleAuditListPlan(p));
+    const isoPlans = paginatedPlans.filter((p) => !isModuleAuditListPlan(p));
+    const listSections =
+        typeFilter === "all"
+            ? [
+                  { id: "module" as const, label: "Modules", plans: modulePlans },
+                  { id: "iso" as const, label: "ISO Standards", plans: isoPlans },
+              ].filter((s) => s.plans.length > 0)
+            : typeFilter === "module"
+              ? [{ id: "module" as const, label: "Modules", plans: paginatedPlans }]
+              : [{ id: "iso" as const, label: "ISO Standards", plans: paginatedPlans }];
+
     const tourTargetPlan =
         paginatedPlans[0] ?? auditPlans[0] ?? null;
 
@@ -726,7 +772,22 @@ const AuditList = () => {
                                         </TableCell>
                                     </TableRow>
                                 ) : (
-                                    paginatedPlans.map((plan) => {
+                                    listSections.flatMap((section) => [
+                                        <TableRow
+                                            key={`section-${section.id}`}
+                                            className="bg-slate-50 hover:bg-slate-50 border-b border-slate-200"
+                                        >
+                                            <TableCell
+                                                colSpan={7}
+                                                className="py-2.5 px-4 text-xs font-bold uppercase tracking-wide text-[#213847]"
+                                            >
+                                                {section.label}
+                                                <span className="ml-2 font-semibold normal-case tracking-normal text-slate-400">
+                                                    ({section.plans.length})
+                                                </span>
+                                            </TableCell>
+                                        </TableRow>,
+                                        ...section.plans.map((plan) => {
                                         const auditTypeLabel = resolveAuditListTypeLabel(plan);
                                         const isTourTargetRow =
                                             tourTargetPlan?.id === plan.id;
@@ -862,7 +923,8 @@ const AuditList = () => {
                                                 </TableCell>
                                             </TableRow>
                                         );
-                                    })
+                                    }),
+                                    ])
                                 )}
                             </TableBody>
                         </Table>

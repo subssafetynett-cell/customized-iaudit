@@ -14,11 +14,9 @@ import {
     sanitizePlainText
 } from '../textSanitize.js';
 import {
-    getOrgRootUserId,
-    collectOrgSubtreeUserIds,
     actorCanAccessTargetUser,
-    actorIsAuditee,
     actorCanAssignAuditeeToSite,
+    resolveOrgCompanyOwnerUserIds,
     assertActorCanManageSite,
     assertActorCanManageDepartment,
     assertDepartmentCreateBodySiteId,
@@ -190,13 +188,7 @@ export function createSitesDepartmentsRouter({ authenticateToken, checkTrialExpi
                 );
             };
 
-            if (await actorIsAuditee(actorId)) {
-                return await sendSites({ userId: actorId });
-            }
-
-            const orgRootId = await getOrgRootUserId(actorId);
-            const ownerUserIds =
-                orgRootId != null ? await collectOrgSubtreeUserIds(orgRootId) : [actorId];
+            const ownerUserIds = await resolveOrgCompanyOwnerUserIds(actorId);
             if (ownerUserIds.length === 0) {
                 if (!pagination.paginate) return res.json([]);
                 return res.json(

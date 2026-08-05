@@ -60,6 +60,32 @@ import { TourStepPopover } from "@/components/TourStepPopover";
 import { ONBOARDING_TOTAL_STEPS } from "@/lib/onboardingTour";
 import { toast } from "sonner";
 
+function countDepartments(sites: Site[] | undefined): number {
+  return (sites ?? []).reduce((acc, site) => acc + (site.departments?.length ?? 0), 0);
+}
+
+function pickRicherCompanySites(a?: Company, b?: Company): Site[] {
+  const aSites = a?.sites ?? [];
+  const bSites = b?.sites ?? [];
+  if (bSites.length > aSites.length) return bSites;
+  if (aSites.length > bSites.length) return aSites;
+  if (countDepartments(bSites) > countDepartments(aSites)) return bSites;
+  return aSites.length > 0 ? aSites : bSites;
+}
+
+function mergeCompanyRecords(store?: Company, paged?: Company): Company | undefined {
+  const base = store ?? paged;
+  if (!base) return undefined;
+  const sites = pickRicherCompanySites(store, paged);
+  return {
+    ...base,
+    ...(store ?? {}),
+    ...(paged ?? {}),
+    sites,
+    isoStandards: store?.isoStandards?.length ? store.isoStandards : (paged?.isoStandards ?? []),
+  };
+}
+
 function siteContactDisplay(site: Site): { primary: string; secondary?: string } | null {
   const name = site.contactName?.trim();
   const position = site.contactPosition?.trim();
@@ -157,7 +183,14 @@ const CompaniesPage = () => {
             ...c,
             id: String(c.id),
             isoStandards: c.isoStandards || [],
-            sites: c.sites || [],
+            sites: (c.sites || []).map((site: Site) => ({
+              ...site,
+              id: String(site.id),
+              departments: (site.departments || []).map((dept: Department) => ({
+                ...dept,
+                id: String(dept.id),
+              })),
+            })),
           })),
         );
         setTotalItems(parsed.total);
@@ -173,6 +206,10 @@ const CompaniesPage = () => {
       setListLoading(false);
     }
   }, [currentPage, debouncedSearch, itemsPerPage]);
+
+  useEffect(() => {
+    void refetchCompanies();
+  }, [refetchCompanies]);
 
   useEffect(() => {
     void fetchCompaniesPage();
@@ -253,19 +290,20 @@ const CompaniesPage = () => {
   const selectedCompany = useMemo(() => {
     if (!selectedCompanyId) return undefined;
     const fromStore = companies.find((c) => String(c.id) === String(selectedCompanyId));
-    if (fromStore) return fromStore;
-    return pagedCompanies.find((c) => String(c.id) === String(selectedCompanyId));
+    const fromPage = pagedCompanies.find((c) => String(c.id) === String(selectedCompanyId));
+    return mergeCompanyRecords(fromStore, fromPage);
   }, [selectedCompanyId, pagedCompanies, companies]);
 
-  // Keep paginated list in sync with the live store for the open company.
+  // When the live store loads richer site data, merge it into the paginated row.
   useEffect(() => {
     if (!selectedCompanyId) return;
     const fresh = companies.find((c) => String(c.id) === String(selectedCompanyId));
-    if (!fresh) return;
+    if (!fresh?.sites?.length) return;
     setPagedCompanies((prev) => {
       const idx = prev.findIndex((c) => String(c.id) === String(selectedCompanyId));
       if (idx < 0) return prev;
-      if (prev[idx].sites === fresh.sites) return prev;
+      const pagedSites = prev[idx].sites ?? [];
+      if (fresh.sites.length <= pagedSites.length) return prev;
       const next = [...prev];
       next[idx] = { ...prev[idx], sites: fresh.sites };
       return next;
