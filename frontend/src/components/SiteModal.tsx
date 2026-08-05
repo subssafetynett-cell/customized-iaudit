@@ -10,13 +10,10 @@ import { Country, State as StateCity } from "country-state-city";
 import { CountrySelect } from "@/components/CountrySelect";
 import { StateSelect } from "@/components/StateSelect";
 import { resolveCountryIsoFromName } from "@/lib/worldCountries";
-import { getPhoneLengthForCountry, getPhonePlaceholder } from "@/lib/phoneCountries";
+import { getDialForCountryCode, getPhonePlaceholder } from "@/lib/phoneCountries";
 import {
     capitalizeFirstLetter,
-    getPhoneErrorMessage,
-    isValidPhone,
     isWithinMaxLength,
-    normalizePhoneDigits,
     SITE_ADDRESS_ERROR_MESSAGE,
     SITE_ADDRESS_MAX,
     SITE_NAME_ERROR_MESSAGE,
@@ -57,7 +54,7 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
 
     const statesForSelectedCountry = countryIso ? StateCity.getStatesOfCountry(countryIso) : [];
     const hasStatesForCountry = statesForSelectedCountry.length > 0;
-    const contactPhoneMaxLength = getPhoneLengthForCountry(countryIso).max;
+    // Unlimited phone input in modals: no country-length clamping.
 
     useEffect(() => {
         if (open) {
@@ -96,7 +93,8 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
     }, [open, initialData]);
 
     useEffect(() => {
-        setContactNumber((prev) => normalizePhoneDigits(prev, countryIso));
+        // Keep digits only; do not clamp by country max length in modals.
+        setContactNumber((prev) => String(prev || "").replace(/\D/g, ""));
     }, [countryIso]);
 
     const handleSubmit = async () => {
@@ -108,7 +106,7 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
         const trimmedContactName = contactName.trim();
         const trimmedContactPosition = contactPosition.trim();
         const trimmedContactNumber = contactNumber.trim();
-        const contactDigits = normalizePhoneDigits(trimmedContactNumber, countryIso);
+        const contactDigits = String(trimmedContactNumber || "").replace(/\D/g, "");
         const trimmedEmail = email.trim();
 
         const countryName = Country.getCountryByCode(countryIso)?.name || "";
@@ -144,8 +142,6 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
         if (!trimmedContactPosition) errors.contactPosition = "Position is required";
         if (!trimmedContactNumber) {
             errors.contactNumber = "Contact number is required";
-        } else if (!isValidPhone(trimmedContactNumber, countryIso)) {
-            errors.contactNumber = getPhoneErrorMessage(countryIso, trimmedContactNumber);
         }
         if (!trimmedEmail) {
             errors.email = "Email is required";
@@ -433,19 +429,25 @@ export default function SiteModal({ open, onClose, onSubmit, initialData, mode =
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                             <div className="space-y-2">
                                 <Label htmlFor="contact-num">Contact Number *</Label>
+                                <div className="relative">
+                                    <span className="absolute left-3 top-2.5 text-[11px] font-medium text-muted-foreground">
+                                        {countryIso ? getDialForCountryCode(countryIso) : ""}
+                                    </span>
                                 <Input
                                     id="contact-num"
                                     type="tel"
                                     inputMode="numeric"
-                                    maxLength={contactPhoneMaxLength}
                                     placeholder={getPhonePlaceholder(countryIso)}
-                                    className={fieldErrorClass("contactNumber")}
+                                    className={`pl-14 ${fieldErrorClass("contactNumber")}`}
                                     value={contactNumber}
                                     onChange={(e) => {
-                                        setContactNumber(normalizePhoneDigits(e.target.value, countryIso));
+                                        setContactNumber(
+                                            String(e.target.value || "").replace(/\D/g, ""),
+                                        );
                                         clearFieldError("contactNumber");
                                     }}
                                 />
+                                </div>
                                 {fieldErrors.contactNumber && <p className="text-[10px] text-red-500 mt-1 pl-1 font-medium">{fieldErrors.contactNumber}</p>}
                             </div>
                             <div className="space-y-2">

@@ -18,6 +18,12 @@ import {
     loadImageAsset,
     type PdfImageAsset,
 } from "@/utils/pdfBranding";
+import {
+    embedPreparedImagesInJsPdf,
+    findingMediaToReportSources,
+    prepareReportEvidenceImages,
+} from "@/lib/reportEvidenceImages";
+import type { AuditEvidenceMedia } from "@/lib/evidenceImageUpload";
 
 const MARGIN_X = 14;
 const HEADER_TOP = 10;
@@ -599,6 +605,39 @@ export async function downloadCapaResponsePdf(
         ["Department", "Yes / No", "Action Taken", "Action By", "Date"],
         otherBody.length > 0 ? otherBody : [["—", "—", "—", "—", "—"]],
     );
+
+    // Supporting evidence (photos / PDF pages uploaded with the CAPA response)
+    const mediaSources = findingMediaToReportSources(
+        (finding.media || []) as AuditEvidenceMedia[],
+        "Supporting evidence",
+    );
+    if (mediaSources.length > 0) {
+        try {
+            const visuals = await prepareReportEvidenceImages(mediaSources);
+            if (visuals.length > 0) {
+                y = ensureSpace(doc, y, 50);
+                y = sectionTitle(doc, "SUPPORTING EVIDENCE", y);
+                y = embedPreparedImagesInJsPdf(doc, visuals, y, {
+                    margin: MARGIN_X,
+                    newPageTopMm: CONTENT_TOP,
+                    footerReserveMm: FOOTER_RESERVE + 4,
+                });
+            }
+        } catch (err) {
+            console.warn("CAPA PDF: could not embed supporting evidence", err);
+            y = ensureSpace(doc, y, 24);
+            y = sectionTitle(doc, "SUPPORTING EVIDENCE", y);
+            doc.setFont("helvetica", "normal");
+            doc.setFontSize(8);
+            doc.setTextColor(100, 100, 100);
+            doc.text(
+                mediaSources.map((s) => `• ${s.name}`).join("   "),
+                MARGIN_X,
+                y,
+            );
+            y += 8;
+        }
+    }
 
     // Stamp header + Built with iAudit footer on every page
     const pageCount = doc.getNumberOfPages();

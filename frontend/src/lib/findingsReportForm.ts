@@ -260,6 +260,161 @@ export function normalizeFindingsReportForm(
   return mergeFindingsReportForm(partial);
 }
 
+function isMeaningfulFormText(v: unknown): boolean {
+  if (typeof v !== "string") return false;
+  const t = v.trim();
+  return t.length > 0 && t !== "—";
+}
+
+/** Count user-entered findings-report answers (ignores empty placeholders). */
+export function countFindingsReportFormAnswers(form: unknown): number {
+  if (!form || typeof form !== "object") return 0;
+  const f = form as Record<string, unknown>;
+  let n = 0;
+  const fieldKeys: (keyof FindingsReportForm)[] = [
+    "generalComment",
+    "managementSystem",
+    "department",
+    "auditDate",
+    "auditors",
+    "auditees",
+    "auditScope",
+    "auditCriteriaAndMethod",
+  ];
+  for (const k of fieldKeys) {
+    if (isMeaningfulFormText(f[k])) n += 1;
+  }
+  // issueDate only counts when not just the auto-default pattern alone with nothing else
+  if (isMeaningfulFormText(f.issueDate)) n += 1;
+
+  const kp = f.keyPersonnel;
+  if (Array.isArray(kp)) {
+    for (const row of kp) {
+      if (!row || typeof row !== "object") continue;
+      const r = row as Record<string, unknown>;
+      if (isMeaningfulFormText(r.name)) n += 1;
+      if (isMeaningfulFormText(r.position)) n += 1;
+      if (isMeaningfulFormText(r.department)) n += 1;
+    }
+  }
+
+  const ack = f.acknowledgement;
+  if (ack && typeof ack === "object") {
+    const a = ack as Record<string, unknown>;
+    if (isMeaningfulFormText(a.auditeeSignature)) n += 1;
+    if (isMeaningfulFormText(a.auditeeDate)) n += 1;
+    if (isMeaningfulFormText(a.auditorSignature)) n += 1;
+    if (isMeaningfulFormText(a.auditorDate)) n += 1;
+  }
+  return n;
+}
+
+/**
+ * Field-level merge so empty module switches / defaults never wipe
+ * key personnel, signatures, or general comments.
+ */
+export function mergeFindingsReportFormPreferRicher(
+  baseline: unknown,
+  incoming: unknown,
+): FindingsReportForm | unknown {
+  if (!baseline || typeof baseline !== "object") {
+    return incoming && typeof incoming === "object"
+      ? mergeFindingsReportForm(incoming as Partial<FindingsReportForm>)
+      : baseline;
+  }
+  if (!incoming || typeof incoming !== "object") {
+    return mergeFindingsReportForm(baseline as Partial<FindingsReportForm>);
+  }
+
+  const a = baseline as Record<string, any>;
+  const b = incoming as Record<string, any>;
+  const pickText = (left: unknown, right: unknown): string => {
+    if (isMeaningfulFormText(right)) return String(right).trim();
+    if (isMeaningfulFormText(left)) return String(left).trim();
+    if (typeof right === "string" && right.trim()) return right;
+    if (typeof left === "string") return left;
+    return "";
+  };
+
+  const baseKp: KeyPersonnelRow[] = Array.isArray(a.keyPersonnel) ? a.keyPersonnel : [];
+  const inKp: KeyPersonnelRow[] = Array.isArray(b.keyPersonnel) ? b.keyPersonnel : [];
+  const kpLen = Math.max(baseKp.length, inKp.length, 4);
+  const keyPersonnel: KeyPersonnelRow[] = [];
+  for (let i = 0; i < kpLen; i += 1) {
+    const left = baseKp[i] || emptyKeyPersonnelRow();
+    const right = inKp[i] || emptyKeyPersonnelRow();
+    keyPersonnel.push({
+      name: pickText(left.name, right.name),
+      position: pickText(left.position, right.position),
+      department: pickText(left.department, right.department),
+    });
+  }
+  // Drop trailing fully-empty rows beyond the default 4.
+  while (
+    keyPersonnel.length > 4 &&
+    !keyPersonnel[keyPersonnel.length - 1].name.trim() &&
+    !keyPersonnel[keyPersonnel.length - 1].position.trim() &&
+    !keyPersonnel[keyPersonnel.length - 1].department.trim()
+  ) {
+    keyPersonnel.pop();
+  }
+
+  const baseAck = (a.acknowledgement || {}) as FindingsReportAcknowledgement;
+  const inAck = (b.acknowledgement || {}) as FindingsReportAcknowledgement;
+
+  return mergeFindingsReportForm({
+    ...a,
+    ...b,
+    docNumber: pickText(a.docNumber, b.docNumber) || a.docNumber || b.docNumber,
+    reportTitle: pickText(a.reportTitle, b.reportTitle) || a.reportTitle || b.reportTitle,
+    revisionNo: pickText(a.revisionNo, b.revisionNo) || a.revisionNo || b.revisionNo,
+    issueDate: pickText(a.issueDate, b.issueDate),
+    managementSystem: pickText(a.managementSystem, b.managementSystem),
+    department: pickText(a.department, b.department),
+    auditDate: pickText(a.auditDate, b.auditDate),
+    auditors: pickText(a.auditors, b.auditors),
+    auditees: pickText(a.auditees, b.auditees),
+    auditScope: pickText(a.auditScope, b.auditScope),
+    auditCriteriaAndMethod: pickText(a.auditCriteriaAndMethod, b.auditCriteriaAndMethod),
+    generalComment: pickText(a.generalComment, b.generalComment),
+    fieldLabels: { ...(a.fieldLabels || {}), ...(b.fieldLabels || {}) },
+    hiddenFields: Array.isArray(b.hiddenFields) ? b.hiddenFields : a.hiddenFields,
+    customFields:
+      Array.isArray(b.customFields) && b.customFields.length > 0
+        ? b.customFields
+        : a.customFields,
+    sectionLabels: { ...(a.sectionLabels || {}), ...(b.sectionLabels || {}) },
+    keyPersonnel,
+    acknowledgement: {
+      auditeeSignature: pickText(baseAck.auditeeSignature, inAck.auditeeSignature),
+      auditeeDate: pickText(baseAck.auditeeDate, inAck.auditeeDate),
+      auditorSignature: pickText(baseAck.auditorSignature, inAck.auditorSignature),
+      auditorDate: pickText(baseAck.auditorDate, inAck.auditorDate),
+    },
+  });
+}
+
+/**
+ * Pick the richest findings-report form from top-level + every module store.
+ * Footer sections (comment / key personnel / signatures) are audit-wide.
+ */
+export function pickRichestFindingsReportForm(
+  auditData: Record<string, unknown> | null | undefined,
+): FindingsReportForm | null {
+  if (!auditData || typeof auditData !== "object") return null;
+  let best: unknown = auditData.findingsReportForm;
+  const store =
+    auditData.moduleDataByTemplateId &&
+    typeof auditData.moduleDataByTemplateId === "object"
+      ? (auditData.moduleDataByTemplateId as Record<string, { findingsReportForm?: unknown }>)
+      : {};
+  for (const entry of Object.values(store)) {
+    best = mergeFindingsReportFormPreferRicher(best, entry?.findingsReportForm);
+  }
+  if (!best || typeof best !== "object") return null;
+  return mergeFindingsReportForm(best as Partial<FindingsReportForm>);
+}
+
 export function getCustomFieldsBySection(
   form: FindingsReportForm,
   section: FindingsReportCustomFieldSection,

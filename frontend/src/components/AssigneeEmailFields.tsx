@@ -1,6 +1,11 @@
+import { useEffect, useId, useRef, useState } from "react";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
+import {
+    useOrgAssigneeSuggestions,
+    type OrgAssigneeSuggestion,
+} from "@/hooks/useOrgAssigneeSuggestions";
 
 type AssigneeEmailFieldsProps = {
     fieldKey: string;
@@ -46,6 +51,11 @@ export function AssigneeEmailFields({
     assignmentSource,
     assignmentKey,
 }: AssigneeEmailFieldsProps) {
+    const listId = useId();
+    const wrapRef = useRef<HTMLDivElement | null>(null);
+    const [open, setOpen] = useState(false);
+    const { suggestions, loading, ensureLoaded, search } = useOrgAssigneeSuggestions();
+
     const notifyMeta =
         findingRef != null
             ? {
@@ -60,18 +70,52 @@ export function AssigneeEmailFields({
 
     const showLabels = layout === "stacked" || layout === "inline";
 
+    useEffect(() => {
+        const onDocMouseDown = (e: MouseEvent) => {
+            if (!wrapRef.current?.contains(e.target as Node)) {
+                setOpen(false);
+            }
+        };
+        document.addEventListener("mousedown", onDocMouseDown);
+        return () => document.removeEventListener("mousedown", onDocMouseDown);
+    }, []);
+
+    const applySuggestion = (user: OrgAssigneeSuggestion) => {
+        setOpen(false);
+        // Prefill name immediately from the Users list; lookup still validates/notifies.
+        onNameChange(user.name);
+        onEmailInput(fieldKey, user.email, onEmailChange, onNameChange, notifyMeta);
+    };
+
     const emailField = (
-        <div className={showLabels ? "space-y-2 min-w-0" : "min-w-0"}>
+        <div
+            ref={wrapRef}
+            className={cn(showLabels ? "space-y-2 min-w-0" : "min-w-0", "relative")}
+        >
             {showLabels ? (
                 <Label className="text-sm font-bold text-slate-700">Assign To (Email)</Label>
             ) : null}
             <Input
-                type="email"
-                placeholder="Enter email..."
+                type="text"
+                inputMode="email"
+                autoComplete="off"
+                role="combobox"
+                aria-expanded={open}
+                aria-controls={listId}
+                aria-autocomplete="list"
+                placeholder="Search name or email..."
                 value={email}
-                onChange={(e) =>
-                    onEmailInput(fieldKey, e.target.value, onEmailChange, onNameChange, notifyMeta)
-                }
+                onFocus={() => {
+                    ensureLoaded();
+                    search(email);
+                    setOpen(true);
+                }}
+                onChange={(e) => {
+                    const next = e.target.value;
+                    setOpen(true);
+                    search(next);
+                    onEmailInput(fieldKey, next, onEmailChange, onNameChange, notifyMeta);
+                }}
                 className={cn(
                     layout === "table-cell"
                         ? "border-0 focus-visible:ring-0 rounded-none bg-transparent h-12 px-4 shadow-none text-sm"
@@ -81,6 +125,46 @@ export function AssigneeEmailFields({
                     error ? "border-red-500 focus-visible:ring-red-500 text-red-600 bg-red-50/40" : "",
                 )}
             />
+            {open ? (
+                <div
+                    id={listId}
+                    role="listbox"
+                    className={cn(
+                        "absolute left-0 right-0 z-[80] mt-1 max-h-56 overflow-y-auto rounded-lg border border-slate-200 bg-white shadow-lg",
+                        layout === "table-cell" ? "min-w-[260px]" : "",
+                    )}
+                >
+                    {loading && suggestions.length === 0 ? (
+                        <p className="px-3 py-2 text-xs text-slate-500">Loading users…</p>
+                    ) : suggestions.length === 0 ? (
+                        <p className="px-3 py-2 text-xs text-slate-500">
+                            No matching users. Type a full email or invite them on Users.
+                        </p>
+                    ) : (
+                        <ul className="py-1">
+                            {suggestions.map((user) => (
+                                <li key={user.id}>
+                                    <button
+                                        type="button"
+                                        role="option"
+                                        className="w-full px-3 py-2 text-left hover:bg-emerald-50 focus:bg-emerald-50 focus:outline-none"
+                                        onMouseDown={(e) => e.preventDefault()}
+                                        onClick={() => applySuggestion(user)}
+                                    >
+                                        <span className="block text-sm font-semibold text-slate-900 truncate">
+                                            {user.name}
+                                        </span>
+                                        <span className="block text-xs text-slate-500 truncate">
+                                            {user.email}
+                                            {user.role ? ` · ${user.role}` : ""}
+                                        </span>
+                                    </button>
+                                </li>
+                            ))}
+                        </ul>
+                    )}
+                </div>
+            ) : null}
             {error && layout !== "table-cell" ? (
                 <p className="text-[10px] text-red-500 font-bold mt-1">{error}</p>
             ) : null}

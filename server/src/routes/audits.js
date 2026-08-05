@@ -51,6 +51,7 @@ import {
     AUDIT_LIFECYCLE,
     lifecycleStatusFromAuditData,
     lifecycleStatusSqlExpression,
+    lifecycleFromModuleProgressMap,
 } from '../audit/lifecycleStatus.js';
 import {
     loadFindingsInboxPlans,
@@ -708,7 +709,7 @@ export function createAuditsRouter({ authenticateToken, checkTrialExpiration }) 
             // Pull only progress / completed flags from Postgres JSON (avoids shipping full auditData).
             // Skip when includeData=true — progress is derived from the selected auditData blob.
             const planIds = plans.map((p) => p.id).filter((id) => Number.isInteger(id) && id > 0);
-            /** @type {Map<number, { progress: number, auditCompleted: boolean }>} */
+            /** @type {Map<number, { progress: number, auditCompleted: boolean, moduleLifecycle?: string|null }>} */
             const progressById = new Map();
             let progressMs = 0;
             if (!includeData && planIds.length > 0) {
@@ -720,7 +721,8 @@ export function createAuditsRouter({ authenticateToken, checkTrialExpiration }) 
                             COALESCE(("auditData"->>'progress')::double precision, 0) AS progress,
                             COALESCE(("auditData"->>'completedItems')::double precision, 0) AS "completedItems",
                             COALESCE(("auditData"->>'totalItems')::double precision, 0) AS "totalItems",
-                            COALESCE(("auditData"->>'auditCompleted')::boolean, false) AS "auditCompleted"
+                            COALESCE(("auditData"->>'auditCompleted')::boolean, false) AS "auditCompleted",
+                            "auditData"->'moduleProgressByTemplateId' AS "moduleProgressByTemplateId"
                          FROM "AuditPlan"
                          WHERE id = ANY($1::int[])`,
                         [planIds],
@@ -743,9 +745,33 @@ export function createAuditsRouter({ authenticateToken, checkTrialExpiration }) 
                                 Math.max(0, Math.round((completedNum / totalNum) * 100)),
                             );
                         }
+                        let moduleProgress = row.moduleProgressByTemplateId;
+                        if (typeof moduleProgress === 'string') {
+                            try {
+                                moduleProgress = JSON.parse(moduleProgress);
+                            } catch {
+                                moduleProgress = null;
+                            }
+                        }
+                        const fromModules = lifecycleFromModuleProgressMap(moduleProgress);
+                        if (fromModules && moduleProgress && typeof moduleProgress === 'object') {
+                            const vals = Object.values(moduleProgress)
+                                .map((v) => Number(v))
+                                .filter((n) => Number.isFinite(n));
+                            if (vals.length > 0) {
+                                progress = Math.min(
+                                    100,
+                                    Math.max(
+                                        0,
+                                        Math.round(vals.reduce((a, b) => a + b, 0) / vals.length),
+                                    ),
+                                );
+                            }
+                        }
                         progressById.set(id, {
                             progress,
                             auditCompleted: row.auditCompleted === true,
+                            moduleLifecycle: fromModules || null,
                         });
                     }
                 } catch (metaErr) {
@@ -755,9 +781,14 @@ export function createAuditsRouter({ authenticateToken, checkTrialExpiration }) 
             }
 
             const optimizedPlans = plans.map((plan) => {
-                const meta = progressById.get(plan.id) || { progress: 0, auditCompleted: false };
+                const meta = progressById.get(plan.id) || {
+                    progress: 0,
+                    auditCompleted: false,
+                    moduleLifecycle: null,
+                };
                 let progress = meta.progress;
                 let auditCompleted = meta.auditCompleted;
+                let moduleLifecycle = meta.moduleLifecycle || null;
 
                 if (includeData && plan.auditData) {
                     try {
@@ -766,7 +797,26 @@ export function createAuditsRouter({ authenticateToken, checkTrialExpiration }) 
                                 ? JSON.parse(plan.auditData)
                                 : plan.auditData;
                         if (data && typeof data === 'object') {
-                            if (data.progress != null) {
+                            const fromModules = lifecycleFromModuleProgressMap(
+                                data.moduleProgressByTemplateId,
+                            );
+                            if (fromModules) {
+                                moduleLifecycle = fromModules;
+                                const vals = Object.values(data.moduleProgressByTemplateId || {})
+                                    .map((v) => Number(v))
+                                    .filter((n) => Number.isFinite(n));
+                                if (vals.length > 0) {
+                                    progress = Math.min(
+                                        100,
+                                        Math.max(
+                                            0,
+                                            Math.round(
+                                                vals.reduce((a, b) => a + b, 0) / vals.length,
+                                            ),
+                                        ),
+                                    );
+                                }
+                            } else if (data.progress != null) {
                                 const p = Number(data.progress);
                                 if (Number.isFinite(p)) {
                                     progress = Math.min(100, Math.max(0, Math.round(p)));
@@ -779,13 +829,14 @@ export function createAuditsRouter({ authenticateToken, checkTrialExpiration }) 
                     }
                 }
 
-                // Badge / tabs: prefer progress-derived lifecycle so UI matches answer state.
+                // Badge / tabs: prefer per-module lifecycle when available, else overall progress.
                 const derivedStatus =
-                    progress <= 0
+                    moduleLifecycle ||
+                    (progress <= 0
                         ? AUDIT_LIFECYCLE.PLANNED
                         : progress >= 100
                           ? AUDIT_LIFECYCLE.COMPLETED
-                          : AUDIT_LIFECYCLE.IN_PROGRESS;
+                          : AUDIT_LIFECYCLE.IN_PROGRESS);
 
                 if (!includeData) {
                     return {

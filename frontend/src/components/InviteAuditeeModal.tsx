@@ -21,9 +21,6 @@ import { DEFAULT_PHONE_COUNTRY_CODE } from "@/lib/phoneCountries";
 import {
     PASSWORD_REGEX,
     PASSWORD_ERROR_MESSAGE,
-    getPhoneErrorMessage,
-    isValidPhone,
-    normalizePhoneDigits,
 } from "@/lib/validation";
 import { apiFetch } from "@/lib/api";
 import type { AuditeeSiteOption } from "@/lib/orgSites";
@@ -79,17 +76,14 @@ export function InviteAuditeeModal({
             setError("Email, password, and at least one site are required.");
             return;
         }
-        if (!mobile.trim()) {
+        const mobileDigits = String(mobile || "").replace(/\D/g, "");
+        if (!mobileDigits) {
             setError("Phone number is required.");
             return;
         }
         const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
         if (!emailRegex.test(trimmedEmail)) {
             setError("Please enter a valid email address.");
-            return;
-        }
-        if (!isValidPhone(mobile, mobileCountry)) {
-            setError(getPhoneErrorMessage(mobileCountry, mobile));
             return;
         }
         if (password !== confirmPassword) {
@@ -108,7 +102,7 @@ export function InviteAuditeeModal({
                 body: JSON.stringify({
                     email: trimmedEmail,
                     password,
-                    mobile: normalizePhoneDigits(mobile, mobileCountry),
+                    mobile: mobileDigits,
                     phoneCountry: mobileCountry,
                     siteIds: siteIds.map((id) => Number(id)),
                     sendWelcomeEmail: true,
@@ -184,6 +178,7 @@ export function InviteAuditeeModal({
                             onCountryCodeChange={setMobileCountry}
                             value={mobile}
                             onChange={setMobile}
+                            unlimited
                         />
                     </div>
 

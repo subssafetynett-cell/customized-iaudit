@@ -5,13 +5,10 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Company } from "@/types/company";
-import { Building2, Phone, MapPin, Info, Pencil } from "lucide-react";
-import { getPhoneLengthForCountry, getPhonePlaceholder } from "@/lib/phoneCountries";
+import { Building2, MapPin, Info, Pencil } from "lucide-react";
+import { getDialForCountryCode, getPhonePlaceholder } from "@/lib/phoneCountries";
 import {
   capitalizeFirstLetter,
-  getPhoneErrorMessage,
-  isValidPhone,
-  normalizePhoneDigits,
   COMPANY_NAME_MAX,
   COMPANY_NAME_ERROR_MESSAGE,
   COMPANY_DESCRIPTION_MAX,
@@ -109,12 +106,12 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
   }, [open, initialData]);
 
   useEffect(() => {
-    setContactNumber((prev) => normalizePhoneDigits(prev, countryIso));
+    // Keep digits only; do not clamp by country max length in modals.
+    setContactNumber((prev) => String(prev || "").replace(/\D/g, ""));
   }, [countryIso]);
 
   const statesForSelectedCountry = countryIso ? StateCity.getStatesOfCountry(countryIso) : [];
   const hasStatesForCountry = statesForSelectedCountry.length > 0;
-  const contactPhoneMaxLength = getPhoneLengthForCountry(countryIso).max;
 
   const clearFieldError = (field: string) => {
     setFieldErrors((prev) => {
@@ -213,8 +210,8 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
       return;
     }
     if (!industry) errors.industry = "Industry is required";
-    if (!contactNumber.trim()) errors.contactNumber = "Contact number is required";
-    else if (!isValidPhone(contactNumber, countryIso)) errors.contactNumber = getPhoneErrorMessage(countryIso, contactNumber);
+    const contactDigits = String(contactNumber || "").replace(/\D/g, "");
+    if (!contactDigits) errors.contactNumber = "Contact number is required";
     if (!trimmedAddress) errors.streetAddress = "Street address is required";
     else if (!isWithinMaxLength(trimmedAddress, STREET_ADDRESS_MAX)) {
       errors.streetAddress = STREET_ADDRESS_ERROR_MESSAGE;
@@ -247,7 +244,7 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
           name: trimmedName,
           logo,
           industry,
-          contactNumber: normalizePhoneDigits(contactNumber, countryIso),
+          contactNumber: contactDigits,
           description: description.trim(),
           streetAddress: trimmedAddress,
           city: city.trim(),
@@ -387,17 +384,18 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
             <div className="space-y-2 text-sm">
               <Label htmlFor="company-contact" className="text-sm">Contact Number *</Label>
               <div className="relative">
-                <Phone className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
+                    <span className="absolute left-3 top-2.5 text-[11px] font-medium text-muted-foreground">
+                      {countryIso ? getDialForCountryCode(countryIso) : ""}
+                    </span>
                 <Input
                   id="company-contact"
                   type="tel"
                   inputMode="numeric"
-                  maxLength={contactPhoneMaxLength}
                   placeholder={getPhonePlaceholder(countryIso)}
-                  className={`pl-9 ${fieldErrors.contactNumber ? "border-red-500 focus:ring-red-500" : ""}`}
+                      className={`pl-14 ${fieldErrors.contactNumber ? "border-red-500 focus:ring-red-500" : ""}`}
                   value={contactNumber}
                   onChange={(e) => {
-                    const value = normalizePhoneDigits(e.target.value, countryIso);
+                        const value = String(e.target.value || "").replace(/\D/g, "");
                     setContactNumber(value);
                     if (fieldErrors.contactNumber) setFieldErrors(prev => ({ ...prev, contactNumber: "" }));
                     setError("");

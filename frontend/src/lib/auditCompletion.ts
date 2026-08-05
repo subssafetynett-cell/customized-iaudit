@@ -3,6 +3,11 @@ import {
     getMergedPlanFindings,
     type Finding,
 } from "@/lib/auditFindings";
+import { parseAuditPlanTemplateIds } from "@/data/auditTemplates";
+import {
+    getPlanOverallChecklistProgress,
+    lifecycleFromModulePercents,
+} from "@/lib/auditPlanModules";
 
 export type AuditPlanLike = {
     id?: number;
@@ -40,8 +45,43 @@ export function parseAuditData(
     }
 }
 
+/**
+ * Read per-module percents from saved auditData when present
+ * (written on save for multi-module plans).
+ */
+function readStoredModulePercents(
+    plan: AuditPlanLike,
+): number[] | null {
+    const ids = parseAuditPlanTemplateIds(plan.templateId);
+    if (ids.length <= 1) return null;
+    const data = parseAuditData(plan);
+    const raw = data?.moduleProgressByTemplateId;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+    const map = raw as Record<string, unknown>;
+    const percents = ids.map((id) => {
+        const n = Number(map[id]);
+        return Number.isFinite(n) ? Math.min(100, Math.max(0, Math.round(n))) : 0;
+    });
+    // Only trust when at least one module key was actually stored.
+    const hasAnyKey = ids.some((id) => Object.prototype.hasOwnProperty.call(map, id));
+    return hasAnyKey ? percents : null;
+}
+
 /** Assessment progress stored on the plan (0–100). */
 export function getAuditAssessmentProgress(plan: AuditPlanLike): number {
+    const ids = parseAuditPlanTemplateIds(plan.templateId);
+    // Multi-module: prefer live / stored module aggregate so one finished
+    // checklist cannot mark the whole plan 100%.
+    if (ids.length > 1) {
+        if (plan.auditData != null) {
+            return getPlanOverallChecklistProgress(plan).percent;
+        }
+        const stored = readStoredModulePercents(plan);
+        if (stored) {
+            const sum = stored.reduce((a, b) => a + b, 0);
+            return Math.min(100, Math.max(0, Math.round(sum / stored.length)));
+        }
+    }
     // List APIs expose progress at the top level without shipping auditData.
     if (typeof plan?.progress === "number" && Number.isFinite(plan.progress)) {
         return Math.min(100, Math.max(0, Math.round(plan.progress)));
@@ -108,6 +148,20 @@ export function isAuditLifecycleCompleted(plan: AuditPlanLike): boolean {
 export function getAuditPlanStatusLabel(
     plan: AuditPlanLike & { id: number },
 ): "Completed" | "In Progress" | "Planned" {
+    const ids = parseAuditPlanTemplateIds(plan.templateId);
+
+    // Multi-module: status depends on EVERY selected checklist, not one module.
+    if (ids.length > 1) {
+        const stored = readStoredModulePercents(plan);
+        if (stored) {
+            return lifecycleFromModulePercents(stored);
+        }
+        if (plan.auditData != null) {
+            const { byModuleId } = getPlanOverallChecklistProgress(plan);
+            return lifecycleFromModulePercents(ids.map((id) => byModuleId[id] ?? 0));
+        }
+    }
+
     // Prefer live progress so badges match assessment state even if status is stale.
     const progress = getAuditAssessmentProgress(plan);
     if (progress >= 100) return "Completed";

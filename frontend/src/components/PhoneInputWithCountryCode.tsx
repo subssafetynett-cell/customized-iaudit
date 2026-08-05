@@ -28,6 +28,11 @@ export interface PhoneInputWithCountryCodeProps {
     onCountryCodeChange?: (code: string) => void;
     value: string;
     onChange: (nationalDigits: string) => void;
+    /**
+     * When true, do not clamp by country max length and do not enforce
+     * country-specific length restrictions at the input level.
+     */
+    unlimited?: boolean;
     disabled?: boolean;
     error?: boolean;
     id?: string;
@@ -41,6 +46,7 @@ export function PhoneInputWithCountryCode({
     onCountryCodeChange,
     value,
     onChange,
+    unlimited = false,
     disabled = false,
     error = false,
     id,
@@ -54,15 +60,21 @@ export function PhoneInputWithCountryCode({
         [countryCode],
     );
     const dial = getDialForCountryCode(countryCode);
-    const placeholder = getPhonePlaceholder(countryCode);
-    const { max: phoneMaxLength } = getPhoneLengthForCountry(countryCode);
+    const placeholder = unlimited ? "Phone number" : getPhonePlaceholder(countryCode);
+    const phoneMaxLength = unlimited ? undefined : getPhoneLengthForCountry(countryCode).max;
 
     const handleCountryChange = (nextCode: string) => {
         onCountryCodeChange?.(nextCode);
-        // Re-clamp national digits to the new country's length rules.
-        const nextDigits = normalizePhoneDigits(value, nextCode);
-        if (nextDigits !== value) {
-            onChange(nextDigits);
+        if (unlimited) {
+            // Keep digits as entered; only normalize formatting.
+            const digitsOnly = String(value || "").replace(/\D/g, "");
+            if (digitsOnly !== value) onChange(digitsOnly);
+        } else {
+            // Re-clamp national digits to the new country's length rules.
+            const nextDigits = normalizePhoneDigits(value, nextCode);
+            if (nextDigits !== value) {
+                onChange(nextDigits);
+            }
         }
         setOpen(false);
     };
@@ -136,7 +148,9 @@ export function PhoneInputWithCountryCode({
                 value={value}
                 disabled={disabled}
                 onChange={(e) => {
-                    const digits = normalizePhoneDigits(e.target.value, countryCode);
+                    const digits = unlimited
+                        ? String(e.target.value || "").replace(/\D/g, "")
+                        : normalizePhoneDigits(e.target.value, countryCode);
                     onChange(digits);
                 }}
                 className={cn(

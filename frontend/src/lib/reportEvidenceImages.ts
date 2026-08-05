@@ -399,6 +399,10 @@ export function evidenceVisualBlockHeightMm(
 export type JsPdfEvidenceEmbedOptions = {
     margin?: number;
     pageHeightMm?: number;
+    /** Y position after adding a new page (leave room for repeating headers). */
+    newPageTopMm?: number;
+    /** Bottom reserve so images don't collide with footers. */
+    footerReserveMm?: number;
     sectionTitle?: string;
     introText?: string;
 };
@@ -415,18 +419,21 @@ export function embedPreparedImagesInJsPdf(
     const margin = options.margin ?? 14;
     const pageW = doc.internal.pageSize.getWidth();
     const pageH = options.pageHeightMm ?? doc.internal.pageSize.getHeight();
+    const newPageTop = options.newPageTopMm ?? margin;
+    const footerReserve = options.footerReserveMm ?? 25;
     const contentWidthMm = pageW - margin * 2;
     let y = startY;
 
     const checkPage = (currentY: number, needMm: number) => {
-        if (currentY + needMm > pageH - 25) {
+        if (currentY + needMm > pageH - footerReserve) {
             doc.addPage();
-            return margin;
+            return newPageTop;
         }
         return currentY;
     };
 
     if (options.sectionTitle) {
+        y = checkPage(y, 16);
         doc.setFontSize(14);
         doc.setFont("helvetica", "bold");
         doc.setTextColor(33, 56, 71);
@@ -494,11 +501,18 @@ export function findingMediaToReportSources(
     context: string,
 ): ReportEvidenceSource[] {
     if (!media?.length) return [];
-    return media.map((m) => ({
-        name: m.name,
-        data: m.data,
-        type: m.type,
-        context,
-        description: m.description?.trim() || undefined,
-    }));
+    return media
+        .filter((m) => {
+            const type = String(m?.type || "").toLowerCase();
+            const data = String(m?.data || "").trim();
+            if (!data || data.startsWith("blob:") || data === "[omitted]") return false;
+            return type.startsWith("image/") || type === "application/pdf" || /^https?:\/\//i.test(data) || data.startsWith("data:");
+        })
+        .map((m) => ({
+            name: m.name || "attachment",
+            data: m.data,
+            type: m.type || "image/jpeg",
+            context,
+            description: m.description?.trim() || undefined,
+        }));
 }

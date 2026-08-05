@@ -8,6 +8,11 @@ import {
 } from "@/data/auditTemplates";
 import { isQfsKoreSectionHeader } from "@/lib/qfsKoreChecklistUi";
 import type { AuditEvidenceMedia } from "@/lib/evidenceImageUpload";
+import {
+    countFindingsReportFormAnswers,
+    mergeFindingsReportFormPreferRicher,
+    pickRichestFindingsReportForm,
+} from "@/lib/findingsReportForm";
 
 /** True when the audit plan has more than one assigned checklist/module. */
 export function planHasMultipleModules(templateId?: string | null): boolean {
@@ -225,6 +230,12 @@ export function moduleStoreEntryHasAnswers(
     return false;
 }
 
+function isNonEmptyString(v: unknown): v is string {
+    return typeof v === "string" && v.trim().length > 0;
+}
+
+// countFindingsReportFormAnswers is imported from findingsReportForm.ts
+
 /** Count answered checklist findings in a module entry (for richer-data comparisons). */
 export function countModuleStoreAnswers(
     entry: ModuleStoreEntry | null | undefined,
@@ -261,15 +272,10 @@ export function countModuleStoreAnswers(
     }
     if (entry.genericFiles && typeof entry.genericFiles === "object") {
         for (const list of Object.values(entry.genericFiles)) {
-            if (Array.isArray(list) && list.length > 0) n += list.length;
+            if (Array.isArray(list) && list.length > 0) n += 1;
         }
     }
-    const form = entry.findingsReportForm;
-    if (form && typeof form === "object") {
-        for (const v of Object.values(form as Record<string, unknown>)) {
-            if (typeof v === "string" && v.trim()) n += 1;
-        }
-    }
+    n += countFindingsReportFormAnswers(entry.findingsReportForm);
     return n;
 }
 
@@ -349,7 +355,41 @@ export function mergeAuditDataPreferRicher(
         sectionData: baseline.sectionData as ModuleStoreEntry["sectionData"],
         auditGlobalInfo: baseline.auditGlobalInfo as ModuleStoreEntry["auditGlobalInfo"],
     });
-    const useIncomingTop = incomingTop >= baselineTop;
+    // On ties, keep baseline to avoid overwriting filled data with emptier objects.
+    const useIncomingTop = incomingTop > baselineTop;
+
+    const mergeEvidenceMapsPreferNonEmpty = (
+        a: Record<string, AuditEvidenceMedia[]> | undefined,
+        b: Record<string, AuditEvidenceMedia[]> | undefined,
+    ): Record<string, AuditEvidenceMedia[]> => {
+        const out: Record<string, AuditEvidenceMedia[]> = {
+            ...(a || {}),
+        };
+        if (!b || typeof b !== "object") return out;
+        for (const [key, list] of Object.entries(b)) {
+            if (Array.isArray(list) && list.length > 0) {
+                out[key] = list;
+            }
+        }
+        return out;
+    };
+
+    const mergeStringMapPreferNonEmpty = (
+        a: Record<string, string> | undefined,
+        b: Record<string, string> | undefined,
+    ): Record<string, string> => {
+        const out: Record<string, string> = { ...(a || {}) };
+        if (!b || typeof b !== "object") return out;
+        for (const [key, val] of Object.entries(b)) {
+            if (isNonEmptyString(val)) out[key] = val;
+        }
+        return out;
+    };
+
+    const chosenFindingsReportForm = mergeFindingsReportFormPreferRicher(
+        baseline.findingsReportForm,
+        incoming.findingsReportForm,
+    );
 
     return {
         ...baseline,
@@ -360,28 +400,26 @@ export function mergeAuditDataPreferRicher(
         sectionData: useIncomingTop
             ? incoming.sectionData ?? baseline.sectionData
             : baseline.sectionData ?? incoming.sectionData,
-        auditGlobalInfo: useIncomingTop
-            ? incoming.auditGlobalInfo ?? baseline.auditGlobalInfo
-            : baseline.auditGlobalInfo ?? incoming.auditGlobalInfo,
+        // Never let empty strings wipe already-filled header answers.
+        auditGlobalInfo: mergeStringMapPreferNonEmpty(
+            baseline.auditGlobalInfo as Record<string, string> | undefined,
+            incoming.auditGlobalInfo as Record<string, string> | undefined,
+        ),
         editableChecklist:
             Array.isArray(incoming.editableChecklist) &&
             (incoming.editableChecklist as unknown[]).length > 0
                 ? incoming.editableChecklist
                 : baseline.editableChecklist ?? incoming.editableChecklist,
-        findingsReportForm:
-            incoming.findingsReportForm ?? baseline.findingsReportForm,
+        findingsReportForm: chosenFindingsReportForm,
         clauseData: incoming.clauseData ?? baseline.clauseData,
-        genericFiles: (() => {
-            const a =
-                baseline.genericFiles && typeof baseline.genericFiles === "object"
-                    ? (baseline.genericFiles as Record<string, unknown>)
-                    : {};
-            const b =
-                incoming.genericFiles && typeof incoming.genericFiles === "object"
-                    ? (incoming.genericFiles as Record<string, unknown>)
-                    : {};
-            return { ...a, ...b };
-        })(),
+        genericFiles: mergeEvidenceMapsPreferNonEmpty(
+            baseline.genericFiles as Record<string, AuditEvidenceMedia[]> | undefined,
+            incoming.genericFiles as Record<string, AuditEvidenceMedia[]> | undefined,
+        ),
+        clauseFiles: mergeEvidenceMapsPreferNonEmpty(
+            baseline.clauseFiles as Record<string, AuditEvidenceMedia[]> | undefined,
+            incoming.clauseFiles as Record<string, AuditEvidenceMedia[]> | undefined,
+        ),
         moduleDataByTemplateId: mergedStore,
         activeModuleId: incoming.activeModuleId ?? baseline.activeModuleId,
     };
@@ -416,9 +454,56 @@ export function mergeModuleStoreEntries(
     const checklistData =
         incomingCount > existingCount
             ? incoming.checklistData ?? existing.checklistData
-            : incomingCount < existingCount
-              ? existing.checklistData ?? incoming.checklistData
-              : incoming.checklistData ?? existing.checklistData;
+            : existing.checklistData ?? incoming.checklistData;
+
+    const mergeEvidenceMapsPreferNonEmpty = (
+        a: Record<string, AuditEvidenceMedia[]> | undefined,
+        b: Record<string, AuditEvidenceMedia[]> | undefined,
+    ): Record<string, AuditEvidenceMedia[]> => {
+        const out: Record<string, AuditEvidenceMedia[]> = { ...(a || {}) };
+        if (!b || typeof b !== "object") return out;
+        for (const [key, list] of Object.entries(b)) {
+            if (Array.isArray(list) && list.length > 0) out[key] = list;
+        }
+        return out;
+    };
+
+    const mergeStringMapPreferNonEmpty = (
+        a: Record<string, string> | undefined,
+        b: Record<string, string> | undefined,
+    ): Record<string, string> => {
+        const out: Record<string, string> = { ...(a || {}) };
+        if (!b || typeof b !== "object") return out;
+        for (const [key, val] of Object.entries(b)) {
+            if (isNonEmptyString(val)) out[key] = val;
+        }
+        return out;
+    };
+
+    const chosenFindingsReportForm = mergeFindingsReportFormPreferRicher(
+        existing.findingsReportForm,
+        incoming.findingsReportForm,
+    );
+
+    const mergeSectionDataPreferNonEmpty = (
+        a: Record<string | number, string | null | undefined> | undefined,
+        b: Record<string | number, string | null | undefined> | undefined,
+    ): Record<string | number, string | null | undefined> | undefined => {
+        const out: Record<string | number, string | null | undefined> = { ...(a || {}) };
+        if (!b || typeof b !== "object") return out;
+        for (const [key, val] of Object.entries(b)) {
+            if (isNonEmptyString(val)) {
+                out[key] = val;
+            }
+        }
+        return out;
+    };
+
+    const mergedSectionData = mergeSectionDataPreferNonEmpty(
+        existing.sectionData,
+        incoming.sectionData,
+    );
+
     return {
         checklistData,
         editableChecklist:
@@ -428,22 +513,13 @@ export function mergeModuleStoreEntries(
                 : existing.editableChecklist) ?? incoming.editableChecklist,
         extraChecklistItems:
             incoming.extraChecklistItems ?? existing.extraChecklistItems,
-        sectionData:
-            incoming.sectionData && Object.keys(incoming.sectionData).length > 0
-                ? incoming.sectionData
-                : existing.sectionData ?? incoming.sectionData,
-        genericFiles:
-            Object.keys(incoming.genericFiles || {}).length >=
-            Object.keys(existing.genericFiles || {}).length
-                ? incoming.genericFiles ?? existing.genericFiles
-                : existing.genericFiles ?? incoming.genericFiles,
-        findingsReportForm:
-            incoming.findingsReportForm ?? existing.findingsReportForm,
-        auditGlobalInfo:
-            incoming.auditGlobalInfo &&
-            Object.values(incoming.auditGlobalInfo).some((v) => String(v || "").trim())
-                ? incoming.auditGlobalInfo
-                : existing.auditGlobalInfo ?? incoming.auditGlobalInfo,
+        sectionData: mergedSectionData ?? existing.sectionData ?? incoming.sectionData,
+        genericFiles: mergeEvidenceMapsPreferNonEmpty(existing.genericFiles, incoming.genericFiles),
+        findingsReportForm: chosenFindingsReportForm,
+        auditGlobalInfo: mergeStringMapPreferNonEmpty(
+            existing.auditGlobalInfo as Record<string, string> | undefined,
+            incoming.auditGlobalInfo as Record<string, string> | undefined,
+        ),
     };
 }
 
@@ -692,6 +768,66 @@ export function getPlanModulesProgressMap(
 }
 
 /**
+ * Aggregate checklist progress across every selected module on the plan.
+ * Used for lifecycle status: Planned (all 0%), Completed (all 100%), else In Progress.
+ */
+export function getPlanOverallChecklistProgress(
+    plan: { templateId?: string | null; auditData?: unknown } | null | undefined,
+): { percent: number; completed: number; total: number; byModuleId: Record<string, number> } {
+    const modules = getPlanModuleOptions(plan?.templateId);
+    const byModuleId: Record<string, number> = {};
+    let completed = 0;
+    let total = 0;
+
+    for (const mod of modules) {
+        const p = getModuleChecklistProgress(plan, mod.id);
+        byModuleId[mod.id] = p.percent;
+        completed += p.completed;
+        total += p.total;
+    }
+
+    if (total > 0) {
+        return {
+            completed,
+            total,
+            percent: Math.min(100, Math.max(0, Math.round((completed / total) * 100))),
+            byModuleId,
+        };
+    }
+
+    // Fallback when totals are unknown: average of per-module percents.
+    const vals = Object.values(byModuleId);
+    if (vals.length === 0) {
+        return { percent: 0, completed: 0, total: 0, byModuleId };
+    }
+    const percent = Math.min(
+        100,
+        Math.max(0, Math.round(vals.reduce((a, b) => a + b, 0) / vals.length)),
+    );
+    return { percent, completed: 0, total: 0, byModuleId };
+}
+
+/**
+ * Lifecycle from selected-module percents:
+ * - all 0% → Planned
+ * - all 100% → Completed
+ * - otherwise → In Progress
+ */
+export function lifecycleFromModulePercents(
+    percents: number[],
+): "Planned" | "In Progress" | "Completed" {
+    if (percents.length === 0) return "Planned";
+    const clamped = percents.map((p) => {
+        const n = Number(p);
+        if (!Number.isFinite(n)) return 0;
+        return Math.min(100, Math.max(0, Math.round(n)));
+    });
+    if (clamped.every((p) => p <= 0)) return "Planned";
+    if (clamped.every((p) => p >= 100)) return "Completed";
+    return "In Progress";
+}
+
+/**
  * Scope a multi-module plan to a single checklist for Perform Audit / report download.
  * Pulls that module's answers from moduleDataByTemplateId when present.
  */
@@ -767,10 +903,9 @@ export function scopePlanToModule(
                 : {}),
         genericFiles: localGenericFiles,
         findingsReportForm:
-            mod?.findingsReportForm ??
-            (auditData.activeModuleId === resolvedId || !multiModule
-                ? auditData.findingsReportForm
-                : undefined),
+            pickRichestFindingsReportForm(auditData) ||
+            mod?.findingsReportForm ||
+            auditData.findingsReportForm,
         auditGlobalInfo:
             mod?.auditGlobalInfo ??
             (auditData.activeModuleId === resolvedId || !multiModule

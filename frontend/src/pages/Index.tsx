@@ -700,12 +700,9 @@ const Index = () => {
 
           {/* Upcoming Audits */}
           <Card className="lg:col-span-5 border-none shadow-sm rounded-xl bg-white p-6">
-            <div className="flex items-center justify-between mb-6">
-              <div>
-                <h2 className="text-lg font-bold text-[#111827]">Upcoming Audits</h2>
-                <p className="text-xs text-[#9CA3AF]">Next scheduled audit plans</p>
-              </div>
-              <button className="text-[#9CA3AF] hover:text-[#111827]">...</button>
+            <div className="mb-6">
+              <h2 className="text-lg font-bold text-[#111827]">Upcoming Audits</h2>
+              <p className="text-xs text-[#9CA3AF]">Next scheduled audit plans</p>
             </div>
 
             <div className="space-y-4">
@@ -816,7 +813,7 @@ const Index = () => {
             <div className="flex items-center justify-between mb-6">
               <div>
                 <h2 className="text-lg font-bold text-[#111827]">Finding Distribution</h2>
-                <p className="text-xs text-[#9CA3AF]">OFI, Minor and Major N/C across all audits</p>
+                <p className="text-xs text-[#9CA3AF]">OFI and Minor N/C across all audits</p>
               </div>
               <Button
                 variant="ghost"
