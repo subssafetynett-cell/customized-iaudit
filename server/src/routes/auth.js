@@ -27,7 +27,8 @@ import {
     RESET_PASSWORD_ALLOWED_BODY_KEYS,
     getDisallowedExtraKeysError,
     LOGIN_SUCCESS_USER_SELECT,
-    ensureUserTrialStarted
+    ensureUserTrialStarted,
+    ensureLoginSchemaReady,
 } from '../session.js';
 import {
     sendOtpIpRateLimit,
@@ -336,19 +337,39 @@ async function handleAuthLogin(req, res) {
         });
 
     try {
+        // Ensure Session table + failedLoginAttempts exist before any login query.
+        await ensureLoginSchemaReady();
+
         console.log(`[AUTH] Login attempt`);
-        const user = await prisma.user.findFirst({
-            where: { email: email },
-            select: {
-                id: true,
-                email: true,
-                password: true,
-                isActive: true,
-                failedLoginAttempts: true,
-                emailVerifiedAt: true,
-                creatorId: true
-            }
-        });
+        let user;
+        try {
+            user = await prisma.user.findFirst({
+                where: { email: email },
+                select: {
+                    id: true,
+                    email: true,
+                    password: true,
+                    isActive: true,
+                    failedLoginAttempts: true,
+                    emailVerifiedAt: true,
+                    creatorId: true
+                }
+            });
+        } catch (lookupErr) {
+            console.warn('[AUTH] Full user lookup failed, retrying minimal select:', lookupErr?.message || lookupErr);
+            user = await prisma.user.findFirst({
+                where: { email: email },
+                select: {
+                    id: true,
+                    email: true,
+                    password: true,
+                    isActive: true,
+                    emailVerifiedAt: true,
+                    creatorId: true
+                }
+            });
+            if (user) user.failedLoginAttempts = 0;
+        }
 
         if (!user) {
             console.log(`[AUTH] Login failed: User not found`);
@@ -378,16 +399,25 @@ async function handleAuthLogin(req, res) {
                 await prisma.user.update({
                     where: { id: user.id },
                     data: { password: hashedPassword, failedLoginAttempts: 0 }
+                }).catch(async () => {
+                    await prisma.user.update({
+                        where: { id: user.id },
+                        data: { password: hashedPassword }
+                    });
                 });
                 isPasswordMatch = true;
             } else {
-                const afterFail = await prisma.user.update({
-                    where: { id: user.id },
-                    data: { failedLoginAttempts: { increment: 1 } },
-                    select: { failedLoginAttempts: true }
-                });
-                if (afterFail.failedLoginAttempts >= LOGIN_MAX_FAILED_ATTEMPTS) {
-                    return accountLockedResponse();
+                try {
+                    const afterFail = await prisma.user.update({
+                        where: { id: user.id },
+                        data: { failedLoginAttempts: { increment: 1 } },
+                        select: { failedLoginAttempts: true }
+                    });
+                    if (afterFail.failedLoginAttempts >= LOGIN_MAX_FAILED_ATTEMPTS) {
+                        return accountLockedResponse();
+                    }
+                } catch (failErr) {
+                    console.warn('[AUTH] failedLoginAttempts increment skipped:', failErr?.message || failErr);
                 }
                 return invalidCredentials();
             }
@@ -428,10 +458,30 @@ async function handleAuthLogin(req, res) {
             console.warn('[AUTH] Org link repair skipped:', err?.message || err);
         });
 
-        const profile = await prisma.user.findUnique({
-            where: { id: user.id },
-            select: LOGIN_SUCCESS_USER_SELECT
-        });
+        let profile = null;
+        try {
+            profile = await prisma.user.findUnique({
+                where: { id: user.id },
+                select: LOGIN_SUCCESS_USER_SELECT
+            });
+        } catch (profileErr) {
+            console.warn('[AUTH] Full profile select failed, using minimal profile:', profileErr?.message || profileErr);
+            profile = await prisma.user.findUnique({
+                where: { id: user.id },
+                select: {
+                    id: true,
+                    firstName: true,
+                    lastName: true,
+                    email: true,
+                    mobile: true,
+                    role: true,
+                    isActive: true,
+                    creatorId: true,
+                    onboardingCompleted: true,
+                    emailVerifiedAt: true,
+                }
+            });
+        }
         if (!profile || String(profile.email || '').toLowerCase().trim() !== email) {
             return res.status(500).json({ error: 'Login could not be completed' });
         }
@@ -448,12 +498,18 @@ async function handleAuthLogin(req, res) {
         });
 
         console.log(`[AUTH] Login successful for user: ${profile.id}, onboardingCompleted: ${profile.onboardingCompleted}`);
-        res.status(200).json(sendAuthenticatedSession(res, profile, session));
+        return res.status(200).json(sendAuthenticatedSession(res, profile, session));
 
     } catch (error) {
         handlePrismaError(error, 'login');
         console.error('[AUTH] Login failed:', error?.message || error, error?.code || '', error?.meta || '');
-        res.status(500).json({ error: 'An error occurred during login' });
+        // Surface a stable code so ops can distinguish schema vs unknown failures without leaking internals.
+        const msg = String(error?.message || '');
+        const schemaIssue = /Session|failedLoginAttempts|does not exist|P2021|P2022|42P01|42703/i.test(msg);
+        return res.status(500).json({
+            error: 'An error occurred during login',
+            code: schemaIssue ? 'LOGIN_SCHEMA_ERROR' : 'LOGIN_INTERNAL_ERROR',
+        });
     }
 }
 

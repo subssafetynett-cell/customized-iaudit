@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import prisma from './prisma.js';
+import prisma, { pool } from './prisma.js';
 
 /** Server-side session lifetime (opaque token stored in DB; delivered via httpOnly cookie). */
 const SESSION_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -7,6 +7,55 @@ const SESSION_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const SESSION_RENEW_WHEN_REMAINING_MS = SESSION_MAX_AGE_MS / 2;
 const SESSION_EXPIRES_HEADER = 'X-Session-Expires-At';
 const SESSION_COOKIE_NAME = 'iaudit_session';
+
+/** Ensures Session table + login columns exist even if bootstrap/migrate lagged. */
+let loginSchemaReadyPromise = null;
+
+async function ensureLoginSchemaReady() {
+    if (!loginSchemaReadyPromise) {
+        loginSchemaReadyPromise = (async () => {
+            await pool.query(
+                'ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "failedLoginAttempts" INTEGER NOT NULL DEFAULT 0'
+            );
+            await pool.query(
+                'ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "lastLoginAt" TIMESTAMP(3)'
+            );
+            await pool.query(
+                'ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "firstLoginAt" TIMESTAMP(3)'
+            );
+            await pool.query(`
+                CREATE TABLE IF NOT EXISTS "Session" (
+                    "token" TEXT NOT NULL,
+                    "userId" INTEGER NOT NULL,
+                    "expiresAt" TIMESTAMP(3) NOT NULL,
+                    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT "Session_pkey" PRIMARY KEY ("token")
+                )
+            `);
+            await pool.query(
+                `CREATE INDEX IF NOT EXISTS "Session_userId_idx" ON "Session"("userId")`
+            );
+            await pool.query(
+                `CREATE INDEX IF NOT EXISTS "Session_expiresAt_idx" ON "Session"("expiresAt")`
+            );
+            await pool.query(`
+                DO $$ BEGIN
+                    ALTER TABLE "Session"
+                        ADD CONSTRAINT "Session_userId_fkey"
+                        FOREIGN KEY ("userId") REFERENCES "User"("id")
+                        ON DELETE CASCADE ON UPDATE CASCADE;
+                EXCEPTION
+                    WHEN duplicate_object THEN NULL;
+                END $$
+            `).catch(() => {});
+            return true;
+        })().catch((err) => {
+            loginSchemaReadyPromise = null;
+            throw err;
+        });
+    }
+    return loginSchemaReadyPromise;
+}
 
 function safeDecodeCookieValue(value) {
     try {
@@ -266,11 +315,30 @@ function resetPasswordVerifyRateLimit(req, res, next) {
  * @param {{ existingToken?: string | null }} [opts]
  * @returns {Promise<{ token: string, sessionExpiresAt: string }>}
  */
+async function createSessionRow(token, userId, expiresAt) {
+    try {
+        await prisma.session.create({
+            data: { token, userId, expiresAt },
+        });
+    } catch (err) {
+        // Table missing / adapter glitch — ensure schema then insert via SQL.
+        await ensureLoginSchemaReady();
+        await pool.query(
+            `INSERT INTO "Session" ("token", "userId", "expiresAt", "createdAt")
+             VALUES ($1, $2, $3, NOW())
+             ON CONFLICT ("token") DO UPDATE SET "expiresAt" = EXCLUDED."expiresAt"`,
+            [token, userId, expiresAt],
+        );
+    }
+}
+
 async function createSessionTokenForUser(userId, opts = {}) {
     const uid = Number(userId);
     if (!Number.isInteger(uid) || uid < 1) {
         throw new Error('Invalid user id for session');
     }
+    await ensureLoginSchemaReady();
+
     const existingToken =
         typeof opts.existingToken === 'string' && opts.existingToken.trim()
             ? opts.existingToken.trim()
@@ -278,26 +346,46 @@ async function createSessionTokenForUser(userId, opts = {}) {
     const now = new Date();
 
     // Opportunistic cleanup of *this user's* expired sessions only (avoid global table scan on every login).
-    // Avoid interactive $transaction here — Prisma driver-adapter tx failures were surfacing as login 500s.
     await prisma.session.deleteMany({
         where: { userId: uid, expiresAt: { lt: now } },
-    }).catch(() => {});
+    }).catch(async () => {
+        await pool.query(
+            `DELETE FROM "Session" WHERE "userId" = $1 AND "expiresAt" < $2`,
+            [uid, now],
+        ).catch(() => {});
+    });
 
     // Same browser/device already signed in — renew that session; leave other devices alone.
     if (existingToken) {
-        const existing = await prisma.session.findFirst({
-            where: {
-                token: existingToken,
-                userId: uid,
-                expiresAt: { gt: now },
-            },
-            select: { token: true },
-        });
+        let existing = null;
+        try {
+            existing = await prisma.session.findFirst({
+                where: {
+                    token: existingToken,
+                    userId: uid,
+                    expiresAt: { gt: now },
+                },
+                select: { token: true },
+            });
+        } catch {
+            const { rows } = await pool.query(
+                `SELECT "token" FROM "Session"
+                 WHERE "token" = $1 AND "userId" = $2 AND "expiresAt" > $3
+                 LIMIT 1`,
+                [existingToken, uid, now],
+            );
+            existing = rows[0] || null;
+        }
         if (existing) {
             const expiresAt = new Date(Date.now() + SESSION_MAX_AGE_MS);
             await prisma.session.update({
                 where: { token: existing.token },
                 data: { expiresAt },
+            }).catch(async () => {
+                await pool.query(
+                    `UPDATE "Session" SET "expiresAt" = $1 WHERE "token" = $2`,
+                    [expiresAt, existing.token],
+                );
             });
             await stampUserLoginTimes(uid);
             return {
@@ -310,9 +398,7 @@ async function createSessionTokenForUser(userId, opts = {}) {
     // New device/browser — create an additional session without revoking others.
     const token = crypto.randomBytes(48).toString('base64url');
     const expiresAt = new Date(Date.now() + SESSION_MAX_AGE_MS);
-    await prisma.session.create({
-        data: { token, userId: uid, expiresAt },
-    });
+    await createSessionRow(token, uid, expiresAt);
     await stampUserLoginTimes(uid);
     return { token, sessionExpiresAt: expiresAt.toISOString() };
 }
@@ -457,6 +543,7 @@ export {
     loginIpBuckets,
     loginIpRateLimit,
     createSessionTokenForUser,
+    ensureLoginSchemaReady,
     invalidateAllUserSessions,
     maybeRenewSessionExpiry,
     LOGIN_INVALID_CREDENTIALS_MESSAGE,

@@ -1193,6 +1193,12 @@ server.keepAliveTimeout = 130000;
 server.headersTimeout = 131000;
 server.requestTimeout = 0;
 
+// Warm login schema ASAP so the first POST /auth/login does not race migrate.
+import('./session.js')
+    .then(({ ensureLoginSchemaReady }) => ensureLoginSchemaReady())
+    .then(() => console.log('[start] ✔ Login schema ready'))
+    .catch((err) => console.warn('[start] Login schema warm-up deferred:', err?.message || err));
+
 // 2. Migrations / seeds in background without freezing HTTP.
 runBootstrap();
 
