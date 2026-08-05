@@ -392,3 +392,11 @@ export function EoshExceptionFollowUp({
 export function needsEoshExceptionFollowUp(score: "2" | "1" | "0" | ""): boolean {
   return score === "1" || score === "0";
 }
+
+/** ISO OK/Not OK scale — Not OK (stored as NC) requires the nonconformance follow-up form. */
+export function needsOkNotOkNcFollowUp(
+  findings: string | null | undefined,
+): boolean {
+  const t = String(findings || "").trim();
+  return t === "NC" || t === "Not OK" || t === "NotOK";
+}

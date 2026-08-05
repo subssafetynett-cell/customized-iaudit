@@ -50,7 +50,7 @@ import {
     getAuditPlanTemplateLabel,
     getAuditPlanTemplateOptions,
     getAuditPlanTemplateSubtitle,
-    getLockedPlanTemplatesFromExecution,
+    getLockedPlanTemplatesFromProgram,
     isAuditPlanMultiStandard,
     serializeAuditPlanTemplateIds,
 } from "@/data/auditTemplates";
@@ -186,19 +186,24 @@ const CreateAuditPlanPage = () => {
         () => resolveDepartmentsFromProgram(activeProgram, companies),
         [activeProgram, companies],
     );
-    const lockedPlanTemplates = useMemo(() => {
-        const fromExecution = getLockedPlanTemplatesFromExecution(execution, activeProgram);
-        if (fromExecution && fromExecution.length > 0) return fromExecution;
-        const iso = String(activeProgram?.isoStandard || "");
-        const isModuleProgram =
-            activeProgram?.scheduleData?.criteriaType === "module" ||
-            iso.includes("EOSH Module:") ||
-            iso.includes("QFS KORE Module:");
-        if (!isModuleProgram) return null;
-        const fromPlan = findAuditTemplates(plan?.templateId);
-        return fromPlan.length > 0 ? fromPlan : null;
-    }, [execution, activeProgram, plan?.templateId]);
+    const lockedPlanTemplates = useMemo(
+        () =>
+            getLockedPlanTemplatesFromProgram(execution, activeProgram, {
+                planTemplateId: plan?.templateId,
+                auditCriteria: plan?.criteria || auditCriteria,
+            }),
+        [execution, activeProgram, plan?.templateId, plan?.criteria, auditCriteria],
+    );
     const templatesLockedFromProgram = Boolean(lockedPlanTemplates && lockedPlanTemplates.length > 0);
+    const lockedTemplatesAreModules = Boolean(
+        lockedPlanTemplates?.some((t) => t.module === "EOSH" || t.module === "QFS KORE"),
+    );
+    /** Multi-ISO program → one locked "IMS Checklist" card (IDs still saved for perform). */
+    const lockedAsImsChecklist = Boolean(
+        templatesLockedFromProgram &&
+            !lockedTemplatesAreModules &&
+            (lockedPlanTemplates?.length ?? 0) > 1,
+    );
 
     const collectSeedAuditors = (...sources: any[]) => {
         const collected: any[] = [];
@@ -376,8 +381,16 @@ const CreateAuditPlanPage = () => {
 
             setAuditObjective(`To verify compliance with ${currentStandard} and internal procedures, and to identify areas for improvement.`);
             if (lockedPlanTemplates && lockedPlanTemplates.length > 0) {
-                const moduleLabels = lockedPlanTemplates.map((t) => getAuditPlanTemplateLabel(t)).join("; ");
-                setAuditCriteria(`${moduleLabels}, Internal Manual, Local Regulations`);
+                const areModules = lockedPlanTemplates.some(
+                    (t) => t.module === "EOSH" || t.module === "QFS KORE",
+                );
+                const criteriaLabel =
+                    areModules
+                        ? lockedPlanTemplates.map((t) => getAuditPlanTemplateLabel(t)).join("; ")
+                        : lockedPlanTemplates.length > 1
+                            ? "IMS Checklist"
+                            : getAuditPlanTemplateLabel(lockedPlanTemplates[0]);
+                setAuditCriteria(`${criteriaLabel}, Internal Manual, Local Regulations`);
             } else {
                 setAuditCriteria(`${currentStandard}, Internal Manual, Local Regulations`);
             }
@@ -715,7 +728,11 @@ const CreateAuditPlanPage = () => {
                                     <Label className="text-xs font-black text-indigo-700 uppercase tracking-wide flex items-center gap-1.5">
                                         <FileText className="w-3.5 h-3.5" />
                                         {templatesLockedFromProgram
-                                            ? "Assigned Audit Modules"
+                                            ? lockedTemplatesAreModules
+                                                ? "Assigned Audit Modules"
+                                                : lockedAsImsChecklist
+                                                    ? "Assigned IMS Checklist"
+                                                    : "Assigned Audit Template"
                                             : "Choose Audit Template"}
                                     </Label>
                                     <span className="bg-amber-400 text-amber-900 text-[9px] font-black uppercase px-2 py-0.5 rounded-full tracking-wider">
@@ -726,22 +743,32 @@ const CreateAuditPlanPage = () => {
                                 {templatesLockedFromProgram && lockedPlanTemplates ? (
                                     <div className="space-y-2">
                                         <p className="text-xs text-slate-500">
-                                            These modules were selected in the audit program for this period and cannot be changed here.
+                                            {lockedTemplatesAreModules
+                                                ? "These modules were selected in the audit program for this period and cannot be changed here."
+                                                : lockedAsImsChecklist
+                                                    ? "Multiple ISO standards were selected in the audit program. This plan uses the IMS Checklist and cannot be changed here."
+                                                    : "This template matches the ISO standard selected in the audit program and cannot be changed here."}
                                         </p>
-                                        {lockedPlanTemplates.map((t) => (
-                                            <div
-                                                key={t.id}
-                                                className="flex items-center gap-3 p-3 bg-white border border-indigo-100 rounded-xl shadow-sm"
-                                            >
+                                        {lockedAsImsChecklist ? (
+                                            <div className="flex items-center gap-3 p-3 bg-white border border-indigo-100 rounded-xl shadow-sm">
                                                 <div className="w-8 h-8 rounded-lg bg-indigo-100 flex items-center justify-center shrink-0">
                                                     <FileText className="w-4 h-4 text-indigo-600" />
                                                 </div>
                                                 <div className="min-w-0 flex-1">
                                                     <p className="text-sm font-bold text-slate-800 truncate">
-                                                        {getAuditPlanTemplateLabel(t)}
+                                                        IMS Checklist
                                                     </p>
                                                     <p className="text-xs text-slate-500">
-                                                        {getAuditPlanTemplateSubtitle(t, false)}
+                                                        {lockedPlanTemplates
+                                                            .map((t) => t.standard)
+                                                            .filter(Boolean)
+                                                            .join(" · ")}
+                                                        {" · "}
+                                                        {lockedPlanTemplates.reduce(
+                                                            (n, t) => n + (t.content?.length || 0),
+                                                            0,
+                                                        )}{" "}
+                                                        questions across standards
                                                     </p>
                                                 </div>
                                                 <Button
@@ -749,7 +776,9 @@ const CreateAuditPlanPage = () => {
                                                     variant="outline"
                                                     size="icon"
                                                     className="h-9 w-9 shrink-0 border-indigo-200 text-indigo-600 hover:bg-indigo-50"
-                                                    onClick={() => setPreviewTemplateId(t.id)}
+                                                    onClick={() =>
+                                                        setPreviewTemplateId(lockedPlanTemplates[0]?.id)
+                                                    }
                                                     title="Preview Template"
                                                 >
                                                     <Eye className="w-4 h-4" />
@@ -758,7 +787,39 @@ const CreateAuditPlanPage = () => {
                                                     Assigned ✓
                                                 </span>
                                             </div>
-                                        ))}
+                                        ) : (
+                                            lockedPlanTemplates.map((t) => (
+                                                <div
+                                                    key={t.id}
+                                                    className="flex items-center gap-3 p-3 bg-white border border-indigo-100 rounded-xl shadow-sm"
+                                                >
+                                                    <div className="w-8 h-8 rounded-lg bg-indigo-100 flex items-center justify-center shrink-0">
+                                                        <FileText className="w-4 h-4 text-indigo-600" />
+                                                    </div>
+                                                    <div className="min-w-0 flex-1">
+                                                        <p className="text-sm font-bold text-slate-800 truncate">
+                                                            {getAuditPlanTemplateLabel(t)}
+                                                        </p>
+                                                        <p className="text-xs text-slate-500">
+                                                            {getAuditPlanTemplateSubtitle(t, false)}
+                                                        </p>
+                                                    </div>
+                                                    <Button
+                                                        type="button"
+                                                        variant="outline"
+                                                        size="icon"
+                                                        className="h-9 w-9 shrink-0 border-indigo-200 text-indigo-600 hover:bg-indigo-50"
+                                                        onClick={() => setPreviewTemplateId(t.id)}
+                                                        title="Preview Template"
+                                                    >
+                                                        <Eye className="w-4 h-4" />
+                                                    </Button>
+                                                    <span className="bg-emerald-100 text-emerald-700 text-[10px] font-bold uppercase px-2 py-0.5 rounded-full shrink-0">
+                                                        Assigned ✓
+                                                    </span>
+                                                </div>
+                                            ))
+                                        )}
                                     </div>
                                 ) : (
                                     <>

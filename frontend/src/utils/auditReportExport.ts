@@ -182,6 +182,9 @@ interface ReportContext {
     auditees: string;
     scope: string;
     criteriaAndMethod: string;
+    /** EOSH / QFS module audits — shown instead of objective/scope/criteria. */
+    facet: string;
+    category: string;
     executiveSummary: string;
     nonConformances: ReportNonConformance[];
     isModuleAudit: boolean;
@@ -289,6 +292,9 @@ async function buildReportContext(plan: Record<string, any>): Promise<ReportCont
 
     const nonConformances = normalizeReportNonConformances(auditData.nonConformances);
 
+    const facet = String(globalInfo.facet || "").trim();
+    const category = String(globalInfo.category || "").trim();
+
     const criteriaParts = [plan.criteria, plan.objective].filter(Boolean);
     const defaultCriteriaAndMethod =
         criteriaParts.length > 0
@@ -321,8 +327,12 @@ async function buildReportContext(plan: Record<string, any>): Promise<ReportCont
         auditDate: form?.auditDate || planAuditDate,
         auditors: form?.auditors || leadAuditor || "—",
         auditees: form?.auditees || auditees || "—",
-        auditScope: form?.auditScope || plan.scope || "—",
-        auditCriteriaAndMethod: form?.auditCriteriaAndMethod || defaultCriteriaAndMethod,
+        auditScope: isModuleAudit
+            ? facet || form?.auditScope || "—"
+            : form?.auditScope || plan.scope || "—",
+        auditCriteriaAndMethod: isModuleAudit
+            ? category || form?.auditCriteriaAndMethod || "—"
+            : form?.auditCriteriaAndMethod || defaultCriteriaAndMethod,
         generalComment: executiveSummary,
         issueDate: form?.issueDate || planIssueDate,
         keyPersonnel: form?.keyPersonnel,
@@ -354,6 +364,8 @@ async function buildReportContext(plan: Record<string, any>): Promise<ReportCont
         auditees: findingsForm.auditees,
         scope: findingsForm.auditScope,
         criteriaAndMethod: findingsForm.auditCriteriaAndMethod,
+        facet: facet || "—",
+        category: category || "—",
         executiveSummary,
         nonConformances,
         isModuleAudit,
@@ -1018,8 +1030,10 @@ async function renderSzlReportHeaderAndMetadataAsync(
     if (isFieldVisible(ctx.findingsForm, "auditScope")) {
         y = renderBlueTextSectionPdf(
             doc,
-            `${getSectionLabel(ctx.findingsForm, "auditScope")}:`,
-            ctx.scope,
+            ctx.isModuleAudit
+                ? "Facet:"
+                : `${getSectionLabel(ctx.findingsForm, "auditScope")}:`,
+            ctx.isModuleAudit ? ctx.facet : ctx.scope,
             y,
             pageH,
         );
@@ -1033,8 +1047,10 @@ async function renderSzlReportHeaderAndMetadataAsync(
     if (isFieldVisible(ctx.findingsForm, "auditCriteriaAndMethod")) {
         y = renderBlueTextSectionPdf(
             doc,
-            `${getSectionLabel(ctx.findingsForm, "auditCriteria")}:`,
-            ctx.criteriaAndMethod,
+            ctx.isModuleAudit
+                ? "Category:"
+                : `${getSectionLabel(ctx.findingsForm, "auditCriteria")}:`,
+            ctx.isModuleAudit ? ctx.category : ctx.criteriaAndMethod,
             y,
             pageH,
         );
@@ -2059,7 +2075,12 @@ export async function generateAuditReportDocx(plan: Record<string, any>) {
     children.push(...buildManagementSystemSectionDocx(form, ctx.managementRows));
 
     if (isFieldVisible(form, "auditScope")) {
-        children.push(...buildBlueTextSectionDocx(`${getSectionLabel(form, "auditScope")}:`, ctx.scope));
+        children.push(
+            ...buildBlueTextSectionDocx(
+                ctx.isModuleAudit ? "Facet:" : `${getSectionLabel(form, "auditScope")}:`,
+                ctx.isModuleAudit ? ctx.facet : ctx.scope,
+            ),
+        );
         getCustomFieldsBySection(form, "content").forEach((field) => {
             children.push(docxSubHeading(`${field.label}:`));
             children.push(docxBorderedContentTable(field.value));
@@ -2069,8 +2090,10 @@ export async function generateAuditReportDocx(plan: Record<string, any>) {
     if (isFieldVisible(form, "auditCriteriaAndMethod")) {
         children.push(
             ...buildBlueTextSectionDocx(
-                `${getSectionLabel(form, "auditCriteria")}:`,
-                ctx.criteriaAndMethod,
+                ctx.isModuleAudit
+                    ? "Category:"
+                    : `${getSectionLabel(form, "auditCriteria")}:`,
+                ctx.isModuleAudit ? ctx.category : ctx.criteriaAndMethod,
             ),
         );
     }
@@ -2462,11 +2485,23 @@ export async function generateAuditReportExcel(plan: Record<string, any>) {
         summaryData.push([row.label, row.value]);
     }
 
-    pushSummaryRow("auditScope", ctx.scope);
-    getCustomFieldsBySection(form, "content").forEach((field) => {
-        summaryData.push([field.label || "Field", field.value || "—"]);
-    });
-    pushSummaryRow("auditCriteriaAndMethod", ctx.criteriaAndMethod);
+    if (ctx.isModuleAudit) {
+        if (isFieldVisible(form, "auditScope")) {
+            summaryData.push(["Facet", ctx.facet || "—"]);
+        }
+        getCustomFieldsBySection(form, "content").forEach((field) => {
+            summaryData.push([field.label || "Field", field.value || "—"]);
+        });
+        if (isFieldVisible(form, "auditCriteriaAndMethod")) {
+            summaryData.push(["Category", ctx.category || "—"]);
+        }
+    } else {
+        pushSummaryRow("auditScope", ctx.scope);
+        getCustomFieldsBySection(form, "content").forEach((field) => {
+            summaryData.push([field.label || "Field", field.value || "—"]);
+        });
+        pushSummaryRow("auditCriteriaAndMethod", ctx.criteriaAndMethod);
+    }
 
     summaryData.push(["Template", template?.title || plan.templateId || "N/A"]);
     summaryData.push(["Status", plan.status || "N/A"]);

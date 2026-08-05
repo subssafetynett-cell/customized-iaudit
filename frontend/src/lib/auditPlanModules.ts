@@ -75,22 +75,28 @@ export function parseSectionEvidenceStorageKey(
     return null;
 }
 
-/** Keep only evidence entries that belong to this module (or legacy unscoped keys). */
+/** Keep only evidence entries that belong to this module.
+ * Legacy unscoped keys (`clause_checklist_N`) are included only when
+ * `includeLegacyUnscoped` is true (owner / single-module migration).
+ */
 export function filterEvidenceMapForModule(
     files: Record<string, AuditEvidenceMedia[]> | null | undefined,
     moduleId: string,
+    options?: { includeLegacyUnscoped?: boolean },
 ): Record<string, AuditEvidenceMedia[]> {
     if (!files || typeof files !== "object") return {};
     const mid = String(moduleId || "").trim();
+    const includeLegacy = options?.includeLegacyUnscoped === true;
     const out: Record<string, AuditEvidenceMedia[]> = {};
     for (const [key, list] of Object.entries(files)) {
         if (!Array.isArray(list) || list.length === 0) continue;
         const checklist = parseChecklistEvidenceStorageKey(key);
         if (checklist) {
-            if (checklist.moduleId === mid || checklist.moduleId == null) {
-                // Normalize legacy keys to scoped form when we know the module.
+            const isOwned = checklist.moduleId === mid;
+            const isLegacy = checklist.moduleId == null;
+            if (isOwned || (isLegacy && includeLegacy)) {
                 const nextKey =
-                    checklist.moduleId == null
+                    isLegacy && mid
                         ? checklistEvidenceStorageKey(mid, checklist.index)
                         : key;
                 out[nextKey] = list;
@@ -99,9 +105,11 @@ export function filterEvidenceMapForModule(
         }
         const section = parseSectionEvidenceStorageKey(key);
         if (section) {
-            if (section.moduleId === mid || section.moduleId == null) {
+            const isOwned = section.moduleId === mid;
+            const isLegacy = section.moduleId == null;
+            if (isOwned || (isLegacy && includeLegacy)) {
                 const nextKey =
-                    section.moduleId == null
+                    isLegacy && mid
                         ? sectionEvidenceStorageKey(mid, section.index)
                         : key;
                 out[nextKey] = list;
@@ -117,8 +125,9 @@ export function filterEvidenceMapForModule(
 export function toActiveModuleLocalEvidenceMap(
     files: Record<string, AuditEvidenceMedia[]> | null | undefined,
     moduleId: string,
+    options?: { includeLegacyUnscoped?: boolean },
 ): Record<string, AuditEvidenceMedia[]> {
-    const filtered = filterEvidenceMapForModule(files, moduleId);
+    const filtered = filterEvidenceMapForModule(files, moduleId, options);
     const mid = String(moduleId || "").trim();
     const out: Record<string, AuditEvidenceMedia[]> = {};
     for (const [key, list] of Object.entries(filtered)) {
@@ -355,8 +364,26 @@ export function mergeAuditDataPreferRicher(
         sectionData: baseline.sectionData as ModuleStoreEntry["sectionData"],
         auditGlobalInfo: baseline.auditGlobalInfo as ModuleStoreEntry["auditGlobalInfo"],
     });
-    // On ties, keep baseline to avoid overwriting filled data with emptier objects.
-    const useIncomingTop = incomingTop > baselineTop;
+
+    const incomingActive =
+        resolveAuditTemplateId(String(incoming.activeModuleId || "")) ||
+        String(incoming.activeModuleId || "");
+    const baselineActive =
+        resolveAuditTemplateId(String(baseline.activeModuleId || "")) ||
+        String(baseline.activeModuleId || "");
+    const multiModule = Object.keys(mergedStore).length > 1;
+    const activeModuleChanged =
+        Boolean(incomingActive) &&
+        Boolean(baselineActive) &&
+        incomingActive !== baselineActive;
+
+    // Top-level checklist blob is only a mirror of the *active* module.
+    // Never keep a richer top-level from module A when incoming is module B —
+    // that re-applies A's answers when B is opened/hydrated.
+    const useIncomingTop =
+        multiModule || activeModuleChanged
+            ? true
+            : incomingTop > baselineTop;
 
     const mergeEvidenceMapsPreferNonEmpty = (
         a: Record<string, AuditEvidenceMedia[]> | undefined,
@@ -391,26 +418,46 @@ export function mergeAuditDataPreferRicher(
         incoming.findingsReportForm,
     );
 
+    // Multi-module: top-level header/footer must follow the active module only —
+    // do not merge fields from a sibling checklist.
+    const topLevelAuditGlobalInfo =
+        multiModule || activeModuleChanged
+            ? ((incoming.auditGlobalInfo as Record<string, string> | undefined) ??
+              (useIncomingTop
+                  ? undefined
+                  : (baseline.auditGlobalInfo as Record<string, string> | undefined)))
+            : mergeStringMapPreferNonEmpty(
+                  baseline.auditGlobalInfo as Record<string, string> | undefined,
+                  incoming.auditGlobalInfo as Record<string, string> | undefined,
+              );
+
+    const topLevelFindingsReportForm =
+        multiModule || activeModuleChanged
+            ? (incoming.findingsReportForm ?? baseline.findingsReportForm)
+            : chosenFindingsReportForm;
+
     return {
         ...baseline,
         ...incoming,
         checklistData: useIncomingTop
-            ? incoming.checklistData ?? baseline.checklistData
+            ? incoming.checklistData ?? (multiModule ? {} : baseline.checklistData)
             : baseline.checklistData ?? incoming.checklistData,
         sectionData: useIncomingTop
-            ? incoming.sectionData ?? baseline.sectionData
+            ? incoming.sectionData ?? (multiModule ? {} : baseline.sectionData)
             : baseline.sectionData ?? incoming.sectionData,
-        // Never let empty strings wipe already-filled header answers.
-        auditGlobalInfo: mergeStringMapPreferNonEmpty(
-            baseline.auditGlobalInfo as Record<string, string> | undefined,
-            incoming.auditGlobalInfo as Record<string, string> | undefined,
-        ),
+        extraChecklistItems: useIncomingTop
+            ? incoming.extraChecklistItems ??
+              (multiModule ? {} : baseline.extraChecklistItems)
+            : baseline.extraChecklistItems ?? incoming.extraChecklistItems,
+        auditGlobalInfo: topLevelAuditGlobalInfo,
         editableChecklist:
             Array.isArray(incoming.editableChecklist) &&
             (incoming.editableChecklist as unknown[]).length > 0
                 ? incoming.editableChecklist
-                : baseline.editableChecklist ?? incoming.editableChecklist,
-        findingsReportForm: chosenFindingsReportForm,
+                : multiModule && useIncomingTop
+                  ? incoming.editableChecklist
+                  : baseline.editableChecklist ?? incoming.editableChecklist,
+        findingsReportForm: topLevelFindingsReportForm,
         clauseData: incoming.clauseData ?? baseline.clauseData,
         genericFiles: mergeEvidenceMapsPreferNonEmpty(
             baseline.genericFiles as Record<string, AuditEvidenceMedia[]> | undefined,
@@ -480,10 +527,10 @@ export function mergeModuleStoreEntries(
         return out;
     };
 
-    const chosenFindingsReportForm = mergeFindingsReportFormPreferRicher(
-        existing.findingsReportForm,
-        incoming.findingsReportForm,
-    );
+    const chosenFindingsReportForm =
+        incomingCount >= existingCount
+            ? (incoming.findingsReportForm ?? existing.findingsReportForm)
+            : (existing.findingsReportForm ?? incoming.findingsReportForm);
 
     const mergeSectionDataPreferNonEmpty = (
         a: Record<string | number, string | null | undefined> | undefined,
@@ -504,6 +551,17 @@ export function mergeModuleStoreEntries(
         incoming.sectionData,
     );
 
+    // Header fields: when this snapshot is the richer/current editor for the module,
+    // replace (do not merge) so sibling checklist values cannot linger.
+    const auditGlobalInfo =
+        incomingCount >= existingCount
+            ? ((incoming.auditGlobalInfo as Record<string, string> | undefined) ??
+              (existing.auditGlobalInfo as Record<string, string> | undefined))
+            : mergeStringMapPreferNonEmpty(
+                  existing.auditGlobalInfo as Record<string, string> | undefined,
+                  incoming.auditGlobalInfo as Record<string, string> | undefined,
+              );
+
     return {
         checklistData,
         editableChecklist:
@@ -512,14 +570,13 @@ export function mergeModuleStoreEntries(
                 ? incoming.editableChecklist
                 : existing.editableChecklist) ?? incoming.editableChecklist,
         extraChecklistItems:
-            incoming.extraChecklistItems ?? existing.extraChecklistItems,
+            incomingCount >= existingCount
+                ? (incoming.extraChecklistItems ?? existing.extraChecklistItems)
+                : (existing.extraChecklistItems ?? incoming.extraChecklistItems),
         sectionData: mergedSectionData ?? existing.sectionData ?? incoming.sectionData,
         genericFiles: mergeEvidenceMapsPreferNonEmpty(existing.genericFiles, incoming.genericFiles),
         findingsReportForm: chosenFindingsReportForm,
-        auditGlobalInfo: mergeStringMapPreferNonEmpty(
-            existing.auditGlobalInfo as Record<string, string> | undefined,
-            incoming.auditGlobalInfo as Record<string, string> | undefined,
-        ),
+        auditGlobalInfo,
     };
 }
 
@@ -539,8 +596,11 @@ export function moduleStoreEntryFromTopLevel(
         sectionData: auditData.sectionData as ModuleStoreEntry["sectionData"],
         genericFiles: mid
             ? toActiveModuleLocalEvidenceMap(
-                  filterEvidenceMapForModule(topFiles, mid),
+                  filterEvidenceMapForModule(topFiles, mid, {
+                      includeLegacyUnscoped: true,
+                  }),
                   mid,
+                  { includeLegacyUnscoped: true },
               )
             : (topFiles as ModuleStoreEntry["genericFiles"]),
         findingsReportForm: auditData.findingsReportForm,
@@ -873,8 +933,15 @@ export function scopePlanToModule(
         ...sharedFiles,
         ...toActiveModuleLocalEvidenceMap(
             moduleGenericFiles ||
-                filterEvidenceMapForModule(topFiles, resolvedId),
+                filterEvidenceMapForModule(topFiles, resolvedId, {
+                    includeLegacyUnscoped:
+                        auditData.activeModuleId === resolvedId || !multiModule,
+                }),
             resolvedId,
+            {
+                includeLegacyUnscoped:
+                    auditData.activeModuleId === resolvedId || !multiModule,
+            },
         ),
     };
 

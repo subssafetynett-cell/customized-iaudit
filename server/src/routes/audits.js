@@ -711,9 +711,26 @@ export function createAuditsRouter({ authenticateToken, checkTrialExpiration }) 
             };
 
             const listStartedAt = performance.now();
+            const sortKey = String(req.query.sort || 'date').trim().toLowerCase();
+            const sortOrder =
+                String(req.query.order || 'desc').trim().toLowerCase() === 'asc'
+                    ? 'asc'
+                    : 'desc';
+            /** @type {import('@prisma/client').Prisma.AuditPlanOrderByWithRelationInput | import('@prisma/client').Prisma.AuditPlanOrderByWithRelationInput[]} */
+            let orderBy;
+            if (sortKey === 'name' || sortKey === 'auditname') {
+                orderBy = { auditName: sortOrder };
+            } else if (sortKey === 'site' || sortKey === 'location') {
+                orderBy = { location: sortOrder };
+            } else if (sortKey === 'created' || sortKey === 'createdat') {
+                orderBy = { createdAt: sortOrder };
+            } else {
+                // Default + "date": latest audits first when order=desc
+                orderBy = [{ date: sortOrder }, { createdAt: sortOrder }];
+            }
             const findManyArgs = {
                 where: listWhere,
-                orderBy: { createdAt: 'desc' },
+                orderBy,
                 select: planSelect,
                 skip: pagination.paginate ? pagination.skip : 0,
                 take: pagination.paginate ? pagination.limit : pagination.take,

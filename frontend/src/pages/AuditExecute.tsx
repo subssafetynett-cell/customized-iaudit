@@ -39,6 +39,13 @@ import { AutoResizeTextarea } from "@/components/ui/auto-resize-textarea";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
   Table,
   TableBody,
   TableCell,
@@ -175,6 +182,7 @@ import {
 import {
   EoshExceptionFollowUp,
   needsEoshExceptionFollowUp,
+  needsOkNotOkNcFollowUp,
   useEoshOrgUsers,
   formatEoshExceptionFollowUpMissing,
   isEoshExceptionFollowUpComplete,
@@ -486,6 +494,8 @@ const AuditExecute = () => {
           auditDoneBy: string;
           auditeeDept: string;
           auditDate: string;
+          facet?: string;
+          category?: string;
         };
       }
     >
@@ -499,6 +509,9 @@ const AuditExecute = () => {
     auditDoneBy: "",
     auditeeDept: "",
     auditDate: "",
+    /** EOSH / QFS only — Health and Safety | Environmental | Quality */
+    facet: "",
+    category: "",
   });
 
   const [checklistData, setChecklistData] = useState<
@@ -604,6 +617,7 @@ const AuditExecute = () => {
 
     const stored = lookupModuleStoreEntry(updatedStore, nextId);
     const nextTemplate = findAuditTemplate(nextId);
+    // Absolute replace — never keep previous module answers/evidence in the editor.
     setChecklistData((stored?.checklistData as Record<number, any>) || {});
     setEditableChecklist(
       stored?.editableChecklist && stored.editableChecklist.length > 0
@@ -625,14 +639,22 @@ const AuditExecute = () => {
           )
         : sanitizeAuditEvidenceMediaMap(stored?.genericFiles || {})),
     });
-    // Keep report footer (comment / key personnel / signatures) across modules —
-    // these are audit-wide, not per-checklist.
-    // (Do not reset findingsReportForm / executiveSummary on module switch.)
-    // Auditee name / done by / dept stay with the module that filled them.
+    // Checklist header fields stay with the module that filled them.
     if (stored?.auditGlobalInfo && typeof stored.auditGlobalInfo === "object") {
       setAuditGlobalInfo({ ...emptyAuditGlobalInfo(), ...stored.auditGlobalInfo });
     } else {
       setAuditGlobalInfo(emptyAuditGlobalInfo());
+    }
+    // Report footer (comment / signatures / key personnel) is per-checklist while performing.
+    if (stored?.findingsReportForm && typeof stored.findingsReportForm === "object") {
+      const form = stored.findingsReportForm as FindingsReportForm;
+      setFindingsReportForm(form);
+      setExecutiveSummary(
+        typeof form.generalComment === "string" ? form.generalComment : "",
+      );
+    } else {
+      setFindingsReportForm(defaultFindingsReportForm());
+      setExecutiveSummary("");
     }
     setActiveModuleId(nextId);
     // Persist the module we just left on the next tick (saveNow is wired below).
@@ -998,12 +1020,6 @@ const AuditExecute = () => {
                 : ids[0] || "";
       if (preferredActive) setActiveModuleId(preferredActive);
 
-      const previousActive =
-        typeof data.activeModuleId === "string" && ids.includes(data.activeModuleId)
-          ? data.activeModuleId
-          : typeof data.activeModuleId === "string"
-            ? resolveAuditTemplateId(data.activeModuleId) || data.activeModuleId
-            : "";
       // Migrate last-active top-level blob into the per-module store so it is not
       // lost when opening / saving a different checklist module.
       const storeFromServer = ensureModuleStorePreservesTopLevel(data, ids);
@@ -1037,56 +1053,52 @@ const AuditExecute = () => {
       }
 
       // Multi-module: never reuse another module's top-level answers/evidence.
-      const previousResolved =
-        resolveAuditTemplateId(previousActive) || previousActive;
+      // Top-level is only a mirror of data.activeModuleId — use it solely for that owner.
       const preferredResolved =
-        resolveAuditTemplateId(preferredActive) || preferredActive;
+        resolveAuditTemplateId(preferredActive) || preferredActive || "";
+      const topLevelOwner =
+        resolveAuditTemplateId(String(data.activeModuleId || "")) ||
+        String(data.activeModuleId || "") ||
+        "";
       const canUseTopLevelAnswers =
         !multiModule ||
-        previousResolved === preferredResolved ||
-        previousActive === preferredActive ||
-        (!previousActive && !Object.keys(store).length);
+        (Boolean(preferredResolved) &&
+          Boolean(topLevelOwner) &&
+          topLevelOwner === preferredResolved);
 
       const incomingChecklist =
         (mod?.checklistData as Record<number, any> | undefined) ||
         (canUseTopLevelAnswers && data.checklistData
           ? data.checklistData
-          : multiModule &&
-              preferredResolved &&
-              previousResolved === preferredResolved &&
-              data.checklistData
-            ? data.checklistData
-            : !multiModule && data.checklistData
-              ? data.checklistData
-              : null);
+          : null);
 
-      setChecklistData((prev) => {
-        const prevCount = countModuleStoreAnswers({ checklistData: prev });
-        const nextCount = countModuleStoreAnswers({
-          checklistData: incomingChecklist || undefined,
+      // Multi-module: always load this module's answers (or empty). Never keep
+      // another module's checklistData via prev-protection.
+      if (multiModule) {
+        setChecklistData((incomingChecklist as Record<number, any>) || {});
+      } else {
+        setChecklistData((prev) => {
+          const prevCount = countModuleStoreAnswers({ checklistData: prev });
+          const nextCount = countModuleStoreAnswers({
+            checklistData: incomingChecklist || undefined,
+          });
+          // Never replace filled answers with an empty hydrate for the same plan.
+          if (prevCount > 0 && nextCount < prevCount) return prev;
+          if (incomingChecklist) return incomingChecklist as Record<number, any>;
+          return prev;
         });
-        // Never replace filled answers with an empty hydrate for the same module.
-        if (prevCount > 0 && nextCount < prevCount) return prev;
-        if (incomingChecklist) return incomingChecklist as Record<number, any>;
-        if (multiModule && prevCount > 0) return prev;
-        if (multiModule) return {};
-        return prev;
-      });
+      }
 
       if (mod?.sectionData) setSectionData(mod.sectionData as Record<number, string>);
       else if (canUseTopLevelAnswers && data.sectionData) setSectionData(data.sectionData);
-      else if (multiModule) {
-        setSectionData((prev) => (Object.keys(prev).length > 0 ? prev : {}));
-      }
+      else if (multiModule) setSectionData({});
 
       if (mod?.extraChecklistItems) {
         setExtraChecklistItems(mod.extraChecklistItems as Record<string, any[]>);
       } else if (canUseTopLevelAnswers && data.extraChecklistItems) {
         setExtraChecklistItems(data.extraChecklistItems);
       } else if (multiModule) {
-        setExtraChecklistItems((prev) =>
-          Object.keys(prev).length > 0 ? prev : {},
-        );
+        setExtraChecklistItems({});
       }
 
       // Only seed preferred module from top-level when that blob actually belongs to it.
@@ -1126,7 +1138,10 @@ const AuditExecute = () => {
           ...(mod.auditGlobalInfo as Record<string, string>),
         });
       } else if (canUseTopLevelAnswers && data.auditGlobalInfo) {
-        setAuditGlobalInfo((prev) => ({ ...prev, ...data.auditGlobalInfo }));
+        setAuditGlobalInfo({
+          ...emptyAuditGlobalInfo(),
+          ...(data.auditGlobalInfo as Record<string, string>),
+        });
       } else if (multiModule) {
         setAuditGlobalInfo(emptyAuditGlobalInfo());
       }
@@ -1158,15 +1173,16 @@ const AuditExecute = () => {
         Object.keys(sharedFromTop).length > 0
       ) {
         const sanitized = sanitizeAuditEvidenceMediaMap(evidenceSource || {});
+        // Never map another module's (or unscoped legacy) checklist evidence onto this module
+        // unless this module owns the top-level blob.
         const localFiles = preferredActive
-          ? toActiveModuleLocalEvidenceMap(
-              multiModule && !mod?.genericFiles && data.genericFiles
-                ? sanitizeAuditEvidenceMediaMap(data.genericFiles)
-                : sanitized,
-              preferredActive,
-            )
+          ? toActiveModuleLocalEvidenceMap(sanitized, preferredActive, {
+              includeLegacyUnscoped: Boolean(canUseTopLevelAnswers),
+            })
           : sanitized;
-        const combined = { ...sharedFromTop, ...localFiles };
+        const combined = multiModule
+          ? { ...localFiles }
+          : { ...sharedFromTop, ...localFiles };
         setGenericFiles(combined);
         setChecklistData((prev) => {
           let next = prev;
@@ -1201,32 +1217,52 @@ const AuditExecute = () => {
         setGenericFiles({});
       }
 
-      // Prefer richest audit-wide report form (comment / key personnel / signatures).
-      const richestForm = pickRichestFindingsReportForm(data as Record<string, unknown>);
-      if (richestForm && (
-        richestForm.generalComment?.trim() ||
-        richestForm.keyPersonnel?.some(
-          (r) => r.name?.trim() || r.position?.trim() || r.department?.trim(),
-        ) ||
-        richestForm.acknowledgement?.auditeeSignature?.trim() ||
-        richestForm.acknowledgement?.auditorSignature?.trim() ||
-        richestForm.acknowledgement?.auditeeDate?.trim() ||
-        richestForm.acknowledgement?.auditorDate?.trim() ||
-        richestForm.managementSystem?.trim() ||
-        richestForm.auditScope?.trim()
-      )) {
-        setFindingsReportForm(richestForm);
-        if (richestForm.generalComment) setExecutiveSummary(richestForm.generalComment);
-      } else if (mod?.findingsReportForm && typeof mod.findingsReportForm === "object") {
-        setFindingsReportForm(mod.findingsReportForm as FindingsReportForm);
-        const comment = (mod.findingsReportForm as FindingsReportForm).generalComment;
-        if (typeof comment === "string") setExecutiveSummary(comment);
-      } else if (canUseTopLevelAnswers || data.findingsReportForm) {
-        setFindingsReportForm(buildFindingsReportDefaults(found, data));
-      } else if (multiModule) {
-        setFindingsReportForm(buildFindingsReportDefaults(found, data));
+      // Per-module report form while performing multi-module audits — do not show
+      // another checklist's signatures / key personnel on this module.
+      if (multiModule) {
+        if (mod?.findingsReportForm && typeof mod.findingsReportForm === "object") {
+          setFindingsReportForm(mod.findingsReportForm as FindingsReportForm);
+          const comment = (mod.findingsReportForm as FindingsReportForm).generalComment;
+          if (typeof comment === "string") setExecutiveSummary(comment);
+          else setExecutiveSummary("");
+        } else if (canUseTopLevelAnswers) {
+          // Only the active module's top-level form — never pickRichest across siblings.
+          if (data.findingsReportForm && typeof data.findingsReportForm === "object") {
+            setFindingsReportForm(data.findingsReportForm as FindingsReportForm);
+            const comment = (data.findingsReportForm as FindingsReportForm).generalComment;
+            if (typeof comment === "string") setExecutiveSummary(comment);
+            else setExecutiveSummary("");
+          } else {
+            setFindingsReportForm(buildFindingsReportDefaults(found, data));
+          }
+        } else {
+          setFindingsReportForm(defaultFindingsReportForm());
+          setExecutiveSummary("");
+        }
       } else {
-        setFindingsReportForm(buildFindingsReportDefaults(found, data));
+        // Prefer richest audit-wide report form (comment / key personnel / signatures).
+        const richestForm = pickRichestFindingsReportForm(data as Record<string, unknown>);
+        if (richestForm && (
+          richestForm.generalComment?.trim() ||
+          richestForm.keyPersonnel?.some(
+            (r) => r.name?.trim() || r.position?.trim() || r.department?.trim(),
+          ) ||
+          richestForm.acknowledgement?.auditeeSignature?.trim() ||
+          richestForm.acknowledgement?.auditorSignature?.trim() ||
+          richestForm.acknowledgement?.auditeeDate?.trim() ||
+          richestForm.acknowledgement?.auditorDate?.trim() ||
+          richestForm.managementSystem?.trim() ||
+          richestForm.auditScope?.trim()
+        )) {
+          setFindingsReportForm(richestForm);
+          if (richestForm.generalComment) setExecutiveSummary(richestForm.generalComment);
+        } else if (mod?.findingsReportForm && typeof mod.findingsReportForm === "object") {
+          setFindingsReportForm(mod.findingsReportForm as FindingsReportForm);
+          const comment = (mod.findingsReportForm as FindingsReportForm).generalComment;
+          if (typeof comment === "string") setExecutiveSummary(comment);
+        } else {
+          setFindingsReportForm(buildFindingsReportDefaults(found, data));
+        }
       }
       const currentTemplate = preferredActive
         ? findAuditTemplate(preferredActive)
@@ -1668,8 +1704,8 @@ const AuditExecute = () => {
         }
       }
 
-      // Audit-wide footer form — keep the richest version, never let an empty
-      // active module wipe key personnel / signatures / general comment.
+      // Audit-wide footer form — keep the richest version for the ACTIVE module only.
+      // Do not copy signatures / key personnel into sibling checklists (causes bleed on switch).
       const sharedFindingsReportForm = {
         ...findingsReportForm,
         generalComment: syncedGeneralComment,
@@ -1696,24 +1732,20 @@ const AuditExecute = () => {
                 extraChecklistItems,
                 sectionData,
                 genericFiles: activeModuleOnlyFiles,
-                findingsReportForm: protectedFindingsReportForm,
+                findingsReportForm: multiModule
+                  ? sharedFindingsReportForm
+                  : protectedFindingsReportForm,
                 auditGlobalInfo,
               },
             ),
           }
         : baseStore;
 
-      // Propagate the shared report form into every module so reopening any
-      // checklist still shows comment / key personnel / signatures.
-      for (const mid of Object.keys(syncedModuleStore)) {
-        const entry = syncedModuleStore[mid];
-        if (!entry) continue;
-        syncedModuleStore[mid] = {
-          ...entry,
-          findingsReportForm: mergeFindingsReportFormPreferRicher(
-            entry.findingsReportForm,
-            protectedFindingsReportForm,
-          ),
+      // Single-module audits still keep one shared richest form on the only store entry.
+      if (!multiModule && currentModuleId && syncedModuleStore[currentModuleId]) {
+        syncedModuleStore[currentModuleId] = {
+          ...syncedModuleStore[currentModuleId],
+          findingsReportForm: protectedFindingsReportForm,
         };
       }
       moduleDataByTemplateIdRef.current = syncedModuleStore;
@@ -1762,7 +1794,9 @@ const AuditExecute = () => {
         extraChecklistItems,
         showExecutiveSummary,
         showAuditFindings,
-        findingsReportForm: protectedFindingsReportForm,
+        findingsReportForm: multiModule
+          ? sharedFindingsReportForm
+          : protectedFindingsReportForm,
         lastSaved: new Date().toISOString(),
         // Placeholder — overwritten below with plan-wide progress for multi-module.
         progress: progressValue,
@@ -2002,9 +2036,13 @@ const AuditExecute = () => {
             id,
             ref: `Clause ${id}`,
             type: data.findingType === "NC" ? "NC" : data.findingType,
-            description: data.description || "",
-            actionBy: data.actionBy || "",
-            closeDate: data.closeDate || "",
+            description: (data as any).details || data.description || "",
+            actionBy:
+              data.actionBy ||
+              data.assignToName ||
+              data.assignTo ||
+              "",
+            closeDate: (data as any).targetDate || data.closeDate || "",
             assignTo: data.assignTo || "",
             assignToName: data.assignToName || "",
             assignToEmail: data.assignToEmail || "",
@@ -2032,9 +2070,9 @@ const AuditExecute = () => {
                 ? `Clause ${item.clause}`
                 : `Item ${Number(idx) + 1}`,
               type: "NC",
-              description: data.description || "",
-              actionBy: data.actionBy || "",
-              closeDate: data.closeDate || "",
+              description: data.details || data.description || "",
+              actionBy: data.actionBy || data.assignToName || data.assignTo || "",
+              closeDate: data.targetDate || data.closeDate || "",
               assignTo: data.assignTo || "",
               assignToName: data.assignToName || "",
               assignToEmail: data.assignToEmail || "",
@@ -2309,9 +2347,20 @@ const AuditExecute = () => {
     setChecklistData((prev) => {
       const current = prev[index] || {};
       const creatorStamp = stampFindingCreator(field, value, current);
+      const next: Record<string, any> = {
+        ...current,
+        [field]: value,
+        ...creatorStamp,
+      };
+      // Keep legacy finding fields in sync with the nonconformance follow-up form.
+      if (field === "details") next.description = value;
+      if (field === "targetDate") next.closeDate = value;
+      if (field === "assignToName" && !String(next.actionBy || "").trim()) {
+        next.actionBy = value;
+      }
       return {
         ...prev,
-        [index]: { ...current, [field]: value, ...creatorStamp } as any,
+        [index]: next,
       };
     });
   };
@@ -2659,15 +2708,25 @@ const AuditExecute = () => {
 
   const handleClauseChange = (
     clauseId: string,
-    field: keyof ClauseChecklistContent,
+    field: keyof ClauseChecklistContent | string,
     value: any,
   ) => {
     setClauseData((prev) => {
       const current = prev[clauseId] || {};
       const creatorStamp = stampFindingCreator(field, value, current);
+      const next: Record<string, any> = {
+        ...current,
+        [field]: value,
+        ...creatorStamp,
+      };
+      if (field === "details") next.description = value;
+      if (field === "targetDate") next.closeDate = value;
+      if (field === "assignToName" && !String(next.actionBy || "").trim()) {
+        next.actionBy = value;
+      }
       return {
         ...prev,
-        [clauseId]: { ...current, [field]: value, ...creatorStamp } as any,
+        [clauseId]: next as any,
       };
     });
   };
@@ -2699,6 +2758,47 @@ const AuditExecute = () => {
       });
     }
 
+    // ISO OK / Not OK — Not OK (NC) requires the same nonconformance follow-up fields.
+    if (template && usesOkNotOkChecklistFindings(template)) {
+      const items =
+        editableChecklist.length > 0
+          ? editableChecklist
+          : Array.isArray(template.content)
+            ? template.content
+            : [];
+      items.forEach((_item: unknown, index: number) => {
+        const row = checklistData[index] || {};
+        if (
+          needsOkNotOkNcFollowUp(row.findings) &&
+          !isEoshExceptionFollowUpComplete(row)
+        ) {
+          incompleteExceptionRows.push(index + 1);
+        }
+      });
+      Object.entries(extraChecklistItems || {}).forEach(([, extras]) => {
+        if (!Array.isArray(extras)) return;
+        extras.forEach((eq: any, eqIdx: number) => {
+          if (
+            needsOkNotOkNcFollowUp(eq?.findings) &&
+            !isEoshExceptionFollowUpComplete(eq)
+          ) {
+            incompleteExceptionRows.push(eqIdx + 1);
+          }
+        });
+      });
+      if (template.type === "clause-checklist") {
+        Object.entries(clauseData || {}).forEach(([clauseId, data]) => {
+          const row = (data || {}) as Record<string, any>;
+          if (
+            needsOkNotOkNcFollowUp(row.findingType) &&
+            !isEoshExceptionFollowUpComplete(row)
+          ) {
+            incompleteExceptionRows.push(Number(clauseId) || incompleteExceptionRows.length + 1);
+          }
+        });
+      }
+    }
+
     if (incompleteExceptionRows.length > 0) {
       setShowExceptionFollowUpErrors(true);
       const first = incompleteExceptionRows[0];
@@ -2712,6 +2812,20 @@ const AuditExecute = () => {
       return;
     }
     setShowExceptionFollowUpErrors(false);
+
+    if (
+      template &&
+      (template.module === "EOSH" || template.module === "QFS KORE")
+    ) {
+      if (!String(auditGlobalInfo.facet || "").trim()) {
+        toast.error("Select a Facet (Health and Safety, Environmental, or Quality).");
+        return;
+      }
+      if (!String(auditGlobalInfo.category || "").trim()) {
+        toast.error("Enter a Category for this audit.");
+        return;
+      }
+    }
 
     const toastId = toast.loading("Saving audit…");
     try {
@@ -3044,7 +3158,7 @@ const AuditExecute = () => {
               </div>
             </Card>
 
-            {/* Audit Details Card */}
+            {/* Audit Details Card — ISO: objective/scope/criteria; EOSH/QFS: facet + category */}
             <Card className="shadow-sm border-slate-100 p-6 flex flex-col gap-5 bg-white">
               <div className="flex items-center gap-2">
                 <div className="bg-slate-500 p-1.5 rounded-md">
@@ -3072,32 +3186,75 @@ const AuditExecute = () => {
                 </h2>
               </div>
 
-              <div className="space-y-4">
-                <div>
-                  <span className="block text-xs font-semibold text-slate-500 mb-1.5">
-                    Objective
-                  </span>
-                  <p className="text-sm text-slate-800">
-                    {plan.objective || "N/A"}
-                  </p>
+              {template?.module === "EOSH" || template?.module === "QFS KORE" ? (
+                <div className="space-y-4">
+                  <div className="space-y-1.5">
+                    <Label className="text-xs font-semibold text-slate-500">
+                      Facet <span className="text-red-500">*</span>
+                    </Label>
+                    <Select
+                      value={auditGlobalInfo.facet || undefined}
+                      onValueChange={(v) =>
+                        setAuditGlobalInfo({ ...auditGlobalInfo, facet: v })
+                      }
+                      disabled={isAuditeeReadOnly}
+                    >
+                      <SelectTrigger className="h-10 bg-slate-50 border-slate-200 font-medium">
+                        <SelectValue placeholder="Select one…" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="Health and Safety">Health and Safety</SelectItem>
+                        <SelectItem value="Environmental">Environmental</SelectItem>
+                        <SelectItem value="Quality">Quality</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs font-semibold text-slate-500">
+                      Category <span className="text-red-500">*</span>
+                    </Label>
+                    <Input
+                      className="h-10 bg-slate-50 border-slate-200 font-medium"
+                      placeholder="Enter category…"
+                      value={auditGlobalInfo.category || ""}
+                      onChange={(e) =>
+                        setAuditGlobalInfo({
+                          ...auditGlobalInfo,
+                          category: e.target.value,
+                        })
+                      }
+                      readOnly={isAuditeeReadOnly}
+                    />
+                  </div>
                 </div>
-                <div>
-                  <span className="block text-xs font-semibold text-slate-500 mb-1.5">
-                    Scope
-                  </span>
-                  <p className="text-sm text-slate-800">
-                    {plan.scope || "N/A"}
-                  </p>
+              ) : (
+                <div className="space-y-4">
+                  <div>
+                    <span className="block text-xs font-semibold text-slate-500 mb-1.5">
+                      Objective
+                    </span>
+                    <p className="text-sm text-slate-800">
+                      {plan.objective || "N/A"}
+                    </p>
+                  </div>
+                  <div>
+                    <span className="block text-xs font-semibold text-slate-500 mb-1.5">
+                      Scope
+                    </span>
+                    <p className="text-sm text-slate-800">
+                      {plan.scope || "N/A"}
+                    </p>
+                  </div>
+                  <div>
+                    <span className="block text-xs font-semibold text-slate-500 mb-1.5">
+                      Audit Criteria
+                    </span>
+                    <p className="text-sm text-slate-800">
+                      {plan.criteria || "N/A"}
+                    </p>
+                  </div>
                 </div>
-                <div>
-                  <span className="block text-xs font-semibold text-slate-500 mb-1.5">
-                    Audit Criteria
-                  </span>
-                  <p className="text-sm text-slate-800">
-                    {plan.criteria || "N/A"}
-                  </p>
-                </div>
-              </div>
+              )}
             </Card>
           </div>
 
@@ -3915,7 +4072,9 @@ const AuditExecute = () => {
             <p className="text-xs font-bold uppercase tracking-wide text-emerald-800">
               {lockToSelectedModule
                 ? "Selected checklist"
-                : `Assigned modules (${planTemplates.length})`}
+                : planTemplates.some((t) => t.module === "EOSH" || t.module === "QFS KORE")
+                  ? `Assigned modules (${planTemplates.length})`
+                  : `IMS checklists (${planTemplates.length})`}
             </p>
             <div className="flex flex-wrap gap-2">
               {(lockToSelectedModule
@@ -4190,8 +4349,45 @@ const AuditExecute = () => {
                       </div>
                     )}
 
-                    {/* Extended Fields for Non-Compliance/OFI */}
-                    {showExtended && (
+                    {/* Extended Fields — ISO Not OK nonconformance form */}
+                    {showExtended &&
+                      usesOkNotOkChecklistFindings(template) &&
+                      needsOkNotOkNcFollowUp(type) && (
+                      <div className="space-y-3 pt-5 border-t border-slate-100 animate-in fade-in slide-in-from-top-4">
+                        <div className="flex items-center gap-2 mb-1">
+                          <div className="px-2 py-0.5 rounded text-xs font-bold text-white uppercase tracking-wider bg-red-600">
+                            Nonconformance (Not OK)
+                          </div>
+                        </div>
+                        <EoshExceptionFollowUp
+                          values={currentData as any}
+                          users={eoshOrgUsers}
+                          disabled={isAuditeeReadOnly}
+                          showErrors={showExceptionFollowUpErrors}
+                          onChange={(field, value) =>
+                            handleClauseChange(clause.id, field as any, value)
+                          }
+                          onAssignToSelect={(user) => {
+                            void notifyExceptionAssignment(
+                              Number(String(clause.id).replace(/\D/g, "")) || 0,
+                              user,
+                              {
+                                ...(currentData as any),
+                                findings: type,
+                              },
+                              `Clause ${clause.id}`,
+                            );
+                          }}
+                        />
+                      </div>
+                    )}
+
+                    {/* Extended Fields for Non-Compliance/OFI (legacy scales) */}
+                    {showExtended &&
+                      !(
+                        usesOkNotOkChecklistFindings(template) &&
+                        needsOkNotOkNcFollowUp(type)
+                      ) && (
                       <div className="space-y-5 pt-5 border-t border-slate-100 animate-in fade-in slide-in-from-top-4">
                         <div className="flex items-center gap-2 mb-2">
                           <div
@@ -5265,7 +5461,7 @@ const AuditExecute = () => {
                                 <TableCell className="p-2 align-top">
                                   <div className="flex flex-col gap-1">
                                     {(usesOkNotOkChecklistFindings(template)
-                                      ? type !== "NC"
+                                      ? !needsOkNotOkNcFollowUp(type)
                                       : !["OFI", "Min", "Maj"].includes(type)) && (
                                       <AutoResizeTextarea
                                         className="min-h-[80px] text-[11px] border-slate-200 bg-slate-50/50 focus:bg-white shadow-none p-2"
@@ -5309,9 +5505,40 @@ const AuditExecute = () => {
 
 
                           {/* Extended findings for Mapping rows */}
-                          {(usesOkNotOkChecklistFindings(template)
-                            ? type === "NC"
-                            : ["OFI", "Min", "Maj"].includes(type)) && (
+                          {usesOkNotOkChecklistFindings(template) &&
+                            needsOkNotOkNcFollowUp(type) && (
+                            <TableRow className="border-slate-300 bg-amber-50/20">
+                              <TableCell colSpan={5} className="border border-slate-300 p-3">
+                                <div className="mb-2 flex items-center gap-2 px-1">
+                                  <span className="rounded-md bg-red-600 px-2.5 py-1 text-xs font-black uppercase tracking-wider text-white">
+                                    Nonconformance (Not OK)
+                                  </span>
+                                </div>
+                                <EoshExceptionFollowUp
+                                  values={checklistData[dataIndex] || {}}
+                                  users={eoshOrgUsers}
+                                  disabled={isAuditeeReadOnly}
+                                  showErrors={showExceptionFollowUpErrors}
+                                  onChange={(field, value) =>
+                                    handleChecklistChange(dataIndex, field, value)
+                                  }
+                                  onAssignToSelect={(user) => {
+                                    void notifyExceptionAssignment(
+                                      dataIndex,
+                                      user,
+                                      checklistData[dataIndex] || {},
+                                      String(
+                                        (editableChecklist[dataIndex] as ChecklistContent)
+                                          ?.question || "",
+                                      ),
+                                    );
+                                  }}
+                                />
+                              </TableCell>
+                            </TableRow>
+                          )}
+                          {!usesOkNotOkChecklistFindings(template) &&
+                            ["OFI", "Min", "Maj"].includes(type) && (
                             <TableRow className="bg-slate-50 border-b-4 border-slate-200 text-sm">
                               <TableCell colSpan={5} className="p-0">
                                 <div className="p-5 m-3 border bg-white rounded-xl shadow-sm border-slate-200">
@@ -5917,7 +6144,7 @@ const AuditExecute = () => {
                                 <TableCell className="p-3 align-top">
                                   <div className="flex flex-col h-full gap-1">
                                     {(okNotOkFindings
-                                      ? type !== "NC"
+                                      ? !needsOkNotOkNcFollowUp(type)
                                       : yesNoFindings || !["OFI", "Min", "Maj"].includes(type)) && (
                                       <AutoResizeTextarea
                                         className="min-h-[100px] text-sm border-slate-200 bg-slate-50/50 focus:bg-white shadow-sm transition-colors placeholder:text-slate-400 p-3"
@@ -5954,11 +6181,43 @@ const AuditExecute = () => {
                             )}
                           </TableRow>
 
-                          {/* Extended findings — NC for OK/Not OK; OFI/Min/Maj for legacy scales */}
-                          {((okNotOkFindings && type === "NC") ||
-                            (!okNotOkFindings &&
-                              !yesNoFindings &&
-                              ["OFI", "Min", "Maj"].includes(type))) && (
+                          {/* ISO Not OK → nonconformance follow-up (Raised by / Assign to / Target date / Details) */}
+                          {okNotOkFindings && needsOkNotOkNcFollowUp(type) && (
+                            <TableRow className="border-slate-300 bg-amber-50/20">
+                              <TableCell colSpan={4} className="border border-slate-300 p-3">
+                                <div className="mb-2 flex items-center gap-2 px-1">
+                                  <span className="rounded-md bg-red-600 px-2.5 py-1 text-xs font-black uppercase tracking-wider text-white">
+                                    Nonconformance (Not OK)
+                                  </span>
+                                  <span className="text-xs font-medium text-slate-500">
+                                    Fill in the nonconformance details below.
+                                  </span>
+                                </div>
+                                <EoshExceptionFollowUp
+                                  values={checklistData[index] || {}}
+                                  users={eoshOrgUsers}
+                                  disabled={isAuditeeReadOnly}
+                                  showErrors={showExceptionFollowUpErrors}
+                                  onChange={(field, value) =>
+                                    handleChecklistChange(index, field, value)
+                                  }
+                                  onAssignToSelect={(user) => {
+                                    void notifyExceptionAssignment(
+                                      index,
+                                      user,
+                                      checklistData[index] || {},
+                                      item.question,
+                                    );
+                                  }}
+                                />
+                              </TableCell>
+                            </TableRow>
+                          )}
+
+                          {/* Extended findings — OFI/Min/Maj for legacy C/OFI/Min/Maj scales */}
+                          {!okNotOkFindings &&
+                            !yesNoFindings &&
+                            ["OFI", "Min", "Maj"].includes(type) && (
                             <TableRow className="bg-slate-50 border-b-4 border-slate-200 text-sm">
                               <TableCell colSpan={4} className="p-0">
                                 <div className="p-6 ml-6 mr-6 my-4 border bg-white rounded-xl shadow-[0_2px_10px_-3px_rgba(6,81,237,0.1)] border-slate-200">
@@ -5971,9 +6230,7 @@ const AuditExecute = () => {
                                         ? "Minor N/C"
                                         : type === "Maj"
                                           ? "Major N/C"
-                                          : type === "NC"
-                                            ? "NC (Not OK)"
-                                            : "OFI"}{" "}
+                                          : "OFI"}{" "}
                                       Details
                                     </div>
                                     <span className="text-slate-400 text-xs font-medium">
@@ -6230,10 +6487,34 @@ const AuditExecute = () => {
                                         />
                                       </TableCell>
                                     </TableRow>
-                                    {((okNotOkFindings && eqType === "NC") ||
-                                      (!okNotOkFindings &&
-                                        ["OFI", "Min", "Maj", "C"].includes(eqType) &&
-                                        !usesYesNoChecklistFindings(template))) && (
+                                    {okNotOkFindings && needsOkNotOkNcFollowUp(eqType) && (
+                                      <TableRow className="border-slate-300 bg-amber-50/20">
+                                        <TableCell colSpan={4} className="border border-slate-300 p-3">
+                                          <div className="mb-2 flex items-center gap-2 px-1">
+                                            <span className="rounded-md bg-red-600 px-2.5 py-1 text-xs font-black uppercase tracking-wider text-white">
+                                              Nonconformance (Not OK)
+                                            </span>
+                                          </div>
+                                          <EoshExceptionFollowUp
+                                            values={eq || {}}
+                                            users={eoshOrgUsers}
+                                            disabled={isAuditeeReadOnly}
+                                            showErrors={showExceptionFollowUpErrors}
+                                            onChange={(field, value) =>
+                                              handleExtraChecklistChange(
+                                                item.clause,
+                                                eqIdx,
+                                                field,
+                                                value,
+                                              )
+                                            }
+                                          />
+                                        </TableCell>
+                                      </TableRow>
+                                    )}
+                                    {!okNotOkFindings &&
+                                      ["OFI", "Min", "Maj", "C"].includes(eqType) &&
+                                      !usesYesNoChecklistFindings(template) && (
                                       <TableRow className="bg-slate-50 border-b-2 border-slate-200 text-sm">
                                         <TableCell colSpan={4} className="p-0">
                                           <div className="p-4 ml-4 mr-4 my-3 border bg-white rounded-xl border-slate-200 grid grid-cols-2 gap-4">

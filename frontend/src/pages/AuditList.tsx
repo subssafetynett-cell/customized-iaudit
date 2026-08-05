@@ -62,7 +62,7 @@ import {
 import { resolveAuditModuleDisplayName } from "@/lib/auditFindings";
 import { AuditModuleSelectDialog } from "@/components/AuditModuleSelectDialog";
 import {
-    MoreVertical, FileText, Trash2, Calendar, Search, Download, Loader2
+    MoreVertical, FileText, Trash2, Calendar, Search, Download, Loader2, ArrowUpDown, ArrowUp, ArrowDown
 } from "lucide-react";
 /** Subtitle under Audit column: module name(s) or ISO Standards. */
 function resolveAuditListTypeLabel(plan: {
@@ -140,6 +140,7 @@ function isModuleAuditListPlan(plan: Parameters<typeof resolveAuditListTypeLabel
 
 type AuditTypeFilter = "all" | "module" | "iso";
 type AuditStatusTab = "planned" | "in_progress" | "completed";
+type AuditListSortKey = "date" | "type" | "name" | "site" | "auditor" | "status";
 
 const STATUS_TAB_TO_API: Record<AuditStatusTab, string> = {
     planned: "PLANNED",
@@ -153,6 +154,9 @@ const AuditList = () => {
     const [typeFilter, setTypeFilter] = useState<AuditTypeFilter>("all");
     /** Status tab — default Planned; each click fetches that status from the API. */
     const [statusTab, setStatusTab] = useState<AuditStatusTab>("planned");
+    /** Default: latest audit date first. */
+    const [sortKey, setSortKey] = useState<AuditListSortKey>("date");
+    const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
     const [selectedSite, setSelectedSite] = useState("all");
     const [loading, setLoading] = useState(true);
     /** True while refetching after filters/page change — keep prior rows visible. */
@@ -229,13 +233,19 @@ const AuditList = () => {
 
     useEffect(() => {
         setCurrentPage(1);
-    }, [debouncedSearch, selectedSite, typeFilter, statusTab]);
+    }, [debouncedSearch, selectedSite, typeFilter, statusTab, sortKey, sortDir]);
 
     const fetchPlans = async () => {
         const isInitial = !hasLoadedOnceRef.current;
         try {
             if (isInitial) setLoading(true);
             else setRefreshing(true);
+            const apiSort =
+                sortKey === "name"
+                    ? "name"
+                    : sortKey === "site"
+                      ? "site"
+                      : "date";
             const qs = buildPageQuery({
                 page: currentPage,
                 limit: itemsPerPage,
@@ -244,6 +254,12 @@ const AuditList = () => {
                 site: selectedSite !== "all" ? selectedSite : undefined,
                 type: typeFilter !== "all" ? typeFilter : undefined,
                 status: STATUS_TAB_TO_API[statusTab],
+                sort: apiSort,
+                // Type / auditor / status are refined client-side; date/name/site use server order.
+                order:
+                    sortKey === "type" || sortKey === "auditor" || sortKey === "status"
+                        ? "desc"
+                        : sortDir,
             });
             const res = await apiFetch(`/audit-plans${qs}`);
             const data = await res.json();
@@ -264,8 +280,8 @@ const AuditList = () => {
 
     useEffect(() => {
         void fetchPlans();
-        // eslint-disable-next-line react-hooks/exhaustive-deps -- fetch when tab/filters/page change
-    }, [currentPage, debouncedSearch, selectedSite, typeFilter, statusTab]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- fetch when tab/filters/page/sort change
+    }, [currentPage, debouncedSearch, selectedSite, typeFilter, statusTab, sortKey, sortDir]);
 
     useEffect(() => {
         let cancelled = false;
@@ -547,24 +563,84 @@ const AuditList = () => {
         }
     };
 
-    const filteredPlans = auditPlans;
-    const paginatedPlans = auditPlans;
+    const filteredPlans = React.useMemo(() => {
+        const plans = [...auditPlans];
+        const dir = sortDir === "asc" ? 1 : -1;
+        const dateMs = (p: any) => (p?.date ? new Date(p.date).getTime() : 0);
+        plans.sort((a, b) => {
+            if (sortKey === "type") {
+                const ma = isModuleAuditListPlan(a) ? 0 : 1;
+                const mb = isModuleAuditListPlan(b) ? 0 : 1;
+                if (ma !== mb) return (ma - mb) * dir;
+                return dateMs(b) - dateMs(a);
+            }
+            if (sortKey === "name") {
+                const cmp = String(a?.auditName || "").localeCompare(
+                    String(b?.auditName || ""),
+                    undefined,
+                    { sensitivity: "base" },
+                );
+                return cmp * dir;
+            }
+            if (sortKey === "site") {
+                const sa = String(
+                    a?.auditProgram?.site?.name || a?.location?.split(",")[0] || "",
+                );
+                const sb = String(
+                    b?.auditProgram?.site?.name || b?.location?.split(",")[0] || "",
+                );
+                const cmp = sa.localeCompare(sb, undefined, { sensitivity: "base" });
+                return cmp * dir;
+            }
+            if (sortKey === "auditor") {
+                const na = a?.leadAuditor
+                    ? `${a.leadAuditor.firstName || ""} ${a.leadAuditor.lastName || ""}`
+                    : "";
+                const nb = b?.leadAuditor
+                    ? `${b.leadAuditor.firstName || ""} ${b.leadAuditor.lastName || ""}`
+                    : "";
+                return na.localeCompare(nb, undefined, { sensitivity: "base" }) * dir;
+            }
+            if (sortKey === "status") {
+                const cmp = getAuditPlanStatusLabel(a).localeCompare(
+                    getAuditPlanStatusLabel(b),
+                    undefined,
+                    { sensitivity: "base" },
+                );
+                return cmp * dir;
+            }
+            // date (default) — also ordered by API; keep client stable
+            const cmp = dateMs(a) - dateMs(b);
+            if (cmp !== 0) return cmp * dir;
+            return (Number(b?.id) || 0) - (Number(a?.id) || 0);
+        });
+        return plans;
+    }, [auditPlans, sortKey, sortDir]);
+
     const uniqueSites = siteOptions;
 
-    const modulePlans = paginatedPlans.filter((p) => isModuleAuditListPlan(p));
-    const isoPlans = paginatedPlans.filter((p) => !isModuleAuditListPlan(p));
-    const listSections =
-        typeFilter === "all"
-            ? [
-                  { id: "module" as const, label: "Modules", plans: modulePlans },
-                  { id: "iso" as const, label: "ISO Standards", plans: isoPlans },
-              ].filter((s) => s.plans.length > 0)
-            : typeFilter === "module"
-              ? [{ id: "module" as const, label: "Modules", plans: paginatedPlans }]
-              : [{ id: "iso" as const, label: "ISO Standards", plans: paginatedPlans }];
+    const toggleSort = (key: AuditListSortKey) => {
+        if (sortKey === key) {
+            setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+            return;
+        }
+        setSortKey(key);
+        // Date / type: newest / modules-first on first click feel natural as desc / asc
+        setSortDir(key === "date" ? "desc" : "asc");
+    };
 
-    const tourTargetPlan =
-        paginatedPlans[0] ?? auditPlans[0] ?? null;
+    const SortIcon = ({ column }: { column: AuditListSortKey }) => {
+        if (sortKey !== column) {
+            return <ArrowUpDown className="w-3.5 h-3.5 opacity-60" aria-hidden />;
+        }
+        return sortDir === "asc" ? (
+            <ArrowUp className="w-3.5 h-3.5" aria-hidden />
+        ) : (
+            <ArrowDown className="w-3.5 h-3.5" aria-hidden />
+        );
+    };
+
+    const tourTargetPlan = filteredPlans[0] ?? auditPlans[0] ?? null;
 
     const handleAuditExecuteTourNext = () => {
         if (auditExecuteTourStep === 3) {
@@ -742,12 +818,68 @@ const AuditList = () => {
                         <Table>
                             <TableHeader className="bg-[#213847]">
                                 <TableRow className="hover:bg-[#213847] border-none">
-                                    <TableHead className="font-medium text-white h-12 py-3">Plan Name</TableHead>
-                                    <TableHead className="font-medium text-white h-12 py-3">Audit</TableHead>
-                                    <TableHead className="font-medium text-white h-12 py-3">Site</TableHead>
-                                    <TableHead className="font-medium text-white h-12 py-3">Date</TableHead>
-                                    <TableHead className="font-medium text-white h-12 py-3">Lead Auditor</TableHead>
-                                    <TableHead className="font-medium text-white h-12 py-3">Status</TableHead>
+                                    <TableHead className="font-medium text-white h-12 py-3">
+                                        <button
+                                            type="button"
+                                            onClick={() => toggleSort("name")}
+                                            className="inline-flex items-center gap-1.5 hover:text-white/90"
+                                        >
+                                            Plan Name
+                                            <SortIcon column="name" />
+                                        </button>
+                                    </TableHead>
+                                    <TableHead className="font-medium text-white h-12 py-3">
+                                        <button
+                                            type="button"
+                                            onClick={() => toggleSort("type")}
+                                            className="inline-flex items-center gap-1.5 hover:text-white/90"
+                                            title="Sort by module vs ISO standard"
+                                        >
+                                            Audit
+                                            <SortIcon column="type" />
+                                        </button>
+                                    </TableHead>
+                                    <TableHead className="font-medium text-white h-12 py-3">
+                                        <button
+                                            type="button"
+                                            onClick={() => toggleSort("site")}
+                                            className="inline-flex items-center gap-1.5 hover:text-white/90"
+                                        >
+                                            Site
+                                            <SortIcon column="site" />
+                                        </button>
+                                    </TableHead>
+                                    <TableHead className="font-medium text-white h-12 py-3">
+                                        <button
+                                            type="button"
+                                            onClick={() => toggleSort("date")}
+                                            className="inline-flex items-center gap-1.5 hover:text-white/90"
+                                            title="Sort by audit date"
+                                        >
+                                            Date
+                                            <SortIcon column="date" />
+                                        </button>
+                                    </TableHead>
+                                    <TableHead className="font-medium text-white h-12 py-3">
+                                        <button
+                                            type="button"
+                                            onClick={() => toggleSort("auditor")}
+                                            className="inline-flex items-center gap-1.5 hover:text-white/90"
+                                        >
+                                            Lead Auditor
+                                            <SortIcon column="auditor" />
+                                        </button>
+                                    </TableHead>
+                                    <TableHead className="font-medium text-white h-12 py-3">
+                                        <button
+                                            type="button"
+                                            onClick={() => toggleSort("status")}
+                                            className="inline-flex items-center gap-1.5 hover:text-white/90"
+                                        >
+                                            Status
+                                            <SortIcon column="status" />
+                                        </button>
+                                    </TableHead>
                                     <TableHead className="text-right font-medium text-white h-12 py-3">Actions</TableHead>
                                 </TableRow>
                             </TableHeader>
@@ -772,22 +904,7 @@ const AuditList = () => {
                                         </TableCell>
                                     </TableRow>
                                 ) : (
-                                    listSections.flatMap((section) => [
-                                        <TableRow
-                                            key={`section-${section.id}`}
-                                            className="bg-slate-50 hover:bg-slate-50 border-b border-slate-200"
-                                        >
-                                            <TableCell
-                                                colSpan={7}
-                                                className="py-2.5 px-4 text-xs font-bold uppercase tracking-wide text-[#213847]"
-                                            >
-                                                {section.label}
-                                                <span className="ml-2 font-semibold normal-case tracking-normal text-slate-400">
-                                                    ({section.plans.length})
-                                                </span>
-                                            </TableCell>
-                                        </TableRow>,
-                                        ...section.plans.map((plan) => {
+                                    filteredPlans.map((plan) => {
                                         const auditTypeLabel = resolveAuditListTypeLabel(plan);
                                         const isTourTargetRow =
                                             tourTargetPlan?.id === plan.id;
@@ -923,8 +1040,7 @@ const AuditList = () => {
                                                 </TableCell>
                                             </TableRow>
                                         );
-                                    }),
-                                    ])
+                                    })
                                 )}
                             </TableBody>
                         </Table>

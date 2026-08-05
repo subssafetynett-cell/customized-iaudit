@@ -131,7 +131,7 @@ export function normalizeOkNotOkFindingValue(
 
 /**
  * When the audit program uses EOSH/QFS modules, lock the plan to the modules
- * scheduled for this execution (month). Returns null for ISO programs (free picker).
+ * scheduled for this execution (month). Returns null for ISO / non-module programs.
  */
 export function getLockedPlanTemplatesFromExecution(
     execution?: { clauses?: Array<{ id?: string; standard?: string }> | null } | null,
@@ -163,9 +163,71 @@ export function getLockedPlanTemplatesFromExecution(
     return templates.length > 0 ? templates : null;
 }
 
+/**
+ * Templates locked on the audit plan form from the audit program.
+ * - EOSH/QFS: modules scheduled for this execution
+ * - ISO standards: templates that match the program ISO selection (no free dropdown)
+ * Returns null only when the program has no standard/modules to lock from.
+ */
+export function getLockedPlanTemplatesFromProgram(
+    execution?: { clauses?: Array<{ id?: string; standard?: string }> | null } | null,
+    program?: {
+        isoStandard?: string | null;
+        scheduleData?: { criteriaType?: string; moduleFamily?: string } | null;
+    } | null,
+    opts?: {
+        planTemplateId?: string | null;
+        auditCriteria?: string | null;
+    },
+): AuditTemplate[] | null {
+    const fromExecution = getLockedPlanTemplatesFromExecution(execution, program);
+    if (fromExecution && fromExecution.length > 0) return fromExecution;
+
+    const iso = String(program?.isoStandard || "").trim();
+    if (!iso) return null;
+
+    const isModuleProgram =
+        program?.scheduleData?.criteriaType === "module" ||
+        iso.includes("EOSH Module:") ||
+        iso.includes("QFS KORE Module:");
+
+    if (isModuleProgram) {
+        const fromPlan = findAuditTemplates(opts?.planTemplateId);
+        return fromPlan.length > 0 ? fromPlan : null;
+    }
+
+    // ISO / clause programs — lock to non-module templates matching the program ISO standard(s).
+    const criteria =
+        String(opts?.auditCriteria || "").trim() ||
+        `${iso}, Internal Manual, Local Regulations`;
+    const standards = resolveAuditPlanStandards(criteria, iso);
+    if (standards.length === 0) return null;
+
+    const matched = auditTemplates.filter((t) => {
+        // Module checklists are only locked via execution (EOSH/QFS programs), never via ISO picker.
+        if (t.module === "EOSH" || t.module === "QFS KORE") return false;
+        const tStd = String(t.standard || "").toUpperCase();
+        return standards.some((s) => {
+            const searchStd = s.toUpperCase();
+            return tStd.includes(searchStd) || searchStd.includes(tStd);
+        });
+    });
+
+    if (opts?.planTemplateId) {
+        const fromPlan = findAuditTemplates(opts.planTemplateId).filter(
+            (t) => t.module !== "EOSH" && t.module !== "QFS KORE",
+        );
+        const optionIds = new Set(matched.map((t) => t.id));
+        const intersecting = fromPlan.filter((t) => optionIds.has(t.id));
+        if (intersecting.length > 0) return intersecting;
+    }
+
+    return matched.length > 0 ? matched : null;
+}
+
 /** Short label for audit plan template picker. */
 export function getAuditPlanTemplateLabel(
-    template: Pick<AuditTemplate, "type" | "isIntegrated" | "title" | "module">,
+    template: Pick<AuditTemplate, "type" | "isIntegrated" | "title" | "module" | "standard">,
     isMultiStandard = false,
 ): string {
     // Named Excel modules (EOSH / QFS) — show the module name, not a generic IMS label.
@@ -198,17 +260,18 @@ export function getAuditPlanTemplateLabel(
                 return "IMS Audit";
         }
     }
+    const std = String(template.standard || "").trim();
     switch (template.type) {
         case "clause-checklist":
-            return "Clause Template";
+            return std ? `${std} Clause Audit` : "Clause Template";
         case "checklist":
-            return "Checklist Template";
+            return std ? `${std} Checklist` : "Checklist Template";
         case "process-audit":
-            return "Process Template";
+            return std ? `${std} Process` : "Process Template";
         case "section":
-            return "Section Template";
+            return std ? `${std} Section` : "Section Template";
         default:
-            return "Audit Template";
+            return std || "Audit Template";
     }
 }
 
