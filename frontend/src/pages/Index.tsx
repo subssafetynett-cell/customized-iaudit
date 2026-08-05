@@ -13,7 +13,6 @@ import {
     fetchSelfAssessmentsPersisted,
 } from "@/lib/userPersistedData";
 import {
-  Building2,
   MapPin,
   Users as UsersIcon,
   BarChart3,
@@ -40,9 +39,6 @@ import {
 } from "recharts";
 import { toast } from "sonner";
 import { formatDistanceToNow } from "date-fns";
-import CompanyModal from "@/components/CompanyModal";
-import SiteModal from "@/components/SiteModal";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { TourStepPopover } from "@/components/TourStepPopover";
 import { ONBOARDING_TOTAL_STEPS } from "@/lib/onboardingTour";
@@ -123,7 +119,7 @@ function PieLegendSkeleton() {
 const Index = () => {
     const navigate = useNavigate();
     const queryClient = useQueryClient();
-    const { companies, hasFetchedCompanies, addCompany, addSite } = useCompanyStore();
+    const { companies, hasFetchedCompanies } = useCompanyStore();
     const [auditPlans, setAuditPlans] = useState<any[]>([]);
     const [findingsPlans, setFindingsPlans] = useState<any[]>([]);
     const [auditPrograms, setAuditPrograms] = useState<any[]>([]);
@@ -145,9 +141,7 @@ const Index = () => {
   
   // Onboarding state (starts only after trial welcome modal is dismissed)
   const [showWelcome, setShowWelcome] = useState(false);
-  const [showCreateCompany, setShowCreateCompany] = useState(false);
-  const [showCreateSite, setShowCreateSite] = useState(false);
-  const [onboardingStep, setOnboardingStep] = useState<number>(1);
+  const [onboardingStep, setOnboardingStep] = useState<number>(2);
   const [trialWelcomeDismissed, setTrialWelcomeDismissed] = useState(() => {
     try {
       const raw = localStorage.getItem("user");
@@ -227,31 +221,18 @@ const Index = () => {
   }, []);
 
   useEffect(() => {
-    const userJson = localStorage.getItem("user");
-    const user = userJson ? JSON.parse(userJson) : null;
-
     if (!hasFetchedCompanies) return;
 
-    if (!user || user.onboardingCompleted || companies.length > 0) {
-      setShowWelcome(false);
-      return;
-    }
-
-    if (shouldAwaitTrialWelcome(user) && !trialWelcomeDismissed) {
-      setShowWelcome(false);
-      return;
-    }
-
-    setShowWelcome(true);
-    setOnboardingStep(1);
+    // Never auto-open create-company onboarding after signup or invite login.
+    // Invitees share the org company; account owners create one from Companies when ready.
+    setShowWelcome(false);
   }, [hasFetchedCompanies, companies.length, trialWelcomeDismissed]);
 
   useEffect(() => {
     const handleRestart = (e: any) => {
       let step = e.detail?.step || 2;
-      if (step === 1 && companies.length > 0) {
-        step = 2;
-      }
+      // Step 1 was the forced create-company modal — skip it.
+      if (step <= 1) step = 2;
       if (step >= 4) {
         navigate(`/companies?onboarding=true&step=${step}`);
         return;
@@ -268,9 +249,7 @@ const Index = () => {
     const params = new URLSearchParams(window.location.search);
     if (params.get('restartOnboarding') === 'true') {
       let step = Number(params.get('step')) || 2;
-      if (step === 1 && companies.length > 0) {
-        step = 2;
-      }
+      if (step <= 1) step = 2;
       if (step >= 4) {
         navigate(`/companies?onboarding=true&step=${step}`);
         window.history.replaceState({}, '', window.location.pathname);
@@ -279,7 +258,7 @@ const Index = () => {
       const userJson = localStorage.getItem('user');
       const user = userJson ? JSON.parse(userJson) : null;
       const blocked = user && shouldAwaitTrialWelcome(user) && !trialWelcomeDismissed;
-      if (!blocked && !(step === 1 && companies.length > 0)) {
+      if (!blocked) {
         setShowWelcome(true);
         setOnboardingStep(step);
       }
@@ -1108,73 +1087,7 @@ const Index = () => {
 
       </div>
 
-      {/* Onboarding Modals */}
-      <Dialog
-        open={showOnboarding && onboardingStep === 1}
-        onOpenChange={(open) => {
-        if (!open && companies.length === 0) return;
-        setShowWelcome(open);
-      }}>
-        {onboardingStep === 1 && (
-          <DialogContent 
-            hideClose
-            className="sm:max-w-md bg-white border-none shadow-2xl p-0 overflow-hidden max-h-[90vh] flex flex-col"
-            onPointerDownOutside={(e) => { if (companies.length === 0 || (companies.length > 0 && totalSites === 0)) e.preventDefault(); }}
-            onEscapeKeyDown={(e) => { if (companies.length === 0 || (companies.length > 0 && totalSites === 0)) e.preventDefault(); }}
-          >
-            <DialogHeader className="sr-only">
-              <DialogTitle>Welcome to iAudit</DialogTitle>
-              <DialogDescription>Get started with your compliance management journey.</DialogDescription>
-            </DialogHeader>
-            <div className="flex-1 overflow-y-auto w-full">
-              <div className="bg-[#213847] p-8 text-white flex flex-col items-center text-center space-y-4 relative">
-                <div className="space-y-2">
-                  <div className="flex items-center justify-center gap-2 mb-1">
-                    <span className="bg-white/20 text-white text-xs font-bold px-3 py-1 rounded-full">
-                      Step {onboardingStep} of {ONBOARDING_TOTAL_STEPS}
-                    </span>
-                  </div>
-                  <h2 className="text-2xl font-bold tracking-tight">Welcome to iAudit!</h2>
-                  <p className="text-slate-300 text-sm max-w-[280px]">
-                    We're excited to help you streamline your compliance management journey.
-                  </p>
-                </div>
-              </div>
-
-              <div className="p-8 space-y-6 bg-white">
-                <div className="space-y-4">
-                  <div className="flex flex-col gap-4 max-h-[60vh] overflow-y-auto pr-1">
-                    <div className="flex items-center gap-4">
-                      <div className="w-12 h-12 rounded-2xl bg-emerald-50 flex items-center justify-center shrink-0">
-                        <Building2 className="w-6 h-6 text-emerald-600" />
-                      </div>
-                      <h4 className="font-black text-xl text-slate-900 tracking-tight whitespace-nowrap">Step 1: Create a Company</h4>
-                    </div>
-                    <div className="space-y-4">
-                      <p className="text-sm font-medium text-slate-600 leading-relaxed px-1">
-                        First you need to create a company by clicking the create company button.
-                      </p>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="flex gap-3">
-                  <Button 
-                    className="w-full h-12 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl shadow-lg shadow-emerald-200 transition-all active:scale-95 group"
-                    onClick={() => {
-                      setShowWelcome(false);
-                      setShowCreateCompany(true);
-                    }}
-                  >
-                    Set Up My Company
-                  </Button>
-                </div>
-              </div>
-            </div>
-          </DialogContent>
-        )}
-      </Dialog>
-
+      {/* Onboarding — create-company modal removed; tour starts at Companies (step 2). */}
       {showOnboarding && onboardingStep === 2 && (
         <TourStepPopover
           targetId="tour-step-companies"
@@ -1186,79 +1099,10 @@ const Index = () => {
             setShowWelcome(false);
             navigate("/companies?onboarding=true&step=3");
           }}
-          onBack={() => {
-            if (companies.length > 0) {
-              setShowWelcome(false);
-              return;
-            }
-            setOnboardingStep(1);
-          }}
+          onBack={() => setShowWelcome(false)}
           onClose={() => setShowWelcome(false)}
         />
       )}
-
-      <CompanyModal
-        open={showCreateCompany}
-        onClose={() => {
-          setShowCreateCompany(false);
-          if (companies.length === 0) {
-            setShowWelcome(true);
-          }
-        }}
-        mode="create"
-        hideCancel={companies.length === 0}
-        onSubmit={async (data) => {
-          try {
-            const success = await addCompany(data);
-            if (success) {
-              setShowCreateCompany(false);
-              setOnboardingStep(2);
-              setShowWelcome(true);
-              toast.success("Company created! Now let's add your first site.");
-            }
-          } catch (err: unknown) {
-            const message = err instanceof Error ? err.message : "Failed to create company";
-            toast.error(message);
-            throw err;
-          }
-        }}
-      />
-
-      <SiteModal
-        open={showCreateSite}
-        onClose={() => {
-          setShowCreateSite(false);
-          if (totalSites === 0) {
-            setShowWelcome(true);
-          }
-        }}
-        mode="create"
-        onSubmit={async (data) => {
-          console.log("[Onboarding] SiteModal onSubmit triggered", data);
-          if (companies.length > 0) {
-            console.log(`[Onboarding] Initiating Step 2 site creation for company: ${companies[0].id}`);
-            const result = await addSite(companies[0].id, data);
-            console.log("[Onboarding] Step 2 API response received:", result);
-            
-            if (result && result.success) {
-              console.log("[Onboarding] Successfully created site, initiating direct navigation to Step 3...");
-              setShowCreateSite(false);
-              toast.success("Perfect! Your first site has been added.");
-              
-              // Direct navigation as requested, preserving the onboarding flag
-              navigate("/users?onboarding=true");
-            } else {
-              const errorMessage = result?.error || "Failed to create site. Please try again.";
-              console.error("[Onboarding] Step 2 failed:", errorMessage);
-              toast.error(errorMessage);
-              // Do NOT navigate or close modal on failure
-            }
-          } else {
-            console.error("[Onboarding] No company found in store during site creation");
-            toast.error("Company information missing. Please restart the setup.");
-          }
-        }}
-      />
     </div>
   );
 };

@@ -88,7 +88,8 @@ function normalizePositiveIntIds(rawIds) {
 /**
  * Org members visible to actor: walk up to account root, then include the full subtree.
  * Ensures inviter, invitees, and sibling teammates (any role) all share one user list.
- * Also expands via company ownership so broken creatorId links do not hide teammates.
+ * Also expands via company ownership and audit-program collaboration so broken
+ * creatorId links do not hide teammates' companies / sites / departments / users.
  */
 async function collectOrgMemberUserIds(actorId) {
     const id = Number(actorId);
@@ -100,6 +101,16 @@ async function collectOrgMemberUserIds(actorId) {
     }
 
     const idSet = new Set();
+
+    const addUserAndOrgTree = async (userId) => {
+        const uid = Number(userId);
+        if (!Number.isInteger(uid) || uid < 1 || idSet.has(uid)) return;
+        idSet.add(uid);
+        const root = (await getOrgRootUserId(uid)) ?? uid;
+        for (const n of await collectOrgSubtreeUserIds(root)) {
+            idSet.add(n);
+        }
+    };
 
     try {
         const rows = await prisma.$queryRaw`
@@ -142,17 +153,47 @@ async function collectOrgMemberUserIds(actorId) {
                 select: { userId: true },
             });
             for (const company of companies) {
-                const ownerId = Number(company.userId);
-                if (!Number.isInteger(ownerId) || ownerId < 1) continue;
-                idSet.add(ownerId);
-                const ownerRoot = (await getOrgRootUserId(ownerId)) ?? ownerId;
-                for (const n of await collectOrgSubtreeUserIds(ownerRoot)) {
-                    idSet.add(n);
-                }
+                await addUserAndOrgTree(company.userId);
             }
         } catch (err) {
             console.warn('[orgAccess] company-owner org expand failed:', err?.message || err);
         }
+    }
+
+    // Expand through audit-program collaboration (covers invitees with broken creatorId
+    // who still appear as lead/team auditor or program owner alongside the company org).
+    try {
+        const programs = await prisma.auditProgram.findMany({
+            where: {
+                OR: [
+                    { userId: id },
+                    { leadAuditorId: id },
+                    { auditors: { some: { id } } },
+                    { userId: { in: [...idSet] } },
+                    { leadAuditorId: { in: [...idSet] } },
+                    { auditors: { some: { id: { in: [...idSet] } } } },
+                    { site: { company: { userId: { in: [...idSet] } } } },
+                ],
+            },
+            select: {
+                userId: true,
+                leadAuditorId: true,
+                auditors: { select: { id: true } },
+                site: { select: { company: { select: { userId: true } } } },
+            },
+        });
+        for (const program of programs) {
+            if (program.userId != null) await addUserAndOrgTree(program.userId);
+            if (program.leadAuditorId != null) await addUserAndOrgTree(program.leadAuditorId);
+            if (program.site?.company?.userId != null) {
+                await addUserAndOrgTree(program.site.company.userId);
+            }
+            for (const auditor of program.auditors || []) {
+                await addUserAndOrgTree(auditor.id);
+            }
+        }
+    } catch (err) {
+        console.warn('[orgAccess] audit-program org expand failed:', err?.message || err);
     }
 
     const memberIds = [...idSet];
@@ -166,35 +207,268 @@ async function collectOrgMemberUserIds(actorId) {
     return memberIds;
 }
 
+/**
+ * Non-auditee org members share one catalog: any teammate in the same org tree
+ * (or expanded membership set) is visible for company/site/user scoped operations.
+ */
 async function actorCanAccessTargetUser(actorId, targetUserId) {
     const a = Number(actorId);
     const t = Number(targetUserId);
     if (!Number.isInteger(a) || a < 1 || !Number.isInteger(t) || t < 1) return false;
     if (a === t) return true;
-    const [actor, target] = await Promise.all([
-        prisma.user.findUnique({ where: { id: a }, select: { role: true, creatorId: true } }),
-        prisma.user.findUnique({ where: { id: t }, select: { id: true, creatorId: true } }),
-    ]);
-    if (!actor || !target) return false;
+    const actor = await prisma.user.findUnique({
+        where: { id: a },
+        select: { role: true },
+    });
+    if (!actor) return false;
     const role = normalizeUserRole(actor.role);
     if (role === 'superadmin') return true;
+    if (role === 'auditee') return false;
 
-    const [actorRootId, targetRootId] = await Promise.all([
-        getOrgRootUserId(a),
-        getOrgRootUserId(t),
-    ]);
-    // Same-org account root or org admin may manage anyone in the org tree.
-    if (actorRootId != null && targetRootId != null && actorRootId === targetRootId) {
-        if (a === actorRootId) return true;
-        if (role === 'admin') return true;
-        if (actor.creatorId == null && role !== 'auditee') return true;
+    if (await actorInSameOrgAs(a, t)) return true;
+
+    const members = await collectOrgMemberUserIds(a);
+    return members.includes(t);
+}
+
+/** True when actor may read/mutate a company owned by companyOwnerUserId. */
+async function actorCanAccessOrgCompanyOwner(actorId, companyOwnerUserId) {
+    const a = Number(actorId);
+    const owner = Number(companyOwnerUserId);
+    if (!Number.isInteger(a) || a < 1 || !Number.isInteger(owner) || owner < 1) return false;
+    if (a === owner) return true;
+    const actor = await prisma.user.findUnique({
+        where: { id: a },
+        select: { role: true },
+    });
+    if (!actor) return false;
+    if (normalizeUserRole(actor.role) === 'superadmin') return true;
+    if (normalizeUserRole(actor.role) === 'auditee') return false;
+    const ownerIds = await resolveOrgCompanyOwnerUserIds(a);
+    return ownerIds.includes(owner);
+}
+
+/**
+ * Re-link invitees with missing/broken creatorId so previously created A→B (and B→C)
+ * accounts share one org catalog. Never merges two company-owning account roots.
+ * @returns {Promise<number>} number of users re-linked
+ */
+async function repairOrgCreatorLinks() {
+    let repaired = 0;
+
+    const users = await prisma.user.findMany({
+        select: {
+            id: true,
+            role: true,
+            creatorId: true,
+            createdAt: true,
+            emailVerifiedAt: true,
+        },
+    });
+    const byId = new Map(users.map((u) => [u.id, u]));
+
+    const companyOwnerRows = await prisma.company.findMany({
+        where: { userId: { not: null } },
+        select: { userId: true },
+    });
+    const companyOwners = new Set(
+        normalizePositiveIntIds(companyOwnerRows.map((c) => c.userId)),
+    );
+
+    const walkRoot = (userId) => {
+        let cur = Number(userId);
+        const seen = new Set();
+        while (Number.isInteger(cur) && cur > 0 && !seen.has(cur)) {
+            seen.add(cur);
+            const row = byId.get(cur);
+            if (!row || row.creatorId == null) return cur;
+            cur = Number(row.creatorId);
+        }
+        return Number(userId);
+    };
+
+    const linkUserToRoot = async (userId, rootId) => {
+        const uid = Number(userId);
+        const root = Number(rootId);
+        if (!Number.isInteger(uid) || uid < 1 || !Number.isInteger(root) || root < 1) return false;
+        if (uid === root) return false;
+        const row = byId.get(uid);
+        if (!row) return false;
+        if (normalizeUserRole(row.role) === 'superadmin') return false;
+        // Never re-parent a user who already owns a registered company (their own org root).
+        if (companyOwners.has(uid)) return false;
+        if (row.creatorId != null && Number(row.creatorId) === root) return false;
+        await prisma.user.update({
+            where: { id: uid },
+            data: { creatorId: root },
+        });
+        row.creatorId = root;
+        repaired += 1;
+        return true;
+    };
+
+    // 1) Audit-program collaboration: attach orphan teammates under the program org root.
+    try {
+        const programs = await prisma.auditProgram.findMany({
+            select: {
+                userId: true,
+                leadAuditorId: true,
+                auditors: { select: { id: true } },
+                site: { select: { company: { select: { userId: true } } } },
+            },
+        });
+        for (const program of programs) {
+            const ownerCandidate = program.site?.company?.userId ?? program.userId;
+            if (ownerCandidate == null) continue;
+            const root = walkRoot(ownerCandidate);
+            const related = new Set();
+            if (program.userId != null) related.add(Number(program.userId));
+            if (program.leadAuditorId != null) related.add(Number(program.leadAuditorId));
+            for (const auditor of program.auditors || []) {
+                related.add(Number(auditor.id));
+            }
+            for (const uid of related) {
+                const row = byId.get(uid);
+                if (!row || row.creatorId != null) continue;
+                await linkUserToRoot(uid, root);
+            }
+        }
+    } catch (err) {
+        console.warn('[orgAccess] repairOrgCreatorLinks audit expand failed:', err?.message || err);
     }
 
-    const actorOrgRoot = actor.creatorId != null ? Number(actor.creatorId) : a;
-    if (Number(target.id) === actorOrgRoot) return true;
-    if (target.creatorId != null && Number(target.creatorId) === actorOrgRoot) return true;
-    if (target.creatorId != null && Number(target.creatorId) === a) return true;
-    return false;
+    // 2) Orphans (no creatorId, no owned company): attach when org root is unambiguous.
+    const companyRoots = users.filter(
+        (u) =>
+            u.creatorId == null &&
+            companyOwners.has(u.id) &&
+            normalizeUserRole(u.role) !== 'superadmin',
+    );
+
+    const orphans = users.filter(
+        (u) =>
+            u.creatorId == null &&
+            !companyOwners.has(u.id) &&
+            normalizeUserRole(u.role) !== 'superadmin',
+    );
+
+    for (const orphan of orphans) {
+        if (orphan.creatorId != null) continue;
+
+        let parentId = null;
+        if (companyRoots.length === 1) {
+            parentId = companyRoots[0].id;
+        } else {
+            const createdMs = orphan.createdAt ? new Date(orphan.createdAt).getTime() : 0;
+            const verifiedMs = orphan.emailVerifiedAt
+                ? new Date(orphan.emailVerifiedAt).getTime()
+                : 0;
+            // Invitees are created first, then verify later; public signup verifies in the same request.
+            const looksLikeInvitee =
+                (verifiedMs > 0 && createdMs > 0 && verifiedMs - createdMs >= 30_000) ||
+                normalizeUserRole(orphan.role) !== 'admin';
+            if (looksLikeInvitee && createdMs > 0) {
+                const priorRoots = companyRoots.filter(
+                    (r) => new Date(r.createdAt).getTime() <= createdMs,
+                );
+                if (priorRoots.length === 1) {
+                    parentId = priorRoots[0].id;
+                }
+            }
+        }
+
+        if (parentId != null) {
+            await linkUserToRoot(orphan.id, parentId);
+        }
+    }
+
+    if (repaired > 0) {
+        invalidateOrgLookupCaches();
+    }
+    return repaired;
+}
+
+/**
+ * Best-effort link for a single orphan invitee (e.g. on login) without a full table scan
+ * when the user already has a creatorId or owns a company.
+ */
+async function ensureOrphanUserOrgLink(userId) {
+    const id = Number(userId);
+    if (!Number.isInteger(id) || id < 1) return false;
+    const user = await prisma.user.findUnique({
+        where: { id },
+        select: {
+            id: true,
+            role: true,
+            creatorId: true,
+            createdAt: true,
+            emailVerifiedAt: true,
+        },
+    });
+    if (!user || user.creatorId != null) return false;
+    if (normalizeUserRole(user.role) === 'superadmin') return false;
+
+    const ownsCompany = await prisma.company.findFirst({
+        where: { userId: id },
+        select: { id: true },
+    });
+    if (ownsCompany) return false;
+
+    // Prefer attaching via a shared audit program.
+    const program = await prisma.auditProgram.findFirst({
+        where: {
+            OR: [
+                { userId: id },
+                { leadAuditorId: id },
+                { auditors: { some: { id } } },
+            ],
+        },
+        select: {
+            userId: true,
+            site: { select: { company: { select: { userId: true } } } },
+        },
+    });
+    if (program) {
+        const ownerCandidate = program.site?.company?.userId ?? program.userId;
+        if (ownerCandidate != null && Number(ownerCandidate) !== id) {
+            const root = (await getOrgRootUserId(ownerCandidate)) ?? Number(ownerCandidate);
+            if (root !== id) {
+                await prisma.user.update({ where: { id }, data: { creatorId: root } });
+                invalidateOrgLookupCaches();
+                return true;
+            }
+        }
+    }
+
+    const companyRoots = await prisma.user.findMany({
+        where: {
+            creatorId: null,
+            role: { not: 'superadmin' },
+            companies: { some: {} },
+        },
+        select: { id: true, createdAt: true },
+        orderBy: { createdAt: 'asc' },
+    });
+
+    let parentId = null;
+    if (companyRoots.length === 1) {
+        parentId = companyRoots[0].id;
+    } else {
+        const createdMs = user.createdAt ? new Date(user.createdAt).getTime() : 0;
+        const verifiedMs = user.emailVerifiedAt ? new Date(user.emailVerifiedAt).getTime() : 0;
+        const looksLikeInvitee =
+            (verifiedMs > 0 && createdMs > 0 && verifiedMs - createdMs >= 30_000) ||
+            normalizeUserRole(user.role) !== 'admin';
+        if (looksLikeInvitee && createdMs > 0) {
+            const prior = companyRoots.filter((r) => new Date(r.createdAt).getTime() <= createdMs);
+            if (prior.length === 1) parentId = prior[0].id;
+        }
+    }
+
+    if (parentId == null || parentId === id) return false;
+    await prisma.user.update({ where: { id }, data: { creatorId: parentId } });
+    invalidateOrgLookupCaches();
+    return true;
 }
 
 /** True when actor and target belong to the same organization tree. */
@@ -1480,6 +1754,9 @@ export {
     collectOrgSubtreeUserIds,
     collectOrgMemberUserIds,
     actorCanAccessTargetUser,
+    actorCanAccessOrgCompanyOwner,
+    repairOrgCreatorLinks,
+    ensureOrphanUserOrgLink,
     actorInSameOrgAs,
     actorCanViewUserBillingStatus,
     actorIsAuditee,

@@ -18,6 +18,7 @@ import {
     checkTrialExpiration,
     actorCanAccessAuditPlan,
     clearLegacySiteUserIds,
+    repairOrgCreatorLinks,
 } from './orgAccess.js';
 import {
     sendOtpIpRateLimit,
@@ -1124,6 +1125,14 @@ async function runBootstrap() {
             }),
             ensureLegacySiteUserIdsCleared(),
         ]);
+        try {
+            const repaired = await repairOrgCreatorLinks();
+            if (repaired > 0) {
+                console.log(`[bootstrap] ✔ Re-linked ${repaired} org member(s) with missing creatorId`);
+            }
+        } catch (err) {
+            console.warn('[bootstrap] Org creatorId repair skipped:', err.message);
+        }
         // After columns exist — bounded backfill (do not block readiness on this).
         void backfillAuditPlanFindingEmails();
         setBootstrapComplete(true);

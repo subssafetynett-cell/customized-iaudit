@@ -83,17 +83,21 @@ export async function parseApiJson<T = unknown>(response: Response): Promise<T> 
         text.includes("<html");
 
     if (!contentType.includes("application/json") || looksLikeHtml) {
+        // Only gateway / upstream failures should be reported as "unavailable".
+        // HTML (or other non-JSON) with 200/4xx/etc. is unexpected content, not downtime.
         if (
             response.status === 502 ||
             response.status === 503 ||
-            response.status === 504 ||
-            looksLikeHtml
+            response.status === 504
         ) {
             throw new Error(
                 "The API is temporarily unavailable (database or server). Please wait a moment and try again.",
             );
         }
-        throw new Error(text?.slice(0, 200) || `Unexpected response (${response.status})`);
+        throw new Error(
+            text?.slice(0, 200) ||
+                `Unexpected response (${response.status}${looksLikeHtml ? ", HTML instead of JSON" : ""})`,
+        );
     }
 
     if (!text) {

@@ -13,9 +13,9 @@ export type FoundationSetupStep = {
 export const FOUNDATION_SETUP_STEPS: FoundationSetupStep[] = [
     {
         id: "company",
-        title: "Create your company",
-        description: "Add your organization profile, contact details, and ISO standards.",
-        path: "/?restartOnboarding=true&step=1",
+        title: "Set up your company",
+        description: "Open Companies to add or review your organization profile when needed.",
+        path: "/companies",
     },
     {
         id: "sites",

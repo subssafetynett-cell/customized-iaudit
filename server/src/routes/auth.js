@@ -38,6 +38,7 @@ import {
     sendOtpToEmailAddress,
     sendPasswordChangedNotificationEmail
 } from '../auth/otpMail.js';
+import { ensureOrphanUserOrgLink } from '../orgAccess.js';
 import {
     PASSWORD_REGEX,
     PASSWORD_REQUIREMENTS_MESSAGE,
@@ -405,6 +406,11 @@ async function handleAuthLogin(req, res) {
 
         await ensureUserTrialStarted(user.id);
 
+        // Repair broken invite links so existing teammates see shared company/site/user catalogs.
+        await ensureOrphanUserOrgLink(user.id).catch((err) => {
+            console.warn('[AUTH] Org link repair skipped:', err?.message || err);
+        });
+
         const profile = await prisma.user.findUnique({
             where: { id: user.id },
             select: LOGIN_SUCCESS_USER_SELECT
@@ -561,7 +567,7 @@ async function handleResetPassword(req, res) {
     }
 }
 
-/** Log out the current browser/device only — deletes this session token so another device may sign in. */
+/** Log out the current browser/device only — other devices stay signed in. */
 async function handleLogout(req, res) {
     try {
         const token =
