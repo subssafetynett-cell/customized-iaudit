@@ -8,6 +8,15 @@ const SESSION_RENEW_WHEN_REMAINING_MS = SESSION_MAX_AGE_MS / 2;
 const SESSION_EXPIRES_HEADER = 'X-Session-Expires-At';
 const SESSION_COOKIE_NAME = 'iaudit_session';
 
+function safeDecodeCookieValue(value) {
+    try {
+        return decodeURIComponent(value);
+    } catch {
+        // Malformed % sequences in any Cookie must not crash auth (login/session).
+        return value;
+    }
+}
+
 function parseRequestCookies(req) {
     const header = req.headers.cookie;
     if (!header || typeof header !== 'string') return {};
@@ -16,7 +25,7 @@ function parseRequestCookies(req) {
         if (idx < 1) return acc;
         const key = part.slice(0, idx).trim();
         const value = part.slice(idx + 1).trim();
-        if (key) acc[key] = decodeURIComponent(value);
+        if (key) acc[key] = safeDecodeCookieValue(value);
         return acc;
     }, {});
 }
@@ -269,47 +278,46 @@ async function createSessionTokenForUser(userId, opts = {}) {
     const now = new Date();
 
     // Opportunistic cleanup of *this user's* expired sessions only (avoid global table scan on every login).
+    // Avoid interactive $transaction here — Prisma driver-adapter tx failures were surfacing as login 500s.
     await prisma.session.deleteMany({
         where: { userId: uid, expiresAt: { lt: now } },
     }).catch(() => {});
 
-    const sessionPayload = await prisma.$transaction(async (tx) => {
-        await tx.session.deleteMany({
-            where: { userId: uid, expiresAt: { lt: now } },
+    // Same browser/device already signed in — renew that session; leave other devices alone.
+    if (existingToken) {
+        const existing = await prisma.session.findFirst({
+            where: {
+                token: existingToken,
+                userId: uid,
+                expiresAt: { gt: now },
+            },
+            select: { token: true },
         });
-
-        // Same browser/device already signed in — renew that session; leave other devices alone.
-        if (existingToken) {
-            const existing = await tx.session.findFirst({
-                where: {
-                    token: existingToken,
-                    userId: uid,
-                    expiresAt: { gt: now },
-                },
-                select: { token: true },
+        if (existing) {
+            const expiresAt = new Date(Date.now() + SESSION_MAX_AGE_MS);
+            await prisma.session.update({
+                where: { token: existing.token },
+                data: { expiresAt },
             });
-            if (existing) {
-                const expiresAt = new Date(Date.now() + SESSION_MAX_AGE_MS);
-                await tx.session.update({
-                    where: { token: existing.token },
-                    data: { expiresAt },
-                });
-                return {
-                    token: existing.token,
-                    sessionExpiresAt: expiresAt.toISOString(),
-                };
-            }
+            await stampUserLoginTimes(uid);
+            return {
+                token: existing.token,
+                sessionExpiresAt: expiresAt.toISOString(),
+            };
         }
+    }
 
-        // New device/browser — create an additional session without revoking others.
-        const token = crypto.randomBytes(48).toString('base64url');
-        const expiresAt = new Date(Date.now() + SESSION_MAX_AGE_MS);
-        await tx.session.create({
-            data: { token, userId: uid, expiresAt },
-        });
-        return { token, sessionExpiresAt: expiresAt.toISOString() };
+    // New device/browser — create an additional session without revoking others.
+    const token = crypto.randomBytes(48).toString('base64url');
+    const expiresAt = new Date(Date.now() + SESSION_MAX_AGE_MS);
+    await prisma.session.create({
+        data: { token, userId: uid, expiresAt },
     });
+    await stampUserLoginTimes(uid);
+    return { token, sessionExpiresAt: expiresAt.toISOString() };
+}
 
+async function stampUserLoginTimes(uid) {
     const loginStamp = await prisma.user.findUnique({
         where: { id: uid },
         select: { firstLoginAt: true },
@@ -321,8 +329,6 @@ async function createSessionTokenForUser(userId, opts = {}) {
             ...(loginStamp?.firstLoginAt == null ? { firstLoginAt: new Date() } : {}),
         },
     }).catch(() => {});
-
-    return sessionPayload;
 }
 
 /**

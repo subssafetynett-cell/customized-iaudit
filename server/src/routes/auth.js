@@ -118,18 +118,29 @@ async function handleVerifyOtpAndSignup(req, res) {
         // Clean up OTP from database
         await prisma.otp.delete({ where: { email } });
 
-        await ensureUserTrialStarted(user.id);
+        try {
+            await ensureUserTrialStarted(user.id);
+        } catch (err) {
+            console.warn('[AUTH] Trial/access grant skipped on signup:', err?.message || err);
+        }
 
         const profile = await prisma.user.findUnique({
             where: { id: user.id },
             select: LOGIN_SUCCESS_USER_SELECT
         });
-        if (!profile || profile.email.toLowerCase().trim() !== email) {
+        if (!profile || String(profile.email || '').toLowerCase().trim() !== email) {
             return res.status(500).json({ error: 'Account creation could not be completed' });
         }
 
+        let existingToken = null;
+        try {
+            existingToken = getSessionTokenFromRequest(req);
+        } catch (err) {
+            console.warn('[AUTH] Session cookie parse skipped on signup:', err?.message || err);
+        }
+
         const session = await createSessionTokenForUser(profile.id, {
-            existingToken: getSessionTokenFromRequest(req),
+            existingToken,
         });
 
         res.status(201).json(sendAuthenticatedSession(res, profile, session));
@@ -351,10 +362,12 @@ async function handleAuthLogin(req, res) {
 
         // Use bcrypt to compare the provided password with the hashed password in DB
         let isPasswordMatch = false;
-        try {
-            isPasswordMatch = await bcrypt.compare(password, user.password);
-        } catch (error) {
-            isPasswordMatch = false;
+        if (typeof user.password === 'string' && user.password.length > 0) {
+            try {
+                isPasswordMatch = await bcrypt.compare(password, user.password);
+            } catch {
+                isPasswordMatch = false;
+            }
         }
 
         if (!isPasswordMatch) {
@@ -404,7 +417,11 @@ async function handleAuthLogin(req, res) {
             data: { failedLoginAttempts: 0 }
         }).catch(() => {});
 
-        await ensureUserTrialStarted(user.id);
+        try {
+            await ensureUserTrialStarted(user.id);
+        } catch (err) {
+            console.warn('[AUTH] Trial/access grant skipped:', err?.message || err);
+        }
 
         // Repair broken invite links so existing teammates see shared company/site/user catalogs.
         await ensureOrphanUserOrgLink(user.id).catch((err) => {
@@ -415,12 +432,19 @@ async function handleAuthLogin(req, res) {
             where: { id: user.id },
             select: LOGIN_SUCCESS_USER_SELECT
         });
-        if (!profile || profile.email.toLowerCase().trim() !== email) {
+        if (!profile || String(profile.email || '').toLowerCase().trim() !== email) {
             return res.status(500).json({ error: 'Login could not be completed' });
         }
 
+        let existingToken = null;
+        try {
+            existingToken = getSessionTokenFromRequest(req);
+        } catch (err) {
+            console.warn('[AUTH] Session cookie parse skipped:', err?.message || err);
+        }
+
         const session = await createSessionTokenForUser(profile.id, {
-            existingToken: getSessionTokenFromRequest(req),
+            existingToken,
         });
 
         console.log(`[AUTH] Login successful for user: ${profile.id}, onboardingCompleted: ${profile.onboardingCompleted}`);
@@ -428,6 +452,7 @@ async function handleAuthLogin(req, res) {
 
     } catch (error) {
         handlePrismaError(error, 'login');
+        console.error('[AUTH] Login failed:', error?.message || error, error?.code || '', error?.meta || '');
         res.status(500).json({ error: 'An error occurred during login' });
     }
 }
