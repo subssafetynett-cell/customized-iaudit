@@ -4,6 +4,8 @@ import prisma, {
     handlePrismaError,
     isPrismaUniqueViolation,
     pool,
+    poolQueryWithRetry,
+    formatErrorDetail,
 } from '../prisma.js';
 import {
     PERSON_NAME_MAX,
@@ -341,7 +343,7 @@ async function lookupUserForLogin(email) {
     let lastErr = null;
     for (const sql of queries) {
         try {
-            const { rows } = await pool.query(sql, [email]);
+            const { rows } = await poolQueryWithRetry(sql, [email]);
             if (!rows[0]) return null;
             const row = rows[0];
             return {
@@ -525,12 +527,12 @@ async function handleAuthLogin(req, res) {
         return res.status(200).json(sendAuthenticatedSession(res, safeProfile, session));
     } catch (error) {
         handlePrismaError(error, 'login');
-        const msg = String(error?.message || error || 'unknown');
+        const msg = formatErrorDetail(error);
         console.error('[AUTH] Login failed:', msg, error?.code || '', error?.meta || '');
         return res.status(500).json({
             error: 'An error occurred during login',
             code: 'LOGIN_INTERNAL_ERROR',
-            detail: msg.slice(0, 300),
+            detail: msg,
         });
     }
 }

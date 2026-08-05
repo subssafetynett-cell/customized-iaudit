@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import prisma, { pool } from './prisma.js';
+import prisma, { pool, poolQueryWithRetry } from './prisma.js';
 
 /** Server-side session lifetime (opaque token stored in DB; delivered via httpOnly cookie). */
 const SESSION_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -363,13 +363,13 @@ async function createSessionTokenForUser(userId, opts = {}) {
             : null;
     const now = new Date();
 
-    await pool.query(
+    await poolQueryWithRetry(
         `DELETE FROM "Session" WHERE "userId" = $1 AND "expiresAt" < $2`,
         [uid, now],
     ).catch(() => {});
 
     if (existingToken) {
-        const { rows } = await pool.query(
+        const { rows } = await poolQueryWithRetry(
             `SELECT "token" FROM "Session"
              WHERE "token" = $1 AND "userId" = $2 AND "expiresAt" > $3
              LIMIT 1`,
@@ -377,7 +377,7 @@ async function createSessionTokenForUser(userId, opts = {}) {
         );
         if (rows[0]?.token) {
             const expiresAt = new Date(Date.now() + SESSION_MAX_AGE_MS);
-            await pool.query(
+            await poolQueryWithRetry(
                 `UPDATE "Session" SET "expiresAt" = $1 WHERE "token" = $2`,
                 [expiresAt, rows[0].token],
             );
@@ -392,7 +392,7 @@ async function createSessionTokenForUser(userId, opts = {}) {
     const token = crypto.randomBytes(48).toString('base64url');
     const expiresAt = new Date(Date.now() + SESSION_MAX_AGE_MS);
     try {
-        await pool.query(
+        await poolQueryWithRetry(
             `INSERT INTO "Session" ("token", "userId", "expiresAt", "createdAt")
              VALUES ($1, $2, $3, NOW())`,
             [token, uid, expiresAt],
@@ -410,7 +410,7 @@ async function createSessionTokenForUser(userId, opts = {}) {
                     CONSTRAINT "Session_pkey" PRIMARY KEY ("token")
                 )
             `);
-            await pool.query(
+            await poolQueryWithRetry(
                 `INSERT INTO "Session" ("token", "userId", "expiresAt", "createdAt")
                  VALUES ($1, $2, $3, NOW())`,
                 [token, uid, expiresAt],

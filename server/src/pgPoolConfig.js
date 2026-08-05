@@ -27,10 +27,9 @@ export function buildPgPoolConfig() {
     const connectionString = process.env.DATABASE_URL;
     const config = {
         connectionString,
-        // Fail fast under pressure so /health and requests don't hang → proxy 504.
-        // Prefer failing a single request (~3s) over queuing until Coolify's gateway timeout.
+        // Allow Coolify/remote Postgres a bit more time than a local socket.
         connectionTimeoutMillis: Number.parseInt(
-            process.env.PG_CONNECTION_TIMEOUT_MS || "3000",
+            process.env.PG_CONNECTION_TIMEOUT_MS || "10000",
             10,
         ),
         // Default raised from 10 — per-request session auth + list queries starved easily under Coolify concurrency.
