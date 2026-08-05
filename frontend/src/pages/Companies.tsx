@@ -67,6 +67,7 @@ function countDepartments(sites: Site[] | undefined): number {
 function pickRicherCompanySites(a?: Company, b?: Company): Site[] {
   const aSites = a?.sites ?? [];
   const bSites = b?.sites ?? [];
+  // Prefer the longer site list; only on a tie compare department richness.
   if (bSites.length > aSites.length) return bSites;
   if (aSites.length > bSites.length) return aSites;
   if (countDepartments(bSites) > countDepartments(aSites)) return bSites;
@@ -178,21 +179,64 @@ const CompaniesPage = () => {
       if (res.ok) {
         const data = await res.json();
         const parsed = parsePaginatedResponse<any>(data, currentPage, itemsPerPage);
-        setPagedCompanies(
-          parsed.items.map((c) => ({
-            ...c,
-            id: String(c.id),
-            isoStandards: c.isoStandards || [],
-            sites: (c.sites || []).map((site: Site) => ({
-              ...site,
-              id: String(site.id),
-              departments: (site.departments || []).map((dept: Department) => ({
-                ...dept,
-                id: String(dept.id),
-              })),
+        let mapped = parsed.items.map((c) => ({
+          ...c,
+          id: String(c.id),
+          isoStandards: c.isoStandards || [],
+          sites: (c.sites || []).map((site: Site) => ({
+            ...site,
+            id: String(site.id),
+            departments: (site.departments || []).map((dept: Department) => ({
+              ...dept,
+              id: String(dept.id),
             })),
           })),
-        );
+        }));
+
+        // Hydrate empty nested sites from GET /sites so invitees always see org sites/departments.
+        if (mapped.some((c) => (c.sites?.length ?? 0) === 0)) {
+          try {
+            const sitesRes = await apiFetch(`/sites?page=1&pageSize=200&_t=${Date.now()}`);
+            if (sitesRes.ok) {
+              const sitesData = await sitesRes.json();
+              const siteRows = parsePaginatedResponse<any>(sitesData, 1, 200).items.length
+                ? parsePaginatedResponse<any>(sitesData, 1, 200).items
+                : Array.isArray(sitesData)
+                  ? sitesData
+                  : Array.isArray((sitesData as any)?.data)
+                    ? (sitesData as any).data
+                    : [];
+              const byCompany = new Map<string, Site[]>();
+              for (const raw of siteRows) {
+                const companyId = String(raw.companyId ?? raw.company?.id ?? "");
+                if (!companyId) continue;
+                const list = byCompany.get(companyId) ?? [];
+                list.push({
+                  ...raw,
+                  id: String(raw.id),
+                  departments: (raw.departments || []).map((dept: Department) => ({
+                    ...dept,
+                    id: String(dept.id),
+                  })),
+                });
+                byCompany.set(companyId, list);
+              }
+              mapped = mapped.map((company) => {
+                const hydrated = byCompany.get(String(company.id));
+                if (!hydrated?.length) return company;
+                const sites = pickRicherCompanySites(company, {
+                  ...company,
+                  sites: hydrated,
+                });
+                return sites === company.sites ? company : { ...company, sites };
+              });
+            }
+          } catch {
+            /* keep mapped as-is */
+          }
+        }
+
+        setPagedCompanies(mapped);
         setTotalItems(parsed.total);
       } else {
         setPagedCompanies([]);
@@ -349,12 +393,19 @@ const CompaniesPage = () => {
     setSelectedCompanyId(null);
   };
 
-  // Auto-select first company if exists
+  // Auto-select the richest company (prefer one that already has sites).
   useEffect(() => {
-    if (companies.length > 0 && !selectedCompanyId) {
-      setSelectedCompanyId(companies[0].id);
-    }
-  }, [companies, selectedCompanyId]);
+    if (selectedCompanyId) return;
+    const pool = companies.length > 0 ? companies : pagedCompanies;
+    if (pool.length === 0) return;
+    const preferred = [...pool].sort((a, b) => {
+      const aSites = a.sites?.length ?? 0;
+      const bSites = b.sites?.length ?? 0;
+      if (bSites !== aSites) return bSites - aSites;
+      return String(a.id).localeCompare(String(b.id));
+    })[0];
+    if (preferred) setSelectedCompanyId(preferred.id);
+  }, [companies, pagedCompanies, selectedCompanyId]);
 
   // If a company is selected, show the detailed view
   if (selectedCompany) {
