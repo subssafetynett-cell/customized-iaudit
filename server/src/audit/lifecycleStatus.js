@@ -32,6 +32,26 @@ export function deriveAuditLifecycleStatus(counts = {}) {
 }
 
 /**
+ * Multi-module: every selected checklist percent must be considered.
+ * all ≤0 → PLANNED; all ≥100 → COMPLETED; otherwise IN_PROGRESS.
+ * @param {unknown} moduleProgressByTemplateId
+ * @returns {'PLANNED'|'IN_PROGRESS'|'COMPLETED'|null}
+ */
+export function lifecycleFromModuleProgressMap(moduleProgressByTemplateId) {
+    if (!moduleProgressByTemplateId || typeof moduleProgressByTemplateId !== 'object') {
+        return null;
+    }
+    const vals = Object.values(moduleProgressByTemplateId)
+        .map((v) => Number(v))
+        .filter((n) => Number.isFinite(n))
+        .map((n) => Math.min(100, Math.max(0, Math.round(n))));
+    if (vals.length === 0) return null;
+    if (vals.every((p) => p <= 0)) return AUDIT_LIFECYCLE.PLANNED;
+    if (vals.every((p) => p >= 100)) return AUDIT_LIFECYCLE.COMPLETED;
+    return AUDIT_LIFECYCLE.IN_PROGRESS;
+}
+
+/**
  * True when a checklist/clause row has been answered for lifecycle progress.
  * Counts finding selection (OK/NC/C/…) or comments / evidence text.
  */
@@ -48,11 +68,25 @@ function rowHasFindingAnswer(row) {
 /**
  * SQL CASE that derives PLANNED | IN_PROGRESS | COMPLETED from auditData (+ status fallback).
  * Safe for use inside Postgres queries on "AuditPlan".
+ * Prefers moduleProgressByTemplateId when present (multi-module plans).
  */
 export function lifecycleStatusSqlExpression() {
     return `
       CASE
         WHEN "auditData" IS NULL THEN COALESCE(NULLIF(BTRIM(COALESCE(status, '')), ''), 'PLANNED')
+        WHEN jsonb_typeof("auditData"->'moduleProgressByTemplateId') = 'object'
+          AND ("auditData"->'moduleProgressByTemplateId') <> '{}'::jsonb THEN
+          CASE
+            WHEN (
+              SELECT bool_and((value)::numeric <= 0)
+              FROM jsonb_each_text("auditData"->'moduleProgressByTemplateId')
+            ) THEN 'PLANNED'
+            WHEN (
+              SELECT bool_and((value)::numeric >= 100)
+              FROM jsonb_each_text("auditData"->'moduleProgressByTemplateId')
+            ) THEN 'COMPLETED'
+            ELSE 'IN_PROGRESS'
+          END
         WHEN COALESCE(("auditData"->>'totalItems')::numeric, 0) > 0 THEN
           CASE
             WHEN COALESCE(("auditData"->>'completedItems')::numeric, 0) <= 0 THEN 'PLANNED'
@@ -143,6 +177,9 @@ export function lifecycleStatusFromAuditData(auditData) {
         }
     }
     if (!data || typeof data !== 'object') return AUDIT_LIFECYCLE.PLANNED;
+
+    const fromModules = lifecycleFromModuleProgressMap(data.moduleProgressByTemplateId);
+    if (fromModules) return fromModules;
 
     const completedItems = Number(data.completedItems);
     const totalItems = Number(data.totalItems);

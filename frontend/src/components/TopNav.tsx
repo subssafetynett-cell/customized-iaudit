@@ -129,7 +129,10 @@ export function TopNav() {
 
         {/* Dedicated Learn Modal */}
         <Dialog open={showLearnModal} onOpenChange={setShowLearnModal}>
-          <DialogContent className="sm:max-w-2xl border-none shadow-2xl p-0 overflow-hidden rounded-[28px] max-h-[90vh] flex flex-col">
+          <DialogContent
+            hideClose
+            className="sm:max-w-2xl border-none shadow-2xl p-0 overflow-hidden rounded-[28px] max-h-[90vh] flex flex-col"
+          >
             <div className="bg-[#213847] p-8 text-white flex flex-col items-center text-center space-y-4 relative shrink-0">
               {/* Added High-Visibility Close Button */}
               <Button

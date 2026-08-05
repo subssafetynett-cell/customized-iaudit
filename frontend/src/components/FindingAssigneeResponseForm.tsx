@@ -26,6 +26,7 @@ import {
 import {
     prepareEvidenceUploads,
     runEvidenceUploadJobs,
+    sanitizeAuditEvidenceMedia,
     type AuditEvidenceMedia,
 } from "@/lib/evidenceImageUpload";
 import {
@@ -396,7 +397,12 @@ export function FindingAssigneeResponseForm({
                 .join("\n"),
             closeDate: earliestDue,
             status: isDraft ? finding.status : "New Response",
-            media: [...(finding.media || []), ...evidenceFiles],
+            media: [
+                ...(finding.media || []),
+                ...evidenceFiles,
+            ]
+                .map((m) => sanitizeAuditEvidenceMedia(m))
+                .filter((m): m is AuditEvidenceMedia => m !== null),
             capaForm: form as unknown as Record<string, unknown>,
             capaResponseHistory: nextHistory,
             rejectReason: isDraft ? finding.rejectReason : "",
@@ -404,6 +410,14 @@ export function FindingAssigneeResponseForm({
     };
 
     const handleSaveDraft = async () => {
+        if (evidenceFiles.some((m) => m.uploadStatus === "pending" || m.uploadStatus === "uploading")) {
+            toast.error("Please wait for evidence uploads to finish");
+            return;
+        }
+        if (evidenceFiles.some((m) => m.uploadStatus === "error")) {
+            toast.error("Remove or retry failed evidence uploads before saving");
+            return;
+        }
         actionRef.current = "draft";
         setSubmitting(true);
         try {
@@ -422,6 +436,14 @@ export function FindingAssigneeResponseForm({
         const missing = getCapaFormMissingForSubmit(form);
         if (missing.length > 0) {
             toast.error(`Please complete: ${missing.join(", ")}`);
+            return;
+        }
+        if (evidenceFiles.some((m) => m.uploadStatus === "pending" || m.uploadStatus === "uploading")) {
+            toast.error("Please wait for evidence uploads to finish");
+            return;
+        }
+        if (evidenceFiles.some((m) => m.uploadStatus === "error")) {
+            toast.error("Remove or retry failed evidence uploads before sending");
             return;
         }
 

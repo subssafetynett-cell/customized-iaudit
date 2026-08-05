@@ -41,8 +41,16 @@ import {
 } from "@/lib/auditExecuteOnboardingTour";
 import { cn } from "@/lib/utils";
 import {
+    getPlanModuleOptions,
+    getPlanModulesProgressMap,
+    getPlanOverallChecklistProgress,
+    lifecycleFromModulePercents,
+    scopePlanToModule,
+} from "@/lib/auditPlanModules";
+import {
   getAuditPlanStatusLabel,
   isAuditPlanCompleted,
+  parseAuditData,
 } from "@/lib/auditCompletion";
 import { useAuditeeReadOnly } from "@/lib/auditeeAccess";
 import {
@@ -52,11 +60,6 @@ import {
     type AuditTemplate,
 } from "@/data/auditTemplates";
 import { resolveAuditModuleDisplayName } from "@/lib/auditFindings";
-import {
-    getPlanModuleOptions,
-    getPlanModulesProgressMap,
-    scopePlanToModule,
-} from "@/lib/auditPlanModules";
 import { AuditModuleSelectDialog } from "@/components/AuditModuleSelectDialog";
 import {
     MoreVertical, FileText, Trash2, Calendar, Search, Download, Loader2
@@ -371,10 +374,76 @@ const AuditList = () => {
                       }
                     : prev,
             );
+
+            // Repair stale multi-module lifecycle: one finished checklist used to
+            // mark the whole plan Completed. Rewrite aggregate progress quietly.
+            void repairMultiModuleLifecycleProgress(fullPlan);
         } catch {
             setModulePicker((prev) =>
                 prev ? { ...prev, progressLoading: false } : prev,
             );
+        }
+    };
+
+    const repairMultiModuleLifecycleProgress = async (fullPlan: {
+        id?: number;
+        templateId?: string | null;
+        auditData?: unknown;
+        status?: string;
+        progress?: number;
+    }) => {
+        const ids = parseAuditPlanTemplateIds(fullPlan?.templateId);
+        if (!fullPlan?.id || ids.length <= 1 || fullPlan.auditData == null) return;
+
+        const overall = getPlanOverallChecklistProgress(fullPlan);
+        const expectedLabel = lifecycleFromModulePercents(
+            ids.map((id) => overall.byModuleId[id] ?? 0),
+        );
+        const currentLabel = getAuditPlanStatusLabel(
+            fullPlan as { id: number; templateId?: string; auditData?: unknown; status?: string; progress?: number },
+        );
+        const data = parseAuditData(fullPlan) || {};
+        const storedMap = data.moduleProgressByTemplateId;
+        const needsModuleMap =
+            !storedMap ||
+            typeof storedMap !== "object" ||
+            ids.some(
+                (id) =>
+                    Number((storedMap as Record<string, unknown>)[id]) !==
+                    (overall.byModuleId[id] ?? 0),
+            );
+        const storedProgress = Number(
+            typeof fullPlan.progress === "number"
+                ? fullPlan.progress
+                : data.progress ?? 0,
+        );
+        const progressMismatch =
+            !Number.isFinite(storedProgress) ||
+            Math.round(storedProgress) !== overall.percent;
+
+        if (expectedLabel === currentLabel && !needsModuleMap && !progressMismatch) {
+            return;
+        }
+
+        try {
+            await apiFetch(`/audit-plans/${fullPlan.id}`, {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    auditData: {
+                        ...data,
+                        progress: overall.percent,
+                        totalItems: overall.total > 0 ? overall.total : data.totalItems,
+                        completedItems:
+                            overall.total > 0 ? overall.completed : data.completedItems,
+                        moduleProgressByTemplateId: overall.byModuleId,
+                    },
+                }),
+            });
+            // Refresh list so the audit moves to the correct status tab.
+            void fetchPlans();
+        } catch {
+            /* non-blocking repair */
         }
     };
 

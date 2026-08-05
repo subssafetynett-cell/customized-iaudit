@@ -8,6 +8,11 @@ import {
 } from "@/data/auditTemplates";
 import { isQfsKoreSectionHeader } from "@/lib/qfsKoreChecklistUi";
 import type { AuditEvidenceMedia } from "@/lib/evidenceImageUpload";
+import {
+    countFindingsReportFormAnswers,
+    mergeFindingsReportFormPreferRicher,
+    pickRichestFindingsReportForm,
+} from "@/lib/findingsReportForm";
 
 /** True when the audit plan has more than one assigned checklist/module. */
 export function planHasMultipleModules(templateId?: string | null): boolean {
@@ -229,49 +234,7 @@ function isNonEmptyString(v: unknown): v is string {
     return typeof v === "string" && v.trim().length > 0;
 }
 
-function countFindingsReportFormAnswers(form: unknown): number {
-    if (!form || typeof form !== "object") return 0;
-    const f = form as Record<string, any>;
-    let n = 0;
-
-    // Count only fields users actually enter (avoid defaults like docNumber/reportTitle/revisionNo).
-    const fieldKeys = [
-        "generalComment",
-        "managementSystem",
-        "department",
-        "auditDate",
-        "auditors",
-        "auditees",
-        "auditScope",
-        "auditCriteriaAndMethod",
-        "issueDate",
-    ] as const;
-    for (const k of fieldKeys) {
-        if (isNonEmptyString(f[k])) n += 1;
-    }
-
-    const kp = f.keyPersonnel;
-    if (Array.isArray(kp)) {
-        for (const row of kp) {
-            if (!row || typeof row !== "object") continue;
-            const r = row as Record<string, unknown>;
-            if (isNonEmptyString(r.name)) n += 1;
-            if (isNonEmptyString(r.position)) n += 1;
-            if (isNonEmptyString(r.department)) n += 1;
-        }
-    }
-
-    const ack = f.acknowledgement;
-    if (ack && typeof ack === "object") {
-        const a = ack as Record<string, unknown>;
-        if (isNonEmptyString(a.auditeeSignature)) n += 1;
-        if (isNonEmptyString(a.auditeeDate)) n += 1;
-        if (isNonEmptyString(a.auditorSignature)) n += 1;
-        if (isNonEmptyString(a.auditorDate)) n += 1;
-    }
-
-    return n;
-}
+// countFindingsReportFormAnswers is imported from findingsReportForm.ts
 
 /** Count answered checklist findings in a module entry (for richer-data comparisons). */
 export function countModuleStoreAnswers(
@@ -423,12 +386,10 @@ export function mergeAuditDataPreferRicher(
         return out;
     };
 
-    const baselineFormCount = countFindingsReportFormAnswers(baseline.findingsReportForm);
-    const incomingFormCount = countFindingsReportFormAnswers(incoming.findingsReportForm);
-    const chosenFindingsReportForm =
-        incomingFormCount > baselineFormCount
-            ? incoming.findingsReportForm
-            : baseline.findingsReportForm ?? incoming.findingsReportForm;
+    const chosenFindingsReportForm = mergeFindingsReportFormPreferRicher(
+        baseline.findingsReportForm,
+        incoming.findingsReportForm,
+    );
 
     return {
         ...baseline,
@@ -519,12 +480,10 @@ export function mergeModuleStoreEntries(
         return out;
     };
 
-    const baselineFormCount = countFindingsReportFormAnswers(existing.findingsReportForm);
-    const incomingFormCount = countFindingsReportFormAnswers(incoming.findingsReportForm);
-    const chosenFindingsReportForm =
-        incomingFormCount > baselineFormCount
-            ? incoming.findingsReportForm
-            : existing.findingsReportForm ?? incoming.findingsReportForm;
+    const chosenFindingsReportForm = mergeFindingsReportFormPreferRicher(
+        existing.findingsReportForm,
+        incoming.findingsReportForm,
+    );
 
     const mergeSectionDataPreferNonEmpty = (
         a: Record<string | number, string | null | undefined> | undefined,
@@ -809,6 +768,66 @@ export function getPlanModulesProgressMap(
 }
 
 /**
+ * Aggregate checklist progress across every selected module on the plan.
+ * Used for lifecycle status: Planned (all 0%), Completed (all 100%), else In Progress.
+ */
+export function getPlanOverallChecklistProgress(
+    plan: { templateId?: string | null; auditData?: unknown } | null | undefined,
+): { percent: number; completed: number; total: number; byModuleId: Record<string, number> } {
+    const modules = getPlanModuleOptions(plan?.templateId);
+    const byModuleId: Record<string, number> = {};
+    let completed = 0;
+    let total = 0;
+
+    for (const mod of modules) {
+        const p = getModuleChecklistProgress(plan, mod.id);
+        byModuleId[mod.id] = p.percent;
+        completed += p.completed;
+        total += p.total;
+    }
+
+    if (total > 0) {
+        return {
+            completed,
+            total,
+            percent: Math.min(100, Math.max(0, Math.round((completed / total) * 100))),
+            byModuleId,
+        };
+    }
+
+    // Fallback when totals are unknown: average of per-module percents.
+    const vals = Object.values(byModuleId);
+    if (vals.length === 0) {
+        return { percent: 0, completed: 0, total: 0, byModuleId };
+    }
+    const percent = Math.min(
+        100,
+        Math.max(0, Math.round(vals.reduce((a, b) => a + b, 0) / vals.length)),
+    );
+    return { percent, completed: 0, total: 0, byModuleId };
+}
+
+/**
+ * Lifecycle from selected-module percents:
+ * - all 0% → Planned
+ * - all 100% → Completed
+ * - otherwise → In Progress
+ */
+export function lifecycleFromModulePercents(
+    percents: number[],
+): "Planned" | "In Progress" | "Completed" {
+    if (percents.length === 0) return "Planned";
+    const clamped = percents.map((p) => {
+        const n = Number(p);
+        if (!Number.isFinite(n)) return 0;
+        return Math.min(100, Math.max(0, Math.round(n)));
+    });
+    if (clamped.every((p) => p <= 0)) return "Planned";
+    if (clamped.every((p) => p >= 100)) return "Completed";
+    return "In Progress";
+}
+
+/**
  * Scope a multi-module plan to a single checklist for Perform Audit / report download.
  * Pulls that module's answers from moduleDataByTemplateId when present.
  */
@@ -884,10 +903,9 @@ export function scopePlanToModule(
                 : {}),
         genericFiles: localGenericFiles,
         findingsReportForm:
-            mod?.findingsReportForm ??
-            (auditData.activeModuleId === resolvedId || !multiModule
-                ? auditData.findingsReportForm
-                : undefined),
+            pickRichestFindingsReportForm(auditData) ||
+            mod?.findingsReportForm ||
+            auditData.findingsReportForm,
         auditGlobalInfo:
             mod?.auditGlobalInfo ??
             (auditData.activeModuleId === resolvedId || !multiModule

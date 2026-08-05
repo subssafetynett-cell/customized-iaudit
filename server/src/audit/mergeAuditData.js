@@ -41,6 +41,12 @@ function isNonEmptyString(v) {
     return typeof v === 'string' && v.trim().length > 0;
 }
 
+function isMeaningfulFormText(v) {
+    if (typeof v !== 'string') return false;
+    const t = v.trim();
+    return t.length > 0 && t !== '—';
+}
+
 // Count only fields users actually enter (avoid defaults like docNumber/reportTitle/revisionNo).
 function countFindingsReportFormAnswers(form) {
     if (!form || typeof form !== 'object') return 0;
@@ -57,26 +63,106 @@ function countFindingsReportFormAnswers(form) {
         'issueDate',
     ];
     for (const k of keys) {
-        if (isNonEmptyString(form[k])) n += 1;
+        if (isMeaningfulFormText(form[k])) n += 1;
     }
 
     if (Array.isArray(form.keyPersonnel)) {
         for (const row of form.keyPersonnel) {
             if (!row || typeof row !== 'object') continue;
-            if (isNonEmptyString(row.name)) n += 1;
-            if (isNonEmptyString(row.position)) n += 1;
-            if (isNonEmptyString(row.department)) n += 1;
+            if (isMeaningfulFormText(row.name)) n += 1;
+            if (isMeaningfulFormText(row.position)) n += 1;
+            if (isMeaningfulFormText(row.department)) n += 1;
         }
     }
 
     const ack = form.acknowledgement;
     if (ack && typeof ack === 'object') {
-        if (isNonEmptyString(ack.auditeeSignature)) n += 1;
-        if (isNonEmptyString(ack.auditeeDate)) n += 1;
-        if (isNonEmptyString(ack.auditorSignature)) n += 1;
-        if (isNonEmptyString(ack.auditorDate)) n += 1;
+        if (isMeaningfulFormText(ack.auditeeSignature)) n += 1;
+        if (isMeaningfulFormText(ack.auditeeDate)) n += 1;
+        if (isMeaningfulFormText(ack.auditorSignature)) n += 1;
+        if (isMeaningfulFormText(ack.auditorDate)) n += 1;
     }
     return n;
+}
+
+/**
+ * Field-level merge so empty module defaults never wipe key personnel / signatures / comments.
+ */
+export function mergeFindingsReportFormPreferRicher(baseline, incoming) {
+    if (!baseline || typeof baseline !== 'object') {
+        return incoming && typeof incoming === 'object' ? { ...incoming } : baseline;
+    }
+    if (!incoming || typeof incoming !== 'object') {
+        return { ...baseline };
+    }
+
+    const pickText = (left, right) => {
+        if (isMeaningfulFormText(right)) return String(right).trim();
+        if (isMeaningfulFormText(left)) return String(left).trim();
+        if (typeof right === 'string' && right.trim()) return right;
+        if (typeof left === 'string') return left;
+        return '';
+    };
+
+    const baseKp = Array.isArray(baseline.keyPersonnel) ? baseline.keyPersonnel : [];
+    const inKp = Array.isArray(incoming.keyPersonnel) ? incoming.keyPersonnel : [];
+    const kpLen = Math.max(baseKp.length, inKp.length, 4);
+    const keyPersonnel = [];
+    for (let i = 0; i < kpLen; i += 1) {
+        const left = baseKp[i] || {};
+        const right = inKp[i] || {};
+        keyPersonnel.push({
+            name: pickText(left.name, right.name),
+            position: pickText(left.position, right.position),
+            department: pickText(left.department, right.department),
+        });
+    }
+    while (
+        keyPersonnel.length > 4 &&
+        !String(keyPersonnel[keyPersonnel.length - 1].name || '').trim() &&
+        !String(keyPersonnel[keyPersonnel.length - 1].position || '').trim() &&
+        !String(keyPersonnel[keyPersonnel.length - 1].department || '').trim()
+    ) {
+        keyPersonnel.pop();
+    }
+
+    const baseAck = baseline.acknowledgement && typeof baseline.acknowledgement === 'object'
+        ? baseline.acknowledgement
+        : {};
+    const inAck = incoming.acknowledgement && typeof incoming.acknowledgement === 'object'
+        ? incoming.acknowledgement
+        : {};
+
+    return {
+        ...baseline,
+        ...incoming,
+        docNumber: pickText(baseline.docNumber, incoming.docNumber) || baseline.docNumber || incoming.docNumber,
+        reportTitle: pickText(baseline.reportTitle, incoming.reportTitle) || baseline.reportTitle || incoming.reportTitle,
+        revisionNo: pickText(baseline.revisionNo, incoming.revisionNo) || baseline.revisionNo || incoming.revisionNo,
+        issueDate: pickText(baseline.issueDate, incoming.issueDate),
+        managementSystem: pickText(baseline.managementSystem, incoming.managementSystem),
+        department: pickText(baseline.department, incoming.department),
+        auditDate: pickText(baseline.auditDate, incoming.auditDate),
+        auditors: pickText(baseline.auditors, incoming.auditors),
+        auditees: pickText(baseline.auditees, incoming.auditees),
+        auditScope: pickText(baseline.auditScope, incoming.auditScope),
+        auditCriteriaAndMethod: pickText(baseline.auditCriteriaAndMethod, incoming.auditCriteriaAndMethod),
+        generalComment: pickText(baseline.generalComment, incoming.generalComment),
+        fieldLabels: { ...(baseline.fieldLabels || {}), ...(incoming.fieldLabels || {}) },
+        hiddenFields: Array.isArray(incoming.hiddenFields) ? incoming.hiddenFields : baseline.hiddenFields,
+        customFields:
+            Array.isArray(incoming.customFields) && incoming.customFields.length > 0
+                ? incoming.customFields
+                : baseline.customFields,
+        sectionLabels: { ...(baseline.sectionLabels || {}), ...(incoming.sectionLabels || {}) },
+        keyPersonnel,
+        acknowledgement: {
+            auditeeSignature: pickText(baseAck.auditeeSignature, inAck.auditeeSignature),
+            auditeeDate: pickText(baseAck.auditeeDate, inAck.auditeeDate),
+            auditorSignature: pickText(baseAck.auditorSignature, inAck.auditorSignature),
+            auditorDate: pickText(baseAck.auditorDate, inAck.auditorDate),
+        },
+    };
 }
 
 function countEvidenceKeys(genericFiles) {
@@ -173,12 +259,10 @@ function mergeModuleStoreEntries(existing, incoming) {
         return out;
     };
 
-    const existingFormCount = countFindingsReportFormAnswers(existing.findingsReportForm);
-    const incomingFormCount = countFindingsReportFormAnswers(incoming.findingsReportForm);
-    const findingsReportForm =
-        incomingFormCount > existingFormCount
-            ? incoming.findingsReportForm
-            : existing.findingsReportForm ?? incoming.findingsReportForm;
+    const findingsReportForm = mergeFindingsReportFormPreferRicher(
+        existing.findingsReportForm,
+        incoming.findingsReportForm,
+    );
 
     const sectionData = mergeSectionDataPreferNonEmpty(existing.sectionData, incoming.sectionData);
     const genericFiles = mergeEvidenceMapsPreferNonEmpty(existing.genericFiles, incoming.genericFiles);
@@ -259,12 +343,10 @@ export function mergeAuditDataPreferRicher(baseline, incoming) {
         return out;
     };
 
-    const baselineFormCount = countFindingsReportFormAnswers(baseline.findingsReportForm);
-    const incomingFormCount = countFindingsReportFormAnswers(incoming.findingsReportForm);
-    const findingsReportForm =
-        incomingFormCount > baselineFormCount
-            ? incoming.findingsReportForm
-            : baseline.findingsReportForm ?? incoming.findingsReportForm;
+    const findingsReportForm = mergeFindingsReportFormPreferRicher(
+        baseline.findingsReportForm,
+        incoming.findingsReportForm,
+    );
 
     const genericFiles = mergeEvidenceMapsPreferNonEmpty(baseFiles, inFiles);
     const clauseFiles = mergeEvidenceMapsPreferNonEmpty(

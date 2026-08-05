@@ -107,6 +107,7 @@ import {
   countModuleStoreAnswers,
   countAuditDataAnswers,
   mergeAuditDataPreferRicher,
+  getPlanOverallChecklistProgress,
   type ModuleStoreEntry,
 } from "@/lib/auditPlanModules";
 import {
@@ -118,6 +119,8 @@ import { AuditFindingsReportForm } from "@/components/AuditFindingsReportForm";
 import {
   buildFindingsReportDefaults,
   defaultFindingsReportForm,
+  mergeFindingsReportFormPreferRicher,
+  pickRichestFindingsReportForm,
   type FindingsReportForm,
 } from "@/lib/findingsReportForm";
 import {
@@ -622,17 +625,9 @@ const AuditExecute = () => {
           )
         : sanitizeAuditEvidenceMediaMap(stored?.genericFiles || {})),
     });
-    // Signatures / acknowledgement stay with the module that captured them.
-    if (stored?.findingsReportForm) {
-      setFindingsReportForm(stored.findingsReportForm as FindingsReportForm);
-      setExecutiveSummary(
-        (stored.findingsReportForm as FindingsReportForm).generalComment || "",
-      );
-    } else {
-      const freshForm = buildFindingsReportDefaults(plan || currentPlan || {});
-      setFindingsReportForm(freshForm);
-      setExecutiveSummary(freshForm.generalComment || "");
-    }
+    // Keep report footer (comment / key personnel / signatures) across modules —
+    // these are audit-wide, not per-checklist.
+    // (Do not reset findingsReportForm / executiveSummary on module switch.)
     // Auditee name / done by / dept stay with the module that filled them.
     if (stored?.auditGlobalInfo && typeof stored.auditGlobalInfo === "object") {
       setAuditGlobalInfo({ ...emptyAuditGlobalInfo(), ...stored.auditGlobalInfo });
@@ -1206,16 +1201,30 @@ const AuditExecute = () => {
         setGenericFiles({});
       }
 
-      // Prefer per-module signatures / acknowledgement when present.
-      if (mod?.findingsReportForm && typeof mod.findingsReportForm === "object") {
+      // Prefer richest audit-wide report form (comment / key personnel / signatures).
+      const richestForm = pickRichestFindingsReportForm(data as Record<string, unknown>);
+      if (richestForm && (
+        richestForm.generalComment?.trim() ||
+        richestForm.keyPersonnel?.some(
+          (r) => r.name?.trim() || r.position?.trim() || r.department?.trim(),
+        ) ||
+        richestForm.acknowledgement?.auditeeSignature?.trim() ||
+        richestForm.acknowledgement?.auditorSignature?.trim() ||
+        richestForm.acknowledgement?.auditeeDate?.trim() ||
+        richestForm.acknowledgement?.auditorDate?.trim() ||
+        richestForm.managementSystem?.trim() ||
+        richestForm.auditScope?.trim()
+      )) {
+        setFindingsReportForm(richestForm);
+        if (richestForm.generalComment) setExecutiveSummary(richestForm.generalComment);
+      } else if (mod?.findingsReportForm && typeof mod.findingsReportForm === "object") {
         setFindingsReportForm(mod.findingsReportForm as FindingsReportForm);
         const comment = (mod.findingsReportForm as FindingsReportForm).generalComment;
         if (typeof comment === "string") setExecutiveSummary(comment);
-      } else if (canUseTopLevelAnswers) {
+      } else if (canUseTopLevelAnswers || data.findingsReportForm) {
         setFindingsReportForm(buildFindingsReportDefaults(found, data));
       } else if (multiModule) {
-        // Do not reuse another module's signatures on this checklist.
-        setFindingsReportForm(buildFindingsReportDefaults(found));
+        setFindingsReportForm(buildFindingsReportDefaults(found, data));
       } else {
         setFindingsReportForm(buildFindingsReportDefaults(found, data));
       }
@@ -1658,6 +1667,24 @@ const AuditExecute = () => {
           );
         }
       }
+
+      // Audit-wide footer form — keep the richest version, never let an empty
+      // active module wipe key personnel / signatures / general comment.
+      const sharedFindingsReportForm = {
+        ...findingsReportForm,
+        generalComment: syncedGeneralComment,
+      };
+      const baselineRichest = pickRichestFindingsReportForm(
+        autosaveBaseline || { moduleDataByTemplateId: baseStore },
+      );
+      const protectedFindingsReportForm =
+        (baselineRichest
+          ? (mergeFindingsReportFormPreferRicher(
+              baselineRichest,
+              sharedFindingsReportForm,
+            ) as FindingsReportForm)
+          : sharedFindingsReportForm);
+
       const syncedModuleStore = currentModuleId
         ? {
             ...baseStore,
@@ -1669,15 +1696,26 @@ const AuditExecute = () => {
                 extraChecklistItems,
                 sectionData,
                 genericFiles: activeModuleOnlyFiles,
-                findingsReportForm: {
-                  ...findingsReportForm,
-                  generalComment: syncedGeneralComment,
-                },
+                findingsReportForm: protectedFindingsReportForm,
                 auditGlobalInfo,
               },
             ),
           }
         : baseStore;
+
+      // Propagate the shared report form into every module so reopening any
+      // checklist still shows comment / key personnel / signatures.
+      for (const mid of Object.keys(syncedModuleStore)) {
+        const entry = syncedModuleStore[mid];
+        if (!entry) continue;
+        syncedModuleStore[mid] = {
+          ...entry,
+          findingsReportForm: mergeFindingsReportFormPreferRicher(
+            entry.findingsReportForm,
+            protectedFindingsReportForm,
+          ),
+        };
+      }
       moduleDataByTemplateIdRef.current = syncedModuleStore;
 
       // Persist module-scoped evidence keys so modules never share index-based slots.
@@ -1724,11 +1762,9 @@ const AuditExecute = () => {
         extraChecklistItems,
         showExecutiveSummary,
         showAuditFindings,
-        findingsReportForm: {
-          ...findingsReportForm,
-          generalComment: syncedGeneralComment,
-        },
+        findingsReportForm: protectedFindingsReportForm,
         lastSaved: new Date().toISOString(),
+        // Placeholder — overwritten below with plan-wide progress for multi-module.
         progress: progressValue,
         totalItems,
         completedItems,
@@ -1739,8 +1775,36 @@ const AuditExecute = () => {
         moduleDataByTemplateId: syncedModuleStore,
       };
 
+      // Lifecycle status must reflect ALL selected modules, not only the active one.
+      // Otherwise finishing Security marks the whole plan Completed while Maintenance is 0%.
+      let savedProgress = progressValue;
+      let savedTotalItems = totalItems;
+      let savedCompletedItems = completedItems;
+      let moduleProgressByTemplateId: Record<string, number> | undefined;
+      if (multiModule && plan?.templateId) {
+        const overall = getPlanOverallChecklistProgress({
+          templateId: plan.templateId,
+          auditData: payload,
+        });
+        savedProgress = overall.percent;
+        savedTotalItems = overall.total > 0 ? overall.total : totalItems;
+        savedCompletedItems =
+          overall.total > 0 ? overall.completed : completedItems;
+        moduleProgressByTemplateId = overall.byModuleId;
+      }
+
+      const progressPayload = {
+        ...payload,
+        progress: savedProgress,
+        totalItems: savedTotalItems,
+        completedItems: savedCompletedItems,
+        ...(moduleProgressByTemplateId
+          ? { moduleProgressByTemplateId }
+          : {}),
+      };
+
       if (!plan?.id) {
-        return { ...payload, auditCompleted: false, completedAt: null };
+        return { ...progressPayload, auditCompleted: false, completedAt: null };
       }
 
       const completion = computeAuditCompletionStatus({
@@ -1748,11 +1812,11 @@ const AuditExecute = () => {
         auditName: plan.auditName,
         templateId: plan.templateId,
         findingsData: plan.findingsData,
-        auditData: payload,
+        auditData: progressPayload,
       });
 
       return {
-        ...payload,
+        ...progressPayload,
         auditCompleted: completion.auditCompleted,
         completedAt: completion.auditCompleted ? new Date().toISOString() : null,
       };
