@@ -569,18 +569,40 @@ export function createAuditsRouter({ authenticateToken, checkTrialExpiration }) 
                     ],
                 });
             }
-            // Module vs ISO: module plans typically have a non-empty templateId.
+            // Module vs ISO:
+            // Modules = EOSH / QFS KORE checklist ids (or program labeled as module).
+            // ISO = ISO/IMS checklists (iso-*) or plans without module templates.
+            // Do NOT treat "any non-empty templateId" as a module — ISO plans also have templateIds.
+            const moduleTemplateClause = {
+                OR: [
+                    { templateId: { contains: 'eosh-', mode: 'insensitive' } },
+                    { templateId: { contains: 'qfs-kore', mode: 'insensitive' } },
+                    {
+                        auditProgram: {
+                            is: {
+                                OR: [
+                                    {
+                                        isoStandard: {
+                                            contains: 'EOSH Module:',
+                                            mode: 'insensitive',
+                                        },
+                                    },
+                                    {
+                                        isoStandard: {
+                                            contains: 'QFS KORE Module:',
+                                            mode: 'insensitive',
+                                        },
+                                    },
+                                ],
+                            },
+                        },
+                    },
+                ],
+            };
             if (typeFilter === 'module') {
-                andFilters.push({
-                    AND: [
-                        { templateId: { not: null } },
-                        { NOT: { templateId: '' } },
-                    ],
-                });
+                andFilters.push(moduleTemplateClause);
             } else if (typeFilter === 'iso') {
-                andFilters.push({
-                    OR: [{ templateId: null }, { templateId: '' }],
-                });
+                andFilters.push({ NOT: moduleTemplateClause });
             }
             // Lifecycle status tabs: Planned | In Progress | Completed
             // Filter by derived progress (completedItems/totalItems/progress), not only the status column.
@@ -676,6 +698,7 @@ export function createAuditsRouter({ authenticateToken, checkTrialExpiration }) 
                     select: {
                         id: true,
                         name: true,
+                        isoStandard: true,
                         // scheduleData can be multi‑MB — never include on list responses
                         site: {
                             select: {
