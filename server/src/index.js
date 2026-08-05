@@ -1133,12 +1133,10 @@ async function runMigrations() {
         return;
     }
     if (/P3005/.test(result.output)) {
-        console.warn('[bootstrap] Database needs baselining (P3005) — attempting…');
-        const { baselineExistingDatabase } = await import(
-            '../scripts/baseline-migrations.js'
+        // Never call spawnSync baseline here — it freezes the event loop → Traefik 504.
+        console.error(
+            '[bootstrap] Database needs baselining (P3005). Skipping auto-baseline to keep HTTP alive. Run: npm run db:baseline',
         );
-        baselineExistingDatabase(process.env.DATABASE_URL);
-        console.log('[bootstrap] ✔ Baseline applied');
         return;
     }
     console.error(`[bootstrap] Migration exited with code ${result.status}`);
@@ -1158,19 +1156,21 @@ async function runBootstrap() {
             }),
             ensureLegacySiteUserIdsCleared(),
         ]);
-        try {
-            const repaired = await repairOrgCreatorLinks();
-            if (repaired > 0) {
-                console.log(`[bootstrap] ✔ Re-linked ${repaired} org member(s) with missing creatorId`);
-            }
-        } catch (err) {
-            console.warn('[bootstrap] Org creatorId repair skipped:', err.message);
-        }
-        // After columns exist — bounded backfill (do not block readiness on this).
-        void backfillAuditPlanFindingEmails();
+        // Mark ready BEFORE heavy backfills so Coolify/Traefik health checks pass quickly.
         setBootstrapComplete(true);
-        console.log(`[bootstrap] ✔ All startup tasks complete in ${Date.now() - t0}ms`);
-        console.log('[bootstrap] ✔ Container ready for traffic');
+        console.log(`[bootstrap] ✔ Ready for traffic in ${Date.now() - t0}ms`);
+
+        // Heavy org repair + email backfill must not delay readiness (public 504 risk).
+        void repairOrgCreatorLinks()
+            .then((repaired) => {
+                if (repaired > 0) {
+                    console.log(`[bootstrap] ✔ Re-linked ${repaired} org member(s) with missing creatorId`);
+                }
+            })
+            .catch((err) => {
+                console.warn('[bootstrap] Org creatorId repair skipped:', err?.message || err);
+            });
+        void backfillAuditPlanFindingEmails();
     } catch (err) {
         console.error('[bootstrap] Startup bootstrap failed:', err);
         // Don't crash — /health stays 503 until DB recovers; /live stays 200.
