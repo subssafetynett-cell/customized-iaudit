@@ -431,10 +431,12 @@ export default function Auth() {
                     throw new Error(data.error);
                 }
                 if (response.status >= 500) {
+                    const dataObj = data as { detail?: unknown; error?: unknown; code?: unknown };
+                    if (dataObj.code === 'LOGIN_DB_UNREACHABLE' && typeof dataObj.error === 'string') {
+                        throw new Error(dataObj.error);
+                    }
                     const detail =
-                        typeof (data as { detail?: unknown }).detail === 'string'
-                            ? ` (${(data as { detail: string }).detail})`
-                            : '';
+                        typeof dataObj.detail === 'string' ? ` (${dataObj.detail})` : '';
                     throw new Error(`Unable to sign in. Please try again later.${detail}`);
                 }
                 throw new Error('Invalid credentials');

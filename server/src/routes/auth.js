@@ -529,9 +529,13 @@ async function handleAuthLogin(req, res) {
         handlePrismaError(error, 'login');
         const msg = formatErrorDetail(error);
         console.error('[AUTH] Login failed:', msg, error?.code || '', error?.meta || '');
+        const dbUnreachable =
+            /ETIMEDOUT|ENETUNREACH|ECONNREFUSED|EAI_AGAIN|Connection terminated|timeout/i.test(msg);
         return res.status(500).json({
-            error: 'An error occurred during login',
-            code: 'LOGIN_INTERNAL_ERROR',
+            error: dbUnreachable
+                ? 'Cannot reach the database. Check DATABASE_URL and that Postgres allows connections from this server (firewall / security group / port 5432).'
+                : 'An error occurred during login',
+            code: dbUnreachable ? 'LOGIN_DB_UNREACHABLE' : 'LOGIN_INTERNAL_ERROR',
             detail: msg,
         });
     }
