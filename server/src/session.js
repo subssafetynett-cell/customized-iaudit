@@ -250,10 +250,9 @@ function resetPasswordVerifyRateLimit(req, res, next) {
 }
 
 /**
- * Create a new opaque session for this login under a single-active-session policy.
- * - At most one non-expired Session row per user.
- * - If another device already has an active session → revoke it and create a new session here.
- * - If this request already presents that same session cookie → renew and reuse (same browser).
+ * Create a new opaque session for this login.
+ * Multiple devices may stay signed in at once (one Session row per device/browser).
+ * If this request already presents a valid session cookie for the user → renew and reuse it.
  * @param {number} userId
  * @param {{ existingToken?: string | null }} [opts]
  * @returns {Promise<{ token: string, sessionExpiresAt: string }>}
@@ -279,41 +278,30 @@ async function createSessionTokenForUser(userId, opts = {}) {
             where: { userId: uid, expiresAt: { lt: now } },
         });
 
-        const actives = await tx.session.findMany({
-            where: { userId: uid, expiresAt: { gt: now } },
-            orderBy: { createdAt: 'desc' },
-            select: { token: true },
-        });
-
-        const active = actives[0] ?? null;
-
-        // Same browser/device already signed in — renew that session.
-        if (active && existingToken && existingToken === active.token) {
-            // Drop any legacy extra rows for this user.
-            if (actives.length > 1) {
-                await tx.session.deleteMany({
-                    where: {
-                        userId: uid,
-                        token: { not: active.token },
-                    },
-                });
-            }
-            const expiresAt = new Date(Date.now() + SESSION_MAX_AGE_MS);
-            await tx.session.update({
-                where: { token: active.token },
-                data: { expiresAt },
+        // Same browser/device already signed in — renew that session; leave other devices alone.
+        if (existingToken) {
+            const existing = await tx.session.findFirst({
+                where: {
+                    token: existingToken,
+                    userId: uid,
+                    expiresAt: { gt: now },
+                },
+                select: { token: true },
             });
-            return {
-                token: active.token,
-                sessionExpiresAt: expiresAt.toISOString(),
-            };
+            if (existing) {
+                const expiresAt = new Date(Date.now() + SESSION_MAX_AGE_MS);
+                await tx.session.update({
+                    where: { token: existing.token },
+                    data: { expiresAt },
+                });
+                return {
+                    token: existing.token,
+                    sessionExpiresAt: expiresAt.toISOString(),
+                };
+            }
         }
 
-        // New login on another device/system — revoke every other session for this user.
-        if (actives.length > 0) {
-            await tx.session.deleteMany({ where: { userId: uid } });
-        }
-
+        // New device/browser — create an additional session without revoking others.
         const token = crypto.randomBytes(48).toString('base64url');
         const expiresAt = new Date(Date.now() + SESSION_MAX_AGE_MS);
         await tx.session.create({
@@ -339,7 +327,7 @@ async function createSessionTokenForUser(userId, opts = {}) {
 
 /**
  * Revoke every server session for a user.
- * Used after password change/reset or account deactivation so a new device can sign in.
+ * Used after password change/reset or account deactivation so all devices must sign in again.
  */
 async function invalidateAllUserSessions(userId) {
     const uid = Number.parseInt(String(userId), 10);

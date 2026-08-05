@@ -53,7 +53,8 @@ import {
     assignAuditeeToSites,
     formatAuditeeSiteLabels,
     defaultAuditeeNamesFromEmail,
-    actorCanManageAuditee
+    actorCanManageAuditee,
+    ensureOrphanUserOrgLink,
 } from '../orgAccess.js';
 import { deleteUserCompletely } from '../deleteUser.js';
 import {
@@ -407,6 +408,7 @@ export function createUsersRouter({ authenticateToken, checkTrialExpiration }) {
                 }
             } else {
                 const orgT0 = Date.now();
+                await ensureOrphanUserOrgLink(actorId).catch(() => {});
                 const allowedIds = await collectOrgMemberUserIds(actorId);
                 orgLookupMs = Date.now() - orgT0;
                 if (allowedIds.length === 0) {
@@ -1102,8 +1104,12 @@ export function createUsersRouter({ authenticateToken, checkTrialExpiration }) {
             }
 
             const creatorIdNum = Number(creatorId);
+            // Always attach invitees under the inviter (keeps A→B→C tree for shared catalogs).
             const creatorFk =
                 Number.isInteger(creatorIdNum) && creatorIdNum > 0 ? creatorIdNum : null;
+            if (!creatorFk) {
+                return res.status(401).json({ error: 'Invalid session. Please log in again.' });
+            }
 
             const user = await prisma.$transaction(async (tx) => {
                 if (roleNorm === 'auditee' && parsedSiteIds) {

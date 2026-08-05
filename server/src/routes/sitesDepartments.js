@@ -14,13 +14,14 @@ import {
     sanitizePlainText
 } from '../textSanitize.js';
 import {
-    actorCanAccessTargetUser,
+    actorCanAccessOrgCompanyOwner,
     actorCanAssignAuditeeToSite,
     resolveOrgCompanyOwnerUserIds,
     assertActorCanManageSite,
     assertActorCanManageDepartment,
     assertDepartmentCreateBodySiteId,
     DEPARTMENT_CREATE_ALLOWED_BODY_KEYS,
+    ensureOrphanUserOrgLink,
     checkTrialExpiration
 } from '../orgAccess.js';
 import {
@@ -48,7 +49,7 @@ export function createSitesDepartmentsRouter({ authenticateToken, checkTrialExpi
             if (!company || company.userId == null) {
                 return res.status(404).json({ error: 'Company not found' });
             }
-            if (!(await actorCanAccessTargetUser(actorId, company.userId))) {
+            if (!(await actorCanAccessOrgCompanyOwner(actorId, company.userId))) {
                 return res.status(403).json({ error: 'Forbidden' });
             }
 
@@ -154,6 +155,8 @@ export function createSitesDepartmentsRouter({ authenticateToken, checkTrialExpi
               };
 
         try {
+            await ensureOrphanUserOrgLink(actorId).catch(() => {});
+
             const searchWhere = search
                 ? { name: { contains: search, mode: 'insensitive' } }
                 : {};

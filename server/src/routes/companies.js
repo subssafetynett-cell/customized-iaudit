@@ -16,8 +16,10 @@ import {
     sanitizeStringArray
 } from '../textSanitize.js';
 import {
-    actorCanAccessTargetUser,
+    actorCanAccessOrgCompanyOwner,
     resolveOrgCompanyOwnerUserIds,
+    invalidateOrgLookupCaches,
+    ensureOrphanUserOrgLink,
     checkTrialExpiration
 } from '../orgAccess.js';
 
@@ -38,6 +40,8 @@ export function createCompaniesRouter({ authenticateToken, checkTrialExpiration 
         console.log(`[DEBUG] GET /companies called for actor: ${actorId}, admin: ${admin}`);
 
         try {
+            await ensureOrphanUserOrgLink(actorId).catch(() => {});
+
             const viewer = await prisma.user.findUnique({
                 where: { id: actorId },
                 select: { role: true }
@@ -245,6 +249,7 @@ export function createCompaniesRouter({ authenticateToken, checkTrialExpiration 
                     userId: parsedUserId
                 },
             });
+            invalidateOrgLookupCaches();
             res.status(201).json(company);
         } catch (error) {
             console.error('Error creating company:', error);
@@ -273,7 +278,7 @@ export function createCompaniesRouter({ authenticateToken, checkTrialExpiration 
             if (!existing || existing.userId == null) {
                 return res.status(404).json({ error: 'Company not found' });
             }
-            if (!(await actorCanAccessTargetUser(actorId, existing.userId))) {
+            if (!(await actorCanAccessOrgCompanyOwner(actorId, existing.userId))) {
                 return res.status(403).json({ error: 'Forbidden' });
             }
 
@@ -387,7 +392,7 @@ export function createCompaniesRouter({ authenticateToken, checkTrialExpiration 
             if (!existing || existing.userId == null) {
                 return res.status(404).json({ error: 'Company not found' });
             }
-            if (!(await actorCanAccessTargetUser(actorId, existing.userId))) {
+            if (!(await actorCanAccessOrgCompanyOwner(actorId, existing.userId))) {
                 return res.status(403).json({ error: 'Forbidden' });
             }
 
