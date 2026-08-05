@@ -16,10 +16,8 @@ import {
     sanitizeStringArray
 } from '../textSanitize.js';
 import {
-    getOrgRootUserId,
-    collectOrgSubtreeUserIds,
     actorCanAccessTargetUser,
-    normalizeUserRole,
+    resolveOrgCompanyOwnerUserIds,
     checkTrialExpiration
 } from '../orgAccess.js';
 
@@ -142,43 +140,11 @@ export function createCompaniesRouter({ authenticateToken, checkTrialExpiration 
                 return await sendCompanies({});
             }
 
-            if (normalizeUserRole(viewer.role) === 'auditee') {
-                const assignedSites = await prisma.site.findMany({
-                    where: { userId: actorId },
-                    include: {
-                        departments: true,
-                        company: true,
-                    },
-                    orderBy: [{ name: 'asc' }],
-                });
-                const companyMap = new Map();
-                for (const site of assignedSites) {
-                    const company = site.company;
-                    if (!company) continue;
-                    if (search && !String(company.name || '').toLowerCase().includes(search.toLowerCase())) {
-                        continue;
-                    }
-                    if (!companyMap.has(company.id)) {
-                        const { sites: _s, ...companyBase } = company;
-                        companyMap.set(company.id, { ...companyBase, sites: [] });
-                    }
-                    const { company: _c, ...siteRow } = site;
-                    companyMap.get(company.id).sites.push(siteRow);
-                }
-                const all = Array.from(companyMap.values());
-                if (!pagination.paginate) {
-                    return res.json(all);
-                }
-                return res.json(paginateArray(all, pagination));
-            }
-
             let ownerUserIds;
             if (viewer.role === 'superadmin' && explicitOwnerId != null) {
                 ownerUserIds = [explicitOwnerId];
             } else {
-                const orgRootId = await getOrgRootUserId(actorId);
-                ownerUserIds =
-                    orgRootId != null ? await collectOrgSubtreeUserIds(orgRootId) : [actorId];
+                ownerUserIds = await resolveOrgCompanyOwnerUserIds(actorId);
             }
 
             if (ownerUserIds.length === 0) {

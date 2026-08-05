@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect } from "react";
 import { Company, Site, Department, ISOStandard } from "@/types/company";
 import { apiFetch } from "@/lib/api";
+import { parsePaginatedResponse } from "@/lib/pagination";
 import { toast } from "sonner";
 
 let globalCompanies: Company[] = [];
@@ -70,16 +71,19 @@ async function fetchCompaniesFromApi() {
     hasFetchedCompanies = false;
     notify();
 
-    const response = await apiFetch(`/companies?_t=${Date.now()}`);
+    const response = await apiFetch(`/companies?page=1&pageSize=100&_t=${Date.now()}`);
     if (response.ok) {
       const data = await response.json();
-      const rows = Array.isArray(data)
-        ? data
-        : Array.isArray(data?.data)
-          ? data.data
-          : Array.isArray(data?.items)
-            ? data.items
-            : [];
+      const parsed = parsePaginatedResponse<any>(data, 1, 100);
+      const rows = parsed.items.length > 0
+        ? parsed.items
+        : Array.isArray(data)
+          ? data
+          : Array.isArray(data?.data)
+            ? data.data
+            : Array.isArray(data?.items)
+              ? data.items
+              : [];
       globalCompanies = rows.map(normalizeCompany);
     }
   } catch (error) {

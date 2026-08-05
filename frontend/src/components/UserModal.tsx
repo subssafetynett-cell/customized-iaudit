@@ -131,21 +131,20 @@ export default function UserModal({
     }, [open, mode, initialData, isEditMode, isViewMode, defaultCreateRole]);
 
     const roleOptions = useMemo(() => {
-        if (canManageRoles) {
-            return canInviteAuditee
-                ? [...USERS_PAGE_ROLE_OPTIONS]
-                : USERS_PAGE_ROLE_OPTIONS.filter((option) => option.value !== "auditee");
+        // Invite (create): any inviter may pick any role.
+        if (mode === "create") {
+            return [...USERS_PAGE_ROLE_OPTIONS];
         }
-        if (mode === "create" && canInviteAuditee) {
-            return USERS_PAGE_ROLE_OPTIONS.filter(
-                (option) => option.value === "auditor" || option.value === "auditee",
-            );
+        // Edit: role changes stay available when the actor may manage roles.
+        if (canManageRoles) {
+            return [...USERS_PAGE_ROLE_OPTIONS];
         }
         return [];
-    }, [canManageRoles, canInviteAuditee, mode]);
+    }, [canManageRoles, mode]);
 
     const canSelectRole = roleOptions.length > 0 && !isViewMode;
     const showAuditeeSites = isAuditeeRole(role);
+    const canSetCustomRoleName = (mode === "create" || canManageRoles) && role === "other";
 
     const emailChangedInEdit =
         isEditMode &&
@@ -272,12 +271,12 @@ export default function UserModal({
             sendWelcomeEmail,
         };
 
-        if (canManageRoles) {
+        if (mode === "create" || canManageRoles) {
             payload.role = role;
             payload.customRoleName = role === "other" ? customRoleName : undefined;
+        }
+        if (canManageRoles) {
             payload.isActive = isActive;
-        } else if (mode === "create" && canInviteAuditee && isAuditeeRole(role)) {
-            payload.role = "auditee";
         }
 
         if (isAuditeeRole(role)) {
@@ -506,7 +505,7 @@ export default function UserModal({
                         </div>
                     </div>
 
-                    {canManageRoles && role === "other" && (
+                    {canSetCustomRoleName && (
                         <div className="space-y-2 animate-in fade-in slide-in-from-top-2">
                             <Label htmlFor="custom-role-name">Custom Role Name *</Label>
                             <div className="relative">

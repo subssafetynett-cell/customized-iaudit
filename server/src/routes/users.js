@@ -813,7 +813,7 @@ export function createUsersRouter({ authenticateToken, checkTrialExpiration }) {
         if (!(await actorCanInviteAuditee(creatorId))) {
             return res.status(403).json({
                 error: 'Forbidden',
-                message: 'Only company administrators and lead auditors can invite auditees.',
+                message: 'You do not have permission to invite auditees.',
             });
         }
 
@@ -1036,10 +1036,7 @@ export function createUsersRouter({ authenticateToken, checkTrialExpiration }) {
     router.post('/users', authenticateToken, async (req, res) => {
         const { firstName, lastName, email, mobile, phoneCountry, role, customRoleName, password, sendWelcomeEmail, siteId, siteIds: rawSiteIds } = req.body;
         const creatorId = req.user.id;
-        const [canManageUsers, canInvite] = await Promise.all([
-            actorCanManageOrgUsers(creatorId),
-            actorCanInviteOrgUser(creatorId),
-        ]);
+        const canInvite = await actorCanInviteOrgUser(creatorId);
         if (!canInvite) {
             return res.status(403).json({
                 error: 'Forbidden',
@@ -1077,31 +1074,12 @@ export function createUsersRouter({ authenticateToken, checkTrialExpiration }) {
 
         try {
             let roleNorm = normalizeUserRole(sanitizeShortLabel(role, 80) || 'auditor');
-            if (!canManageUsers) {
-                // Non-admins default to auditor, but lead auditors / invite-capable actors may create auditees.
-                if (roleNorm === 'auditee') {
-                    if (!(await actorCanInviteAuditee(creatorId))) {
-                        return res.status(403).json({
-                            error: 'Forbidden',
-                            message: 'Only company administrators and lead auditors can invite auditees.',
-                        });
-                    }
-                } else {
-                    roleNorm = 'auditor';
-                }
-            }
             if (!USER_ASSIGNABLE_ROLES.has(roleNorm)) {
                 return res.status(400).json({ error: 'Invalid role' });
             }
 
             let parsedSiteIds = null;
             if (roleNorm === 'auditee') {
-                if (!(await actorCanInviteAuditee(creatorId))) {
-                    return res.status(403).json({
-                        error: 'Forbidden',
-                        message: 'Only company administrators and lead auditors can invite auditees.',
-                    });
-                }
                 parsedSiteIds = parseAuditeeSiteIds({ siteIds: rawSiteIds, siteId });
                 if (!parsedSiteIds) {
                     return res.status(400).json({ error: 'At least one valid site is required' });
@@ -1162,7 +1140,7 @@ export function createUsersRouter({ authenticateToken, checkTrialExpiration }) {
                         mobile: userMobile,
                         role: roleNorm,
                         customRoleName:
-                            canManageUsers && roleNorm === 'other'
+                            roleNorm === 'other'
                                 ? sanitizeShortLabel(customRoleName, 120)
                                 : null,
                         isActive: false,
@@ -1454,7 +1432,7 @@ export function createUsersRouter({ authenticateToken, checkTrialExpiration }) {
                 } else if (!(await actorCanInviteAuditee(actorId))) {
                     return res.status(403).json({
                         error: 'Forbidden',
-                        message: 'Only company administrators and lead auditors can assign the auditee role.',
+                        message: 'You do not have permission to assign the auditee role.',
                     });
                 }
                 const siteAccess = await Promise.all(

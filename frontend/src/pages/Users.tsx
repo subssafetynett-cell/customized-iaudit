@@ -145,18 +145,19 @@ function UsersPage() {
     const clientCanManageUsers = canManageOrgUsers(
         storedUser as { role?: string; creatorId?: number | null } | null,
     );
-    const clientCanInviteUsers = !isAuditeeRole((storedUser as { role?: string } | null)?.role);
+    const clientCanInviteUsers = Boolean(storedUser);
     const [canManageUsers, setCanManageUsers] = useState(clientCanManageUsers);
     const [canInviteUsers, setCanInviteUsers] = useState(clientCanInviteUsers);
-    const [canInviteAuditee, setCanInviteAuditee] = useState(false);
+    const [canInviteAuditee, setCanInviteAuditee] = useState(clientCanInviteUsers);
 
     useEffect(() => {
         const nextCanManageUsers = canManageOrgUsers(
             storedUser as { role?: string; creatorId?: number | null } | null,
         );
-        const nextCanInviteUsers = !isAuditeeRole((storedUser as { role?: string } | null)?.role);
+        const nextCanInviteUsers = Boolean(storedUser);
         setCanManageUsers(nextCanManageUsers);
         setCanInviteUsers(nextCanInviteUsers);
+        setCanInviteAuditee(nextCanInviteUsers);
     }, [storedUser]);
 
     useEffect(() => {
@@ -168,8 +169,9 @@ function UsersPage() {
                 const data = (await res.json()) as UsersAccessResponse;
                 if (!cancelled) {
                     setCanManageUsers(data.canManageUsers === true);
-                    setCanInviteUsers(data.canInviteUsers === true || data.allowed === true);
-                    setCanInviteAuditee(data.canInviteAuditee === true);
+                    const inviteOk = data.canInviteUsers === true || data.allowed === true;
+                    setCanInviteUsers(inviteOk);
+                    setCanInviteAuditee(data.canInviteAuditee === true || inviteOk);
                 }
             } catch {
                 if (!cancelled) {
@@ -222,11 +224,18 @@ function UsersPage() {
     }, []);
 
     const hasLoadedUsersRef = useRef(false);
+    const usersFetchGenRef = useRef(0);
+    const usersRef = useRef(users);
+    usersRef.current = users;
 
     const fetchUsers = useCallback(async (opts?: { silent?: boolean }) => {
         const silent = Boolean(opts?.silent);
+        const fetchGen = ++usersFetchGenRef.current;
         try {
-            if (!silent) setIsLoading(true);
+            // Never blank an already-rendered list (avoids flicker while refetching).
+            if (!silent && !hasLoadedUsersRef.current && usersRef.current.length === 0) {
+                setIsLoading(true);
+            }
             const qs = buildPageQuery({
                 page: currentPage,
                 limit: itemsPerPage,
@@ -235,17 +244,34 @@ function UsersPage() {
                 status: statusFilter !== "all" ? statusFilter : undefined,
             });
             const response = await apiFetch(`/users${qs}`);
+            if (fetchGen !== usersFetchGenRef.current) return;
             if (response.ok) {
                 const responseData = await response.json();
+                if (fetchGen !== usersFetchGenRef.current) return;
                 const parsed = parsePaginatedResponse<any>(
                     responseData,
                     currentPage,
                     itemsPerPage,
                 );
                 const data = [...parsed.items];
+
+                // Keep the richer list if an unfiltered refetch briefly returns fewer rows.
+                const unfiltered =
+                    currentPage === 1 &&
+                    !debouncedSearch &&
+                    roleFilter === "all" &&
+                    statusFilter === "all";
+                if (
+                    unfiltered &&
+                    hasLoadedUsersRef.current &&
+                    data.length < usersRef.current.length &&
+                    data.length === 0
+                ) {
+                    return;
+                }
+
                 setTotalItems(parsed.total);
 
-                // Add the currently logged-in user to the list if they aren't already there
                 let loggedInUser: { id?: number } | null = null;
                 try {
                     loggedInUser = JSON.parse(localStorage.getItem("user") || "null");
@@ -257,9 +283,21 @@ function UsersPage() {
                         (u: any) => String(u.id) === String(loggedInUser!.id),
                     );
                     if (selfFromApi) {
-                        setStoredUser({ ...loggedInUser, ...selfFromApi });
-                    } else if (currentPage === 1 && !debouncedSearch && roleFilter === "all" && statusFilter === "all") {
-                        data.unshift(loggedInUser as any);
+                        // Sync profile fields quietly — avoid rewriting localStorage on every poll.
+                        try {
+                            const prev = JSON.parse(localStorage.getItem("user") || "{}") as Record<
+                                string,
+                                unknown
+                            >;
+                            const nextRole = selfFromApi.role ?? prev.role;
+                            const nextActive =
+                                selfFromApi.isActive != null ? selfFromApi.isActive : prev.isActive;
+                            if (prev.role !== nextRole || prev.isActive !== nextActive) {
+                                setStoredUser({ ...prev, ...selfFromApi, id: prev.id ?? selfFromApi.id });
+                            }
+                        } catch {
+                            /* ignore */
+                        }
                     }
                 }
 
@@ -267,10 +305,13 @@ function UsersPage() {
                 hasLoadedUsersRef.current = true;
             }
         } catch (error) {
+            if (fetchGen !== usersFetchGenRef.current) return;
             console.error("Failed to fetch users:", error);
             toast.error("Failed to load users");
         } finally {
-            setIsLoading(false);
+            if (fetchGen === usersFetchGenRef.current) {
+                setIsLoading(false);
+            }
         }
     }, [
         currentPage,
@@ -281,7 +322,7 @@ function UsersPage() {
     ]);
 
     useEffect(() => {
-        void fetchUsers({ silent: hasLoadedUsersRef.current });
+        void fetchUsers({ silent: hasLoadedUsersRef.current || usersRef.current.length > 0 });
     }, [fetchUsers]);
 
     const auditeeUserIds = useMemo(() => {
@@ -838,8 +879,8 @@ function UsersPage() {
                 }}
                 mode={modalMode}
                 initialData={selectedUser}
-                canManageRoles={canManageUsers}
-                canInviteAuditee={canInviteAuditee}
+                canManageRoles={canManageUsers || modalMode === "create"}
+                canInviteAuditee={canInviteAuditee || canInviteUsers}
                 auditeeSites={modalAuditeeSites}
                 disabledAuditeeSiteIds={
                     modalMode === "create" ? undefined : disabledSiteIdsForSelectedUser
@@ -867,7 +908,7 @@ function UsersPage() {
                 sites={allAuditeeSites}
                 disabledSiteIds={disabledSiteIdsForAssign}
                 onSuccess={() => {
-                    void fetchUsers();
+                    void fetchUsers({ silent: true });
                     void refetchCompanies();
                 }}
             />

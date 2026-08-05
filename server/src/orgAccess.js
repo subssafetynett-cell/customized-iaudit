@@ -65,7 +65,7 @@ async function collectOrgSubtreeUserIds(orgRootId) {
         )
         SELECT id FROM subtree
     `;
-    const ids = rows.map((r) => Number(r.id)).filter((n) => Number.isInteger(n) && n > 0);
+    const ids = normalizePositiveIntIds(rows.map((r) => r.id));
     orgSubtreeIdsCache.set(orgRootId, {
         ids,
         expiresAt: Date.now() + ORG_LOOKUP_CACHE_TTL_MS,
@@ -73,49 +73,96 @@ async function collectOrgSubtreeUserIds(orgRootId) {
     return ids;
 }
 
+function normalizePositiveIntIds(rawIds) {
+    const out = [];
+    const seen = new Set();
+    for (const raw of rawIds || []) {
+        const n = typeof raw === 'bigint' ? Number(raw) : Number(raw);
+        if (!Number.isInteger(n) || n < 1 || seen.has(n)) continue;
+        seen.add(n);
+        out.push(n);
+    }
+    return out;
+}
+
 /**
  * Org members visible to actor: walk up to account root, then include the full subtree.
- * Ensures inviter, invitees, and sibling teammates all share one user list.
+ * Ensures inviter, invitees, and sibling teammates (any role) all share one user list.
+ * Also expands via company ownership so broken creatorId links do not hide teammates.
  */
 async function collectOrgMemberUserIds(actorId) {
     const id = Number(actorId);
     if (!Number.isInteger(id) || id < 1) return [];
 
     const cached = orgMemberIdsCache.get(id);
-    if (cached && cached.expiresAt > Date.now()) {
+    if (cached && cached.expiresAt > Date.now() && Array.isArray(cached.ids) && cached.ids.length > 0) {
         return cached.ids;
     }
 
-    const rows = await prisma.$queryRaw`
-        WITH RECURSIVE ancestor AS (
-            SELECT id, "creatorId" FROM "User" WHERE id = ${id}
-            UNION
-            SELECT u.id, u."creatorId" FROM "User" u
-            INNER JOIN ancestor a ON u.id = a."creatorId"
-        ),
-        org_root AS (
-            SELECT id FROM ancestor WHERE "creatorId" IS NULL
-            LIMIT 1
-        ),
-        subtree AS (
-            SELECT id FROM org_root
-            UNION
-            SELECT u.id FROM "User" u
-            INNER JOIN subtree s ON u."creatorId" = s.id
-        )
-        SELECT id FROM subtree
-    `;
-    let memberIds = rows.map((r) => Number(r.id)).filter((n) => Number.isInteger(n) && n > 0);
-    if (memberIds.length === 0) {
-        const orgRootId = await resolveActorOrgRootId(id);
-        const fromRoot = await collectOrgSubtreeUserIds(orgRootId);
-        memberIds = fromRoot.length > 0 ? fromRoot : [id];
+    const idSet = new Set();
+
+    try {
+        const rows = await prisma.$queryRaw`
+            WITH RECURSIVE ancestor AS (
+                SELECT id, "creatorId" FROM "User" WHERE id = ${id}
+                UNION
+                SELECT u.id, u."creatorId" FROM "User" u
+                INNER JOIN ancestor a ON u.id = a."creatorId"
+            ),
+            org_root AS (
+                SELECT id FROM ancestor WHERE "creatorId" IS NULL
+                LIMIT 1
+            ),
+            subtree AS (
+                SELECT id FROM org_root
+                UNION
+                SELECT u.id FROM "User" u
+                INNER JOIN subtree s ON u."creatorId" = s.id
+            )
+            SELECT id FROM subtree
+        `;
+        for (const n of normalizePositiveIntIds(rows.map((r) => r.id))) {
+            idSet.add(n);
+        }
+    } catch (err) {
+        console.warn('[orgAccess] collectOrgMemberUserIds CTE failed:', err?.message || err);
     }
 
-    orgMemberIdsCache.set(id, {
-        ids: memberIds,
-        expiresAt: Date.now() + ORG_LOOKUP_CACHE_TTL_MS,
-    });
+    // Authoritative fallback: root + subtree (also covers CTE miss / empty org_root).
+    const orgRootId = await resolveActorOrgRootId(id);
+    const fromRoot = await collectOrgSubtreeUserIds(orgRootId);
+    for (const n of fromRoot) idSet.add(n);
+    idSet.add(id);
+
+    // Expand through company owners linked to anyone already in the set (peer admins / invitees).
+    if (idSet.size > 0) {
+        try {
+            const companies = await prisma.company.findMany({
+                where: { userId: { in: [...idSet] } },
+                select: { userId: true },
+            });
+            for (const company of companies) {
+                const ownerId = Number(company.userId);
+                if (!Number.isInteger(ownerId) || ownerId < 1) continue;
+                idSet.add(ownerId);
+                const ownerRoot = (await getOrgRootUserId(ownerId)) ?? ownerId;
+                for (const n of await collectOrgSubtreeUserIds(ownerRoot)) {
+                    idSet.add(n);
+                }
+            }
+        } catch (err) {
+            console.warn('[orgAccess] company-owner org expand failed:', err?.message || err);
+        }
+    }
+
+    const memberIds = [...idSet];
+    // Do not cache empty results — invite / org-tree races must not stick for the TTL window.
+    if (memberIds.length > 0) {
+        orgMemberIdsCache.set(id, {
+            ids: memberIds,
+            expiresAt: Date.now() + ORG_LOOKUP_CACHE_TTL_MS,
+        });
+    }
     return memberIds;
 }
 
@@ -504,13 +551,13 @@ const LAST_ACTIVE_ADMIN_MESSAGE =
 
 /** Any org member except auditees may invite teammates; role assignment stays admin-only. */
 async function actorCanInviteOrgUser(actorId) {
-    if (await actorCanManageOrgUsers(actorId)) return true;
     const actor = await prisma.user.findUnique({
-        where: { id: actorId },
-        select: { role: true },
+        where: { id: Number(actorId) },
+        select: { id: true, role: true, isActive: true },
     });
-    if (!actor) return false;
-    return normalizeUserRole(actor.role) !== 'auditee';
+    if (!actor || actor.isActive === false) return false;
+    // Every active role (admin, auditor, lead auditor, auditee, other, …) may invite.
+    return true;
 }
 
 /** User is designated lead auditor on at least one audit program or plan. */
@@ -524,21 +571,27 @@ async function actorIsLeadAuditor(actorId) {
     return programCount > 0 || planCount > 0;
 }
 
-/** Company admin (org root / admin role), lead auditor role, or lead on an audit program/plan. */
+/** Any active org member may invite an auditee (site assignment still org-scoped). */
 async function actorCanInviteAuditee(actorId) {
-    if (await actorCanManageOrgUsers(actorId)) return true;
-    if (await actorIsLeadAuditor(actorId)) return true;
-    const actor = await prisma.user.findUnique({
-        where: { id: Number(actorId) },
-        select: { role: true },
-    });
-    return normalizeUserRole(actor?.role) === 'lead_auditor';
+    return actorCanInviteOrgUser(actorId);
+}
+
+/**
+ * User ids whose registered companies an actor may read (sites + departments included).
+ * Any org member — regardless of role — shares the same company catalog as the account root.
+ */
+async function resolveOrgCompanyOwnerUserIds(actorId) {
+    const id = Number(actorId);
+    if (!Number.isInteger(id) || id < 1) return [];
+    const memberIds = await collectOrgMemberUserIds(id);
+    if (memberIds.length > 0) return memberIds;
+    const orgRootId = await resolveActorOrgRootId(id);
+    const fromRoot = await collectOrgSubtreeUserIds(orgRootId);
+    return fromRoot.length > 0 ? fromRoot : [id];
 }
 
 async function siteIdsInActorOrg(actorId) {
-    const orgRootId = await getOrgRootUserId(actorId);
-    const ownerUserIds =
-        orgRootId != null ? await collectOrgSubtreeUserIds(orgRootId) : [Number(actorId)];
+    const ownerUserIds = await resolveOrgCompanyOwnerUserIds(actorId);
     const companies = await prisma.company.findMany({
         where: { userId: { in: ownerUserIds } },
         select: { sites: { select: { id: true } } },
@@ -1453,6 +1506,7 @@ export {
     actorCanInviteOrgUser,
     actorIsLeadAuditor,
     actorCanInviteAuditee,
+    resolveOrgCompanyOwnerUserIds,
     siteIdsInActorOrg,
     actorCanAssignAuditeeToSite,
     actorCanAssignAuditeeToAllSites,
