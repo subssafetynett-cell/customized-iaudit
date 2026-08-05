@@ -431,7 +431,11 @@ export default function Auth() {
                     throw new Error(data.error);
                 }
                 if (response.status >= 500) {
-                    throw new Error('Unable to sign in. Please try again later.');
+                    const detail =
+                        typeof (data as { detail?: unknown }).detail === 'string'
+                            ? ` (${(data as { detail: string }).detail})`
+                            : '';
+                    throw new Error(`Unable to sign in. Please try again later.${detail}`);
                 }
                 throw new Error('Invalid credentials');
             }

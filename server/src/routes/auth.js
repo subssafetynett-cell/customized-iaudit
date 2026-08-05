@@ -2,7 +2,8 @@ import { Router } from 'express';
 import bcrypt from 'bcrypt';
 import prisma, {
     handlePrismaError,
-    isPrismaUniqueViolation
+    isPrismaUniqueViolation,
+    pool,
 } from '../prisma.js';
 import {
     PERSON_NAME_MAX,
@@ -336,39 +337,65 @@ async function handleAuthLogin(req, res) {
             code: 'ACCOUNT_LOCKED_PASSWORD_RESET_REQUIRED'
         });
 
+    const fail = (error) => {
+        handlePrismaError(error, 'login');
+        const msg = String(error?.message || error || 'unknown');
+        console.error('[AUTH] Login failed:', msg, error?.code || '', error?.meta || '');
+        return res.status(500).json({
+            error: 'An error occurred during login',
+            code: 'LOGIN_INTERNAL_ERROR',
+            detail: msg.slice(0, 300),
+        });
+    };
+
     try {
-        // Ensure Session table + failedLoginAttempts exist before any login query.
-        await ensureLoginSchemaReady();
+        // Best-effort schema warm-up — never block login if this fails.
+        await ensureLoginSchemaReady().catch(() => false);
 
         console.log(`[AUTH] Login attempt`);
-        let user;
+
+        // Prefer raw SQL lookup so missing optional columns cannot 500 the whole login.
+        let user = null;
         try {
-            user = await prisma.user.findFirst({
-                where: { email: email },
-                select: {
-                    id: true,
-                    email: true,
-                    password: true,
-                    isActive: true,
-                    failedLoginAttempts: true,
-                    emailVerifiedAt: true,
-                    creatorId: true
+            const { rows } = await pool.query(
+                `SELECT id, email, password, "isActive",
+                        COALESCE("failedLoginAttempts", 0) AS "failedLoginAttempts",
+                        "emailVerifiedAt", "creatorId"
+                 FROM "User" WHERE lower(trim(email)) = $1 LIMIT 1`,
+                [email],
+            );
+            user = rows[0] || null;
+        } catch (sqlErr) {
+            console.warn('[AUTH] SQL user lookup failed, trying Prisma:', sqlErr?.message || sqlErr);
+            try {
+                user = await prisma.user.findFirst({
+                    where: { email },
+                    select: {
+                        id: true,
+                        email: true,
+                        password: true,
+                        isActive: true,
+                        failedLoginAttempts: true,
+                        emailVerifiedAt: true,
+                        creatorId: true,
+                    },
+                });
+            } catch {
+                user = await prisma.user.findFirst({
+                    where: { email },
+                    select: {
+                        id: true,
+                        email: true,
+                        password: true,
+                        isActive: true,
+                    },
+                });
+                if (user) {
+                    user.failedLoginAttempts = 0;
+                    user.emailVerifiedAt = user.emailVerifiedAt ?? null;
+                    user.creatorId = user.creatorId ?? null;
                 }
-            });
-        } catch (lookupErr) {
-            console.warn('[AUTH] Full user lookup failed, retrying minimal select:', lookupErr?.message || lookupErr);
-            user = await prisma.user.findFirst({
-                where: { email: email },
-                select: {
-                    id: true,
-                    email: true,
-                    password: true,
-                    isActive: true,
-                    emailVerifiedAt: true,
-                    creatorId: true
-                }
-            });
-            if (user) user.failedLoginAttempts = 0;
+            }
         }
 
         if (!user) {
@@ -377,11 +404,10 @@ async function handleAuthLogin(req, res) {
         }
         console.log(`[AUTH] User found for login: ${user.id}`);
 
-        if ((user.failedLoginAttempts ?? 0) >= LOGIN_MAX_FAILED_ATTEMPTS) {
+        if (Number(user.failedLoginAttempts ?? 0) >= LOGIN_MAX_FAILED_ATTEMPTS) {
             return accountLockedResponse();
         }
 
-        // Use bcrypt to compare the provided password with the hashed password in DB
         let isPasswordMatch = false;
         if (typeof user.password === 'string' && user.password.length > 0) {
             try {
@@ -390,40 +416,38 @@ async function handleAuthLogin(req, res) {
                 isPasswordMatch = false;
             }
         }
-
-        if (!isPasswordMatch) {
-            // Fallback: check plain text (for existing users not yet migrated to hashing)
-            if (user.password === password) {
-                // Migration: hash and save the password for future logins
+        if (!isPasswordMatch && user.password === password) {
+            try {
                 const hashedPassword = await bcrypt.hash(password, 10);
-                await prisma.user.update({
-                    where: { id: user.id },
-                    data: { password: hashedPassword, failedLoginAttempts: 0 }
-                }).catch(async () => {
-                    await prisma.user.update({
-                        where: { id: user.id },
-                        data: { password: hashedPassword }
-                    });
-                });
-                isPasswordMatch = true;
-            } else {
-                try {
-                    const afterFail = await prisma.user.update({
-                        where: { id: user.id },
-                        data: { failedLoginAttempts: { increment: 1 } },
-                        select: { failedLoginAttempts: true }
-                    });
-                    if (afterFail.failedLoginAttempts >= LOGIN_MAX_FAILED_ATTEMPTS) {
-                        return accountLockedResponse();
-                    }
-                } catch (failErr) {
-                    console.warn('[AUTH] failedLoginAttempts increment skipped:', failErr?.message || failErr);
-                }
-                return invalidCredentials();
+                await pool.query(
+                    `UPDATE "User" SET password = $1 WHERE id = $2`,
+                    [hashedPassword, user.id],
+                );
+            } catch (hashErr) {
+                console.warn('[AUTH] password rehash skipped:', hashErr?.message || hashErr);
             }
+            isPasswordMatch = true;
         }
 
-        if (!user.isActive) {
+        if (!isPasswordMatch) {
+            try {
+                const { rows } = await pool.query(
+                    `UPDATE "User"
+                     SET "failedLoginAttempts" = COALESCE("failedLoginAttempts", 0) + 1
+                     WHERE id = $1
+                     RETURNING "failedLoginAttempts"`,
+                    [user.id],
+                );
+                if (Number(rows[0]?.failedLoginAttempts ?? 0) >= LOGIN_MAX_FAILED_ATTEMPTS) {
+                    return accountLockedResponse();
+                }
+            } catch {
+                /* ignore lock counter failures */
+            }
+            return invalidCredentials();
+        }
+
+        if (user.isActive === false || user.isActive === 'f' || user.isActive === 0) {
             if (user.creatorId != null && !user.emailVerifiedAt) {
                 return res.status(403).json({
                     error: 'Please verify your email before signing in. Check your inbox for the activation code from your administrator.',
@@ -442,10 +466,10 @@ async function handleAuthLogin(req, res) {
             });
         }
 
-        await prisma.user.update({
-            where: { id: user.id },
-            data: { failedLoginAttempts: 0 }
-        }).catch(() => {});
+        await pool.query(
+            `UPDATE "User" SET "failedLoginAttempts" = 0 WHERE id = $1`,
+            [user.id],
+        ).catch(() => {});
 
         try {
             await ensureUserTrialStarted(user.id);
@@ -453,38 +477,40 @@ async function handleAuthLogin(req, res) {
             console.warn('[AUTH] Trial/access grant skipped:', err?.message || err);
         }
 
-        // Repair broken invite links so existing teammates see shared company/site/user catalogs.
-        await ensureOrphanUserOrgLink(user.id).catch((err) => {
+        // Non-blocking — must never delay or fail login.
+        void ensureOrphanUserOrgLink(user.id).catch((err) => {
             console.warn('[AUTH] Org link repair skipped:', err?.message || err);
         });
 
-        let profile = null;
+        // Build a JSON-safe profile (Dates → ISO strings) with a tiny required field set.
+        let profile;
         try {
-            profile = await prisma.user.findUnique({
-                where: { id: user.id },
-                select: LOGIN_SUCCESS_USER_SELECT
+            const full = await prisma.user.findUnique({
+                where: { id: Number(user.id) },
+                select: LOGIN_SUCCESS_USER_SELECT,
             });
+            profile = full;
         } catch (profileErr) {
-            console.warn('[AUTH] Full profile select failed, using minimal profile:', profileErr?.message || profileErr);
-            profile = await prisma.user.findUnique({
-                where: { id: user.id },
-                select: {
-                    id: true,
-                    firstName: true,
-                    lastName: true,
-                    email: true,
-                    mobile: true,
-                    role: true,
-                    isActive: true,
-                    creatorId: true,
-                    onboardingCompleted: true,
-                    emailVerifiedAt: true,
-                }
-            });
+            console.warn('[AUTH] Full profile select failed:', profileErr?.message || profileErr);
+            profile = null;
+        }
+        if (!profile) {
+            const { rows } = await pool.query(
+                `SELECT id, "firstName", "lastName", email, mobile, role, "isActive", "creatorId"
+                 FROM "User" WHERE id = $1 LIMIT 1`,
+                [user.id],
+            );
+            profile = rows[0] || null;
         }
         if (!profile || String(profile.email || '').toLowerCase().trim() !== email) {
-            return res.status(500).json({ error: 'Login could not be completed' });
+            return res.status(500).json({ error: 'Login could not be completed', code: 'LOGIN_PROFILE_MISMATCH' });
         }
+
+        // Ensure plain JSON (no Date / BigInt surprises for res.json).
+        const safeProfile = JSON.parse(JSON.stringify(profile, (_k, v) => {
+            if (typeof v === 'bigint') return Number(v);
+            return v;
+        }));
 
         let existingToken = null;
         try {
@@ -493,23 +519,14 @@ async function handleAuthLogin(req, res) {
             console.warn('[AUTH] Session cookie parse skipped:', err?.message || err);
         }
 
-        const session = await createSessionTokenForUser(profile.id, {
+        const session = await createSessionTokenForUser(Number(safeProfile.id), {
             existingToken,
         });
 
-        console.log(`[AUTH] Login successful for user: ${profile.id}, onboardingCompleted: ${profile.onboardingCompleted}`);
-        return res.status(200).json(sendAuthenticatedSession(res, profile, session));
-
+        console.log(`[AUTH] Login successful for user: ${safeProfile.id}`);
+        return res.status(200).json(sendAuthenticatedSession(res, safeProfile, session));
     } catch (error) {
-        handlePrismaError(error, 'login');
-        console.error('[AUTH] Login failed:', error?.message || error, error?.code || '', error?.meta || '');
-        // Surface a stable code so ops can distinguish schema vs unknown failures without leaking internals.
-        const msg = String(error?.message || '');
-        const schemaIssue = /Session|failedLoginAttempts|does not exist|P2021|P2022|42P01|42703/i.test(msg);
-        return res.status(500).json({
-            error: 'An error occurred during login',
-            code: schemaIssue ? 'LOGIN_SCHEMA_ERROR' : 'LOGIN_INTERNAL_ERROR',
-        });
+        return fail(error);
     }
 }
 
