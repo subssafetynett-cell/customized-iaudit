@@ -314,6 +314,52 @@ async function handleResendInviteVerification(req, res) {
 // Also register under /api (mountedApiRouter) so Vite same-origin proxy always hits login
 // before the /api strip path — keeps Set-Cookie on the /api response the browser expects.
 
+/** Progressive SQL user lookup — never uses Prisma (adapter findFirst was 500ing in prod). */
+async function lookupUserForLogin(email) {
+    const queries = [
+        `SELECT id, email, password, "isActive",
+                COALESCE("failedLoginAttempts", 0) AS "failedLoginAttempts",
+                "emailVerifiedAt", "creatorId",
+                "firstName", "lastName", mobile, role, "customRoleName",
+                "onboardingCompleted", "subscriptionStatus", "subscriptionPlan",
+                "trialStartDate", "trialEndDate", "planStartDate", "planExpiryDate",
+                "nextBillingDate", "renewalType", "autopayConsent",
+                "createdAt", "updatedAt"
+         FROM "User" WHERE lower(trim(both from email)) = $1 LIMIT 1`,
+        `SELECT id, email, password, "isActive",
+                "emailVerifiedAt", "creatorId",
+                "firstName", "lastName", mobile, role, "onboardingCompleted"
+         FROM "User" WHERE lower(trim(both from email)) = $1 LIMIT 1`,
+        `SELECT id, email, password, "isActive",
+                "firstName", "lastName", mobile, role, "creatorId"
+         FROM "User" WHERE lower(email) = $1 LIMIT 1`,
+        `SELECT id, email, password, "isActive", "firstName", "lastName", role
+         FROM "User" WHERE lower(email) = $1 LIMIT 1`,
+        `SELECT id, email, password, "isActive", "firstName", "lastName", role
+         FROM "User" WHERE email = $1 LIMIT 1`,
+    ];
+    let lastErr = null;
+    for (const sql of queries) {
+        try {
+            const { rows } = await pool.query(sql, [email]);
+            if (!rows[0]) return null;
+            const row = rows[0];
+            return {
+                ...row,
+                failedLoginAttempts: Number(row.failedLoginAttempts ?? 0),
+                emailVerifiedAt: row.emailVerifiedAt ?? null,
+                creatorId: row.creatorId ?? null,
+                onboardingCompleted: row.onboardingCompleted ?? false,
+            };
+        } catch (err) {
+            lastErr = err;
+            console.warn('[AUTH] login lookup query skipped:', err?.message || err);
+        }
+    }
+    if (lastErr) throw lastErr;
+    return null;
+}
+
 async function handleAuthLogin(req, res) {
     const badKeys = getDisallowedExtraKeysError(req.body, LOGIN_ALLOWED_BODY_KEYS);
     if (badKeys) {
@@ -337,67 +383,11 @@ async function handleAuthLogin(req, res) {
             code: 'ACCOUNT_LOCKED_PASSWORD_RESET_REQUIRED'
         });
 
-    const fail = (error) => {
-        handlePrismaError(error, 'login');
-        const msg = String(error?.message || error || 'unknown');
-        console.error('[AUTH] Login failed:', msg, error?.code || '', error?.meta || '');
-        return res.status(500).json({
-            error: 'An error occurred during login',
-            code: 'LOGIN_INTERNAL_ERROR',
-            detail: msg.slice(0, 300),
-        });
-    };
-
     try {
-        // Best-effort schema warm-up — never block login if this fails.
         await ensureLoginSchemaReady().catch(() => false);
-
         console.log(`[AUTH] Login attempt`);
 
-        // Prefer raw SQL lookup so missing optional columns cannot 500 the whole login.
-        let user = null;
-        try {
-            const { rows } = await pool.query(
-                `SELECT id, email, password, "isActive",
-                        COALESCE("failedLoginAttempts", 0) AS "failedLoginAttempts",
-                        "emailVerifiedAt", "creatorId"
-                 FROM "User" WHERE lower(trim(email)) = $1 LIMIT 1`,
-                [email],
-            );
-            user = rows[0] || null;
-        } catch (sqlErr) {
-            console.warn('[AUTH] SQL user lookup failed, trying Prisma:', sqlErr?.message || sqlErr);
-            try {
-                user = await prisma.user.findFirst({
-                    where: { email },
-                    select: {
-                        id: true,
-                        email: true,
-                        password: true,
-                        isActive: true,
-                        failedLoginAttempts: true,
-                        emailVerifiedAt: true,
-                        creatorId: true,
-                    },
-                });
-            } catch {
-                user = await prisma.user.findFirst({
-                    where: { email },
-                    select: {
-                        id: true,
-                        email: true,
-                        password: true,
-                        isActive: true,
-                    },
-                });
-                if (user) {
-                    user.failedLoginAttempts = 0;
-                    user.emailVerifiedAt = user.emailVerifiedAt ?? null;
-                    user.creatorId = user.creatorId ?? null;
-                }
-            }
-        }
-
+        const user = await lookupUserForLogin(email);
         if (!user) {
             console.log(`[AUTH] Login failed: User not found`);
             return invalidCredentials();
@@ -419,10 +409,7 @@ async function handleAuthLogin(req, res) {
         if (!isPasswordMatch && user.password === password) {
             try {
                 const hashedPassword = await bcrypt.hash(password, 10);
-                await pool.query(
-                    `UPDATE "User" SET password = $1 WHERE id = $2`,
-                    [hashedPassword, user.id],
-                );
+                await pool.query(`UPDATE "User" SET password = $1 WHERE id = $2`, [hashedPassword, user.id]);
             } catch (hashErr) {
                 console.warn('[AUTH] password rehash skipped:', hashErr?.message || hashErr);
             }
@@ -442,7 +429,7 @@ async function handleAuthLogin(req, res) {
                     return accountLockedResponse();
                 }
             } catch {
-                /* ignore lock counter failures */
+                /* ignore */
             }
             return invalidCredentials();
         }
@@ -452,7 +439,7 @@ async function handleAuthLogin(req, res) {
                 return res.status(403).json({
                     error: 'Please verify your email before signing in. Check your inbox for the activation code from your administrator.',
                     code: 'EMAIL_VERIFICATION_REQUIRED',
-                    email
+                    email,
                 });
             }
             return res.status(403).json({ error: 'Account is deactivated' });
@@ -462,7 +449,7 @@ async function handleAuthLogin(req, res) {
             return res.status(403).json({
                 error: 'Please verify your email before signing in. Enter the activation code sent to your inbox.',
                 code: 'EMAIL_VERIFICATION_REQUIRED',
-                email
+                email,
             });
         }
 
@@ -471,44 +458,57 @@ async function handleAuthLogin(req, res) {
             [user.id],
         ).catch(() => {});
 
-        try {
-            await ensureUserTrialStarted(user.id);
-        } catch (err) {
-            console.warn('[AUTH] Trial/access grant skipped:', err?.message || err);
+        // Grant access without Prisma (avoid adapter findUnique/findFirst during login).
+        if (user.role !== 'superadmin' && user.subscriptionStatus !== 'active') {
+            await pool.query(
+                `UPDATE "User"
+                 SET "subscriptionStatus" = 'active',
+                     "trialStartDate" = NULL,
+                     "trialEndDate" = NULL
+                 WHERE id = $1`,
+                [user.id],
+            ).catch((err) => {
+                console.warn('[AUTH] Trial/access grant skipped:', err?.message || err);
+            });
         }
 
-        // Non-blocking — must never delay or fail login.
         void ensureOrphanUserOrgLink(user.id).catch((err) => {
             console.warn('[AUTH] Org link repair skipped:', err?.message || err);
         });
 
-        // Build a JSON-safe profile (Dates → ISO strings) with a tiny required field set.
-        let profile;
-        try {
-            const full = await prisma.user.findUnique({
-                where: { id: Number(user.id) },
-                select: LOGIN_SUCCESS_USER_SELECT,
-            });
-            profile = full;
-        } catch (profileErr) {
-            console.warn('[AUTH] Full profile select failed:', profileErr?.message || profileErr);
-            profile = null;
-        }
-        if (!profile) {
-            const { rows } = await pool.query(
-                `SELECT id, "firstName", "lastName", email, mobile, role, "isActive", "creatorId"
-                 FROM "User" WHERE id = $1 LIMIT 1`,
-                [user.id],
-            );
-            profile = rows[0] || null;
-        }
-        if (!profile || String(profile.email || '').toLowerCase().trim() !== email) {
-            return res.status(500).json({ error: 'Login could not be completed', code: 'LOGIN_PROFILE_MISMATCH' });
-        }
+        const profile = {
+            id: Number(user.id),
+            firstName: user.firstName ?? '',
+            lastName: user.lastName ?? '',
+            email: String(user.email || email),
+            mobile: user.mobile ?? null,
+            role: user.role,
+            customRoleName: user.customRoleName ?? null,
+            isActive: user.isActive !== false && user.isActive !== 'f' && user.isActive !== 0,
+            creatorId: user.creatorId != null ? Number(user.creatorId) : null,
+            createdAt: user.createdAt ?? null,
+            updatedAt: user.updatedAt ?? null,
+            trialStartDate: user.trialStartDate ?? null,
+            trialEndDate: user.trialEndDate ?? null,
+            subscriptionStatus: user.subscriptionStatus === 'active' ? 'active' : (user.subscriptionStatus ?? 'active'),
+            subscriptionPlan: user.subscriptionPlan ?? null,
+            planStartDate: user.planStartDate ?? null,
+            planExpiryDate: user.planExpiryDate ?? null,
+            nextBillingDate: user.nextBillingDate ?? null,
+            stripeCustomerId: null,
+            stripeSubscriptionId: null,
+            stripePriceId: null,
+            stripeInvoiceId: null,
+            stripePaymentIntentId: null,
+            renewalType: user.renewalType ?? null,
+            autopayConsent: user.autopayConsent ?? false,
+            onboardingCompleted: Boolean(user.onboardingCompleted),
+            emailVerifiedAt: user.emailVerifiedAt ?? null,
+        };
 
-        // Ensure plain JSON (no Date / BigInt surprises for res.json).
         const safeProfile = JSON.parse(JSON.stringify(profile, (_k, v) => {
             if (typeof v === 'bigint') return Number(v);
+            if (v instanceof Date) return v.toISOString();
             return v;
         }));
 
@@ -519,14 +519,19 @@ async function handleAuthLogin(req, res) {
             console.warn('[AUTH] Session cookie parse skipped:', err?.message || err);
         }
 
-        const session = await createSessionTokenForUser(Number(safeProfile.id), {
-            existingToken,
-        });
+        const session = await createSessionTokenForUser(safeProfile.id, { existingToken });
 
         console.log(`[AUTH] Login successful for user: ${safeProfile.id}`);
         return res.status(200).json(sendAuthenticatedSession(res, safeProfile, session));
     } catch (error) {
-        return fail(error);
+        handlePrismaError(error, 'login');
+        const msg = String(error?.message || error || 'unknown');
+        console.error('[AUTH] Login failed:', msg, error?.code || '', error?.meta || '');
+        return res.status(500).json({
+            error: 'An error occurred during login',
+            code: 'LOGIN_INTERNAL_ERROR',
+            detail: msg.slice(0, 300),
+        });
     }
 }
 
