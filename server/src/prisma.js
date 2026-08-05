@@ -1,5 +1,5 @@
 import pkgPg from 'pg';
-const { Pool } = pkgPg;
+const { Pool, Client } = pkgPg;
 import { PrismaPg } from '@prisma/adapter-pg';
 import dns from 'node:dns';
 import pkgPrisma from '../generated/prisma/index.js';
@@ -105,7 +105,23 @@ export async function poolQueryWithRetry(text, params, retries = 1) {
             await new Promise((r) => setTimeout(r, 200 * (attempt + 1)));
         }
     }
-    throw lastErr;
+    // Last resort: same path as the working Coolify smoke test (fresh Client, URL-only).
+    try {
+        return await queryWithFreshClient(text, params);
+    } catch {
+        throw lastErr;
+    }
+}
+
+/** One-shot Client using DATABASE_URL exactly like: new Client({ connectionString }) */
+export async function queryWithFreshClient(text, params) {
+    const client = new Client({ connectionString: process.env.DATABASE_URL });
+    try {
+        await client.connect();
+        return await client.query(text, params);
+    } finally {
+        await client.end().catch(() => {});
+    }
 }
 
 export { pool };
