@@ -17,6 +17,7 @@ import {
     actorCanAccessOrgCompanyOwner,
     actorCanAssignAuditeeToSite,
     resolveOrgCompanyOwnerUserIds,
+    resolveOrgVisibleCompanyIds,
     assertActorCanManageSite,
     assertActorCanManageDepartment,
     assertDepartmentCreateBodySiteId,
@@ -125,6 +126,7 @@ export function createSitesDepartmentsRouter({ authenticateToken, checkTrialExpi
             ? {
                   id: true,
                   name: true,
+                  companyId: true,
               }
             : {
                   id: true,
@@ -150,6 +152,19 @@ export function createSitesDepartmentsRouter({ authenticateToken, checkTrialExpi
                           id: true,
                           name: true,
                           userId: true,
+                      },
+                  },
+                  departments: {
+                      select: {
+                          id: true,
+                          name: true,
+                          description: true,
+                          siteId: true,
+                          code: true,
+                          manager: true,
+                          status: true,
+                          createdAt: true,
+                          updatedAt: true,
                       },
                   },
               };
@@ -191,8 +206,12 @@ export function createSitesDepartmentsRouter({ authenticateToken, checkTrialExpi
                 );
             };
 
-            const ownerUserIds = await resolveOrgCompanyOwnerUserIds(actorId);
-            if (ownerUserIds.length === 0) {
+            const companyIds = await resolveOrgVisibleCompanyIds(actorId);
+            const ownerUserIds = companyIds.length === 0
+                ? await resolveOrgCompanyOwnerUserIds(actorId)
+                : [];
+
+            if (companyIds.length === 0 && ownerUserIds.length === 0) {
                 if (!pagination.paginate) return res.json([]);
                 return res.json(
                     paginatedResponse([], {
@@ -203,9 +222,11 @@ export function createSitesDepartmentsRouter({ authenticateToken, checkTrialExpi
                 );
             }
 
-            return await sendSites({
-                company: { userId: { in: ownerUserIds } },
-            });
+            return await sendSites(
+                companyIds.length > 0
+                    ? { companyId: { in: companyIds } }
+                    : { company: { userId: { in: ownerUserIds } } },
+            );
         } catch (error) {
             console.error('Failed to fetch sites:', error);
             res.status(500).json({ error: 'Failed to fetch sites' });

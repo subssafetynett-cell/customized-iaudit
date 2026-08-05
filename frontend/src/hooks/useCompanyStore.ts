@@ -44,6 +44,55 @@ function normalizeCompany(c: any): Company {
   };
 }
 
+function unwrapListPayload(data: unknown): any[] {
+  if (Array.isArray(data)) return data;
+  if (data && typeof data === "object") {
+    const obj = data as Record<string, unknown>;
+    if (Array.isArray(obj.data)) return obj.data as any[];
+    if (Array.isArray(obj.items)) return obj.items as any[];
+  }
+  return [];
+}
+
+function countDepartments(sites: Site[] | undefined): number {
+  return (sites ?? []).reduce((acc, site) => acc + (site.departments?.length ?? 0), 0);
+}
+
+/**
+ * Prefer the longer site list; only when lengths tie, prefer more departments.
+ * Never replace a longer site list with a shorter one for department count alone.
+ */
+function pickRicherSites(existing: Site[] | undefined, hydrated: Site[]): Site[] {
+  const existingSites = existing ?? [];
+  if (hydrated.length > existingSites.length) return hydrated;
+  if (existingSites.length > hydrated.length) return existingSites;
+  if (countDepartments(hydrated) > countDepartments(existingSites)) return hydrated;
+  return existingSites.length > 0 ? existingSites : hydrated;
+}
+
+/** Merge GET /sites (+ departments) into companies when nested include was empty. */
+function mergeSitesIntoCompanies(companies: Company[], sitesPayload: unknown): Company[] {
+  const siteRows = unwrapListPayload(sitesPayload);
+  if (siteRows.length === 0) return companies;
+
+  const byCompany = new Map<string, Site[]>();
+  for (const raw of siteRows) {
+    const companyId = String(raw.companyId ?? raw.company?.id ?? "");
+    if (!companyId) continue;
+    const site = normalizeSite(raw);
+    const list = byCompany.get(companyId) ?? [];
+    list.push(site);
+    byCompany.set(companyId, list);
+  }
+
+  return companies.map((company) => {
+    const hydrated = byCompany.get(String(company.id));
+    if (!hydrated?.length) return company;
+    const sites = pickRicherSites(company.sites, hydrated);
+    return sites === company.sites ? company : { ...company, sites };
+  });
+}
+
 /** Synchronous read of cached companies (for tour routing without waiting on fetch). */
 export function getCompaniesSnapshot(): Company[] {
   return globalCompanies;
@@ -77,14 +126,24 @@ async function fetchCompaniesFromApi() {
       const parsed = parsePaginatedResponse<any>(data, 1, 100);
       const rows = parsed.items.length > 0
         ? parsed.items
-        : Array.isArray(data)
-          ? data
-          : Array.isArray(data?.data)
-            ? data.data
-            : Array.isArray(data?.items)
-              ? data.items
-              : [];
-      globalCompanies = rows.map(normalizeCompany);
+        : unwrapListPayload(data);
+      let companies = rows.map(normalizeCompany);
+
+      // If any org company came back without sites, hydrate from GET /sites (includes departments).
+      const needsSiteHydration = companies.some((c) => (c.sites?.length ?? 0) === 0);
+      if (companies.length > 0 && needsSiteHydration) {
+        try {
+          const sitesRes = await apiFetch(`/sites?page=1&pageSize=200&_t=${Date.now()}`);
+          if (sitesRes.ok) {
+            const sitesData = await sitesRes.json();
+            companies = mergeSitesIntoCompanies(companies, sitesData);
+          }
+        } catch (hydrateErr) {
+          console.warn("Failed to hydrate company sites:", hydrateErr);
+        }
+      }
+
+      globalCompanies = companies;
     }
   } catch (error) {
     console.error("Failed to fetch companies:", error);

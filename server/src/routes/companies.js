@@ -18,10 +18,73 @@ import {
 import {
     actorCanAccessOrgCompanyOwner,
     resolveOrgCompanyOwnerUserIds,
+    resolveOrgVisibleCompanyIds,
     invalidateOrgLookupCaches,
     ensureOrphanUserOrgLink,
     checkTrialExpiration
 } from '../orgAccess.js';
+
+const SITE_LIST_SELECT = {
+    id: true,
+    name: true,
+    description: true,
+    siteType: true,
+    status: true,
+    address: true,
+    city: true,
+    state: true,
+    country: true,
+    postalCode: true,
+    latitude: true,
+    longitude: true,
+    contactName: true,
+    contactPosition: true,
+    contactNumber: true,
+    email: true,
+    companyId: true,
+    userId: true,
+    createdAt: true,
+    updatedAt: true,
+    departments: {
+        select: {
+            id: true,
+            name: true,
+            description: true,
+            siteId: true,
+            code: true,
+            manager: true,
+            status: true,
+            createdAt: true,
+            updatedAt: true,
+        },
+    },
+};
+
+/** Always attach sites + departments in a second query so invitees never get empty nested arrays. */
+async function attachSitesAndDepartments(companies) {
+    if (!Array.isArray(companies) || companies.length === 0) return companies || [];
+    const companyIds = companies
+        .map((c) => Number(c.id))
+        .filter((n) => Number.isInteger(n) && n > 0);
+    if (companyIds.length === 0) {
+        return companies.map((c) => ({ ...c, sites: Array.isArray(c.sites) ? c.sites : [] }));
+    }
+    const sites = await prisma.site.findMany({
+        where: { companyId: { in: companyIds } },
+        select: SITE_LIST_SELECT,
+        orderBy: [{ name: 'asc' }],
+    });
+    const byCompany = new Map();
+    for (const site of sites) {
+        const cid = Number(site.companyId);
+        if (!byCompany.has(cid)) byCompany.set(cid, []);
+        byCompany.get(cid).push(site);
+    }
+    return companies.map((company) => ({
+        ...company,
+        sites: byCompany.get(Number(company.id)) || [],
+    }));
+}
 
 export function createCompaniesRouter({ authenticateToken, checkTrialExpiration }) {
     const router = Router();
@@ -62,45 +125,25 @@ export function createCompaniesRouter({ authenticateToken, checkTrialExpiration 
                 }
             }
 
-            // List responses only need fields used by company/site/department tables and forms.
-            const companyInclude = {
-                sites: {
-                    select: {
-                        id: true,
-                        name: true,
-                        description: true,
-                        siteType: true,
-                        status: true,
-                        address: true,
-                        city: true,
-                        state: true,
-                        country: true,
-                        postalCode: true,
-                        latitude: true,
-                        longitude: true,
-                        contactName: true,
-                        contactPosition: true,
-                        contactNumber: true,
-                        email: true,
-                        companyId: true,
-                        userId: true,
-                        createdAt: true,
-                        updatedAt: true,
-                        departments: {
-                            select: {
-                                id: true,
-                                name: true,
-                                description: true,
-                                siteId: true,
-                                code: true,
-                                manager: true,
-                                status: true,
-                                createdAt: true,
-                                updatedAt: true,
-                            },
-                        },
-                    },
-                },
+            // Scalar company fields only — sites/departments attached below (reliable for invitees).
+            const companySelect = {
+                id: true,
+                name: true,
+                logo: true,
+                industry: true,
+                contactNumber: true,
+                description: true,
+                streetAddress: true,
+                city: true,
+                state: true,
+                country: true,
+                postalCode: true,
+                isoStandards: true,
+                location: true,
+                contactDetails: true,
+                createdAt: true,
+                updatedAt: true,
+                userId: true,
             };
 
             const searchWhere = search
@@ -112,24 +155,25 @@ export function createCompaniesRouter({ authenticateToken, checkTrialExpiration 
                 if (!pagination.paginate) {
                     const companies = await prisma.company.findMany({
                         where: fullWhere,
-                        include: companyInclude,
+                        select: companySelect,
                         orderBy: { id: 'asc' },
                         take: pagination.take,
                     });
-                    return res.json(companies);
+                    return res.json(await attachSitesAndDepartments(companies));
                 }
                 const [total, companies] = await Promise.all([
                     prisma.company.count({ where: fullWhere }),
                     prisma.company.findMany({
                         where: fullWhere,
-                        include: companyInclude,
+                        select: companySelect,
                         orderBy: { id: 'asc' },
                         skip: pagination.skip,
                         take: pagination.limit,
                     }),
                 ]);
+                const withSites = await attachSitesAndDepartments(companies);
                 return res.json(
-                    paginatedResponse(companies, {
+                    paginatedResponse(withSites, {
                         page: pagination.page,
                         limit: pagination.limit,
                         total,
@@ -145,13 +189,15 @@ export function createCompaniesRouter({ authenticateToken, checkTrialExpiration 
             }
 
             let ownerUserIds;
+            let companyIds = [];
             if (viewer.role === 'superadmin' && explicitOwnerId != null) {
                 ownerUserIds = [explicitOwnerId];
             } else {
                 ownerUserIds = await resolveOrgCompanyOwnerUserIds(actorId);
+                companyIds = await resolveOrgVisibleCompanyIds(actorId);
             }
 
-            if (ownerUserIds.length === 0) {
+            if (ownerUserIds.length === 0 && companyIds.length === 0) {
                 if (!pagination.paginate) return res.json([]);
                 return res.json(
                     paginatedResponse([], {
@@ -162,7 +208,20 @@ export function createCompaniesRouter({ authenticateToken, checkTrialExpiration 
                 );
             }
 
-            return await sendCompanies({ userId: { in: ownerUserIds } });
+            // Prefer explicit company ids (includes program-linked companies); also match by owner.
+            const orgCompanyWhere =
+                companyIds.length > 0
+                    ? {
+                          OR: [
+                              { id: { in: companyIds } },
+                              ...(ownerUserIds.length > 0
+                                  ? [{ userId: { in: ownerUserIds } }]
+                                  : []),
+                          ],
+                      }
+                    : { userId: { in: ownerUserIds } };
+
+            return await sendCompanies(orgCompanyWhere);
         } catch (error) {
             console.error('Failed to fetch companies:', error);
             res.status(500).json({ error: 'Failed to fetch companies', details: error.message || String(error) });

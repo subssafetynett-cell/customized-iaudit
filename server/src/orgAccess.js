@@ -864,13 +864,70 @@ async function resolveOrgCompanyOwnerUserIds(actorId) {
     return fromRoot.length > 0 ? fromRoot : [id];
 }
 
+/**
+ * Concrete Company row ids visible to the actor (owner match + audit-program company links).
+ * Prefer this for site/department catalog queries so invitees always see the org's sites.
+ */
+async function resolveOrgVisibleCompanyIds(actorId) {
+    const id = Number(actorId);
+    if (!Number.isInteger(id) || id < 1) return [];
+
+    const ownerUserIds = await resolveOrgCompanyOwnerUserIds(id);
+    const idSet = new Set();
+
+    if (ownerUserIds.length > 0) {
+        const owned = await prisma.company.findMany({
+            where: { userId: { in: ownerUserIds } },
+            select: { id: true },
+        });
+        for (const row of owned) {
+            const cid = Number(row.id);
+            if (Number.isInteger(cid) && cid > 0) idSet.add(cid);
+        }
+    }
+
+    // Also pull companies tied to audit programs that org members participate in
+    // (covers odd ownership / null userId edge cases without leaking other tenants).
+    if (ownerUserIds.length > 0) {
+        try {
+            const programs = await prisma.auditProgram.findMany({
+                where: {
+                    OR: [
+                        { userId: { in: ownerUserIds } },
+                        { leadAuditorId: { in: ownerUserIds } },
+                        { auditors: { some: { id: { in: ownerUserIds } } } },
+                    ],
+                },
+                select: { site: { select: { companyId: true } } },
+            });
+            for (const program of programs) {
+                const cid = Number(program.site?.companyId);
+                if (Number.isInteger(cid) && cid > 0) idSet.add(cid);
+            }
+        } catch (err) {
+            console.warn('[orgAccess] resolveOrgVisibleCompanyIds program expand failed:', err?.message || err);
+        }
+    }
+
+    return [...idSet];
+}
+
 async function siteIdsInActorOrg(actorId) {
-    const ownerUserIds = await resolveOrgCompanyOwnerUserIds(actorId);
-    const companies = await prisma.company.findMany({
-        where: { userId: { in: ownerUserIds } },
-        select: { sites: { select: { id: true } } },
+    const companyIds = await resolveOrgVisibleCompanyIds(actorId);
+    if (companyIds.length === 0) {
+        // Fallback for older call sites / empty company id resolution.
+        const ownerUserIds = await resolveOrgCompanyOwnerUserIds(actorId);
+        const companies = await prisma.company.findMany({
+            where: { userId: { in: ownerUserIds } },
+            select: { sites: { select: { id: true } } },
+        });
+        return new Set(companies.flatMap((c) => c.sites.map((s) => s.id)));
+    }
+    const sites = await prisma.site.findMany({
+        where: { companyId: { in: companyIds } },
+        select: { id: true },
     });
-    return new Set(companies.flatMap((c) => c.sites.map((s) => s.id)));
+    return new Set(sites.map((s) => s.id));
 }
 
 async function actorCanAssignAuditeeToSite(actorId, siteId) {
@@ -1784,6 +1841,7 @@ export {
     actorIsLeadAuditor,
     actorCanInviteAuditee,
     resolveOrgCompanyOwnerUserIds,
+    resolveOrgVisibleCompanyIds,
     siteIdsInActorOrg,
     actorCanAssignAuditeeToSite,
     actorCanAssignAuditeeToAllSites,
