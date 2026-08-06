@@ -32,7 +32,11 @@ import {
     buildOrgSubtreePlanVisibilityOr,
     buildAssignedAuditProgramVisibilityOr,
     buildAssignedAuditPlanVisibilityOr,
+    buildTeammateAuditProgramVisibilityOr,
+    buildTeammateAuditPlanVisibilityOr,
     actorHasFullOrgAuditVisibility,
+    ensureOrphanUserOrgLink,
+    collectOrgMemberUserIds,
     checkTrialExpiration,
     countOrgAuditPrograms,
     rejectIfTrialLimitExceeded
@@ -88,15 +92,19 @@ export function createAuditsRouter({ authenticateToken, checkTrialExpiration }) 
                 userId === 'null';
 
             if (useOrgScope && req.user.role !== 'superadmin') {
+                await ensureOrphanUserOrgLink(actorId).catch(() => {});
                 const orgRootId = await resolveActorOrgRootId(actorId);
                 if (!(await actorCanReadOrgAssessmentStore(actorId, orgRootId))) {
                     return res.status(403).json({ error: 'Forbidden' });
                 }
                 if (await actorHasFullOrgAuditVisibility(actorId)) {
                     const subtreeIds = await collectOrgSubtreeUserIds(orgRootId);
-                    programWhere = { OR: buildOrgSubtreeProgramVisibilityOr(subtreeIds) };
+                    const memberIds = await collectOrgMemberUserIds(actorId);
+                    const scopeIds = memberIds.length > 0 ? memberIds : subtreeIds;
+                    programWhere = { OR: buildOrgSubtreeProgramVisibilityOr(scopeIds) };
                 } else {
-                    programWhere = { OR: buildAssignedAuditProgramVisibilityOr(actorId) };
+                    // Invitees (User B): assigned programs + programs on User A's org sites.
+                    programWhere = { OR: await buildTeammateAuditProgramVisibilityOr(actorId) };
                 }
             } else {
                 let scopeUserId;
@@ -112,20 +120,13 @@ export function createAuditsRouter({ authenticateToken, checkTrialExpiration }) 
                     return res.status(403).json({ error: 'Forbidden' });
                 }
 
-                const parsedUserId = scopeUserId;
-                const user = await prisma.user.findUnique({ where: { id: parsedUserId } });
-                const effectiveAdminId = user?.creatorId || parsedUserId;
-
-                programWhere = {
-                    OR: [
-                        { userId: parsedUserId },
-                        { leadAuditorId: parsedUserId },
-                        { auditors: { some: { id: parsedUserId } } },
-                        { user: { is: { creatorId: parsedUserId } } },
-                        { user: { is: { id: effectiveAdminId } } },
-                        { user: { is: { creatorId: effectiveAdminId } } }
-                    ]
-                };
+                await ensureOrphanUserOrgLink(actorId).catch(() => {});
+                const memberIds = await collectOrgMemberUserIds(scopeUserId);
+                if (memberIds.length > 0) {
+                    programWhere = { OR: buildOrgSubtreeProgramVisibilityOr(memberIds) };
+                } else {
+                    programWhere = { OR: await buildTeammateAuditProgramVisibilityOr(scopeUserId) };
+                }
             }
             }
 
@@ -304,6 +305,7 @@ export function createAuditsRouter({ authenticateToken, checkTrialExpiration }) 
             if (await rejectIfAuditee(actorId, res, 'Auditees cannot create audit programs')) {
                 return;
             }
+            await ensureOrphanUserOrgLink(actorId).catch(() => {});
             const ownerId = userId != null ? Number.parseInt(String(userId), 10) : actorId;
             if (Number.isNaN(ownerId)) {
                 return res.status(400).json({ error: 'Invalid userId' });
@@ -489,15 +491,18 @@ export function createAuditsRouter({ authenticateToken, checkTrialExpiration }) 
                     userId === 'null';
 
                 if (useOrgScope) {
+                    await ensureOrphanUserOrgLink(actorId).catch(() => {});
                     const orgRootId = await resolveActorOrgRootId(actorId);
                     if (!(await actorCanReadOrgAssessmentStore(actorId, orgRootId))) {
                         return res.status(403).json({ error: 'Forbidden' });
                     }
                     if (await actorHasFullOrgAuditVisibility(actorId)) {
                         const subtreeIds = await collectOrgSubtreeUserIds(orgRootId);
-                        whereClause.OR = buildOrgSubtreePlanVisibilityOr(subtreeIds);
+                        const memberIds = await collectOrgMemberUserIds(actorId);
+                        const scopeIds = memberIds.length > 0 ? memberIds : subtreeIds;
+                        whereClause.OR = buildOrgSubtreePlanVisibilityOr(scopeIds);
                     } else {
-                        whereClause.OR = buildAssignedAuditPlanVisibilityOr(actorId);
+                        whereClause.OR = await buildTeammateAuditPlanVisibilityOr(actorId);
                     }
                 } else {
                     let scopeUserId = Number.parseInt(String(userId), 10);
@@ -508,21 +513,13 @@ export function createAuditsRouter({ authenticateToken, checkTrialExpiration }) 
                         return res.status(403).json({ error: 'Forbidden' });
                     }
 
-                    const uId = scopeUserId;
-                    const user = await prisma.user.findUnique({ where: { id: uId } });
-                    const effectiveAdminId = user?.creatorId || uId;
-
-                    whereClause.OR = [
-                        { userId: uId },
-                        { leadAuditorId: uId },
-                        { auditors: { some: { id: uId } } },
-                        { user: { is: { creatorId: uId } } },
-                        { user: { is: { id: effectiveAdminId } } },
-                        { user: { is: { creatorId: effectiveAdminId } } },
-                        { auditProgram: { is: { userId: uId } } },
-                        { auditProgram: { is: { leadAuditorId: uId } } },
-                        { auditProgram: { is: { auditors: { some: { id: uId } } } } }
-                    ];
+                    await ensureOrphanUserOrgLink(actorId).catch(() => {});
+                    const memberIds = await collectOrgMemberUserIds(scopeUserId);
+                    if (memberIds.length > 0) {
+                        whereClause.OR = buildOrgSubtreePlanVisibilityOr(memberIds);
+                    } else {
+                        whereClause.OR = await buildTeammateAuditPlanVisibilityOr(scopeUserId);
+                    }
                 }
                 }
             }
@@ -1032,6 +1029,7 @@ export function createAuditsRouter({ authenticateToken, checkTrialExpiration }) 
                 },
             });
             if (!program) return res.status(404).json({ error: 'Audit program not found' });
+            await ensureOrphanUserOrgLink(req.user.id).catch(() => {});
             if (!(await actorCanAccessAuditProgram(req.user.id, program))) {
                 return res.status(403).json({ error: 'You do not have permission to create an audit plan for this program' });
             }
