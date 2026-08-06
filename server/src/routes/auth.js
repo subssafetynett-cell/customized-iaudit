@@ -324,7 +324,10 @@ async function handleResendInviteVerification(req, res) {
 // Also register under /api (mountedApiRouter) so Vite same-origin proxy always hits login
 // before the /api strip path — keeps Set-Cookie on the /api response the browser expects.
 
-/** Progressive SQL user lookup — never uses Prisma (adapter findFirst was 500ing in prod). */
+/**
+ * Progressive SQL user lookup for login (case-insensitive).
+ * Never uses Prisma — adapter findFirst was 500ing in production.
+ */
 async function lookupUserForLogin(email) {
     const queries = [
         `SELECT id, email, password, "isActive",
@@ -396,15 +399,6 @@ async function handleAuthLogin(req, res) {
     try {
         await ensureLoginSchemaReady().catch(() => false);
         console.log(`[AUTH] Login attempt`);
-        const user = await findUserByEmailInsensitive(email, {
-            id: true,
-            email: true,
-            password: true,
-            isActive: true,
-            failedLoginAttempts: true,
-            emailVerifiedAt: true,
-            creatorId: true,
-        });
 
         const user = await lookupUserForLogin(email);
         if (!user) {
