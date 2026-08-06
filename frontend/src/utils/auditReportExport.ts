@@ -9,10 +9,13 @@ import {
     Table as DocxTable,
     TableRow as DocxTableRow,
     TableCell as DocxTableCell,
+    TableLayoutType,
     WidthType,
     BorderStyle,
     UnderlineType,
     Header,
+    VerticalAlign,
+    AlignmentType,
 } from "docx";
 import { saveAs } from "file-saver";
 import * as XLSX from "xlsx";
@@ -1380,6 +1383,33 @@ const NC_BOX_FILL: [number, number, number] = [255, 251, 235];
 const NC_BOX_BORDER: [number, number, number] = [245, 158, 11];
 const NC_BOX_TITLE: [number, number, number] = [120, 53, 15];
 
+function isChecklistScoreHeader(text: string): boolean {
+    const t = text.toLowerCase();
+    return (
+        t.includes("compliance") ||
+        t.includes("exception") ||
+        t.includes("non-compliance") ||
+        t.includes("non compliance") ||
+        /\(\s*[012]\s*\)/.test(t) ||
+        t === "finding" ||
+        t.includes("score / finding") ||
+        t.includes("score/finding") ||
+        (t.includes("score") && !t.includes("comments"))
+    );
+}
+
+/** Relative weights — same proportions for PDF (mm) and Word (%). */
+function checklistColumnWeight(headerText: string): number {
+    const t = headerText.trim().toLowerCase();
+    if (t === "clause" || t === "#") return 10;
+    if (t === "intent") return 16;
+    if (t === "evidence" || t === "comments") return 16;
+    if (t === "comment") return 12;
+    if (isChecklistScoreHeader(headerText)) return 9;
+    // Question / Requirement / unknown flex columns
+    return 28;
+}
+
 /**
  * Explicit checklist column widths so long questions wrap by word — not letter-by-letter.
  * Score columns stay narrow; Question takes the remaining width.
@@ -1388,24 +1418,13 @@ function buildChecklistPdfColumnStyles(
     headerCells: ChecklistReportHeaderCell[],
     contentWidthMm: number,
 ): Record<number, { cellWidth: number; overflow?: "linebreak"; halign?: "left" | "center" }> {
-    const isScoreHeader = (text: string) => {
-        const t = text.toLowerCase();
-        return (
-            t.includes("compliance") ||
-            t.includes("exception") ||
-            t.includes("non-compliance") ||
-            t.includes("non compliance") ||
-            /\(\s*[012]\s*\)/.test(t) ||
-            t === "finding" ||
-            t.includes("score")
-        );
-    };
+    const isScoreHeader = isChecklistScoreHeader;
 
     const widths = headerCells.map((h) => {
         const t = h.text.trim().toLowerCase();
         if (t === "clause" || t === "#") return 16;
         if (t === "intent") return 28;
-        if (t === "evidence") return 32;
+        if (t === "evidence" || t === "comments") return 32;
         if (t === "comment") return 24;
         if (isScoreHeader(h.text)) return 22;
         if (t === "question" || t === "requirement") return -1; // flex
@@ -1438,6 +1457,52 @@ function buildChecklistPdfColumnStyles(
         }
     });
     return styles;
+}
+
+/**
+ * Percentage widths for Word checklist tables (sum = 100).
+ * Fixed layout + these widths keep Clause/Question readable like the PDF.
+ */
+function buildChecklistDocxColumnWidthsPct(
+    headerCells: ChecklistReportHeaderCell[],
+): number[] {
+    const weights = headerCells.map((h) => checklistColumnWeight(h.text));
+    const total = weights.reduce((sum, w) => sum + w, 0) || 1;
+    const raw = weights.map((w) => (w / total) * 100);
+    const floors = raw.map((w) => Math.max(4, Math.floor(w)));
+    let rem = 100 - floors.reduce((sum, w) => sum + w, 0);
+    const order = raw
+        .map((w, i) => ({ i, frac: w - Math.floor(w) }))
+        .sort((a, b) => b.frac - a.frac);
+    let idx = 0;
+    while (rem !== 0 && order.length > 0) {
+        const target = order[idx % order.length].i;
+        if (rem > 0) {
+            floors[target] += 1;
+            rem -= 1;
+        } else if (floors[target] > 4) {
+            floors[target] -= 1;
+            rem += 1;
+        } else {
+            idx += 1;
+            if (idx > order.length * 3) break;
+            continue;
+        }
+        idx += 1;
+    }
+    return floors;
+}
+
+/** Soft-break long unbroken tokens so Word wraps instead of stretching columns. */
+function softWrapDocxCellText(text: string, chunk = 28): string {
+    if (!text) return text;
+    return text.replace(/\S{30,}/g, (token) => {
+        const parts: string[] = [];
+        for (let i = 0; i < token.length; i += chunk) {
+            parts.push(token.slice(i, i + chunk));
+        }
+        return parts.join("\u200B");
+    });
 }
 
 /** Stacked label/value NC box (separate table — does not distort checklist columns). */
@@ -1852,17 +1917,19 @@ export async function generateAuditReportPdf(plan: Record<string, any>) {
 function docxBorderedCell(
     children: Paragraph[],
     widthPct = 33,
-    options?: { fillHex?: string },
+    options?: { fillHex?: string; columnSpan?: number; center?: boolean },
 ) {
     return new DocxTableCell({
         children,
         width: { size: widthPct, type: WidthType.PERCENTAGE },
+        verticalAlign: VerticalAlign.TOP,
         borders: {
             top: { style: BorderStyle.SINGLE, size: 1 },
             bottom: { style: BorderStyle.SINGLE, size: 1 },
             left: { style: BorderStyle.SINGLE, size: 1 },
             right: { style: BorderStyle.SINGLE, size: 1 },
         },
+        ...(options?.columnSpan ? { columnSpan: options.columnSpan } : {}),
         ...(options?.fillHex
             ? { shading: { fill: options.fillHex.replace("#", "") } }
             : {}),
@@ -1890,7 +1957,7 @@ function docxChecklistFindingExtraBox(
                         }),
                     ],
                     100,
-                    { fillHex: "#FEF3C7" },
+                    { fillHex: "#FEF3C7", columnSpan: 2 },
                 ),
             ],
         }),
@@ -1903,15 +1970,25 @@ function docxChecklistFindingExtraBox(
                         [
                             new Paragraph({
                                 children: [
+                                    new TextRun({ text: "Finding", bold: true, size: 16 }),
+                                ],
+                            }),
+                        ],
+                        28,
+                        { fillHex: "#FFFBEB" },
+                    ),
+                    docxBorderedCell(
+                        [
+                            new Paragraph({
+                                children: [
                                     new TextRun({
-                                        text: `Finding: ${block.finding}`,
-                                        bold: true,
+                                        text: softWrapDocxCellText(block.finding),
                                         size: 16,
                                     }),
                                 ],
                             }),
                         ],
-                        100,
+                        72,
                         { fillHex: "#FFFBEB" },
                     ),
                 ],
@@ -1944,7 +2021,7 @@ function docxChecklistFindingExtraBox(
                                 }),
                             ],
                             100,
-                            { fillHex: "#FEF3C7" },
+                            { fillHex: "#FEF3C7", columnSpan: 2 },
                         ),
                     ],
                 }),
@@ -1968,7 +2045,12 @@ function docxChecklistFindingExtraBox(
                     docxBorderedCell(
                         [
                             new Paragraph({
-                                children: [new TextRun({ text: field.value, size: 16 })],
+                                children: [
+                                    new TextRun({
+                                        text: softWrapDocxCellText(field.value || "—"),
+                                        size: 16,
+                                    }),
+                                ],
                             }),
                         ],
                         72,
@@ -1980,6 +2062,7 @@ function docxChecklistFindingExtraBox(
     }
     return new DocxTable({
         width: { size: 100, type: WidthType.PERCENTAGE },
+        layout: TableLayoutType.FIXED,
         rows,
     });
 }
@@ -2336,78 +2419,111 @@ export async function generateAuditReportDocx(plan: Record<string, any>) {
             );
             if (checklistSection && checklistSection.checklistContent.length > 0) {
                 const { headerCells, bodyCells, extrasBlocks } = checklistSection;
-                const colWidth = Math.max(4, Math.floor(100 / Math.max(headerCells.length, 1)));
+                const colWidths = buildChecklistDocxColumnWidthsPct(headerCells);
                 const extrasByIndex = new Map(extrasBlocks.map((b) => [b.itemIndex, b]));
                 children.push(docxSubHeading(checklistSection.title || "Checklist"));
-                // Header row once, then each question (+ optional NC box) as its own table
-                // so NC details sit directly under the raised question.
+
+                const checklistRows: DocxTableRow[] = [
+                    new DocxTableRow({
+                        children: headerCells.map((header, colIndex) =>
+                            docxBorderedCell(
+                                [
+                                    new Paragraph({
+                                        children: [
+                                            new TextRun({
+                                                text: softWrapDocxCellText(header.text),
+                                                bold: true,
+                                                size: 15,
+                                                color: header.textHex
+                                                    ? header.textHex.replace("#", "")
+                                                    : undefined,
+                                            }),
+                                        ],
+                                    }),
+                                ],
+                                colWidths[colIndex] ?? 10,
+                                { fillHex: header.fillHex },
+                            ),
+                        ),
+                    }),
+                ];
+
+                bodyCells.forEach((row, rowIndex) => {
+                    checklistRows.push(
+                        new DocxTableRow({
+                            children: row.map((cell, colIndex) => {
+                                const headerText = headerCells[colIndex]?.text || "";
+                                const scoreCol = isChecklistScoreHeader(headerText);
+                                return docxBorderedCell(
+                                    [
+                                        new Paragraph({
+                                            alignment:
+                                                scoreCol || cell.align === "center"
+                                                    ? AlignmentType.CENTER
+                                                    : AlignmentType.LEFT,
+                                            children: [
+                                                new TextRun({
+                                                    text: softWrapDocxCellText(
+                                                        cell.text ||
+                                                            (cell.fillHex ? " " : ""),
+                                                    ),
+                                                    size: 15,
+                                                    color: cell.textHex
+                                                        ? cell.textHex.replace("#", "")
+                                                        : undefined,
+                                                }),
+                                            ],
+                                        }),
+                                    ],
+                                    colWidths[colIndex] ?? 10,
+                                    { fillHex: cell.fillHex },
+                                );
+                            }),
+                        }),
+                    );
+
+                    const extra = extrasByIndex.get(rowIndex);
+                    if (extra) {
+                        // Full-width NC details row — same placement as PDF (under the question).
+                        checklistRows.push(
+                            new DocxTableRow({
+                                children: [
+                                    new DocxTableCell({
+                                        columnSpan: headerCells.length,
+                                        width: { size: 100, type: WidthType.PERCENTAGE },
+                                        borders: {
+                                            top: { style: BorderStyle.SINGLE, size: 1, color: "F59E0B" },
+                                            bottom: {
+                                                style: BorderStyle.SINGLE,
+                                                size: 1,
+                                                color: "F59E0B",
+                                            },
+                                            left: { style: BorderStyle.SINGLE, size: 1, color: "F59E0B" },
+                                            right: {
+                                                style: BorderStyle.SINGLE,
+                                                size: 1,
+                                                color: "F59E0B",
+                                            },
+                                        },
+                                        children: [
+                                            new Paragraph({ text: "", spacing: { after: 40 } }),
+                                            docxChecklistFindingExtraBox(extra),
+                                            new Paragraph({ text: "", spacing: { after: 40 } }),
+                                        ],
+                                    }),
+                                ],
+                            }),
+                        );
+                    }
+                });
+
                 children.push(
                     new DocxTable({
                         width: { size: 100, type: WidthType.PERCENTAGE },
-                        rows: [
-                            new DocxTableRow({
-                                children: headerCells.map((header) =>
-                                    docxBorderedCell(
-                                        [
-                                            new Paragraph({
-                                                children: [
-                                                    new TextRun({
-                                                        text: header.text,
-                                                        bold: true,
-                                                        size: 16,
-                                                        color: header.textHex
-                                                            ? header.textHex.replace("#", "")
-                                                            : undefined,
-                                                    }),
-                                                ],
-                                            }),
-                                        ],
-                                        colWidth,
-                                        { fillHex: header.fillHex },
-                                    ),
-                                ),
-                            }),
-                        ],
+                        layout: TableLayoutType.FIXED,
+                        rows: checklistRows,
                     }),
                 );
-                bodyCells.forEach((row, rowIndex) => {
-                    children.push(
-                        new DocxTable({
-                            width: { size: 100, type: WidthType.PERCENTAGE },
-                            rows: [
-                                new DocxTableRow({
-                                    children: row.map((cell) =>
-                                        docxBorderedCell(
-                                            [
-                                                new Paragraph({
-                                                    children: [
-                                                        new TextRun({
-                                                            text:
-                                                                cell.text ||
-                                                                (cell.fillHex ? " " : ""),
-                                                            size: 16,
-                                                            color: cell.textHex
-                                                                ? cell.textHex.replace("#", "")
-                                                                : undefined,
-                                                        }),
-                                                    ],
-                                                }),
-                                            ],
-                                            colWidth,
-                                            { fillHex: cell.fillHex },
-                                        ),
-                                    ),
-                                }),
-                            ],
-                        }),
-                    );
-                    const extra = extrasByIndex.get(rowIndex);
-                    if (extra) {
-                        children.push(new Paragraph({ text: "", spacing: { after: 60 } }));
-                        children.push(docxChecklistFindingExtraBox(extra));
-                        children.push(new Paragraph({ text: "", spacing: { after: 120 } }));
-                    }
-                });
 
                 if (planUsesEoshTotals(plan)) {
                     const scores = computeEoshCapabilityScores(
