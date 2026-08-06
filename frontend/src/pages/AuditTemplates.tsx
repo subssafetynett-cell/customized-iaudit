@@ -74,7 +74,11 @@ const AuditTemplates = () => {
         if (auditTemplatesTourStep >= AUDIT_TEMPLATES_TOUR_TOTAL_STEPS) {
             exitAuditTemplatesTour();
             navigate("/getting-started");
-            toast.success("Audit workflow tour complete!");
+            toast.success("Thank you!", {
+                description:
+                    "You have completed the How to start audits workflow tour. You can revisit any step anytime from Start Onboarding.",
+                duration: 8000,
+            });
             return;
         }
         setAuditTemplatesTourStep(auditTemplatesTourStep + 1);

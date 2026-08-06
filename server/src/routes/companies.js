@@ -152,6 +152,35 @@ export function createCompaniesRouter({ authenticateToken, checkTrialExpiration 
 
             const sendCompanies = async (where) => {
                 const fullWhere = { ...where, ...searchWhere };
+                const preferRicherSameNameCompanies = (companies) => {
+                    if (!Array.isArray(companies) || companies.length < 2) return companies;
+                    const byName = new Map();
+                    for (const company of companies) {
+                        const key = String(company?.name || '').trim().toLowerCase() || `__id_${company.id}`;
+                        const siteCount = Array.isArray(company.sites) ? company.sites.length : 0;
+                        const prev = byName.get(key);
+                        if (!prev) {
+                            byName.set(key, company);
+                            continue;
+                        }
+                        const prevCount = Array.isArray(prev.sites) ? prev.sites.length : 0;
+                        if (siteCount > prevCount) {
+                            byName.set(key, company);
+                        } else if (siteCount === prevCount) {
+                            const prevDepts = (prev.sites || []).reduce(
+                                (n, s) => n + (s.departments?.length || 0),
+                                0,
+                            );
+                            const nextDepts = (company.sites || []).reduce(
+                                (n, s) => n + (s.departments?.length || 0),
+                                0,
+                            );
+                            if (nextDepts > prevDepts) byName.set(key, company);
+                        }
+                    }
+                    return Array.from(byName.values()).sort((a, b) => Number(a.id) - Number(b.id));
+                };
+
                 if (!pagination.paginate) {
                     const companies = await prisma.company.findMany({
                         where: fullWhere,
@@ -159,7 +188,8 @@ export function createCompaniesRouter({ authenticateToken, checkTrialExpiration 
                         orderBy: { id: 'asc' },
                         take: pagination.take,
                     });
-                    return res.json(await attachSitesAndDepartments(companies));
+                    const withSites = await attachSitesAndDepartments(companies);
+                    return res.json(preferRicherSameNameCompanies(withSites));
                 }
                 const [total, companies] = await Promise.all([
                     prisma.company.count({ where: fullWhere }),
@@ -172,11 +202,12 @@ export function createCompaniesRouter({ authenticateToken, checkTrialExpiration 
                     }),
                 ]);
                 const withSites = await attachSitesAndDepartments(companies);
+                const enriched = preferRicherSameNameCompanies(withSites);
                 return res.json(
-                    paginatedResponse(withSites, {
+                    paginatedResponse(enriched, {
                         page: pagination.page,
                         limit: pagination.limit,
-                        total,
+                        total: Math.max(total, enriched.length),
                     }),
                 );
             };

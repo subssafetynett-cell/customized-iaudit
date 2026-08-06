@@ -142,7 +142,10 @@ const GapAnalysis = () => {
             { replace: true }
         );
         setShowOnboardingGuide(false);
-        toast.success("Onboarding complete! Open App Instructions anytime for more guidance.");
+        toast.success(
+            "Step 1 complete! Continue with Step 2 — How to start audits?",
+        );
+        navigate("/getting-started?focusSection=how-to-start-audits");
     };
     const userCompany = companies.length > 0 ? companies[0] : null;
 

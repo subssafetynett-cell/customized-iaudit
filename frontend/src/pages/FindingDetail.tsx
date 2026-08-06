@@ -34,6 +34,17 @@ import {
 } from "@/lib/nonconformanceApi";
 import { downloadCapaResponsePdf } from "@/utils/capaResponsePdf";
 import { cn } from "@/lib/utils";
+import { TourStepPopover } from "@/components/TourStepPopover";
+import {
+    AUDIT_FINDINGS_TOUR_STEP,
+    AUDIT_FINDINGS_TOUR_TOTAL_STEPS,
+    clearFindingsTourPath,
+    getAuditFindingsTourStepConfig,
+    getNextFindingsTourStep,
+    getPrevFindingsTourStep,
+    loadFindingsTourPath,
+    type FindingsTourPath,
+} from "@/lib/auditFindingsOnboardingTour";
 
 function findingAssigneeEmail(finding: Finding) {
     if (finding.assignToEmail?.trim()) {
@@ -102,9 +113,54 @@ export default function FindingDetail() {
     const { auditId, findingId } = useParams<{ auditId: string; findingId: string }>();
     const navigate = useNavigate();
     const location = useLocation();
-    const [searchParams] = useSearchParams();
+    const [searchParams, setSearchParams] = useSearchParams();
     const { user } = useStoredUser();
     const responseRef = useRef<HTMLDivElement | null>(null);
+
+    const auditFindingsTourActive = searchParams.get("auditFindingsTour") === "true";
+    const auditFindingsTourStep = Math.min(
+        AUDIT_FINDINGS_TOUR_TOTAL_STEPS,
+        Math.max(1, parseInt(searchParams.get("auditFindingsStep") || "1", 10)),
+    );
+    const findingsTourPath: FindingsTourPath | null =
+        (searchParams.get("findingsTourPath") === "assigned" ||
+        searchParams.get("findingsTourPath") === "raised"
+            ? (searchParams.get("findingsTourPath") as FindingsTourPath)
+            : null) || loadFindingsTourPath();
+    const auditFindingsTourStepConfig =
+        getAuditFindingsTourStepConfig(auditFindingsTourStep);
+
+    const setAuditFindingsTourStep = (step: number) => {
+        setSearchParams(
+            (prev) => {
+                const next = new URLSearchParams(prev);
+                next.set("auditFindingsTour", "true");
+                next.set("auditFindingsStep", String(step));
+                if (findingsTourPath) next.set("findingsTourPath", findingsTourPath);
+                return next;
+            },
+            { replace: true },
+        );
+    };
+
+    const exitAuditFindingsTour = () => {
+        clearFindingsTourPath();
+        setSearchParams(
+            (prev) => {
+                const next = new URLSearchParams(prev);
+                next.delete("auditFindingsTour");
+                next.delete("auditFindingsStep");
+                next.delete("findingsTourPath");
+                return next;
+            },
+            { replace: true },
+        );
+    };
+
+    const tourFindingsHighlight = (step: number) =>
+        auditFindingsTourActive && auditFindingsTourStep === step
+            ? "relative z-[60] ring-[4px] ring-emerald-500/80 ring-offset-2 rounded-xl"
+            : "";
 
     const [finding, setFinding] = useState<Finding | null>(null);
     const [nc, setNc] = useState<NonconformanceSummary | null>(null);
@@ -251,9 +307,89 @@ export default function FindingDetail() {
 
     const openResponseForm = () => {
         setShowResponseForm(true);
+        if (
+            auditFindingsTourActive &&
+            auditFindingsTourStep === AUDIT_FINDINGS_TOUR_STEP.RESPOND
+        ) {
+            setAuditFindingsTourStep(AUDIT_FINDINGS_TOUR_STEP.CAPA_FORM);
+        }
         requestAnimationFrame(() => {
             responseRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
         });
+    };
+
+    useEffect(() => {
+        if (
+            !auditFindingsTourActive ||
+            !canRespond ||
+            loading
+        ) {
+            return;
+        }
+        if (
+            (auditFindingsTourStep === AUDIT_FINDINGS_TOUR_STEP.CAPA_FORM ||
+                auditFindingsTourStep === AUDIT_FINDINGS_TOUR_STEP.SAVE_DRAFT ||
+                auditFindingsTourStep === AUDIT_FINDINGS_TOUR_STEP.SEND) &&
+            !showResponseForm
+        ) {
+            setShowResponseForm(true);
+        }
+    }, [
+        auditFindingsTourActive,
+        auditFindingsTourStep,
+        canRespond,
+        loading,
+        showResponseForm,
+    ]);
+
+    const handleAuditFindingsTourNext = () => {
+        if (auditFindingsTourStep === AUDIT_FINDINGS_TOUR_STEP.RESPOND) {
+            if (canRespond) {
+                toast.message("Click Respond findings to open the CAPA / RCA form.");
+            } else {
+                setAuditFindingsTourStep(AUDIT_FINDINGS_TOUR_STEP.COMPLETE);
+            }
+            return;
+        }
+        if (auditFindingsTourStep >= AUDIT_FINDINGS_TOUR_STEP.COMPLETE) {
+            exitAuditFindingsTour();
+            navigate("/nonconformances?findingsTourHandoff=1");
+            return;
+        }
+        const path: FindingsTourPath =
+            findingsTourPath ??
+            (isAssignee ? "assigned" : "raised");
+        if (
+            auditFindingsTourStep === AUDIT_FINDINGS_TOUR_STEP.DETAILS &&
+            (path === "raised" || !canRespond)
+        ) {
+            setAuditFindingsTourStep(AUDIT_FINDINGS_TOUR_STEP.COMPLETE);
+            return;
+        }
+        setAuditFindingsTourStep(getNextFindingsTourStep(auditFindingsTourStep, path));
+    };
+
+    const handleAuditFindingsTourBack = () => {
+        if (auditFindingsTourStep <= AUDIT_FINDINGS_TOUR_STEP.DETAILS) {
+            const tab =
+                findingsTourPath === "assigned" ? "assigned" : "raised";
+            navigate(
+                `/audit-findings?tab=${tab}&auditFindingsTour=true&auditFindingsStep=${AUDIT_FINDINGS_TOUR_STEP.VIEW}&findingsTourPath=${tab}`,
+            );
+            return;
+        }
+        const path =
+            findingsTourPath ??
+            (isAssignee ? "assigned" : isRaisedByMe ? "raised" : "raised");
+        const prev = getPrevFindingsTourStep(auditFindingsTourStep, path);
+        if (
+            prev < AUDIT_FINDINGS_TOUR_STEP.CAPA_FORM &&
+            showResponseForm &&
+            auditFindingsTourStep >= AUDIT_FINDINGS_TOUR_STEP.CAPA_FORM
+        ) {
+            setShowResponseForm(false);
+        }
+        setAuditFindingsTourStep(prev);
     };
 
     const handleDownloadResponse = async () => {
@@ -298,7 +434,17 @@ export default function FindingDetail() {
 
     return (
         <div className="h-full bg-slate-50/60">
+            {auditFindingsTourActive && (
+                <div className="fixed inset-0 bg-slate-900/10 z-[40] pointer-events-none" />
+            )}
             <div className="w-full px-4 sm:px-6 lg:px-8 py-6 space-y-6">
+                <div
+                    id="tour-step-finding-details"
+                    className={cn(
+                        "space-y-6",
+                        tourFindingsHighlight(AUDIT_FINDINGS_TOUR_STEP.DETAILS),
+                    )}
+                >
                 <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
                     <div className="space-y-2 min-w-0">
                         <Button
@@ -341,9 +487,13 @@ export default function FindingDetail() {
                         ) : null}
                         {canRespond && !showResponseForm ? (
                             <Button
+                                id="tour-step-respond-findings"
                                 type="button"
                                 size="sm"
-                                className="gap-1.5 bg-[#213847] hover:bg-[#213847]/90 text-white"
+                                className={cn(
+                                    "gap-1.5 bg-[#213847] hover:bg-[#213847]/90 text-white",
+                                    tourFindingsHighlight(AUDIT_FINDINGS_TOUR_STEP.RESPOND),
+                                )}
                                 onClick={openResponseForm}
                             >
                                 {isEditingExistingResponse ? (
@@ -436,6 +586,7 @@ export default function FindingDetail() {
                         <FindingDetailPanel finding={finding} />
                     </CardContent>
                 </Card>
+                </div>
 
                 {finding.rejectReason?.trim() && isAssignee ? (
                     <div className="rounded-xl border border-red-200 bg-red-50/70 px-4 py-3">
@@ -620,7 +771,13 @@ export default function FindingDetail() {
                 ) : null}
 
                 {showResponseForm && canRespond ? (
-                    <div ref={responseRef}>
+                    <div
+                        ref={responseRef}
+                        id="tour-step-capa-form"
+                        className={cn(
+                            tourFindingsHighlight(AUDIT_FINDINGS_TOUR_STEP.CAPA_FORM),
+                        )}
+                    >
                         <FindingAssigneeResponseForm
                             key={`${finding.id}-edit-${isEditingExistingResponse ? "1" : "0"}`}
                             finding={finding}
@@ -633,6 +790,14 @@ export default function FindingDetail() {
                                 setShowResponseForm(false);
                                 void loadDetail();
                             }}
+                            highlightSaveDraft={
+                                auditFindingsTourActive &&
+                                auditFindingsTourStep === AUDIT_FINDINGS_TOUR_STEP.SAVE_DRAFT
+                            }
+                            highlightSend={
+                                auditFindingsTourActive &&
+                                auditFindingsTourStep === AUDIT_FINDINGS_TOUR_STEP.SEND
+                            }
                         />
                     </div>
                 ) : null}
@@ -654,6 +819,29 @@ export default function FindingDetail() {
                     </div>
                 ) : null}
             </div>
+
+            {auditFindingsTourActive &&
+                auditFindingsTourStep >= AUDIT_FINDINGS_TOUR_STEP.DETAILS &&
+                auditFindingsTourStepConfig && (
+                    <TourStepPopover
+                        key={auditFindingsTourStep}
+                        targetId={auditFindingsTourStepConfig.targetId}
+                        step={auditFindingsTourStep}
+                        totalSteps={AUDIT_FINDINGS_TOUR_TOTAL_STEPS}
+                        title={auditFindingsTourStepConfig.title}
+                        description={auditFindingsTourStepConfig.description}
+                        position={auditFindingsTourStepConfig.position}
+                        onNext={handleAuditFindingsTourNext}
+                        onBack={handleAuditFindingsTourBack}
+                        onClose={() => {
+                            exitAuditFindingsTour();
+                            navigate("/getting-started");
+                        }}
+                        hideNext={
+                            auditFindingsTourStep === AUDIT_FINDINGS_TOUR_STEP.RESPOND
+                        }
+                    />
+                )}
         </div>
     );
 }

@@ -57,8 +57,13 @@ import {
 } from "@/data/auditTemplates";
 import { TourStepPopover } from "@/components/TourStepPopover";
 import {
+    AUDIT_PLAN_TOUR_STEP,
     AUDIT_PLAN_TOUR_TOTAL_STEPS,
+    type AuditPlanTourContext,
+    clearAuditPlanTourContext,
     getAuditPlanTourStepConfig,
+    loadAuditPlanTourContext,
+    saveAuditPlanTourContext,
 } from "@/lib/auditPlanOnboardingTour";
 
 interface ItineraryItem {
@@ -102,7 +107,11 @@ const CreateAuditPlanPage = () => {
     const navigate = useNavigate();
     const isAuditeeReadOnly = useAuditeeReadOnly();
     const [searchParams, setSearchParams] = useSearchParams();
-    const { execution, program, site, plan } = location.state || {};
+    const restoredTourContext = useMemo(() => loadAuditPlanTourContext(), []);
+    const routeState = (location.state || null) as AuditPlanTourContext | null;
+    const hasRouteState = Boolean(routeState?.execution || routeState?.plan);
+    const { execution, program, site, plan } =
+        (hasRouteState ? routeState : null) || restoredTourContext || {};
     const isEditMode = !!plan;
     const [savedPlanId, setSavedPlanId] = useState<number | null>(plan?.id ?? null);
     const persistedPlanId = plan?.id ?? savedPlanId;
@@ -110,7 +119,10 @@ const CreateAuditPlanPage = () => {
     const auditPlanTourActive = searchParams.get("auditPlanTour") === "true";
     const auditPlanTourStep = Math.min(
         AUDIT_PLAN_TOUR_TOTAL_STEPS,
-        Math.max(4, parseInt(searchParams.get("auditPlanStep") || "4", 10)),
+        Math.max(
+            AUDIT_PLAN_TOUR_STEP.AUDIT_NAME,
+            parseInt(searchParams.get("auditPlanStep") || String(AUDIT_PLAN_TOUR_STEP.AUDIT_NAME), 10),
+        ),
     );
     const auditPlanTourStepConfig = getAuditPlanTourStepConfig(auditPlanTourStep);
 
@@ -139,7 +151,9 @@ const CreateAuditPlanPage = () => {
     };
 
     const tourPlanHighlight = (step: number) =>
-        auditPlanTourActive && auditPlanTourStep === step
+        auditPlanTourActive &&
+        auditPlanTourStep === step &&
+        !previewTemplateId
             ? "relative z-[60] ring-[4px] ring-emerald-500/80 ring-offset-2 rounded-xl"
             : "";
 
@@ -176,6 +190,7 @@ const CreateAuditPlanPage = () => {
         { id: "8", startTime: "16:15", endTime: "16:45", activity: "Report Preparation", notes: "Drafting the preliminary audit report and summarizing key findings." },
         { id: "9", startTime: "16:45", endTime: "17:00", activity: "Closing Meeting", notes: "Presentation of audit findings, conclusions, and next steps." },
     ]);
+    const [highlightedItineraryId, setHighlightedItineraryId] = useState<string | null>(null);
 
     const auditorOptions = useMemo(
         () => mergeAuditorUserOptions(usersEligibleAsAuditors(users), seedAuditors),
@@ -262,13 +277,46 @@ const CreateAuditPlanPage = () => {
 
     // Companies come from useCompanyStore (shared singleton, no duplicate fetch).
 
-    // Safety check for missing state — only redirect when there is no usable state at all
+    // Safety check for missing state — restore from session when tour is active.
     useEffect(() => {
-        if (!isEditMode && !execution && !plan) {
+        if (execution || plan) {
+            if (auditPlanTourActive) {
+                saveAuditPlanTourContext({
+                    execution: execution ?? null,
+                    program: program ?? null,
+                    site: site ?? null,
+                    plan: plan ?? null,
+                });
+            }
+            return;
+        }
+        if (auditPlanTourActive) {
+            const restored = loadAuditPlanTourContext();
+            if (restored?.execution || restored?.plan) {
+                navigate(
+                    `/audit-program/create-plan?auditPlanTour=true&auditPlanStep=${auditPlanTourStep}`,
+                    { replace: true, state: restored },
+                );
+                return;
+            }
+            toast.error("Missing required audit details. Returning to Audit Plan…");
+            navigate(`/audit-program?auditPlanTour=true&auditPlanStep=${AUDIT_PLAN_TOUR_STEP.CREATE_PLAN}`);
+            return;
+        }
+        if (!isEditMode) {
             toast.error("Missing required audit details. Redirecting...");
             navigate("/audit-program");
         }
-    }, [execution, plan, isEditMode, navigate]);
+    }, [
+        execution,
+        plan,
+        program,
+        site,
+        isEditMode,
+        navigate,
+        auditPlanTourActive,
+        auditPlanTourStep,
+    ]);
 
     // Pre-populate data
     useEffect(() => {
@@ -486,18 +534,31 @@ const CreateAuditPlanPage = () => {
     };
 
     const addItineraryItem = () => {
+        const newId = `itinerary-${Date.now()}`;
         const newItem: ItineraryItem = {
-            id: `itinerary-${Date.now()}`,
+            id: newId,
             startTime: "",
             endTime: "",
             activity: "",
             notes: "",
         };
         setItinerary((prev) => [...prev, newItem]);
+        setHighlightedItineraryId(newId);
+
+        // Scroll to and focus the new row after it mounts — keep it selected until replaced/deleted.
+        window.setTimeout(() => {
+            const row = document.getElementById(`itinerary-row-${newId}`);
+            row?.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
+            const activityInput = document.getElementById(
+                `itinerary-activity-${newId}`,
+            ) as HTMLTextAreaElement | HTMLInputElement | null;
+            activityInput?.focus();
+        }, 50);
     };
 
     const removeItineraryItem = (id: string) => {
-        setItinerary(itinerary.filter(item => item.id !== id));
+        setItinerary((prev) => prev.filter((item) => item.id !== id));
+        setHighlightedItineraryId((current) => (current === id ? null : current));
     };
 
     // Drag and Drop Handlers
@@ -553,6 +614,13 @@ const CreateAuditPlanPage = () => {
             toast.error("Auditees can view and download audit plans only.");
             return;
         }
+        if (
+            auditPlanTourActive &&
+            auditPlanTourStep < AUDIT_PLAN_TOUR_STEP.SAVE
+        ) {
+            toast.message("Continue the tour with Next until you reach Save Audit Plan.");
+            return;
+        }
         if (!auditPlanRequiredFieldsValid()) {
             toast.error("Please fill in all required fields (Name, Template, Date, Location).");
             return;
@@ -603,6 +671,37 @@ const CreateAuditPlanPage = () => {
                 if (!updating && saved?.id) {
                     setSavedPlanId(Number(saved.id));
                 }
+                if (auditPlanTourActive && auditPlanTourStep === AUDIT_PLAN_TOUR_STEP.SAVE) {
+                    const createdId =
+                        (!updating && saved?.id != null ? Number(saved.id) : null) ??
+                        persistedPlanId;
+                    const planForList =
+                        saved?.id
+                            ? saved
+                            : plan ?? (createdId != null ? { id: createdId } : null);
+                    saveAuditPlanTourContext({
+                        execution: execution ?? null,
+                        program: program ?? null,
+                        site: site ?? null,
+                        plan: planForList,
+                    });
+                    // Navigate first so Step 16 appears immediately; toast on the list page.
+                    navigate(
+                        `/audit?auditPlanTour=true&auditPlanStep=${AUDIT_PLAN_TOUR_STEP.COMPLETE}${
+                            createdId ? `&highlightPlanId=${createdId}` : ""
+                        }`,
+                        {
+                            state: {
+                                auditPlanTourJustSaved: true,
+                                savedMessage: updating
+                                    ? "Audit Plan updated successfully!"
+                                    : "Audit Plan saved successfully!",
+                                savedPlan: planForList,
+                            },
+                        },
+                    );
+                    return;
+                }
                 toast.success(
                     updating ? "Audit Plan updated successfully!" : "Audit Plan saved successfully!",
                 );
@@ -632,26 +731,44 @@ const CreateAuditPlanPage = () => {
         : undefined;
 
     const handleAuditPlanTourNext = () => {
-        if (auditPlanTourStep === 4 && !auditPlanBasicFieldsValid()) {
-            toast.error("Please complete Audit Name, Date, and Location before continuing.");
+        if (auditPlanTourStep === AUDIT_PLAN_TOUR_STEP.AUDIT_NAME && !auditName.trim()) {
+            toast.error("Please enter an audit name before continuing.");
             return;
         }
-        if (auditPlanTourStep === 5 && !selectedTemplateId) {
+        if (
+            auditPlanTourStep === AUDIT_PLAN_TOUR_STEP.TEMPLATE &&
+            !templatesLockedFromProgram &&
+            !selectedTemplateId
+        ) {
             toast.error("Please select an audit template before continuing.");
             return;
         }
-        if (auditPlanTourStep >= AUDIT_PLAN_TOUR_TOTAL_STEPS) {
+        if (auditPlanTourStep === AUDIT_PLAN_TOUR_STEP.DATE && !auditDate) {
+            toast.error("Please pick an audit date before continuing.");
+            return;
+        }
+        if (auditPlanTourStep === AUDIT_PLAN_TOUR_STEP.LOCATION && !auditLocation.trim()) {
+            toast.error("Please enter a location before continuing.");
+            return;
+        }
+        if (auditPlanTourStep === AUDIT_PLAN_TOUR_STEP.SAVE) {
+            toast.message("Click Save Audit Plan to continue the tour.");
+            return;
+        }
+        if (auditPlanTourStep >= AUDIT_PLAN_TOUR_STEP.COMPLETE) {
+            clearAuditPlanTourContext();
             exitAuditPlanTour();
-            navigate("/getting-started");
-            toast.success("Audit plan tour complete!");
+            navigate("/getting-started?nextAuditWorkflowStep=audits");
             return;
         }
         setAuditPlanTourStep(auditPlanTourStep + 1);
     };
 
     const handleAuditPlanTourBack = () => {
-        if (auditPlanTourStep <= 4) {
-            navigate("/audit-program?auditPlanTour=true&auditPlanStep=3");
+        if (auditPlanTourStep <= AUDIT_PLAN_TOUR_STEP.AUDIT_NAME) {
+            navigate(
+                `/audit-program?auditPlanTour=true&auditPlanStep=${AUDIT_PLAN_TOUR_STEP.CREATE_PLAN}`,
+            );
             return;
         }
         setAuditPlanTourStep(auditPlanTourStep - 1);
@@ -702,7 +819,7 @@ const CreateAuditPlanPage = () => {
                     disabled={isSaving}
                     className={cn(
                         "bg-emerald-600 hover:bg-emerald-700 text-white font-bold shadow-lg shadow-emerald-100 rounded-xl gap-2",
-                        tourPlanHighlight(7),
+                        tourPlanHighlight(AUDIT_PLAN_TOUR_STEP.SAVE),
                     )}
                 >
                     <Save className="w-4 h-4" />
@@ -717,17 +834,11 @@ const CreateAuditPlanPage = () => {
                 </div>
             )}
 
-            <div className={cn("grid grid-cols-1 lg:grid-cols-3 gap-8", isAuditeeReadOnly && "pointer-events-none select-none opacity-95")}>
+            <div className={cn("grid grid-cols-1 lg:grid-cols-3 gap-8 items-start", isAuditeeReadOnly && "pointer-events-none select-none opacity-95")}>
                 {/* Left Column: Core Details */}
-                <div className="lg:col-span-2 space-y-6">
+                <div className="lg:col-span-2 space-y-6 self-start min-w-0">
                     {/* General Information Card */}
-                    <Card
-                        id="tour-step-audit-plan-form"
-                        className={cn(
-                            "border-slate-200 shadow-sm rounded-2xl overflow-hidden",
-                            tourPlanHighlight(4),
-                        )}
-                    >
+                    <Card className="border-slate-200 shadow-sm rounded-2xl overflow-hidden">
                         <CardHeader className="bg-slate-50/50 border-b border-slate-100 pb-4">
                             <CardTitle className="flex items-center gap-2 text-base font-bold text-slate-700">
                                 <FileText className="w-4 h-4 text-emerald-500" />
@@ -735,7 +846,13 @@ const CreateAuditPlanPage = () => {
                             </CardTitle>
                         </CardHeader>
                         <CardContent className="p-6 grid grid-cols-1 md:grid-cols-2 gap-6">
-                            <div className="space-y-2 md:col-span-2">
+                            <div
+                                id="tour-step-audit-plan-name"
+                                className={cn(
+                                    "space-y-2 md:col-span-2",
+                                    tourPlanHighlight(AUDIT_PLAN_TOUR_STEP.AUDIT_NAME),
+                                )}
+                            >
                                 <Label className="text-xs font-bold text-slate-500 uppercase">Audit Name</Label>
                                 <Input
                                     value={auditName}
@@ -751,7 +868,7 @@ const CreateAuditPlanPage = () => {
                                 id="tour-step-audit-plan-template"
                                 className={cn(
                                     "md:col-span-2 rounded-xl border-2 border-indigo-300 bg-gradient-to-br from-indigo-50 to-white p-4 shadow-sm space-y-3",
-                                    tourPlanHighlight(5),
+                                    tourPlanHighlight(AUDIT_PLAN_TOUR_STEP.TEMPLATE),
                                 )}
                             >
                                 <div className="flex items-center justify-between">
@@ -875,7 +992,13 @@ const CreateAuditPlanPage = () => {
                             </div>
 
 
-                            <div className="space-y-2">
+                            <div
+                                id="tour-step-audit-plan-date"
+                                className={cn(
+                                    "space-y-2",
+                                    tourPlanHighlight(AUDIT_PLAN_TOUR_STEP.DATE),
+                                )}
+                            >
                                 <div className="flex items-center justify-between">
                                     <Label className="text-xs font-bold text-slate-500 uppercase">Date</Label>
                                     {!auditDate && <span className="bg-red-50 text-red-600 text-[9px] font-black uppercase px-1.5 py-0.5 rounded-sm">Required</span>}
@@ -911,11 +1034,23 @@ const CreateAuditPlanPage = () => {
                                     </PopoverContent>
                                 </Popover>
                             </div>
-                            <div className="space-y-2">
+                            <div
+                                id="tour-step-audit-plan-criteria"
+                                className={cn(
+                                    "space-y-2",
+                                    tourPlanHighlight(AUDIT_PLAN_TOUR_STEP.CRITERIA),
+                                )}
+                            >
                                 <Label className="text-xs font-bold text-slate-500 uppercase">Audit Criteria</Label>
                                 <Input value={auditCriteria} onChange={e => setAuditCriteria(e.target.value)} className="font-semibold bg-slate-50 border-slate-200" placeholder="e.g. ISO 14001:2015" />
                             </div>
-                            <div className="space-y-2 md:col-span-2">
+                            <div
+                                id="tour-step-audit-plan-location"
+                                className={cn(
+                                    "space-y-2 md:col-span-2",
+                                    tourPlanHighlight(AUDIT_PLAN_TOUR_STEP.LOCATION),
+                                )}
+                            >
                                 <Label className="text-xs font-bold text-slate-500 uppercase">Location & Address</Label>
                                 <div className="relative">
                                     <MapPin className="absolute left-3 top-2.5 w-4 h-4 text-slate-400" />
@@ -986,7 +1121,7 @@ const CreateAuditPlanPage = () => {
                     )}
 
                     {/* Itinerary Section */}
-                    <div id="tour-step-audit-plan-itinerary" className="space-y-4">
+                    <div className="space-y-4 self-start w-full">
                         <div className="flex items-center justify-between">
                             <h3 className="text-lg font-bold text-slate-700 flex items-center gap-2">
                                 <Clock className="w-5 h-5 text-emerald-500" />
@@ -1003,7 +1138,7 @@ const CreateAuditPlanPage = () => {
                                 }}
                                 className={cn(
                                     "bg-slate-900 text-white hover:bg-slate-800 rounded-lg text-xs font-bold gap-2",
-                                    tourPlanHighlight(6),
+                                    tourPlanHighlight(AUDIT_PLAN_TOUR_STEP.ADD_ACTIVITY),
                                 )}
                             >
                                 <Plus className="w-3 h-3" />
@@ -1011,7 +1146,13 @@ const CreateAuditPlanPage = () => {
                             </Button>
                         </div>
 
-                        <div className="bg-white border border-slate-100 rounded-xl shadow-[0_2px_10px_rgba(0,0,0,0.04)] overflow-hidden">
+                        <div
+                            id="tour-step-audit-plan-itinerary"
+                            className={cn(
+                                "bg-white border border-slate-100 rounded-xl shadow-[0_2px_10px_rgba(0,0,0,0.04)] overflow-hidden w-full",
+                                tourPlanHighlight(AUDIT_PLAN_TOUR_STEP.ITINERARY),
+                            )}
+                        >
                             {/* Header Row */}
                             <div className="grid grid-cols-[auto_1fr_1fr_auto] gap-4 bg-slate-50/80 border-b border-slate-100 p-4 py-3">
                                 <div className="w-36 flex items-center pl-8 text-sm font-semibold text-slate-500">Time</div>
@@ -1025,6 +1166,7 @@ const CreateAuditPlanPage = () => {
                                 {itinerary.map((item, index) => (
                                     <div
                                         key={item.id}
+                                        id={`itinerary-row-${item.id}`}
                                         draggable
                                         onDragStart={(e) => handleDragStart(e, index)}
                                         onDragOver={(e) => handleDragOver(e, index)}
@@ -1032,7 +1174,9 @@ const CreateAuditPlanPage = () => {
                                         onDragEnd={handleDragEnd}
                                         className={cn(
                                             "grid grid-cols-[auto_1fr_1fr_auto] gap-4 p-4 items-start group transition-all hover:bg-slate-50/50 relative",
-                                            draggedItemIndex === index ? "bg-emerald-50 opacity-50" : "opacity-100"
+                                            draggedItemIndex === index ? "bg-emerald-50 opacity-50" : "opacity-100",
+                                            highlightedItineraryId === item.id &&
+                                                "z-10 bg-emerald-50/80 ring-[3px] ring-emerald-500 rounded-lg shadow-md",
                                         )}
                                     >
                                         <div className="absolute left-2 top-1/2 -translate-y-1/2 cursor-grab active:cursor-grabbing text-slate-300 hover:text-slate-500 p-1 opacity-0 group-hover:opacity-100 transition-opacity" title="Drag to reorder">
@@ -1060,6 +1204,7 @@ const CreateAuditPlanPage = () => {
                                         {/* Content Inputs */}
                                         <div className="mt-1">
                                             <AutoResizeTextarea
+                                                id={`itinerary-activity-${item.id}`}
                                                 value={item.activity}
                                                 onChange={(e: any) => handleItineraryChange(item.id, 'activity', e.target.value)}
                                                 className="w-full min-h-[32px] h-auto p-1 text-sm font-medium text-slate-700 border-transparent bg-transparent hover:bg-slate-50 focus:bg-white focus:border-slate-200 resize-none transition-colors"
@@ -1076,7 +1221,18 @@ const CreateAuditPlanPage = () => {
                                         </div>
 
                                         <div className="w-8 flex justify-end">
-                                            <Button variant="ghost" size="icon" onClick={() => removeItineraryItem(item.id)} className="w-8 h-8 flex-shrink-0 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-lg opacity-0 group-hover:opacity-100 transition-all">
+                                            <Button
+                                                variant="ghost"
+                                                size="icon"
+                                                onClick={() => removeItineraryItem(item.id)}
+                                                className={cn(
+                                                    "w-8 h-8 flex-shrink-0 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all",
+                                                    highlightedItineraryId === item.id
+                                                        ? "opacity-100 text-red-500"
+                                                        : "opacity-0 group-hover:opacity-100",
+                                                )}
+                                                title="Delete activity"
+                                            >
                                                 <Trash2 className="w-4 h-4" />
                                             </Button>
                                         </div>
@@ -1090,7 +1246,13 @@ const CreateAuditPlanPage = () => {
                 {/* Right Column: Key Personnel & Summary */}
                 <div className="space-y-6">
                     {/* Audit Team Card */}
-                    <Card className="border-slate-200 shadow-sm rounded-2xl overflow-hidden sticky top-24">
+                    <Card
+                        id="tour-step-audit-plan-team"
+                        className={cn(
+                            "border-slate-200 shadow-sm rounded-2xl overflow-hidden sticky top-24",
+                            tourPlanHighlight(AUDIT_PLAN_TOUR_STEP.AUDIT_TEAM),
+                        )}
+                    >
                         <CardHeader className="bg-slate-50/50 border-b border-slate-100 pb-4">
                             <CardTitle className="flex items-center gap-2 text-base font-bold text-slate-700">
                                 <User className="w-4 h-4 text-emerald-500" />
@@ -1170,80 +1332,91 @@ const CreateAuditPlanPage = () => {
                     )}
 
                     {/* Selected Clauses Summary (Moved under Audit Team) */}
-                    {
-                        execution?.clauses && (
-                            <Card className="border-slate-200 shadow-sm rounded-2xl overflow-hidden mt-6">
-                                <CardHeader className="bg-slate-50/50 border-b border-slate-100 pb-4">
-                                    <CardTitle className="flex items-center gap-2 text-base font-bold text-slate-700">
-                                        <FileText className="w-4 h-4 text-emerald-500" />
-                                        Selected Audit Schedule
-                                    </CardTitle>
-                                </CardHeader>
-                                <CardContent className="p-4 bg-slate-50/30">
-                                    <div className="grid gap-3 grid-cols-1">
-                                        {(() => {
-                                            const groups = new Map<string, any[]>();
-                                            execution.clauses.forEach((clause: any) => {
-                                                const lastDashIndex = clause.id.lastIndexOf('-');
-                                                const baseId = lastDashIndex !== -1 ? clause.id.substring(0, lastDashIndex) : clause.id;
-                                                if (!groups.has(baseId)) groups.set(baseId, []);
-                                                groups.get(baseId)!.push(clause);
-                                            });
-                                            return Array.from(groups.values()).map((group, idx) => {
-                                                const byName = new Map<string, { name: string; standards: string[] }>();
-                                                for (const clause of group) {
-                                                    const key = clause.name as string;
-                                                    let row = byName.get(key);
-                                                    if (!row) {
-                                                        row = { name: key, standards: [] };
-                                                        byName.set(key, row);
-                                                    }
-                                                    if (clause.standard && !row.standards.includes(clause.standard)) {
-                                                        row.standards.push(clause.standard);
-                                                    }
+                    <Card
+                        id="tour-step-audit-plan-schedule"
+                        className={cn(
+                            "border-slate-200 shadow-sm rounded-2xl overflow-hidden mt-6",
+                            tourPlanHighlight(AUDIT_PLAN_TOUR_STEP.SCHEDULE),
+                        )}
+                    >
+                        <CardHeader className="bg-slate-50/50 border-b border-slate-100 pb-4">
+                            <CardTitle className="flex items-center gap-2 text-base font-bold text-slate-700">
+                                <FileText className="w-4 h-4 text-emerald-500" />
+                                Selected Audit Schedule
+                            </CardTitle>
+                        </CardHeader>
+                        <CardContent className="p-4 bg-slate-50/30">
+                            {execution?.clauses?.length ? (
+                                <div className="grid gap-3 grid-cols-1">
+                                    {(() => {
+                                        const groups = new Map<string, any[]>();
+                                        execution.clauses.forEach((clause: any) => {
+                                            const lastDashIndex = clause.id.lastIndexOf('-');
+                                            const baseId = lastDashIndex !== -1 ? clause.id.substring(0, lastDashIndex) : clause.id;
+                                            if (!groups.has(baseId)) groups.set(baseId, []);
+                                            groups.get(baseId)!.push(clause);
+                                        });
+                                        return Array.from(groups.values()).map((group, idx) => {
+                                            const byName = new Map<string, { name: string; standards: string[] }>();
+                                            for (const clause of group) {
+                                                const key = clause.name as string;
+                                                let row = byName.get(key);
+                                                if (!row) {
+                                                    row = { name: key, standards: [] };
+                                                    byName.set(key, row);
                                                 }
-                                                const rows = Array.from(byName.values());
-                                                return (
-                                                    <Card key={idx} className="border border-slate-200 shadow-sm bg-white overflow-hidden group hover:shadow-md transition-all">
-                                                        <div className="h-1 bg-emerald-500 w-0 group-hover:w-full transition-all duration-500" />
-                                                        <CardContent className="p-3">
-                                                            <div className="flex flex-col gap-2">
-                                                                {rows.map((row) => (
-                                                                    <div key={row.name} className="flex items-start gap-2 min-w-0">
-                                                                        {row.standards.length > 0 && (
-                                                                            <div className="flex flex-wrap items-center gap-1 shrink-0 pt-0.5">
-                                                                                {row.standards.map((label) => (
-                                                                                    <span
-                                                                                        key={label}
-                                                                                        className="text-[9px] uppercase font-black text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded"
-                                                                                    >
-                                                                                        {label}
-                                                                                    </span>
-                                                                                ))}
-                                                                            </div>
-                                                                        )}
-                                                                        <span className="text-[12px] text-slate-700 font-semibold leading-tight min-w-0 flex-1">
-                                                                            {row.name}
-                                                                        </span>
-                                                                    </div>
-                                                                ))}
-                                                            </div>
-                                                        </CardContent>
-                                                    </Card>
-                                                );
-                                            });
-                                        })()}
-                                    </div>
-                                </CardContent>
-                            </Card>
-                        )
-                    }
+                                                if (clause.standard && !row.standards.includes(clause.standard)) {
+                                                    row.standards.push(clause.standard);
+                                                }
+                                            }
+                                            const rows = Array.from(byName.values());
+                                            return (
+                                                <Card key={idx} className="border border-slate-200 shadow-sm bg-white overflow-hidden group hover:shadow-md transition-all">
+                                                    <div className="h-1 bg-emerald-500 w-0 group-hover:w-full transition-all duration-500" />
+                                                    <CardContent className="p-3">
+                                                        <div className="flex flex-col gap-2">
+                                                            {rows.map((row) => (
+                                                                <div key={row.name} className="flex items-start gap-2 min-w-0">
+                                                                    {row.standards.length > 0 && (
+                                                                        <div className="flex flex-wrap items-center gap-1 shrink-0 pt-0.5">
+                                                                            {row.standards.map((label) => (
+                                                                                <span
+                                                                                    key={label}
+                                                                                    className="text-[9px] uppercase font-black text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded"
+                                                                                >
+                                                                                    {label}
+                                                                                </span>
+                                                                            ))}
+                                                                        </div>
+                                                                    )}
+                                                                    <span className="text-[12px] text-slate-700 font-semibold leading-tight min-w-0 flex-1">
+                                                                        {row.name}
+                                                                    </span>
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                    </CardContent>
+                                                </Card>
+                                            );
+                                        });
+                                    })()}
+                                </div>
+                            ) : (
+                                <p className="text-sm text-slate-500">
+                                    No scheduled clauses or modules are linked to this period yet.
+                                </p>
+                            )}
+                        </CardContent>
+                    </Card>
                 </div>
             </div>
 
             {/* Template Preview Modal */}
-            <Dialog open={!!previewTemplateId && !!previewTemplate} onOpenChange={() => setPreviewTemplateId(null)}>
-                <DialogContent className="max-w-2xl max-h-[80vh] overflow-y-auto">
+            <Dialog
+                open={!!previewTemplateId && !!previewTemplate}
+                onOpenChange={() => setPreviewTemplateId(null)}
+            >
+                <DialogContent className="max-w-2xl max-h-[80vh] overflow-y-auto z-[30001]">
                     <DialogHeader>
                         <DialogTitle>{previewTemplate?.title}</DialogTitle>
                         <DialogDescription>{previewTemplate?.description}</DialogDescription>
@@ -1319,7 +1492,11 @@ const CreateAuditPlanPage = () => {
                 </DialogContent>
             </Dialog>
 
-            {auditPlanTourActive && auditPlanTourStepConfig && auditPlanTourStep >= 4 && (
+            {auditPlanTourActive &&
+                auditPlanTourStepConfig &&
+                auditPlanTourStep >= AUDIT_PLAN_TOUR_STEP.AUDIT_NAME &&
+                auditPlanTourStep <= AUDIT_PLAN_TOUR_STEP.SAVE &&
+                !previewTemplateId && (
                 <TourStepPopover
                     key={auditPlanTourStep}
                     targetId={auditPlanTourStepConfig.targetId}
@@ -1330,9 +1507,10 @@ const CreateAuditPlanPage = () => {
                     position={auditPlanTourStepConfig.position}
                     onNext={handleAuditPlanTourNext}
                     onBack={handleAuditPlanTourBack}
-                    hideNext={auditPlanTourStep === 7}
-                    disableShadow={auditPlanTourStep === 6}
+                    disableShadow={auditPlanTourStep === AUDIT_PLAN_TOUR_STEP.ADD_ACTIVITY}
+                    hideNext={false}
                     onClose={() => {
+                        clearAuditPlanTourContext();
                         exitAuditPlanTour();
                         navigate("/getting-started");
                     }}
