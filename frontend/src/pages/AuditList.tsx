@@ -169,8 +169,6 @@ const AuditList = () => {
     const [auditPlans, setAuditPlans] = useState<any[]>([]);
     const [searchQuery, setSearchQuery] = useState("");
     const [typeFilter, setTypeFilter] = useState<AuditTypeFilter>("all");
-    /** Status tab — default Planned; each click fetches that status from the API. */
-    const [statusTab, setStatusTab] = useState<AuditStatusTab>("planned");
     /** Default: latest audit date first. Audit column sorts by module / ISO type label. */
     const [sortKey, setSortKey] = useState<AuditListSortKey>("date");
     const [sortDir, setSortDir] = useState<AuditListSortDir>("desc");
@@ -201,6 +199,16 @@ const AuditList = () => {
     );
     const auditExecuteTourStepConfig =
         getAuditExecuteTourStepConfig(auditExecuteTourStep);
+
+    const statusFromUrl = searchParams.get("status");
+    const initialStatusTab: AuditStatusTab =
+        statusFromUrl === "planned" ||
+        statusFromUrl === "in_progress" ||
+        statusFromUrl === "completed"
+            ? statusFromUrl
+            : "planned";
+    /** Status tab — default Planned; each click fetches that status from the API. */
+    const [statusTab, setStatusTab] = useState<AuditStatusTab>(initialStatusTab);
 
     const setAuditExecuteTourStep = (step: number) => {
         setSearchParams(
@@ -248,6 +256,28 @@ const AuditList = () => {
         return () => window.clearTimeout(t);
     }, [searchQuery]);
 
+    // After creating a plan, land on Planned with filters cleared so the new row is visible.
+    useEffect(() => {
+        if (searchParams.get("saved") !== "1") return;
+        setStatusTab("planned");
+        setSelectedSite("all");
+        setTypeFilter("all");
+        setSearchQuery("");
+        setDebouncedSearch("");
+        setCurrentPage(1);
+        hasLoadedOnceRef.current = false;
+        setSearchParams(
+            (prev) => {
+                const next = new URLSearchParams(prev);
+                next.delete("saved");
+                next.set("status", "planned");
+                return next;
+            },
+            { replace: true },
+        );
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot after save redirect
+    }, [searchParams.get("saved")]);
+
     useEffect(() => {
         setCurrentPage(1);
     }, [debouncedSearch, selectedSite, typeFilter, statusTab]);
@@ -276,6 +306,14 @@ const AuditList = () => {
                 order: dateOrderForApi,
             });
             const res = await apiFetch(`/audit-plans${qs}`);
+            if (!res.ok) {
+                const errBody = await res.json().catch(() => ({}));
+                throw new Error(
+                    (errBody as { error?: string; details?: string })?.details ||
+                        (errBody as { error?: string })?.error ||
+                        `Failed to load audit plans (${res.status})`,
+                );
+            }
             const data = await res.json();
             const parsed = parsePaginatedResponse<any>(data, currentPage, itemsPerPage);
             setAuditPlans(parsed.items);

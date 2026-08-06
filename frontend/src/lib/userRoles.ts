@@ -7,6 +7,8 @@ export function canManageOrgUsers(
         .trim()
         .toLowerCase();
     if (role === "superadmin" || role === "admin") return true;
+    // Lead auditors may edit the org user directory (confirmed by /users/manage-access).
+    if (role === "lead_auditor") return true;
     // Organization root accounts (no creator) manage users in their org; auditees never may.
     if ((user.creatorId == null || user.creatorId === undefined) && role !== "auditee") {
         return true;

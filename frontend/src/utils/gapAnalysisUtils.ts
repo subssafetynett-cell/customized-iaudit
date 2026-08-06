@@ -134,6 +134,9 @@ export const generatePDF = async (
         ["Location of Audit", analysisData.location],
         ["Company Representatives", analysisData.representatives],
         ["Name of Auditor", analysisData.auditorName],
+        ...(analysisData.auditorPosition
+            ? [["Auditor Position", analysisData.auditorPosition]]
+            : []),
         ["Contact email", analysisData.contactEmail],
         ["Scope of Audit", analysisData.scope]
     ];
@@ -470,6 +473,9 @@ export const generateWord = async (
         ["Location of Audit", analysisData.location],
         ["Company Representatives", analysisData.representatives],
         ["Name of Auditor", analysisData.auditorName],
+        ...(analysisData.auditorPosition
+            ? [["Auditor Position", analysisData.auditorPosition]]
+            : []),
         ["Contact email", analysisData.contactEmail],
         ["Scope of Audit", analysisData.scope]
     ].map(([key, value]) => (

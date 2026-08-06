@@ -30,27 +30,37 @@ export function mediaToReportSources(
         }));
 }
 
-export type ClauseEvidenceSegment = {
-    clauseLabel: string;
-    sources: ReportEvidenceSource[];
-    deferred?: boolean;
-};
+/** Stable fingerprint for an evidence blob (ignores display context). */
+export function evidenceContentSignature(source: {
+    name?: string;
+    data?: string;
+    type?: string;
+}): string {
+    const data = String(source.data || "");
+    // Prefer full data URL when short; otherwise name + type + head/tail of payload.
+    if (data.length <= 120) return data;
+    return `${source.name || ""}::${source.type || ""}::${data.slice(0, 64)}::${data.slice(-64)}::${data.length}`;
+}
 
 export function mergeEvidenceSources(
     target: ReportEvidenceSource[],
     incoming: ReportEvidenceSource[],
 ): ReportEvidenceSource[] {
-    const seen = new Set(
-        target.map((item) => `${item.context}::${item.name}::${item.data.slice(0, 40)}`),
-    );
+    const seen = new Set(target.map((item) => evidenceContentSignature(item)));
     for (const item of incoming) {
-        const sig = `${item.context}::${item.name}::${item.data.slice(0, 40)}`;
+        const sig = evidenceContentSignature(item);
         if (seen.has(sig)) continue;
         seen.add(sig);
         target.push(item);
     }
     return target;
 }
+
+export type ClauseEvidenceSegment = {
+    clauseLabel: string;
+    sources: ReportEvidenceSource[];
+    deferred?: boolean;
+};
 
 function collectMediaForChecklistIndex(
     clauseFiles: Record<string, AuditEvidenceMedia[]>,
@@ -234,7 +244,7 @@ export function collectShownEvidenceSignatures(
     const sigs = new Set<string>();
     for (const segment of segments) {
         for (const source of segment.sources) {
-            sigs.add(`${source.context}::${source.name}::${source.data.slice(0, 40)}`);
+            sigs.add(evidenceContentSignature(source));
         }
     }
     return sigs;
@@ -244,8 +254,5 @@ export function filterUnshownEvidenceSources(
     allSources: ReportEvidenceSource[],
     shown: Set<string>,
 ): ReportEvidenceSource[] {
-    return allSources.filter((source) => {
-        const sig = `${source.context}::${source.name}::${source.data.slice(0, 40)}`;
-        return !shown.has(sig);
-    });
+    return allSources.filter((source) => !shown.has(evidenceContentSignature(source)));
 }

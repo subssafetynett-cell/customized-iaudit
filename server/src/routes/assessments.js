@@ -85,11 +85,23 @@ export function createAssessmentsRouter({ authenticateToken, checkTrialExpiratio
                 where: { userId: storeOwnerId },
             });
             const ownedExisting = filterGapAnalysesForUser(existing?.analyses, storeOwnerId);
+            const incomingAnalyses =
+                analyses !== undefined
+                    ? stampGapAnalysesForUser(
+                          filterGapAnalysesForUser(analyses, storeOwnerId),
+                          storeOwnerId,
+                      )
+                    : undefined;
+            // Refuse accidental empty wipe of an existing store (use DELETE for removals).
+            const safeAnalyses =
+                incomingAnalyses !== undefined &&
+                incomingAnalyses.length === 0 &&
+                ownedExisting.length > 0 &&
+                req.body?.forceReplaceAnalyses !== true
+                    ? ownedExisting
+                    : incomingAnalyses;
             const data = {
-                analyses:
-                    analyses !== undefined
-                        ? stampGapAnalysesForUser(filterGapAnalysesForUser(analyses, storeOwnerId), storeOwnerId)
-                        : ownedExisting,
+                analyses: safeAnalyses !== undefined ? safeAnalyses : ownedExisting,
                 draft:
                     draft !== undefined
                         ? draft === null
@@ -197,14 +209,22 @@ export function createAssessmentsRouter({ authenticateToken, checkTrialExpiratio
                 where: { userId: storeOwnerId },
             });
             const ownedExisting = filterSelfAssessmentsForUser(existing?.assessments, storeOwnerId);
+            const incomingAssessments =
+                assessments !== undefined
+                    ? stampSelfAssessmentsForUser(
+                          filterSelfAssessmentsForUser(assessments, storeOwnerId),
+                          storeOwnerId,
+                      )
+                    : undefined;
+            const safeAssessments =
+                incomingAssessments !== undefined &&
+                incomingAssessments.length === 0 &&
+                ownedExisting.length > 0 &&
+                req.body?.forceReplaceAssessments !== true
+                    ? ownedExisting
+                    : incomingAssessments;
             const data = {
-                assessments:
-                    assessments !== undefined
-                        ? stampSelfAssessmentsForUser(
-                              filterSelfAssessmentsForUser(assessments, storeOwnerId),
-                              storeOwnerId,
-                          )
-                        : ownedExisting,
+                assessments: safeAssessments !== undefined ? safeAssessments : ownedExisting,
                 draft:
                     draft !== undefined
                         ? draft === null
@@ -288,11 +308,23 @@ export function createAssessmentsRouter({ authenticateToken, checkTrialExpiratio
             const existing = await prisma.userGapAnalysisStore.findUnique({
                 where: { userId: actorId },
             });
+            const ownedExisting = filterGapAnalysesForUser(existing?.analyses, actorId);
+            const incomingAnalyses =
+                analyses !== undefined
+                    ? stampGapAnalysesForUser(
+                          filterGapAnalysesForUser(analyses, actorId),
+                          actorId,
+                      )
+                    : undefined;
+            const safeAnalyses =
+                incomingAnalyses !== undefined &&
+                incomingAnalyses.length === 0 &&
+                ownedExisting.length > 0 &&
+                req.body?.forceReplaceAnalyses !== true
+                    ? ownedExisting
+                    : incomingAnalyses;
             const data = {
-                analyses:
-                    analyses !== undefined
-                        ? stampGapAnalysesForUser(analyses, actorId)
-                        : filterGapAnalysesForUser(existing?.analyses, actorId),
+                analyses: safeAnalyses !== undefined ? safeAnalyses : ownedExisting,
                 draft:
                     draft !== undefined
                         ? draft === null
@@ -333,14 +365,22 @@ export function createAssessmentsRouter({ authenticateToken, checkTrialExpiratio
                 where: { userId: actorId },
             });
             const ownedExisting = filterSelfAssessmentsForUser(existing?.assessments, actorId);
+            const incomingAssessments =
+                assessments !== undefined
+                    ? stampSelfAssessmentsForUser(
+                          filterSelfAssessmentsForUser(assessments, actorId),
+                          actorId,
+                      )
+                    : undefined;
+            const safeAssessments =
+                incomingAssessments !== undefined &&
+                incomingAssessments.length === 0 &&
+                ownedExisting.length > 0 &&
+                req.body?.forceReplaceAssessments !== true
+                    ? ownedExisting
+                    : incomingAssessments;
             const data = {
-                assessments:
-                    assessments !== undefined
-                        ? stampSelfAssessmentsForUser(
-                              filterSelfAssessmentsForUser(assessments, actorId),
-                              actorId,
-                          )
-                        : ownedExisting,
+                assessments: safeAssessments !== undefined ? safeAssessments : ownedExisting,
                 draft:
                     draft !== undefined
                         ? draft === null

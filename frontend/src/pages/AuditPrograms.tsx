@@ -546,6 +546,8 @@ const AuditPrograms = () => {
     const [departmentSearch, setDepartmentSearch] = useState("");
     const [auditorSearch, setAuditorSearch] = useState("");
     const [selectedCells, setSelectedCells] = useState<Record<string, boolean>>({});
+    /** Module grid cells filled by "Select all modules" — Clear all removes only these. */
+    const selectAllModuleCellKeysRef = useRef<Set<string>>(new Set());
     const [customRows, setCustomRows] = useState<{ id: string, text: string }[]>([]);
     const [programStartDate, setProgramStartDate] = useState<Date>(new Date());
 
@@ -597,16 +599,6 @@ const AuditPrograms = () => {
         const loadFormBootstrap = async () => {
             try {
                 const user = JSON.parse(localStorage.getItem('user') || '{}');
-                const [sitesRes, companiesRes, usersRes] = await Promise.all([
-                    apiFetch("/sites"),
-                    apiFetch("/companies"),
-                    apiFetch("/users"),
-                ]);
-                if (cancelled) return;
-
-                const sitesData = sitesRes.ok ? await sitesRes.json() : [];
-                const companiesData = companiesRes.ok ? await companiesRes.json() : [];
-                let usersData = usersRes.ok ? await usersRes.json() : [];
                 const unwrapList = (payload: unknown) =>
                     Array.isArray(payload)
                         ? payload
@@ -615,6 +607,35 @@ const AuditPrograms = () => {
                           : Array.isArray((payload as { items?: unknown })?.items)
                             ? (payload as { items: unknown[] }).items
                             : [];
+
+                const fetchAllPages = async (basePath: string, pageSize: number) => {
+                    const all: unknown[] = [];
+                    let page = 1;
+                    let totalPages = 1;
+                    do {
+                        const res = await apiFetch(
+                            `${basePath}?page=${page}&pageSize=${pageSize}&_t=${Date.now()}`,
+                        );
+                        if (!res.ok) break;
+                        const data = await res.json();
+                        const parsed = parsePaginatedResponse<unknown>(data, page, pageSize);
+                        const rows =
+                            parsed.items.length > 0 ? parsed.items : unwrapList(data);
+                        all.push(...rows);
+                        totalPages = Math.max(1, Number(parsed.totalPages) || 1);
+                        page += 1;
+                    } while (page <= totalPages && page <= 50);
+                    return all;
+                };
+
+                const [sitesListRaw, companiesListRaw, usersRes] = await Promise.all([
+                    fetchAllPages("/sites", 200),
+                    fetchAllPages("/companies", 100),
+                    apiFetch("/users"),
+                ]);
+                if (cancelled) return;
+
+                let usersData = usersRes.ok ? await usersRes.json() : [];
                 usersData = unwrapList(usersData);
 
                 if (user && user.id) {
@@ -627,8 +648,8 @@ const AuditPrograms = () => {
                     }
                 }
 
-                let sitesList = unwrapList(sitesData) as any[];
-                const companiesList = unwrapList(companiesData) as any[];
+                let sitesList = sitesListRaw as any[];
+                const companiesList = companiesListRaw as any[];
                 if (sitesList.length === 0 && companiesList.length > 0) {
                     sitesList = sitesFromCompanies(companiesList);
                 }
@@ -790,10 +811,46 @@ const AuditPrograms = () => {
 
     const toggleCell = (row: number | string, col: number) => {
         if (view === "view") return;
+
+        // Custom schedule rows use string keys (e.g. custom_${id})
+        if (typeof row === "string") {
+            const key = `${row}-${col}`;
+            setSelectedCells((prev) => ({
+                ...prev,
+                [key]: !prev[key],
+            }));
+            return;
+        }
+
+        const clause = CLAUSE_MATRIX[row];
+        // Main section heading (blue row): select/deselect all clauses under that section for this period
+        if (clause && isMainClauseHeading(clause)) {
+            const sectionId = clause.id;
+            const indicesToToggle = CLAUSE_MATRIX.map((c, i) => ({ c, i })).filter(({ c }) => {
+                const underSection = c.id === sectionId || c.id.startsWith(`${sectionId}.`);
+                if (!underSection) return false;
+                if (selectedStandards.length === 1 && !isMainClauseHeading(c)) {
+                    const text = clauseTextForStandard(c, selectedStandards[0]);
+                    if (text === "Corresponding Clause does not exist") return false;
+                }
+                return true;
+            }).map(({ i }) => i);
+
+            setSelectedCells((prev) => {
+                const nextChecked = !prev[`${row}-${col}`];
+                const next = { ...prev };
+                for (const idx of indicesToToggle) {
+                    next[`${idx}-${col}`] = nextChecked;
+                }
+                return next;
+            });
+            return;
+        }
+
         const key = `${row}-${col}`;
-        setSelectedCells(prev => ({
+        setSelectedCells((prev) => ({
             ...prev,
-            [key]: !prev[key]
+            [key]: !prev[key],
         }));
     };
 
@@ -838,7 +895,19 @@ const AuditPrograms = () => {
         }
 
         const siteDeptIds = siteDepartments.map((dept) => dept.id);
-        const departmentIdsToSave = selectedDepartmentIds.filter((id) => siteDeptIds.includes(id));
+        // If site departments have not loaded yet, keep the user's selection instead of wiping to [].
+        const departmentIdsToSave =
+            siteDepartments.length > 0
+                ? selectedDepartmentIds.filter((id) => siteDeptIds.includes(id))
+                : selectedDepartmentIds;
+        if (
+            siteDepartments.length === 0 &&
+            selectedDepartmentIds.length > 0 &&
+            selectedSite
+        ) {
+            toast.error("Site departments are still loading. Wait a moment and save again.");
+            return;
+        }
         const departmentNamesToSave = selectedDepartments
             .filter((dept) => departmentIdsToSave.includes(dept.id))
             .map((dept) => dept.name);
@@ -1065,6 +1134,7 @@ const AuditPrograms = () => {
         setDepartmentSearch("");
         setAuditorSearch("");
         setSelectedCells({});
+        selectAllModuleCellKeysRef.current = new Set();
         setCustomRows([]);
         setProgramStartDate(new Date());
         setShowSchedule(false);
@@ -1497,43 +1567,75 @@ const AuditPrograms = () => {
                       .map(standardDisplayLabel)
                       .join(", ")
                 : "N/A";
+            const departmentsLabel = formatDepartmentNames(
+                resolveDepartmentsByIds(
+                    getDepartmentIdsFromScheduleData(program.scheduleData),
+                    companies,
+                ),
+            );
+
+            const detailsBorder = {
+                top: { style: BorderStyle.SINGLE, size: 4, color: "CBD5E1" },
+                bottom: { style: BorderStyle.SINGLE, size: 4, color: "CBD5E1" },
+                left: { style: BorderStyle.SINGLE, size: 4, color: "CBD5E1" },
+                right: { style: BorderStyle.SINGLE, size: 4, color: "CBD5E1" },
+            };
+
+            const detailsRows = [
+                ["Program Name", program.name || "N/A"],
+                [isModuleProgram ? "Modules" : "Standard", standardsLabel],
+                ["Frequency", program.frequency || "N/A"],
+                ["Site", program.site?.name || "N/A"],
+                ["Departments", departmentsLabel || "N/A"],
+                ["Lead Auditor", people.leadAuditor || "N/A"],
+                ["Auditors", people.auditors || "N/A"],
+                ["Company", company.name || "N/A"],
+            ].map(
+                ([label, value]) =>
+                    new DocxTableRow({
+                        children: [
+                            new DocxTableCell({
+                                width: { size: 30, type: WidthType.PERCENTAGE },
+                                shading: { fill: "F1F5F9" },
+                                borders: detailsBorder,
+                                verticalAlign: AlignmentType.CENTER,
+                                children: [
+                                    new Paragraph({
+                                        children: [
+                                            new TextRun({ text: String(label), bold: true, size: 20 }),
+                                        ],
+                                    }),
+                                ],
+                            }),
+                            new DocxTableCell({
+                                width: { size: 70, type: WidthType.PERCENTAGE },
+                                borders: detailsBorder,
+                                verticalAlign: AlignmentType.CENTER,
+                                children: [
+                                    new Paragraph({
+                                        children: [
+                                            new TextRun({ text: String(value || "N/A"), size: 20 }),
+                                        ],
+                                    }),
+                                ],
+                            }),
+                        ],
+                    }),
+            );
+
+            const detailsTable = new DocxTable({
+                width: { size: 100, type: WidthType.PERCENTAGE },
+                rows: detailsRows,
+            });
+
             children.push(
                 new Paragraph({
                     text: "Audit Program Schedule",
                     heading: HeadingLevel.HEADING_1,
                     spacing: { after: 200 },
                 }),
-                new Paragraph({ text: `Program Name: ${program.name}` }),
-                new Paragraph({
-                    text: `${isModuleProgram ? "Modules" : "Standard"}: ${standardsLabel}`,
-                }),
-                new Paragraph({ text: `Frequency: ${program.frequency}` }),
-                new Paragraph({ text: `Site: ${program.site?.name || "N/A"}` }),
-                new Paragraph({
-                    text: `Departments: ${formatDepartmentNames(
-                        resolveDepartmentsByIds(
-                            getDepartmentIdsFromScheduleData(program.scheduleData),
-                            companies,
-                        ),
-                    )}`,
-                }),
-                new Paragraph({ text: `Lead Auditor: ${people.leadAuditor}` }),
-                new Paragraph({
-                    text: `Auditors: ${people.auditors}`,
-                    spacing: { after: 160 },
-                }),
-                new Paragraph({
-                    children: [new TextRun({ text: "Company:", bold: true })],
-                    spacing: { after: 80 },
-                }),
-            );
-
-            children.push(
-                new Paragraph({
-                    children: [new TextRun({ text: company.name, bold: true, size: 28 })],
-                    indent: { left: 720 },
-                    spacing: { after: 240 },
-                }),
+                detailsTable,
+                new Paragraph({ text: "", spacing: { after: 240 } }),
             );
 
             children.push(table);
@@ -1865,6 +1967,7 @@ const AuditPrograms = () => {
                                         setModuleFamily(null);
                                         setSelectedStandards([]);
                                         setSelectedCells({});
+                                        selectAllModuleCellKeysRef.current = new Set();
                                         setCustomRows([]);
                                         setShowSchedule(false);
                                     }}
@@ -1942,6 +2045,7 @@ const AuditPrograms = () => {
                                                         setModuleFamily("eosh");
                                                         setSelectedStandards([]);
                                                         setSelectedCells({});
+                                                        selectAllModuleCellKeysRef.current = new Set();
                                                         setCustomRows([]);
                                                         setShowSchedule(false);
                                                     }
@@ -1968,6 +2072,7 @@ const AuditPrograms = () => {
                                                         setModuleFamily("qfs-kore");
                                                         setSelectedStandards([]);
                                                         setSelectedCells({});
+                                                        selectAllModuleCellKeysRef.current = new Set();
                                                         setCustomRows([]);
                                                         setShowSchedule(false);
                                                     }
@@ -2586,32 +2691,65 @@ const AuditPrograms = () => {
                                             variant="outline"
                                             className="rounded-xl border-emerald-200 text-emerald-800 hover:bg-emerald-50"
                                             onClick={() => {
-                                                const allSelected = activeAuditModules.every((m) =>
-                                                    selectedStandards.includes(m.value),
+                                                const selectAllKeys = selectAllModuleCellKeysRef.current;
+                                                const allHaveSelection = activeAuditModules.every((_, rowIndex) =>
+                                                    periods.some((_, colIndex) =>
+                                                        Boolean(selectedCells[`${rowIndex}-${colIndex}`]),
+                                                    ),
                                                 );
-                                                if (allSelected) {
-                                                    setSelectedStandards([]);
-                                                    setSelectedCells((prev) => {
-                                                        const next: Record<string, boolean> = {};
-                                                        Object.keys(prev).forEach((key) => {
-                                                            if (key.startsWith("custom_")) next[key] = prev[key];
-                                                        });
-                                                        return next;
-                                                    });
-                                                } else {
-                                                    setSelectedStandards(activeAuditModules.map((m) => m.value));
+
+                                                if (allHaveSelection) {
+                                                    // Deselect only cells added by Select All; keep individual picks
                                                     setSelectedCells((prev) => {
                                                         const next = { ...prev };
-                                                        activeAuditModules.forEach((_, rowIndex) => {
-                                                            // Mark the first period/month for every module
-                                                            next[`${rowIndex}-0`] = true;
+                                                        selectAllKeys.forEach((key) => {
+                                                            delete next[key];
                                                         });
+
+                                                        const remainingStandards = activeAuditModules
+                                                            .filter((_, rowIndex) =>
+                                                                periods.some(
+                                                                    (_, colIndex) =>
+                                                                        Boolean(next[`${rowIndex}-${colIndex}`]),
+                                                                ),
+                                                            )
+                                                            .map((m) => m.value);
+                                                        setSelectedStandards(remainingStandards);
                                                         return next;
                                                     });
+                                                    selectAllModuleCellKeysRef.current = new Set();
+                                                    return;
                                                 }
+
+                                                // Select All: fill only modules that have no period selected yet
+                                                const addedKeys: string[] = [];
+                                                activeAuditModules.forEach((_, rowIndex) => {
+                                                    const hasAny = periods.some((_, colIndex) =>
+                                                        Boolean(selectedCells[`${rowIndex}-${colIndex}`]),
+                                                    );
+                                                    if (hasAny) return;
+                                                    addedKeys.push(`${rowIndex}-0`);
+                                                });
+                                                setSelectedCells((prev) => {
+                                                    const next = { ...prev };
+                                                    addedKeys.forEach((key) => {
+                                                        next[key] = true;
+                                                    });
+                                                    return next;
+                                                });
+                                                addedKeys.forEach((k) => selectAllKeys.add(k));
+                                                setSelectedStandards((stdPrev) => {
+                                                    const next = new Set(stdPrev);
+                                                    activeAuditModules.forEach((m) => next.add(m.value));
+                                                    return Array.from(next);
+                                                });
                                             }}
                                         >
-                                            {activeAuditModules.every((m) => selectedStandards.includes(m.value))
+                                            {activeAuditModules.every((_, rowIndex) =>
+                                                periods.some((_, colIndex) =>
+                                                    Boolean(selectedCells[`${rowIndex}-${colIndex}`]),
+                                                ),
+                                            )
                                                 ? "Clear all modules"
                                                 : "Select all modules"}
                                         </Button>
@@ -2697,6 +2835,8 @@ const AuditPrograms = () => {
                                                                           onClick={() => {
                                                                               if (view === "view") return;
                                                                               const nextChecked = !isChecked;
+                                                                              // Individual clicks own the cell — Clear all must not remove them
+                                                                              selectAllModuleCellKeysRef.current.delete(cellKey);
                                                                               setSelectedCells((prev) => {
                                                                                   const next = { ...prev };
                                                                                   if (nextChecked) next[cellKey] = true;
@@ -2897,51 +3037,6 @@ const AuditPrograms = () => {
                                 )}
                             </div>
 
-                            {selectedClausesList.length > 0 && (
-                                <div className="space-y-4 pt-10 border-t border-slate-200">
-                                    <h3 className="text-xl font-bold text-slate-800 flex items-center gap-2">
-                                        Selected Audit Schedule
-                                    </h3>
-                                    <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-                                        {selectedClausesList.map((item, idx) => (
-                                            <Card key={idx} className="border-none shadow-sm bg-white overflow-hidden group hover:shadow-md transition-all">
-                                                <div className="h-1 bg-emerald-500 w-0 group-hover:w-full transition-all duration-500" />
-                                                <CardContent className="p-4">
-                                                    <div className="text-[12px] font-bold text-slate-800 leading-tight mb-3">
-                                                        {criteriaType === "module" ? (
-                                                            <span className="text-slate-700 font-semibold">
-                                                                {item.clause.iso9001}
-                                                            </span>
-                                                        ) : (
-                                                            selectedStandards.map(std => {
-                                                                const cellText = clauseTextForStandard(item.clause, std);
-                                                                if (cellText === "Corresponding Clause does not exist") return null;
-
-                                                                const label = standardBadgeLabel(std);
-
-                                                                return (
-                                                                    <div key={std} className="mb-1 pb-1 border-b border-slate-50 last:border-0">
-                                                                        <span className="text-[9px] uppercase font-black text-emerald-600 mr-2 bg-emerald-50 px-1 rounded">{label}</span>
-                                                                        <span className="text-slate-700 font-semibold">{cellText}</span>
-                                                                    </div>
-                                                                )
-                                                            })
-                                                        )}
-                                                    </div>
-                                                    <div className="flex flex-wrap gap-2">
-                                                        {item.periods.map(p => (
-                                                            <Badge key={p} className="bg-emerald-50 text-emerald-700 hover:bg-emerald-100 border-emerald-100 text-[9px] font-bold tracking-wider">
-                                                                {p}
-                                                            </Badge>
-                                                        ))}
-                                                    </div>
-                                                </CardContent>
-                                            </Card>
-                                        ))}
-                                    </div>
-                                </div>
-                            )}
-
                             {view !== "view" && (
                                 <div className="pt-10 flex justify-end">
                                     <Button
@@ -2994,7 +3089,7 @@ const AuditPrograms = () => {
                         <AlertDialogTitle>Are you absolutely sure?</AlertDialogTitle>
                         <AlertDialogDescription>
                             This action cannot be undone. This will permanently delete the audit program
-                            and remove all associated schedule data.
+                            and all audit plans created from it.
                         </AlertDialogDescription>
                     </AlertDialogHeader>
                     <AlertDialogFooter>

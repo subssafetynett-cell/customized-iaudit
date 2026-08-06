@@ -44,7 +44,8 @@ function isNonEmptyString(v) {
 function isMeaningfulFormText(v) {
     if (typeof v !== 'string') return false;
     const t = v.trim();
-    return t.length > 0 && t !== '—';
+    if (!t || t === '—' || t === '[omitted]') return false;
+    return true;
 }
 
 // Count only fields users actually enter (avoid defaults like docNumber/reportTitle/revisionNo).

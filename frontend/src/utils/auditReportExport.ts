@@ -62,6 +62,7 @@ import {
     isModuleAuditPlan,
     normalizeReportNonConformances,
     resolveChecklistContent,
+    resolveChecklistContentWithAnswers,
     resolveModuleAuditFacetCategory,
     resolveQfsScoreModeForPlan,
     resolveReportManagementSystemLabel,
@@ -232,12 +233,14 @@ function buildReportChecklistSection(
     clauseFiles: Record<string, AuditEvidenceMedia[]>,
     genericFiles: Record<string, AuditEvidenceMedia[]>,
     isModule: boolean,
+    isClauseSelected?: (clauseStr: string) => boolean,
 ): ReportChecklistSection | null {
     if (!template?.content) return null;
-    const checklistContent = resolveChecklistContent(
-        auditData,
-        template.content as ChecklistContent[],
-    );
+    const { content: checklistContent, checklistData } =
+        resolveChecklistContentWithAnswers(
+            auditData,
+            template.content as ChecklistContent[],
+        );
     if (checklistContent.length === 0) return null;
 
     const collectEvidence = (clauseKey: string, itemIndex: number, textEvidence?: string) =>
@@ -249,14 +252,14 @@ function buildReportChecklistSection(
     if (template.isTripleMapping) {
         const { headerCells, bodyCells, rowMeta } = buildImsChecklistReportTable({
             content: checklistContent,
-            checklistData: (auditData.checklistData as Record<string, any>) || {},
+            checklistData,
             programIsoStandard: plan.auditProgram?.isoStandard,
             criteria: plan.criteria,
             collectEvidence,
         });
         const extrasBlocks = buildImsChecklistFindingExtraBlocks({
             content: checklistContent,
-            checklistData: (auditData.checklistData as Record<string, any>) || {},
+            checklistData,
             rowMeta,
         });
         return {
@@ -270,18 +273,21 @@ function buildReportChecklistSection(
 
     const { bodyCells, headerCells } = buildChecklistReportTable({
         content: checklistContent,
-        checklistData: (auditData.checklistData as Record<string, any>) || {},
+        checklistData,
         isModule,
         isEosh: planUsesEoshTotals(plan),
         qfsScoreMode: resolveQfsScoreModeForPlan(plan),
+        templateId: template.id || plan.templateId,
         collectEvidence,
+        isClauseSelected,
     });
     const extrasBlocks = buildChecklistFindingExtraBlocks({
         content: checklistContent,
-        checklistData: (auditData.checklistData as Record<string, any>) || {},
+        checklistData,
         isModule,
         isEosh: planUsesEoshTotals(plan),
         qfsScoreMode: resolveQfsScoreModeForPlan(plan),
+        isClauseSelected,
     });
     return {
         title: "Checklist",
@@ -319,6 +325,31 @@ function docxImageRun(data: Uint8Array | ArrayBuffer, width: number, height: num
         data: bytes,
         transformation: { width, height },
     });
+}
+
+/** Flatten transparent signature PNGs onto white so they render in PDF/Word. */
+async function flattenSignatureDataUrl(signature: string): Promise<string> {
+    const raw = String(signature || "").trim();
+    if (!raw.startsWith("data:image/")) return raw;
+    try {
+        const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+            const el = new Image();
+            el.onload = () => resolve(el);
+            el.onerror = () => reject(new Error("signature image load failed"));
+            el.src = raw;
+        });
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, img.naturalWidth || img.width || 1);
+        canvas.height = Math.max(1, img.naturalHeight || img.height || 1);
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return raw;
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0);
+        return canvas.toDataURL("image/png");
+    } catch {
+        return raw;
+    }
 }
 
 export function auditReportBaseName(plan: Record<string, unknown>) {
@@ -1082,7 +1113,7 @@ function pdfDottedLine(doc: jsPDF, label: string, y: number, pageW: number, x = 
     return y + 10;
 }
 
-function renderPdfSignatureColumn(
+async function renderPdfSignatureColumn(
     doc: jsPDF,
     label: string,
     signature: string,
@@ -1090,7 +1121,7 @@ function renderPdfSignatureColumn(
     x: number,
     y: number,
     colWidth: number,
-): number {
+): Promise<number> {
     let cy = y;
     doc.setFont(FONT, "bold");
     doc.setFontSize(10);
@@ -1098,19 +1129,20 @@ function renderPdfSignatureColumn(
     doc.text(`${label}:`, x, cy);
     cy += 7;
 
-    if (signature.startsWith("data:image/")) {
+    const flatSignature = await flattenSignatureDataUrl(signature);
+    if (flatSignature.startsWith("data:image/")) {
         try {
-            const format = signature.includes("image/jpeg") ? "JPEG" : "PNG";
-            doc.addImage(signature, format, x, cy, Math.min(colWidth - 6, 48), 14, undefined, "FAST");
+            const format = flatSignature.includes("image/jpeg") ? "JPEG" : "PNG";
+            doc.addImage(flatSignature, format, x, cy, Math.min(colWidth - 6, 48), 14, undefined, "FAST");
             cy += 16;
         } catch {
             doc.setFont(FONT, "normal");
             doc.text("[Invalid Image]", x, cy);
             cy += 8;
         }
-    } else if (signature.trim()) {
+    } else if (flatSignature.trim() && flatSignature.trim() !== "[omitted]") {
         doc.setFont(FONT, "normal");
-        const lines = doc.splitTextToSize(signature, colWidth - 4);
+        const lines = doc.splitTextToSize(flatSignature, colWidth - 4);
         doc.text(lines, x, cy);
         cy += lines.length * 5 + 2;
     } else {
@@ -1128,13 +1160,13 @@ function renderPdfSignatureColumn(
     return cy + 12;
 }
 
-function renderAcknowledgementSectionPdf(
+async function renderAcknowledgementSectionPdf(
     doc: jsPDF,
     ctx: ReportContext,
     y: number,
     pageH: number,
     pageW: number,
-): number {
+): Promise<number> {
     y = checkPage(doc, y, 50, pageH);
     y = pdfBlueSectionHeading(
         doc,
@@ -1146,7 +1178,7 @@ function renderAcknowledgementSectionPdf(
     const leftX = MARGIN;
     const rightX = MARGIN + colWidth + 8;
     const startY = y + 4;
-    const leftEnd = renderPdfSignatureColumn(
+    const leftEnd = await renderPdfSignatureColumn(
         doc,
         "Auditee Signature",
         ctx.acknowledgement.auditeeSignature,
@@ -1155,7 +1187,7 @@ function renderAcknowledgementSectionPdf(
         startY,
         colWidth,
     );
-    const rightEnd = renderPdfSignatureColumn(
+    const rightEnd = await renderPdfSignatureColumn(
         doc,
         "Auditor Signature",
         ctx.acknowledgement.auditorSignature,
@@ -1228,7 +1260,7 @@ async function renderSzlReportHeaderAndMetadataAsync(
     return y;
 }
 
-function renderSzlReportSummaryAndSignatures(doc: jsPDF, ctx: ReportContext, y: number): number {
+async function renderSzlReportSummaryAndSignatures(doc: jsPDF, ctx: ReportContext, y: number): Promise<number> {
     const pageW = doc.internal.pageSize.getWidth();
     const pageH = doc.internal.pageSize.getHeight();
     const form = ctx.findingsForm;
@@ -1644,36 +1676,11 @@ export async function generateAuditReportPdf(plan: Record<string, any>) {
             clauseFilesForReport,
             genericFilesForReport,
             isModule,
+            isoClausePredicate,
         );
-        if (checklistContent.length > 0) {
-            const { bodyCells, headerCells } = buildChecklistReportTable({
-                content: checklistContent,
-                checklistData: (auditData.checklistData as Record<string, any>) || {},
-                isModule,
-                isEosh: planUsesEoshTotals(plan),
-                qfsScoreMode: resolveQfsScoreModeForPlan(plan),
-                isClauseSelected: isoClausePredicate,
-                collectEvidence: (clauseKey, itemIndex, textEvidence) =>
-                    buildFindingEvidenceText(
-                        textEvidence,
-                        collectFindingAttachmentMedia(
-                            clauseFilesForReport,
-                            genericFilesForReport,
-                            clauseKey,
-                            itemIndex,
-                        ),
-                    ),
-            });
+        if (checklistSection && checklistSection.checklistContent.length > 0) {
             y = checkPage(doc, y, 20, pageH);
-            y = sectionHeading("Checklist", y);
-            const extrasBlocks = buildChecklistFindingExtraBlocks({
-                content: checklistContent,
-                checklistData: (auditData.checklistData as Record<string, any>) || {},
-                isModule,
-                isEosh: planUsesEoshTotals(plan),
-                qfsScoreMode: resolveQfsScoreModeForPlan(plan),
-                isClauseSelected: isoClausePredicate,
-            });
+            y = sectionHeading(checklistSection.title || "Checklist", y);
             y = renderChecklistPdfWithInlineExtras(doc, {
                 headerCells: checklistSection.headerCells,
                 bodyCells: checklistSection.bodyCells,
@@ -1815,7 +1822,7 @@ export async function generateAuditReportPdf(plan: Record<string, any>) {
     }
 
     // Now render 4. AUDIT SUMMARY and 5. ACKNOWLEDGEMENT OF FINDINGS (Signatures)
-    y = renderSzlReportSummaryAndSignatures(doc, ctx, y);
+    y = await renderSzlReportSummaryAndSignatures(doc, ctx, y);
 
     const iauditFooterAsset: PdfImageAsset | null = await loadImageAsset(
         IAUDIT_FOOTER_LOGO_SRC,
@@ -2047,16 +2054,16 @@ function buildBlueTextSectionDocx(heading: string, content: string): (Paragraph 
     return [docxBlueSectionHeading(heading), docxBorderedContentTable(content)];
 }
 
-function buildAcknowledgementSectionDocx(ctx: ReportContext): (Paragraph | DocxTable)[] {
+async function buildAcknowledgementSectionDocx(ctx: ReportContext): Promise<(Paragraph | DocxTable)[]> {
     const blocks: (Paragraph | DocxTable)[] = [
         docxBlueSectionHeading(`${getSectionLabel(ctx.findingsForm, "acknowledgement")}:`),
     ];
 
-    const buildSignatureCell = (
+    const buildSignatureCell = async (
         label: string,
         signature: string,
         date: string,
-    ): DocxTableCell => {
+    ): Promise<DocxTableCell> => {
         const children: Paragraph[] = [
             new Paragraph({
                 children: [new TextRun({ text: `${label}:`, bold: true })],
@@ -2064,20 +2071,21 @@ function buildAcknowledgementSectionDocx(ctx: ReportContext): (Paragraph | DocxT
             }),
         ];
 
-        if (signature.startsWith("data:image/")) {
+        const flatSignature = await flattenSignatureDataUrl(signature);
+        if (flatSignature.startsWith("data:image/")) {
             try {
-                const buffer = dataUrlToUint8Array(signature);
+                const buffer = dataUrlToUint8Array(flatSignature);
                     children.push(
                         new Paragraph({
-                            children: [docxImageRun(buffer, 120, 45, signature)],
+                            children: [docxImageRun(buffer, 120, 45, flatSignature)],
                             spacing: { after: 80 },
                         }),
                     );
             } catch {
                 children.push(new Paragraph({ text: "[Invalid Image]", spacing: { after: 80 } }));
             }
-        } else if (signature.trim()) {
-            children.push(new Paragraph({ text: signature, spacing: { after: 80 } }));
+        } else if (flatSignature.trim() && flatSignature.trim() !== "[omitted]") {
+            children.push(new Paragraph({ text: flatSignature, spacing: { after: 80 } }));
         } else {
             children.push(
                 new Paragraph({
@@ -2103,12 +2111,12 @@ function buildAcknowledgementSectionDocx(ctx: ReportContext): (Paragraph | DocxT
             rows: [
                 new DocxTableRow({
                     children: [
-                        buildSignatureCell(
+                        await buildSignatureCell(
                             "Auditee Signature",
                             ctx.acknowledgement.auditeeSignature,
                             ctx.acknowledgement.auditeeDate,
                         ),
-                        buildSignatureCell(
+                        await buildSignatureCell(
                             "Auditor Signature",
                             ctx.acknowledgement.auditorSignature,
                             ctx.acknowledgement.auditorDate,
@@ -2324,37 +2332,13 @@ export async function generateAuditReportDocx(plan: Record<string, any>) {
                 clauseFilesForReport,
                 genericFilesForReport,
                 ctx.isModuleAudit,
+                isoClausePredicate,
             );
-            if (checklistContent.length > 0) {
-                const { headerCells, bodyCells } = buildChecklistReportTable({
-                    content: checklistContent,
-                    checklistData: (auditData.checklistData as Record<string, any>) || {},
-                    isModule: ctx.isModuleAudit,
-                    isEosh: planUsesEoshTotals(plan),
-                    qfsScoreMode: resolveQfsScoreModeForPlan(plan),
-                    isClauseSelected: isoClausePredicate,
-                    collectEvidence: (clauseKey, itemIndex, textEvidence) =>
-                        buildFindingEvidenceText(
-                            textEvidence,
-                            collectFindingAttachmentMedia(
-                                clauseFilesForReport,
-                                genericFilesForReport,
-                                clauseKey,
-                                itemIndex,
-                            ),
-                        ),
-                });
+            if (checklistSection && checklistSection.checklistContent.length > 0) {
+                const { headerCells, bodyCells, extrasBlocks } = checklistSection;
                 const colWidth = Math.max(4, Math.floor(100 / Math.max(headerCells.length, 1)));
-                const extras = buildChecklistFindingExtraBlocks({
-                    content: checklistContent,
-                    checklistData: (auditData.checklistData as Record<string, any>) || {},
-                    isModule: ctx.isModuleAudit,
-                    isEosh: planUsesEoshTotals(plan),
-                    qfsScoreMode: resolveQfsScoreModeForPlan(plan),
-                    isClauseSelected: isoClausePredicate,
-                });
-                const extrasByIndex = new Map(extras.map((b) => [b.itemIndex, b]));
-                children.push(docxSubHeading("Checklist"));
+                const extrasByIndex = new Map(extrasBlocks.map((b) => [b.itemIndex, b]));
+                children.push(docxSubHeading(checklistSection.title || "Checklist"));
                 // Header row once, then each question (+ optional NC box) as its own table
                 // so NC details sit directly under the raised question.
                 children.push(
@@ -2428,7 +2412,7 @@ export async function generateAuditReportDocx(plan: Record<string, any>) {
                 if (planUsesEoshTotals(plan)) {
                     const scores = computeEoshCapabilityScores(
                         (auditData.checklistData as Record<string, { findings?: string }>) || {},
-                        checklistContent.length,
+                        checklistSection.checklistContent.length,
                     );
                     children.push(docxSubHeading("EOSH Score Summary"));
                     children.push(
@@ -2628,7 +2612,7 @@ export async function generateAuditReportDocx(plan: Record<string, any>) {
         }),
     );
 
-    children.push(...buildAcknowledgementSectionDocx(ctx));
+    children.push(...(await buildAcknowledgementSectionDocx(ctx)));
 
     const doc = new Document({
         sections: [
@@ -2735,35 +2719,11 @@ export async function generateAuditReportExcel(plan: Record<string, any>) {
             clauseFilesForExcel,
             genericFilesForExcel,
             ctx.isModuleAudit,
+            isoClausePredicate,
         );
-        if (checklistContent.length > 0) {
-            const { bodyCells, headerCells } = buildChecklistReportTable({
-                content: checklistContent,
-                checklistData: (auditData.checklistData as Record<string, any>) || {},
-                isModule: ctx.isModuleAudit,
-                isEosh: planUsesEoshTotals(plan),
-                qfsScoreMode: resolveQfsScoreModeForPlan(plan),
-                isClauseSelected: isoClausePredicate,
-                collectEvidence: (clauseKey, itemIndex, textEvidence) =>
-                    buildFindingEvidenceText(
-                        textEvidence,
-                        collectFindingAttachmentMedia(
-                            clauseFilesForExcel,
-                            genericFilesForExcel,
-                            clauseKey,
-                            itemIndex,
-                        ),
-                    ),
-            });
+        if (checklistSection && checklistSection.checklistContent.length > 0) {
+            const { headerCells, bodyCells, extrasBlocks } = checklistSection;
             // Excel (community xlsx) has limited cell fills — mark selected QFS score with ●.
-            const extrasBlocks = buildChecklistFindingExtraBlocks({
-                content: checklistContent,
-                checklistData: (auditData.checklistData as Record<string, any>) || {},
-                isModule: ctx.isModuleAudit,
-                isEosh: planUsesEoshTotals(plan),
-                qfsScoreMode: resolveQfsScoreModeForPlan(plan),
-                isClauseSelected: isoClausePredicate,
-            });
             const extrasByIndex = new Map(extrasBlocks.map((b) => [b.itemIndex, b]));
             const colCount = Math.max(headerCells.length, 1);
             const sheetName = template.isTripleMapping ? "IMS Checklist" : "Checklist";

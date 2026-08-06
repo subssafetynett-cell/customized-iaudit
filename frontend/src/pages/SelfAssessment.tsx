@@ -23,6 +23,7 @@ import { cn } from "@/lib/utils";
 import { Eye, Download, History, FileText, Minus } from "lucide-react";
 import { format } from "date-fns";
 import { useCompanyStore } from "@/hooks/useCompanyStore";
+import { sitesFromCompanies } from "@/lib/orgSites";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import html2canvas from "html2canvas";
@@ -98,6 +99,39 @@ interface SavedAssessment {
     contactEmail?: string;
     auditScope?: string;
     auditorPosition?: string;
+}
+
+/** Drop duplicate rows (same id, or near-identical saves from double-submit). */
+function dedupeSavedSelfAssessments(list: SavedAssessment[]): SavedAssessment[] {
+    const byId = new Map<string, SavedAssessment>();
+    for (const item of list) {
+        if (!item?.id) continue;
+        byId.set(String(item.id), item);
+    }
+    const sorted = Array.from(byId.values()).sort((a, b) => {
+        const da = Date.parse(String(a.date ?? "")) || 0;
+        const db = Date.parse(String(b.date ?? "")) || 0;
+        return db - da;
+    });
+
+    const kept: SavedAssessment[] = [];
+    for (const item of sorted) {
+        const isDup = kept.some((existing) => {
+            if (
+                existing.companyName === item.companyName &&
+                existing.standard === item.standard &&
+                existing.score === item.score &&
+                existing.auditorName === item.auditorName
+            ) {
+                const tExisting = Date.parse(String(existing.date ?? "")) || 0;
+                const tItem = Date.parse(String(item.date ?? "")) || 0;
+                return Math.abs(tExisting - tItem) < 120_000;
+            }
+            return false;
+        });
+        if (!isDup) kept.push(item);
+    }
+    return kept;
 }
 
 // --- Data ---
@@ -363,6 +397,8 @@ const SelfAssessment = () => {
             });
         }
     }, [searchParams]);
+    const OTHER_OPTION = "__other__";
+
     const [standard, setStandard] = useState<Standard | "">("");
     const [companyName, setCompanyName] = useState(""); // Auditor's Company
     const [auditorName, setAuditorName] = useState("");
@@ -371,15 +407,28 @@ const SelfAssessment = () => {
     const [questions, setQuestions] = useState<Question[]>([]);
 
     // Fetch user company for logo
-    const { companies } = useCompanyStore();
+    const { companies, hasFetchedCompanies } = useCompanyStore();
     const userCompany = companies.length > 0 ? companies[0] : null;
 
     // New State Fields
     const [auditDate, setAuditDate] = useState(format(new Date(), "yyyy-MM-dd"));
     const [auditLocation, setAuditLocation] = useState("");
+    /** Company dropdown: company id, `__other__`, or empty */
+    const [companySelect, setCompanySelect] = useState("");
+    /** Location dropdown: site id, `__other__`, or empty */
+    const [locationSelect, setLocationSelect] = useState("");
     const [auditRepresentatives, setAuditRepresentatives] = useState("");
     const [contactEmail, setContactEmail] = useState("");
     const [auditScope, setAuditScope] = useState("");
+
+    const orgSites = React.useMemo(() => sitesFromCompanies(companies), [companies]);
+
+    const sitesForLocationDropdown = React.useMemo(() => {
+        if (companySelect && companySelect !== OTHER_OPTION) {
+            return orgSites.filter((s) => String(s.company.id) === companySelect);
+        }
+        return orgSites;
+    }, [orgSites, companySelect]);
 
     type OrgUser = {
         id: number | string;
@@ -430,6 +479,8 @@ const SelfAssessment = () => {
     const [currentClauseIndex, setCurrentClauseIndex] = useState(0);
     const draftSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const draftPendingSyncRef = useRef<Record<string, unknown> | null>(null);
+    const finishingAssessmentRef = useRef(false);
+    const [isFinishingAssessment, setIsFinishingAssessment] = useState(false);
 
     const buildSelfAssessmentDraft = useCallback((): Record<string, unknown> | null => {
         if (step !== "setup" && step !== "assessment") return null;
@@ -612,7 +663,12 @@ const SelfAssessment = () => {
         const merged = await migrateLocalSelfAssessmentsToServer(
             assessments.map((a) => sanitizeSavedSelfAssessment(a) as SavedAssessment),
         );
-        setSavedAssessments(merged);
+        const deduped = dedupeSavedSelfAssessments(merged);
+        setSavedAssessments(deduped);
+        // Persist cleaned list if we dropped accidental duplicates
+        if (deduped.length < merged.length) {
+            void persistSelfAssessmentsList(deduped, { ownerUserId: dataOwnerUserId });
+        }
 
         if (restoreDraft && draft && typeof draft === "object") {
             const draftStep = draft.step;
@@ -623,10 +679,12 @@ const SelfAssessment = () => {
             if (canRestoreAssessment || canRestoreSetup) {
                 setStandard((draft.standard as typeof standard) || "");
                 setCompanyName(String(draft.companyName ?? ""));
+                setCompanySelect("");
                 setAuditorName(String(draft.auditorName ?? ""));
                 setAuditorPosition(String(draft.auditorPosition ?? ""));
                 setAuditCompany(String(draft.auditCompany ?? ""));
                 setAuditLocation(String(draft.auditLocation ?? ""));
+                setLocationSelect("");
                 setAuditRepresentatives(String(draft.auditRepresentatives ?? ""));
                 setContactEmail(String(draft.contactEmail ?? ""));
                 setAuditScope(String(draft.auditScope ?? ""));
@@ -674,11 +732,27 @@ const SelfAssessment = () => {
             ...newAssessment,
             ...(userId ? { createdByUserId: userId, userId } : {}),
         }) as SavedAssessment;
-        const isNew = !savedAssessments.some((a) => a.id === safe.id);
-        if (isNew && !guardTrialCreate("selfAssessment", savedAssessments.length)) return false;
 
         const previous = savedAssessments;
-        const updated = [safe, ...savedAssessments.filter((a) => a.id !== safe.id)];
+        // Replace near-duplicates from a double-click rather than appending another row
+        const withoutDupes = previous.filter((a) => {
+            if (a.id === safe.id) return false;
+            if (
+                a.companyName === safe.companyName &&
+                a.standard === safe.standard &&
+                a.score === safe.score &&
+                a.auditorName === safe.auditorName
+            ) {
+                const tA = Date.parse(String(a.date ?? "")) || 0;
+                const tSafe = Date.parse(String(safe.date ?? "")) || 0;
+                return Math.abs(tA - tSafe) >= 120_000;
+            }
+            return true;
+        });
+        const updated = dedupeSavedSelfAssessments([safe, ...withoutDupes]);
+        const isNew = !previous.some((a) => a.id === safe.id) && updated.length > previous.length;
+        if (isNew && !guardTrialCreate("selfAssessment", previous.length)) return false;
+
         setSavedAssessments(updated);
 
         if (draftSaveTimerRef.current) {
@@ -705,6 +779,7 @@ const SelfAssessment = () => {
 
     const [deleteAssessmentOpen, setDeleteAssessmentOpen] = useState(false);
     const [assessmentToDelete, setAssessmentToDelete] = useState<SavedAssessment | null>(null);
+    const [cancelAssessmentOpen, setCancelAssessmentOpen] = useState(false);
 
     const requestDeleteSavedAssessment = (assessment: SavedAssessment) => {
         setAssessmentToDelete(assessment);
@@ -752,7 +827,7 @@ const SelfAssessment = () => {
             return;
         }
         if (!companyName.trim()) {
-            toast.error("Please enter the Auditor Company Name.");
+            toast.error("Please select or enter the company name.");
             return;
         }
         if (!selectedAuditorUserId) {
@@ -768,7 +843,7 @@ const SelfAssessment = () => {
             return;
         }
         if (!auditLocation.trim()) {
-            toast.error("Please enter the Audit Location.");
+            toast.error("Please select or enter the audit location.");
             return;
         }
         if (!contactEmail.trim()) {
@@ -844,7 +919,7 @@ const SelfAssessment = () => {
             setCurrentClauseIndex(prev => prev + 1);
             window.scrollTo({ top: 0, behavior: 'smooth' });
         } else {
-            setStep("email-collection");
+            void finishAssessmentAndShowResults();
         }
     };
 
@@ -901,85 +976,94 @@ const SelfAssessment = () => {
         if (unanswered.length > 0) {
             setShowValidationErrors(true);
             toast.error(`Please answer all questions. ${unanswered.length} remaining.`);
-            // Scroll to first error? optionally
             return;
         }
-        setStep("email-collection");
+        void finishAssessmentAndShowResults();
     };
 
-    const handleEmailSubmit = async () => {
-        const safeEmail = sanitizeSelfAssessmentEmail(email);
-        if (!safeEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(safeEmail)) {
-            toast.error("Please enter a valid email address to see results.");
+    /** Save assessment and open results immediately (no email gate modal). */
+    const finishAssessmentAndShowResults = async () => {
+        if (finishingAssessmentRef.current) return;
+        const unanswered = questions.filter((q) => q.answer === null);
+        if (unanswered.length > 0) {
+            setShowValidationErrors(true);
+            toast.error(`Please answer all questions. ${unanswered.length} remaining.`);
             return;
         }
 
-        const score = calculateScore();
-        const newDate = new Date().toISOString();
+        finishingAssessmentRef.current = true;
+        setIsFinishingAssessment(true);
 
-        const newAssessment = sanitizeSavedSelfAssessment({
-            id: Date.now().toString(),
-            companyName,
-            auditorName,
-            auditorPosition,
-            auditCompany,
-            standard: standard as Standard,
-            score,
-            date: newDate,
-            email: safeEmail,
-            questions,
-            auditDate,
-            auditLocation,
-            auditRepresentatives,
-            contactEmail,
-            auditScope,
-        }) as SavedAssessment;
-
-        setEmail(safeEmail);
-        const persisted = await saveToHistory(newAssessment);
-        if (persisted) {
-            toast.success("Assessment saved to your history.");
-        } else {
-            toast.warning("Assessment saved on this device, but could not sync to the server.");
-        }
-
-        setIsSendingReport(true);
         try {
-            const reportPayload = {
-                companyName: newAssessment.companyName,
-                auditorName: newAssessment.auditorName,
-                auditCompany: newAssessment.auditCompany,
-                standard: newAssessment.standard,
-                score: newAssessment.score,
-                date: newAssessment.date,
-                questions: newAssessment.questions,
-            };
+            const safeEmail = sanitizeSelfAssessmentEmail(
+                email || contactEmail || loggedInUser?.email || "",
+            );
+            const score = calculateScore();
+            const newDate = new Date().toISOString();
 
-            const res = await apiFetch("/send-assessment-report", {
-                method: "POST",
-                body: JSON.stringify(reportPayload),
-            });
+            const newAssessment = sanitizeSavedSelfAssessment({
+                id: crypto.randomUUID(),
+                companyName,
+                auditorName,
+                auditorPosition,
+                auditCompany,
+                standard: standard as Standard,
+                score,
+                date: newDate,
+                email: safeEmail,
+                questions,
+                auditDate,
+                auditLocation,
+                auditRepresentatives,
+                contactEmail: contactEmail || safeEmail,
+                auditScope,
+            }) as SavedAssessment;
 
-            if (!res.ok) {
-                const data = await res.json().catch(() => ({}));
-                throw new Error(
-                    typeof data?.error === "string" ? data.error : "Failed to send report email",
-                );
+            if (safeEmail) setEmail(safeEmail);
+
+            const frozenQuestions = newAssessment.questions.map((q) => ({ ...q }));
+            setResultQuestions(frozenQuestions);
+            setResultAssessment({ ...newAssessment, questions: frozenQuestions });
+            setStep("result");
+            window.scrollTo({ top: 0, behavior: "smooth" });
+
+            const persisted = await saveToHistory(newAssessment);
+            if (persisted) {
+                toast.success("Assessment completed. Results are ready.");
+            } else {
+                toast.warning("Assessment saved on this device, but could not sync to the server.");
             }
-            toast.success("Assessment report sent to your account email!");
-        } catch (err) {
-            console.error("Assessment report email failed", err);
-            const message =
-                err instanceof Error ? err.message : "Could not send email, but your results are saved.";
-            toast.error(message);
-        } finally {
-            setIsSendingReport(false);
-        }
 
-        const frozenQuestions = newAssessment.questions.map((q) => ({ ...q }));
-        setResultQuestions(frozenQuestions);
-        setResultAssessment({ ...newAssessment, questions: frozenQuestions });
-        setStep("result");
+            // Optional report email — never blocks viewing results.
+            if (safeEmail && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(safeEmail)) {
+                setIsSendingReport(true);
+                try {
+                    const reportPayload = {
+                        companyName: newAssessment.companyName,
+                        auditorName: newAssessment.auditorName,
+                        auditCompany: newAssessment.auditCompany,
+                        standard: newAssessment.standard,
+                        score: newAssessment.score,
+                        date: newAssessment.date,
+                        questions: newAssessment.questions,
+                    };
+                    const res = await apiFetch("/send-assessment-report", {
+                        method: "POST",
+                        body: JSON.stringify(reportPayload),
+                    });
+                    if (res.ok) {
+                        toast.success("Assessment report sent to your email.");
+                    }
+                } catch (err) {
+                    console.error("Assessment report email failed", err);
+                } finally {
+                    setIsSendingReport(false);
+                }
+            }
+        } finally {
+            finishingAssessmentRef.current = false;
+            setIsFinishingAssessment(false);
+        }
     };
 
 
@@ -1043,7 +1127,6 @@ const SelfAssessment = () => {
         if (score >= 25) return {
             description: "Your organization has a basic QMS in place and is working toward maturity. Most requirements are addressed but need refinement.",
             actions: [
-                "Engage BSI or certified gap assessment consultant to identify specific gaps",
                 "Implement corrective actions from gap assessment findings",
                 "Enhance internal audit capability and frequency",
                 "Strengthen management review process with data-driven decisions",
@@ -1071,6 +1154,7 @@ const SelfAssessment = () => {
         setStep("list");
         setStandard("");
         setCompanyName("");
+        setCompanySelect("");
         setAuditorName("");
         setAuditCompany("");
         setQuestions([]);
@@ -1079,6 +1163,7 @@ const SelfAssessment = () => {
         // Reset new fields
         setAuditDate(format(new Date(), "yyyy-MM-dd"));
         setAuditLocation("");
+        setLocationSelect("");
         setAuditRepresentatives("");
         setContactEmail("");
         setAuditScope("");
@@ -1088,8 +1173,266 @@ const SelfAssessment = () => {
 
     };
 
+    const confirmCancelAssessment = () => {
+        if (draftSaveTimerRef.current) {
+            clearTimeout(draftSaveTimerRef.current);
+            draftSaveTimerRef.current = null;
+        }
+        void persistSelfAssessmentDraft(null, dataOwnerOptions);
+        setCurrentClauseIndex(0);
+        resetAssessment();
+        setCancelAssessmentOpen(false);
+        toast.message("Assessment cancelled");
+    };
+
+    const resolveCompanySelectFromName = useCallback(
+        (name: string) => {
+            const trimmed = name.trim();
+            if (!trimmed) {
+                setCompanySelect("");
+                return;
+            }
+            const match = companies.find(
+                (c) => c.name.trim().toLowerCase() === trimmed.toLowerCase(),
+            );
+            setCompanySelect(match ? String(match.id) : OTHER_OPTION);
+        },
+        [companies],
+    );
+
+    const resolveLocationSelectFromName = useCallback(
+        (location: string, companyId?: string) => {
+            const trimmed = location.trim();
+            if (!trimmed) {
+                setLocationSelect("");
+                return;
+            }
+            const pool =
+                companyId && companyId !== OTHER_OPTION
+                    ? orgSites.filter((s) => String(s.company.id) === companyId)
+                    : orgSites;
+            const match =
+                pool.find((s) => s.name.trim().toLowerCase() === trimmed.toLowerCase()) ||
+                orgSites.find((s) => s.name.trim().toLowerCase() === trimmed.toLowerCase());
+            setLocationSelect(match ? String(match.id) : OTHER_OPTION);
+        },
+        [orgSites],
+    );
+
+    // Restore company/location dropdown selection when companies load (e.g. after draft restore)
+    useEffect(() => {
+        if (step !== "setup") return;
+        if (!hasFetchedCompanies) return;
+        if (companies.length === 0) {
+            if (!companySelect) setCompanySelect(OTHER_OPTION);
+            return;
+        }
+        if (companyName.trim() && !companySelect) {
+            resolveCompanySelectFromName(companyName);
+        }
+    }, [
+        step,
+        companies,
+        companyName,
+        companySelect,
+        hasFetchedCompanies,
+        resolveCompanySelectFromName,
+    ]);
+
+    useEffect(() => {
+        if (step !== "setup") return;
+        if (!hasFetchedCompanies) return;
+        if (orgSites.length === 0) {
+            if (!locationSelect) setLocationSelect(OTHER_OPTION);
+            return;
+        }
+        if (auditLocation.trim() && !locationSelect) {
+            resolveLocationSelectFromName(auditLocation, companySelect || undefined);
+        }
+    }, [
+        step,
+        orgSites,
+        auditLocation,
+        locationSelect,
+        companySelect,
+        hasFetchedCompanies,
+        resolveLocationSelectFromName,
+    ]);
+
     const pieChartRef = React.useRef<HTMLDivElement>(null);
     const barChartRef = React.useRef<HTMLDivElement>(null);
+
+    /** Capture a visible chart node, or return null if not mounted. */
+    const captureChartElement = async (
+        el: HTMLElement | null,
+    ): Promise<{ buffer: ArrayBuffer; width: number; height: number } | null> => {
+        if (!el) return null;
+        try {
+            const canvas = await html2canvas(el, {
+                scale: 2,
+                useCORS: true,
+                backgroundColor: "#ffffff",
+                logging: false,
+            });
+            const blob = await new Promise<Blob | null>((resolve) =>
+                canvas.toBlob(resolve, "image/png"),
+            );
+            if (!blob) return null;
+            return {
+                buffer: await blob.arrayBuffer(),
+                width: canvas.width,
+                height: canvas.height,
+            };
+        } catch (e) {
+            console.error("Chart capture failed", e);
+            return null;
+        }
+    };
+
+    /** Programmatic donut chart (used when results charts are not on screen). */
+    const renderDonutChartBuffer = async (
+        score: number,
+        yesCount: number,
+        total: number,
+    ): Promise<{ buffer: ArrayBuffer; width: number; height: number } | null> => {
+        try {
+            const size = 520;
+            const canvas = document.createElement("canvas");
+            canvas.width = size;
+            canvas.height = size;
+            const ctx = canvas.getContext("2d");
+            if (!ctx) return null;
+
+            const cx = size / 2;
+            const cy = size / 2;
+            const outerR = 170;
+            const innerR = 120;
+            const pct = Math.max(0, Math.min(50, score)) / 50;
+
+            ctx.fillStyle = "#ffffff";
+            ctx.fillRect(0, 0, size, size);
+
+            // Background ring
+            ctx.beginPath();
+            ctx.arc(cx, cy, outerR, 0, Math.PI * 2);
+            ctx.arc(cx, cy, innerR, 0, Math.PI * 2, true);
+            ctx.fillStyle = "#f1f5f9";
+            ctx.fill();
+
+            // Score arc (from top, clockwise)
+            if (pct > 0) {
+                const start = -Math.PI / 2;
+                const end = start + pct * Math.PI * 2;
+                ctx.beginPath();
+                ctx.arc(cx, cy, outerR, start, end);
+                ctx.arc(cx, cy, innerR, end, start, true);
+                ctx.closePath();
+                ctx.fillStyle = "#fbbf24";
+                ctx.fill();
+            }
+
+            ctx.fillStyle = "#f59e0b";
+            ctx.font = "bold 48px system-ui, sans-serif";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillText(`${Math.round(score)} / 50`, cx, cy - 12);
+
+            ctx.fillStyle = "#94a3b8";
+            ctx.font = "22px system-ui, sans-serif";
+            ctx.fillText(`${yesCount} questions yes`, cx, cy + 28);
+
+            const blob = await new Promise<Blob | null>((resolve) =>
+                canvas.toBlob(resolve, "image/png"),
+            );
+            if (!blob) return null;
+            return { buffer: await blob.arrayBuffer(), width: size, height: size };
+        } catch (e) {
+            console.error("Donut chart render failed", e);
+            return null;
+        }
+    };
+
+    /** Programmatic clause bar chart for Word when the live chart is not mounted. */
+    const renderBarChartBuffer = async (
+        clauseScores: { clause: string; score: number; fullClause?: string }[],
+    ): Promise<{ buffer: ArrayBuffer; width: number; height: number } | null> => {
+        if (!clauseScores.length) return null;
+        try {
+            const width = 1100;
+            const height = 520;
+            const canvas = document.createElement("canvas");
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext("2d");
+            if (!ctx) return null;
+
+            ctx.fillStyle = "#ffffff";
+            ctx.fillRect(0, 0, width, height);
+
+            const padL = 50;
+            const padR = 30;
+            const padT = 40;
+            const padB = 60;
+            const chartW = width - padL - padR;
+            const chartH = height - padT - padB;
+            const n = clauseScores.length;
+            const slot = chartW / n;
+            const barW = Math.max(18, slot * 0.55);
+
+            // Grid
+            ctx.strokeStyle = "#e2e8f0";
+            ctx.lineWidth = 1;
+            for (let i = 0; i <= 4; i++) {
+                const y = padT + chartH - (i / 4) * chartH;
+                ctx.beginPath();
+                ctx.moveTo(padL, y);
+                ctx.lineTo(padL + chartW, y);
+                ctx.stroke();
+                ctx.fillStyle = "#94a3b8";
+                ctx.font = "16px system-ui, sans-serif";
+                ctx.textAlign = "right";
+                ctx.fillText(String(i * 25), padL - 8, y + 5);
+            }
+
+            clauseScores.forEach((item, index) => {
+                const score = Math.max(0, Math.min(100, Number(item.score) || 0));
+                const barH = Math.max(2, (score / 100) * chartH);
+                const x = padL + index * slot + (slot - barW) / 2;
+                const y = padT + chartH - barH;
+                ctx.fillStyle =
+                    score >= 80 ? "#10b981" : score >= 50 ? "#f59e0b" : "#ef4444";
+                // Rounded-ish bar
+                ctx.beginPath();
+                const r = 6;
+                ctx.moveTo(x + r, y);
+                ctx.lineTo(x + barW - r, y);
+                ctx.quadraticCurveTo(x + barW, y, x + barW, y + r);
+                ctx.lineTo(x + barW, y + barH);
+                ctx.lineTo(x, y + barH);
+                ctx.lineTo(x, y + r);
+                ctx.quadraticCurveTo(x, y, x + r, y);
+                ctx.fill();
+
+                ctx.fillStyle = "#334155";
+                ctx.font = "bold 14px system-ui, sans-serif";
+                ctx.textAlign = "center";
+                ctx.fillText(`${Math.round(score)}%`, x + barW / 2, y - 8);
+
+                ctx.fillStyle = "#64748b";
+                ctx.font = "14px system-ui, sans-serif";
+                ctx.fillText(`Cl. ${item.clause}`, x + barW / 2, padT + chartH + 24);
+            });
+
+            const blob = await new Promise<Blob | null>((resolve) =>
+                canvas.toBlob(resolve, "image/png"),
+            );
+            if (!blob) return null;
+            return { buffer: await blob.arrayBuffer(), width, height };
+        } catch (e) {
+            console.error("Bar chart render failed", e);
+            return null;
+        }
+    };
 
     const generatePDF = async (assessmentData?: SavedAssessment, returnBlob = false): Promise<Blob | void> => {
         const doc = new jsPDF({ compress: true });
@@ -1581,6 +1924,26 @@ const SelfAssessment = () => {
                 logoBlob = await imageResponse.arrayBuffer();
             }
 
+            // Prefer live chart capture (results page); fall back to canvas render (history download).
+            const yesCount = qs.filter((q) => q.answer === "yes").length;
+            let pieCapture = await captureChartElement(pieChartRef.current);
+            if (!pieCapture) {
+                pieCapture = await renderDonutChartBuffer(finalScore, yesCount, qs.length);
+            }
+            let barCapture = await captureChartElement(barChartRef.current);
+            if (!barCapture) {
+                barCapture = await renderBarChartBuffer(clauseScores);
+            }
+
+            const pieDocWidth = 280;
+            const pieDocHeight = pieCapture
+                ? (pieCapture.height / pieCapture.width) * pieDocWidth
+                : 280;
+            const barDocWidth = 520;
+            const barDocHeight = barCapture
+                ? (barCapture.height / barCapture.width) * barDocWidth
+                : 240;
+
             const doc = new Document({
                 sections: [{
                     properties: {},
@@ -1655,7 +2018,7 @@ const SelfAssessment = () => {
                             })];
                         })(),
 
-                        // PAGE 2: RESULTS & RECOMMENDATIONS
+                        // PAGE 2: RESULTS & CHARTS
                         new Paragraph({ text: "", pageBreakBefore: true }),
                         new Paragraph({
                             text: "Assessment Results",
@@ -1675,6 +2038,72 @@ const SelfAssessment = () => {
                             ]
                         }),
                         new Paragraph({ text: "" }),
+
+                        new Paragraph({
+                            text: "Total Score Chart",
+                            heading: HeadingLevel.HEADING_3,
+                            spacing: { before: 120, after: 80 },
+                        }),
+                        ...(pieCapture
+                            ? [
+                                  new Paragraph({
+                                      alignment: AlignmentType.CENTER,
+                                      children: [
+                                          new ImageRun({
+                                              data: pieCapture.buffer,
+                                              transformation: {
+                                                  width: pieDocWidth,
+                                                  height: pieDocHeight,
+                                              },
+                                          }),
+                                      ],
+                                      spacing: { after: 200 },
+                                  }),
+                              ]
+                            : [
+                                  new Paragraph({
+                                      children: [
+                                          new TextRun({
+                                              text: "(Score chart unavailable)",
+                                              italics: true,
+                                              color: "64748B",
+                                          }),
+                                      ],
+                                  }),
+                              ]),
+
+                        new Paragraph({
+                            text: "Score by Clause Chart",
+                            heading: HeadingLevel.HEADING_3,
+                            spacing: { before: 120, after: 80 },
+                        }),
+                        ...(barCapture
+                            ? [
+                                  new Paragraph({
+                                      alignment: AlignmentType.CENTER,
+                                      children: [
+                                          new ImageRun({
+                                              data: barCapture.buffer,
+                                              transformation: {
+                                                  width: barDocWidth,
+                                                  height: barDocHeight,
+                                              },
+                                          }),
+                                      ],
+                                      spacing: { after: 200 },
+                                  }),
+                              ]
+                            : [
+                                  new Paragraph({
+                                      children: [
+                                          new TextRun({
+                                              text: "(Clause chart unavailable)",
+                                              italics: true,
+                                              color: "64748B",
+                                          }),
+                                      ],
+                                  }),
+                              ]),
 
                         new Paragraph({
                             text: "Recommendations & Actions",
@@ -2076,13 +2505,59 @@ const SelfAssessment = () => {
                                     <Label htmlFor="company" className="text-sm font-semibold text-slate-700">
                                         Name of the Company <span className="text-red-500">*</span>
                                     </Label>
-                                    <Input
-                                        id="company"
-                                        placeholder="Enter your organization name"
-                                        value={companyName}
-                                        onChange={(e) => setCompanyName(sanitizeSelfAssessmentNameField(e.target.value))}
-                                        className="h-12 rounded-xl border-slate-200 bg-slate-50 shadow-sm focus-visible:ring-1 focus-visible:ring-[#213847]/40 w-full"
-                                    />
+                                    <Select
+                                        value={companySelect || undefined}
+                                        onValueChange={(val) => {
+                                            setCompanySelect(val);
+                                            if (val === OTHER_OPTION) {
+                                                setCompanyName("");
+                                                return;
+                                            }
+                                            const company = companies.find((c) => String(c.id) === val);
+                                            if (company) {
+                                                setCompanyName(sanitizeSelfAssessmentNameField(company.name));
+                                            }
+                                            if (locationSelect && locationSelect !== OTHER_OPTION) {
+                                                const site = orgSites.find((s) => String(s.id) === locationSelect);
+                                                if (site && String(site.company.id) !== val) {
+                                                    setLocationSelect("");
+                                                    setAuditLocation("");
+                                                }
+                                            }
+                                        }}
+                                    >
+                                        <SelectTrigger
+                                            id="company"
+                                            className="h-12 rounded-xl border-slate-200 bg-slate-50 shadow-sm focus:ring-[#213847]/40 w-full"
+                                        >
+                                            <SelectValue placeholder="Select company" />
+                                        </SelectTrigger>
+                                        <SelectContent className="rounded-xl border-slate-200 shadow-lg">
+                                            {companies.map((c) => (
+                                                <SelectItem
+                                                    key={String(c.id)}
+                                                    value={String(c.id)}
+                                                    className="rounded-lg cursor-pointer"
+                                                >
+                                                    {c.name}
+                                                </SelectItem>
+                                            ))}
+                                            <SelectItem value={OTHER_OPTION} className="rounded-lg cursor-pointer">
+                                                Other
+                                            </SelectItem>
+                                        </SelectContent>
+                                    </Select>
+                                    {companySelect === OTHER_OPTION && (
+                                        <Input
+                                            id="company-other"
+                                            placeholder="Enter your organization name"
+                                            value={companyName}
+                                            onChange={(e) =>
+                                                setCompanyName(sanitizeSelfAssessmentNameField(e.target.value))
+                                            }
+                                            className="h-12 rounded-xl border-slate-200 bg-slate-50 shadow-sm focus-visible:ring-1 focus-visible:ring-[#213847]/40 w-full"
+                                        />
+                                    )}
                                 </div>
 
                                 <div className="grid gap-6 md:grid-cols-2">
@@ -2126,13 +2601,65 @@ const SelfAssessment = () => {
                                     {/* 4. Location of Audit */}
                                     <div className="space-y-2">
                                         <Label htmlFor="auditLocation" className="text-sm font-semibold text-slate-700">Location of Audit <span className="text-red-500">*</span></Label>
-                                        <Input
-                                            id="auditLocation"
-                                            placeholder="Enter audit location"
-                                            value={auditLocation}
-                                            onChange={(e) => setAuditLocation(sanitizeSelfAssessmentNameField(e.target.value))}
-                                            className="h-12 rounded-xl border-slate-200 bg-slate-50 shadow-sm focus-visible:ring-1 focus-visible:ring-[#213847]/40 w-full"
-                                        />
+                                        <Select
+                                            value={locationSelect || undefined}
+                                            onValueChange={(val) => {
+                                                setLocationSelect(val);
+                                                if (val === OTHER_OPTION) {
+                                                    setAuditLocation("");
+                                                    return;
+                                                }
+                                                const site = orgSites.find((s) => String(s.id) === val);
+                                                if (site) {
+                                                    setAuditLocation(sanitizeSelfAssessmentNameField(site.name));
+                                                    // Align company when picking a site from another company
+                                                    if (
+                                                        !companySelect ||
+                                                        companySelect === OTHER_OPTION ||
+                                                        String(site.company.id) !== companySelect
+                                                    ) {
+                                                        setCompanySelect(String(site.company.id));
+                                                        setCompanyName(
+                                                            sanitizeSelfAssessmentNameField(site.company.name),
+                                                        );
+                                                    }
+                                                }
+                                            }}
+                                        >
+                                            <SelectTrigger
+                                                id="auditLocation"
+                                                className="h-12 rounded-xl border-slate-200 bg-slate-50 shadow-sm focus:ring-[#213847]/40 w-full"
+                                            >
+                                                <SelectValue placeholder="Select site" />
+                                            </SelectTrigger>
+                                            <SelectContent className="rounded-xl border-slate-200 shadow-lg">
+                                                {sitesForLocationDropdown.map((s) => (
+                                                    <SelectItem
+                                                        key={String(s.id)}
+                                                        value={String(s.id)}
+                                                        className="rounded-lg cursor-pointer"
+                                                    >
+                                                        {companies.length > 1
+                                                            ? `${s.company.name} — ${s.name}`
+                                                            : s.name}
+                                                    </SelectItem>
+                                                ))}
+                                                <SelectItem value={OTHER_OPTION} className="rounded-lg cursor-pointer">
+                                                    Other
+                                                </SelectItem>
+                                            </SelectContent>
+                                        </Select>
+                                        {locationSelect === OTHER_OPTION && (
+                                            <Input
+                                                id="auditLocation-other"
+                                                placeholder="Enter audit location"
+                                                value={auditLocation}
+                                                onChange={(e) =>
+                                                    setAuditLocation(sanitizeSelfAssessmentNameField(e.target.value))
+                                                }
+                                                className="h-12 rounded-xl border-slate-200 bg-slate-50 shadow-sm focus-visible:ring-1 focus-visible:ring-[#213847]/40 w-full"
+                                            />
+                                        )}
                                     </div>
 
                                     {/* 5. Company Representatives */}
@@ -2408,22 +2935,34 @@ const SelfAssessment = () => {
                         </Card>
 
                         {/* Navigation Footer */}
-                        <div className="flex items-center justify-between pt-4">
-                            <Button
-                                variant="outline"
-                                onClick={handlePrevClause}
-                                disabled={currentClauseIndex === 0}
-                                className="gap-2 h-12 px-6"
-                            >
-                                <ArrowLeft className="w-4 h-4" /> Previous
-                            </Button>
+                        <div className="flex items-center justify-between pt-4 gap-3">
+                            <div className="flex items-center gap-3">
+                                <Button
+                                    variant="outline"
+                                    onClick={handlePrevClause}
+                                    disabled={currentClauseIndex === 0}
+                                    className="gap-2 h-12 px-6"
+                                >
+                                    <ArrowLeft className="w-4 h-4" /> Previous
+                                </Button>
+                                <Button
+                                    variant="outline"
+                                    onClick={() => setCancelAssessmentOpen(true)}
+                                    className="h-12 px-6 text-slate-600 hover:text-red-600 hover:border-red-300 hover:bg-red-50"
+                                >
+                                    Cancel
+                                </Button>
+                            </div>
 
                             <Button
                                 onClick={handleNextClause}
-                                disabled={currentQuestions.some(q => q.answer === null)}
+                                disabled={
+                                    isFinishingAssessment ||
+                                    currentQuestions.some(q => q.answer === null)
+                                }
                                 className={cn(
                                     "gap-2 h-12 px-8 text-lg shadow-lg transition-all",
-                                    currentQuestions.some(q => q.answer === null)
+                                    isFinishingAssessment || currentQuestions.some(q => q.answer === null)
                                         ? "bg-slate-300 text-slate-500 cursor-not-allowed hover:bg-slate-300"
                                         : currentClauseIndex === uniqueClauses.length - 1
                                             ? "bg-emerald-600 hover:bg-emerald-700 hover:shadow-xl"
@@ -2431,7 +2970,11 @@ const SelfAssessment = () => {
                                 )}
                             >
                                 {currentClauseIndex === uniqueClauses.length - 1 ? (
-                                    <>Complete Assessment <CheckCircle2 className="w-5 h-5" /></>
+                                    isFinishingAssessment ? (
+                                        <>Saving…</>
+                                    ) : (
+                                        <>Complete Assessment <CheckCircle2 className="w-5 h-5" /></>
+                                    )
                                 ) : (
                                     <>Next Clause <ArrowRight className="w-5 h-5" /></>
                                 )}
@@ -2440,44 +2983,7 @@ const SelfAssessment = () => {
                     </div>
                 )}
 
-                {/* Step 3: Email Collection */}
-                {step === "email-collection" && (
-                    <Card className="max-w-xl mx-auto border-none shadow-2xl animate-in fade-in zoom-in-95 duration-500">
-                        <CardHeader className="text-center pt-8">
-                            <CardTitle className="text-2xl font-bold">Get Your Results</CardTitle>
-                            <CardDescription>Enter your email to view your full assessment report.</CardDescription>
-                        </CardHeader>
-                        <CardContent className="space-y-6 pt-4 pb-8 px-8">
-                            <div className="space-y-2">
-                                <Label htmlFor="email-input">Email Address <span className="text-red-500">*</span></Label>
-                                <Input
-                                    id="email-input"
-                                    type="email"
-                                    placeholder="you@company.com"
-                                    value={email}
-                                    onChange={(e) => setEmail(sanitizeSelfAssessmentEmail(e.target.value))}
-                                    className="h-12"
-                                />
-                            </div>
-
-                            <div className="pt-4">
-                                <Button
-                                    onClick={() => void handleEmailSubmit()}
-                                    disabled={isSendingReport}
-                                    className="w-full h-12 text-base bg-emerald-600 hover:bg-emerald-700 text-white"
-                                >
-                                    {isSendingReport ? "Sending report…" : "See Results"}
-                                </Button>
-                            </div>
-
-                            <div className="text-center">
-                                <Button variant="ghost" size="sm" onClick={() => setStep("assessment")}>
-                                    Back to Assessment
-                                </Button>
-                            </div>
-                        </CardContent>
-                    </Card>
-                )}
+                {/* Results (email gate removed — complete assessment opens results directly) */}
 
                 {/* Step 4: Result */}
                 {step === "result" && (() => {
@@ -2505,12 +3011,13 @@ const SelfAssessment = () => {
                     const resultYesCount = resultQs.filter((q) => q.answer === "yes").length;
                     const resultGroupedQuestions = resultQs.reduce((acc, q) => {
                         if (!acc[q.clause]) acc[q.clause] = [];
+                        if (acc[q.clause].some((existing) => existing.id === q.id)) return acc;
                         acc[q.clause].push(q);
                         return acc;
                     }, {} as Record<string, Question[]>);
 
                     return (
-                    <div className="flex flex-col items-center justify-center py-12 animate-in fade-in zoom-in-95 duration-500 w-full max-w-5xl mx-auto space-y-8">
+                    <div className="flex flex-col items-stretch py-12 w-full max-w-5xl mx-auto space-y-8">
 
                         <div className="w-full flex items-center justify-between gap-3 px-2">
                             <Button variant="ghost" onClick={() => setStep("list")} className="gap-2 pl-0 hover:bg-transparent hover:text-emerald-600">
@@ -2743,8 +3250,114 @@ const SelfAssessment = () => {
                             </CardContent>
                         </Card>
 
+                        {/* Detailed question answers */}
+                        <div className="w-full space-y-4">
+                            <div className="px-1">
+                                <h3 className="text-xl font-semibold text-slate-900">Question responses</h3>
+                                <p className="text-sm text-slate-500 mt-1">
+                                    Each question with your Yes / No answer and compliance status.
+                                </p>
+                            </div>
+
+                            {Object.entries(resultGroupedQuestions).length > 0 ? (
+                                Object.entries(resultGroupedQuestions).map(([clause, clauseQuestions]) => {
+                                    const uniqueQuestions = clauseQuestions.filter(
+                                        (q, index, arr) =>
+                                            arr.findIndex((other) => other.id === q.id) === index,
+                                    );
+                                    return (
+                                        <Card
+                                            key={clause}
+                                            className="border border-slate-200 shadow-sm overflow-hidden bg-white"
+                                        >
+                                            <CardHeader className="bg-slate-50 border-b border-slate-200 py-3 px-5">
+                                                <CardTitle className="text-base font-semibold text-slate-800">
+                                                    {clause}
+                                                </CardTitle>
+                                            </CardHeader>
+                                            <CardContent className="p-0">
+                                                <Table>
+                                                    <TableHeader>
+                                                        <TableRow className="hover:bg-transparent border-slate-200">
+                                                            <TableHead className="w-12 text-slate-500">#</TableHead>
+                                                            <TableHead className="text-slate-500">Question</TableHead>
+                                                            <TableHead className="w-28 text-slate-500">Answer</TableHead>
+                                                            <TableHead className="w-40 text-slate-500">Status</TableHead>
+                                                        </TableRow>
+                                                    </TableHeader>
+                                                    <TableBody>
+                                                        {uniqueQuestions.map((q, qIndex) => (
+                                                            <TableRow
+                                                                key={`${clause}-${q.id}-${qIndex}`}
+                                                                className="border-slate-100"
+                                                            >
+                                                                <TableCell className="align-top text-slate-400 font-medium">
+                                                                    {qIndex + 1}
+                                                                </TableCell>
+                                                                <TableCell className="align-top text-slate-800 font-medium leading-snug">
+                                                                    {q.text}
+                                                                </TableCell>
+                                                                <TableCell className="align-top">
+                                                                    <span
+                                                                        className={cn(
+                                                                            "inline-flex items-center gap-1.5 text-sm font-semibold",
+                                                                            q.answer === "yes"
+                                                                                ? "text-emerald-700"
+                                                                                : q.answer === "no"
+                                                                                    ? "text-red-700"
+                                                                                    : "text-slate-500",
+                                                                        )}
+                                                                    >
+                                                                        {q.answer === "yes" ? (
+                                                                            <CheckCircle2 className="w-4 h-4 shrink-0" />
+                                                                        ) : q.answer === "no" ? (
+                                                                            <AlertCircle className="w-4 h-4 shrink-0" />
+                                                                        ) : (
+                                                                            <Minus className="w-4 h-4 shrink-0" />
+                                                                        )}
+                                                                        {q.answer === "yes"
+                                                                            ? "Yes"
+                                                                            : q.answer === "no"
+                                                                                ? "No"
+                                                                                : "—"}
+                                                                    </span>
+                                                                </TableCell>
+                                                                <TableCell className="align-top">
+                                                                    <Badge
+                                                                        variant="secondary"
+                                                                        className={cn(
+                                                                            "font-semibold uppercase tracking-wide",
+                                                                            q.answer === "yes"
+                                                                                ? "bg-emerald-50 text-emerald-700 hover:bg-emerald-50"
+                                                                                : q.answer === "no"
+                                                                                    ? "bg-red-50 text-red-700 hover:bg-red-50"
+                                                                                    : "bg-slate-100 text-slate-500 hover:bg-slate-100",
+                                                                        )}
+                                                                    >
+                                                                        {q.answer === "yes"
+                                                                            ? "Compliant"
+                                                                            : q.answer === "no"
+                                                                                ? "Non-Compliant"
+                                                                                : "Not Answered"}
+                                                                    </Badge>
+                                                                </TableCell>
+                                                            </TableRow>
+                                                        ))}
+                                                    </TableBody>
+                                                </Table>
+                                            </CardContent>
+                                        </Card>
+                                    );
+                                })
+                            ) : (
+                                <div className="text-center py-12 text-slate-400 border border-dashed border-slate-200 rounded-xl bg-white">
+                                    No questions found.
+                                </div>
+                            )}
+                        </div>
+
                         {/* Action Buttons */}
-                        <div className="flex flex-col sm:flex-row justify-center gap-4 w-full pt-8">
+                        <div className="flex flex-col sm:flex-row justify-center gap-4 w-full pt-4">
                             <Button onClick={resetAssessment} variant="outline" className="gap-2 h-12 flex-1">
                                 <RotateCcw className="w-4 h-4" /> Start New
                             </Button>
@@ -2757,47 +3370,6 @@ const SelfAssessment = () => {
                                 <FileText className="w-4 h-4" /> Download Word
                             </Button>
                         </div>
-                        {Object.entries(resultGroupedQuestions).length > 0 ? (
-                            Object.entries(resultGroupedQuestions).map(([clause, clauseQuestions]) => (
-                                <Card key={clause} className="border-none shadow-sm overflow-hidden bg-white/80 backdrop-blur-sm">
-                                    <CardHeader className="bg-slate-50/80 border-b border-slate-100 py-4 px-6">
-                                        <CardTitle className="text-lg font-bold text-slate-800">{clause}</CardTitle>
-                                    </CardHeader>
-                                    <CardContent className="p-0">
-                                        <div className="divide-y divide-slate-100">
-                                            {clauseQuestions.map((q) => (
-                                                <div key={q.id} className="p-6 flex gap-4 items-start hover:bg-slate-50 transition-colors">
-                                                    <div className={cn(
-                                                        "mt-1 w-6 h-6 rounded-full flex items-center justify-center shrink-0 border",
-                                                        q.answer === "yes" ? "bg-emerald-100 border-emerald-200 text-emerald-700" :
-                                                            q.answer === "no" ? "bg-red-100 border-red-200 text-red-700" : "bg-slate-100 border-slate-200 text-slate-400"
-                                                    )}>
-                                                        {q.answer === "yes" ? <CheckCircle2 className="w-3.5 h-3.5" /> :
-                                                            q.answer === "no" ? <AlertCircle className="w-3.5 h-3.5" /> : <Minus className="w-3.5 h-3.5" />}
-                                                    </div>
-                                                    <div className="space-y-2 flex-1">
-                                                        <p className="text-slate-800 font-medium">{q.text}</p>
-                                                        <div className="flex items-center gap-2">
-                                                            <span className={cn(
-                                                                "text-xs font-bold px-2 py-1 rounded-full uppercase tracking-wider",
-                                                                q.answer === "yes" ? "bg-emerald-50 text-emerald-700" :
-                                                                    q.answer === "no" ? "bg-red-50 text-red-700" : "bg-slate-100 text-slate-500"
-                                                            )}>
-                                                                {q.answer === "yes" ? "Compliant" : q.answer === "no" ? "Non-Compliant" : "Not Answered"}
-                                                            </span>
-                                                        </div>
-                                                    </div>
-                                                </div>
-                                            ))}
-                                        </div>
-                                    </CardContent>
-                                </Card>
-                            ))
-                        ) : (
-                            <div className="text-center py-12 text-slate-400">
-                                No questions found.
-                            </div>
-                        )}
                     </div>
                     );
                 })()}
@@ -2854,6 +3426,28 @@ const SelfAssessment = () => {
                             : "This will permanently remove this self assessment. This action cannot be undone."
                     }
                 />
+
+                <Dialog open={cancelAssessmentOpen} onOpenChange={setCancelAssessmentOpen}>
+                    <DialogContent>
+                        <DialogHeader>
+                            <DialogTitle>Cancel assessment?</DialogTitle>
+                            <DialogDescription>
+                                This will discard your current answers and return you to the assessment list.
+                            </DialogDescription>
+                        </DialogHeader>
+                        <DialogFooter>
+                            <Button variant="outline" onClick={() => setCancelAssessmentOpen(false)}>
+                                Keep assessing
+                            </Button>
+                            <Button
+                                variant="destructive"
+                                onClick={confirmCancelAssessment}
+                            >
+                                Yes, cancel
+                            </Button>
+                        </DialogFooter>
+                    </DialogContent>
+                </Dialog>
 
             </div>
         </div>

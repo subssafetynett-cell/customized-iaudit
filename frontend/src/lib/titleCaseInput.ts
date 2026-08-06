@@ -149,22 +149,16 @@ export function mergeTitleCaseChangeHandler<E extends TextElement>(
         const el = event.target;
         const raw = el.value;
         const formatted = formatValue(raw, multiline);
-        if (formatted === raw) {
+        if (formatted !== raw) {
+            const selStart = el.selectionStart ?? formatted.length;
+            // Keep the real DOM node as the event target (required by AutoResizeTextarea
+            // and other handlers that call methods on currentTarget).
+            el.value = formatted;
             onChange(event);
+            restoreCaret(el, raw, selStart, multiline);
             return;
         }
-
-        const selStart = el.selectionStart ?? formatted.length;
-        el.value = formatted;
-
-        const next = {
-            ...event,
-            target: { ...el, value: formatted },
-            currentTarget: { ...el, value: formatted },
-        } as React.ChangeEvent<E>;
-
-        onChange(next);
-        restoreCaret(el, raw, selStart, multiline);
+        onChange(event);
     };
 }
 
@@ -183,12 +177,7 @@ export function mergeTitleCaseBlurHandler<E extends TextElement>(
         const formatted = formatValue(raw, multiline);
         if (formatted !== raw && onChange) {
             el.value = formatted;
-            const next = {
-                ...event,
-                target: { ...el, value: formatted },
-                currentTarget: { ...el, value: formatted },
-            } as unknown as React.ChangeEvent<E>;
-            onChange(next);
+            onChange(event as unknown as React.ChangeEvent<E>);
         }
         onBlur?.(event);
     };

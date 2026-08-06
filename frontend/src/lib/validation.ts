@@ -142,5 +142,5 @@ export function formatDeleteDepartmentDescription(deptName: string, siteName?: s
 
 export function formatDeleteSiteDescription(siteName: string): string {
     const name = truncateForDisplay(siteName, 50);
-    return `Are you sure you want to delete the site "${name}"? All associated departments will be permanently removed. This cannot be undone.`;
+    return `Are you sure you want to delete the site "${name}"? All associated departments, audit programs, and audit plans for this site will be permanently removed. This cannot be undone.`;
 }
