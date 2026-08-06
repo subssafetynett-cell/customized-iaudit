@@ -48,9 +48,25 @@ export function SignatureInput({
       const reader = new FileReader();
       reader.onload = (event) => {
         const result = event.target?.result;
-        if (typeof result === "string") {
-          onChange(result);
-        }
+        if (typeof result !== "string") return;
+        // Flatten onto white so transparent PNGs remain visible in PDF/Word exports.
+        const img = new Image();
+        img.onload = () => {
+          const canvas = document.createElement("canvas");
+          canvas.width = Math.max(1, img.naturalWidth || img.width || 1);
+          canvas.height = Math.max(1, img.naturalHeight || img.height || 1);
+          const ctx = canvas.getContext("2d");
+          if (!ctx) {
+            onChange(result);
+            return;
+          }
+          ctx.fillStyle = "#ffffff";
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          ctx.drawImage(img, 0, 0);
+          onChange(canvas.toDataURL("image/png"));
+        };
+        img.onerror = () => onChange(result);
+        img.src = result;
       };
       reader.readAsDataURL(file);
     }
@@ -130,11 +146,21 @@ export function SignatureInput({
   const saveCanvas = () => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    
-    // Check if the canvas is empty by comparing with a blank canvas,
-    // or simply save the contents if the user drew something.
-    const dataUrl = canvas.toDataURL("image/png");
-    onChange(dataUrl);
+
+    const exportCanvas = document.createElement("canvas");
+    exportCanvas.width = canvas.width;
+    exportCanvas.height = canvas.height;
+    const exportCtx = exportCanvas.getContext("2d");
+    if (!exportCtx) {
+      onChange(canvas.toDataURL("image/png"));
+      setIsDrawOpen(false);
+      return;
+    }
+    // Flatten onto white so transparent PNG strokes remain visible in PDF/Word exports.
+    exportCtx.fillStyle = "#ffffff";
+    exportCtx.fillRect(0, 0, exportCanvas.width, exportCanvas.height);
+    exportCtx.drawImage(canvas, 0, 0);
+    onChange(exportCanvas.toDataURL("image/png"));
     setIsDrawOpen(false);
   };
 

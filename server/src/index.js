@@ -119,11 +119,6 @@ app.use((req, res, next) => {
     next();
 });
 
-// Full `/api/auth/...` paths must be registered before `app.use('/api', mountedApiRouter)` so they are
-// not lost when the sub-router has no match (and so they work even if `/auth/...` aliases are missing).
-app.post('/api/auth/forgot-password', express.json({ limit: '50mb' }), sendOtpIpRateLimit, handleForgotPassword);
-app.post('/api/auth/reset-password', express.json({ limit: '50mb' }), resetPasswordVerifyRateLimit, handleResetPassword);
-
 app.use('/api', mountedApiRouter);
 
 // Strip `/api` so existing handlers stay registered as `/users`, `/companies`, etc.
@@ -978,6 +973,10 @@ mountedApiRouter.post('/auth/verify-invited-account', sendOtpIpRateLimit, handle
 mountedApiRouter.post('/auth/resend-invite-verification', sendOtpIpRateLimit, handleResendInviteVerification);
 mountedApiRouter.post('/auth/login', loginIpRateLimit, handleAuthLogin);
 app.post('/api/auth/login', express.json({ limit: '50mb' }), loginIpRateLimit, handleAuthLogin);
+mountedApiRouter.post('/auth/forgot-password', sendOtpIpRateLimit, handleForgotPassword);
+app.post('/api/auth/forgot-password', authJson, sendOtpIpRateLimit, handleForgotPassword);
+mountedApiRouter.post('/auth/reset-password', resetPasswordVerifyRateLimit, handleResetPassword);
+app.post('/api/auth/reset-password', authJson, resetPasswordVerifyRateLimit, handleResetPassword);
 app.post('/api/auth/logout', authenticateToken, handleLogout);
 mountedApiRouter.post('/auth/logout', authenticateToken, handleLogout);
 app.get('/api/auth/session', authenticateToken, handleAuthSession);

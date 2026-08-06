@@ -120,31 +120,55 @@ async function fetchCompaniesFromApi() {
     hasFetchedCompanies = false;
     notify();
 
-    const response = await apiFetch(`/companies?page=1&pageSize=100&_t=${Date.now()}`);
-    if (response.ok) {
+    const pageSize = 100;
+    let page = 1;
+    let totalPages = 1;
+    const allRows: any[] = [];
+    do {
+      const response = await apiFetch(
+        `/companies?page=${page}&pageSize=${pageSize}&_t=${Date.now()}`,
+      );
+      if (!response.ok) break;
       const data = await response.json();
-      const parsed = parsePaginatedResponse<any>(data, 1, 100);
-      const rows = parsed.items.length > 0
-        ? parsed.items
-        : unwrapListPayload(data);
-      let companies = rows.map(normalizeCompany);
+      const parsed = parsePaginatedResponse<any>(data, page, pageSize);
+      const rows =
+        parsed.items.length > 0 ? parsed.items : unwrapListPayload(data);
+      allRows.push(...rows);
+      totalPages = Math.max(1, Number(parsed.totalPages) || 1);
+      page += 1;
+    } while (page <= totalPages && page <= 50);
 
-      // If any org company came back without sites, hydrate from GET /sites (includes departments).
-      const needsSiteHydration = companies.some((c) => (c.sites?.length ?? 0) === 0);
-      if (companies.length > 0 && needsSiteHydration) {
-        try {
-          const sitesRes = await apiFetch(`/sites?page=1&pageSize=200&_t=${Date.now()}`);
-          if (sitesRes.ok) {
-            const sitesData = await sitesRes.json();
-            companies = mergeSitesIntoCompanies(companies, sitesData);
-          }
-        } catch (hydrateErr) {
-          console.warn("Failed to hydrate company sites:", hydrateErr);
-        }
+    let companies = allRows.map(normalizeCompany);
+
+    // Always hydrate sites so nested company.sites stays complete after save/refresh.
+    if (companies.length > 0) {
+      try {
+        const sitePageSize = 200;
+        let sitePage = 1;
+        let siteTotalPages = 1;
+        const allSites: any[] = [];
+        do {
+          const sitesRes = await apiFetch(
+            `/sites?page=${sitePage}&pageSize=${sitePageSize}&_t=${Date.now()}`,
+          );
+          if (!sitesRes.ok) break;
+          const sitesData = await sitesRes.json();
+          const parsedSites = parsePaginatedResponse<any>(sitesData, sitePage, sitePageSize);
+          const siteRows =
+            parsedSites.items.length > 0
+              ? parsedSites.items
+              : unwrapListPayload(sitesData);
+          allSites.push(...siteRows);
+          siteTotalPages = Math.max(1, Number(parsedSites.totalPages) || 1);
+          sitePage += 1;
+        } while (sitePage <= siteTotalPages && sitePage <= 50);
+        companies = mergeSitesIntoCompanies(companies, allSites);
+      } catch (hydrateErr) {
+        console.warn("Failed to hydrate company sites:", hydrateErr);
       }
-
-      globalCompanies = companies;
     }
+
+    globalCompanies = companies;
   } catch (error) {
     console.error("Failed to fetch companies:", error);
   } finally {

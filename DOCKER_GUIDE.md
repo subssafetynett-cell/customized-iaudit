@@ -2,35 +2,64 @@
 
 This guide lists common Docker commands and **required Coolify / Traefik settings** to avoid 502/504 Gateway errors on Hostinger VPS.
 
-## Gateway timeouts — required Coolify settings
+## Gateway Timeout after every redeploy (fix this first)
 
-Apply these in the Coolify UI for the **frontend** (public) service. Do **not** only raise proxy timeouts — the app fixes the root causes, but misconfigured health checks recreate outages.
+If `https://beta.iaudit.global` (or any domain) shows a black **"Gateway Timeout"** page after Coolify redeploy, Traefik cannot reach the container. The usual causes:
 
-### 1. Public health check (critical)
+### 1. Custom Docker networks in `docker-compose.yaml` (most common)
+
+Coolify docs: **Do not define custom `networks:`** in compose.
+
+Custom networks put each container on two bridges. Traefik only sits on Coolify’s network, but Docker DNS may return the *other* IP → hang / **504 Gateway Timeout**. This often appears after every redeploy.
+
+Our compose file must **not** include a top-level `networks:` block (already removed). If you re-add one, the outage returns.
+
+### 2. Coolify UI — public service health check
+
+Apply these on the **frontend** service (the one with the domain), not the API:
 
 | Setting | Value |
 |--------|--------|
 | Health check path | `/nginx-health` |
-| Health check port | `80` (frontend) |
-| Interval | `10s` |
+| Health check port | `80` |
+| Interval | `5–10s` |
 | Timeout | `3s` |
-| Retries | `5` |
+| Retries | `5–6` |
+| Expected status | `200` |
 
-**Never** point Coolify/Traefik health checks at:
+**Never** point Coolify/Traefik edge health checks at:
 
 - Backend port `3001`
-- `/api/health` or proxied API readiness through the public hostname during edge checks
+- `/api/health` or `/health/ready` (those wait on DB / bootstrap)
 
-Public `/health` on nginx is edge liveness only (always fast). Deep readiness is `/health/ready` (proxies to API) for monitoring.
+### 3. Which service gets the domain?
 
-### 2. Which service is public?
+- Attach `beta.iaudit.global` (etc.) to the **frontend** service, port **80**.
+- Keep `server:3001` **internal** (`expose` only — no public port).
 
-- **Expose / domain**: attach your domain to the **frontend** service (port 80).
-- Backend (`server:3001`) must stay **internal** on the Docker network (already `expose` only in compose).
+### 4. After changing compose / health settings
 
-### 3. Traefik timeouts (only if needed)
+1. Save the Coolify application settings.
+2. Redeploy (force rebuild if the compose file changed).
+3. Verify:
 
-Default Traefik ~60s is fine once the event-loop block is fixed. If you still see rare 504s on large uploads/exports only, set these **custom labels** on the frontend service (Coolify → Labels):
+```bash
+# Must be instant (edge liveness)
+curl -sS https://YOUR_DOMAIN/nginx-health
+curl -sS https://YOUR_DOMAIN/health
+
+# API readiness (may be 503 for a few seconds during migrate — site HTML still works)
+curl -sS https://YOUR_DOMAIN/health/ready
+curl -sS https://YOUR_DOMAIN/api/health
+```
+
+If `/nginx-health` works but the homepage still 504s, restart **coolify-proxy** once on the VPS (`docker restart coolify-proxy`) so Traefik reloads routes — then redeploy again; with custom networks removed this should not recur.
+
+---
+
+## Traefik timeouts (only if needed)
+
+Default Traefik ~60s is fine once networking/health are correct. If you still see rare 504s on large uploads/exports only, set these **custom labels** on the frontend service (Coolify → Labels):
 
 ```
 traefik.http.services.<SERVICE>.loadbalancer.server.scheme=http
@@ -44,7 +73,9 @@ Replace `<SERVICE>` with Coolify’s generated Traefik service name (from the se
 
 Do **not** set multi-minute read timeouts to hide hung Node processes.
 
-### 4. Hostinger VPS
+---
+
+## Hostinger VPS
 
 | Check | Recommendation |
 |------|----------------|
@@ -52,18 +83,6 @@ Do **not** set multi-minute read timeouts to hide hung Node processes.
 | Swap | 1–2 GB if VPS is ≤ 2 GB RAM |
 | Disk | Keep ≥ 15% free (full disk → Postgres/container failures) |
 | Postgres `max_connections` | Leave headroom; app pool default `PG_POOL_MAX=10` |
-
-### 5. After redeploy — verify
-
-```bash
-# Edge (must be instant, never hang)
-curl -sS https://YOUR_DOMAIN/nginx-health
-curl -sS https://YOUR_DOMAIN/health
-
-# API readiness (may be 503 for a few seconds during migrate)
-curl -sS https://YOUR_DOMAIN/health/ready
-curl -sS https://YOUR_DOMAIN/api/health
-```
 
 ---
 
@@ -115,7 +134,7 @@ docker compose logs -f server
 
 Look for:
 - `[start] ✔ Listening on 0.0.0.0:3001` within ~1–2s of container start
-- `[bootstrap] ✔ All startup tasks complete in …ms`
+- `[bootstrap] ✔ Ready for traffic in …ms`
 - Absence of long stalls with no log lines while `/health` hangs (that was the old `spawnSync` migrate bug)
 
 ### Execute Command in Container

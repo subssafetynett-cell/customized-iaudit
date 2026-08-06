@@ -32,7 +32,11 @@ import {
     buildOrgSubtreePlanVisibilityOr,
     buildAssignedAuditProgramVisibilityOr,
     buildAssignedAuditPlanVisibilityOr,
+    buildTeammateAuditProgramVisibilityOr,
+    buildTeammateAuditPlanVisibilityOr,
     actorHasFullOrgAuditVisibility,
+    ensureOrphanUserOrgLink,
+    collectOrgMemberUserIds,
     checkTrialExpiration,
     countOrgAuditPrograms,
     rejectIfTrialLimitExceeded
@@ -88,15 +92,19 @@ export function createAuditsRouter({ authenticateToken, checkTrialExpiration }) 
                 userId === 'null';
 
             if (useOrgScope && req.user.role !== 'superadmin') {
+                await ensureOrphanUserOrgLink(actorId).catch(() => {});
                 const orgRootId = await resolveActorOrgRootId(actorId);
                 if (!(await actorCanReadOrgAssessmentStore(actorId, orgRootId))) {
                     return res.status(403).json({ error: 'Forbidden' });
                 }
                 if (await actorHasFullOrgAuditVisibility(actorId)) {
                     const subtreeIds = await collectOrgSubtreeUserIds(orgRootId);
-                    programWhere = { OR: buildOrgSubtreeProgramVisibilityOr(subtreeIds) };
+                    const memberIds = await collectOrgMemberUserIds(actorId);
+                    const scopeIds = memberIds.length > 0 ? memberIds : subtreeIds;
+                    programWhere = { OR: buildOrgSubtreeProgramVisibilityOr(scopeIds) };
                 } else {
-                    programWhere = { OR: buildAssignedAuditProgramVisibilityOr(actorId) };
+                    // Invitees (User B): assigned programs + programs on User A's org sites.
+                    programWhere = { OR: await buildTeammateAuditProgramVisibilityOr(actorId) };
                 }
             } else {
                 let scopeUserId;
@@ -112,20 +120,13 @@ export function createAuditsRouter({ authenticateToken, checkTrialExpiration }) 
                     return res.status(403).json({ error: 'Forbidden' });
                 }
 
-                const parsedUserId = scopeUserId;
-                const user = await prisma.user.findUnique({ where: { id: parsedUserId } });
-                const effectiveAdminId = user?.creatorId || parsedUserId;
-
-                programWhere = {
-                    OR: [
-                        { userId: parsedUserId },
-                        { leadAuditorId: parsedUserId },
-                        { auditors: { some: { id: parsedUserId } } },
-                        { user: { is: { creatorId: parsedUserId } } },
-                        { user: { is: { id: effectiveAdminId } } },
-                        { user: { is: { creatorId: effectiveAdminId } } }
-                    ]
-                };
+                await ensureOrphanUserOrgLink(actorId).catch(() => {});
+                const memberIds = await collectOrgMemberUserIds(scopeUserId);
+                if (memberIds.length > 0) {
+                    programWhere = { OR: buildOrgSubtreeProgramVisibilityOr(memberIds) };
+                } else {
+                    programWhere = { OR: await buildTeammateAuditProgramVisibilityOr(scopeUserId) };
+                }
             }
             }
 
@@ -297,20 +298,17 @@ export function createAuditsRouter({ authenticateToken, checkTrialExpiration }) 
         }
     });
 
-    router.post('/audit-programs', authenticateToken, checkTrialExpiration, async (req, res) => {
-        const { name, isoStandard, frequency, duration, siteId, auditorIds, leadAuditorId, scheduleData, userId } = req.body;
+            router.post('/audit-programs', authenticateToken, checkTrialExpiration, async (req, res) => {
+        const { name, isoStandard, frequency, duration, siteId, auditorIds, leadAuditorId, scheduleData } = req.body;
         try {
             const actorId = req.user.id;
             if (await rejectIfAuditee(actorId, res, 'Auditees cannot create audit programs')) {
                 return;
             }
-            const ownerId = userId != null ? Number.parseInt(String(userId), 10) : actorId;
-            if (Number.isNaN(ownerId)) {
-                return res.status(400).json({ error: 'Invalid userId' });
-            }
-            if (!(await actorCanAccessTargetUser(actorId, ownerId))) {
-                return res.status(403).json({ error: 'Forbidden' });
-            }
+            await ensureOrphanUserOrgLink(actorId).catch(() => {});
+            // Programs are always owned by the signed-in user (invitees create under their own id
+            // while using User A's sites/departments via org site access).
+            const ownerId = Number(actorId);
 
             const programCount = await countOrgAuditPrograms(actorId);
             const trialRejected = await rejectIfTrialLimitExceeded(
@@ -382,7 +380,9 @@ export function createAuditsRouter({ authenticateToken, checkTrialExpiration }) 
                     ? auditorIds
                     : existing.auditors.map((a) => a.id);
             const effectiveScheduleData =
-                scheduleData !== undefined ? scheduleData : existing.scheduleData;
+                scheduleData !== undefined && scheduleData !== null && typeof scheduleData === 'object'
+                    ? scheduleData
+                    : (existing.scheduleData ?? {});
             const assignmentCheck = await validateAuditProgramAssignments(actorId, {
                 siteId: effectiveSiteId,
                 leadAuditorId: effectiveLeadAuditorId,
@@ -393,31 +393,35 @@ export function createAuditsRouter({ authenticateToken, checkTrialExpiration }) 
                 return res.status(assignmentCheck.status).json({ error: assignmentCheck.error });
             }
 
-            // Disconnect all current auditors first before connecting new ones to ensure clean update
-            await prisma.auditProgram.update({
-                where: { id: Number.parseInt(id) },
-                data: {
-                    auditors: {
-                        set: []
-                    }
+            // Partial update — never wipe fields the client omitted or coerce scheduleData to {}.
+            const data = {
+                siteId: assignmentCheck.siteId,
+                leadAuditorId: assignmentCheck.leadAuditorId,
+            };
+            if (name !== undefined) data.name = name;
+            if (isoStandard !== undefined) data.isoStandard = isoStandard;
+            if (frequency !== undefined) data.frequency = frequency;
+            if (duration !== undefined) {
+                const parsedDuration = Number.parseInt(duration, 10);
+                if (Number.isInteger(parsedDuration) && parsedDuration >= 1) {
+                    data.duration = parsedDuration;
                 }
-            });
+            }
+            if (scheduleData !== undefined) {
+                data.scheduleData = effectiveScheduleData;
+            }
+            if (status !== undefined && status !== null && String(status).trim() !== '') {
+                data.status = status;
+            }
+            if (auditorIds !== undefined) {
+                data.auditors = {
+                    set: assignmentCheck.auditorIds.map((aid) => ({ id: aid })),
+                };
+            }
 
             const program = await prisma.auditProgram.update({
                 where: { id: Number.parseInt(id) },
-                data: {
-                    name,
-                    isoStandard,
-                    frequency,
-                    duration: Number.parseInt(duration),
-                    siteId: assignmentCheck.siteId,
-                    auditors: {
-                        connect: assignmentCheck.auditorIds.map((id) => ({ id })),
-                    },
-                    leadAuditorId: assignmentCheck.leadAuditorId,
-                    scheduleData: scheduleData || {},
-                    status: status || 'Draft'
-                },
+                data,
                 include: {
                     site: true,
                     auditors: true,
@@ -489,15 +493,18 @@ export function createAuditsRouter({ authenticateToken, checkTrialExpiration }) 
                     userId === 'null';
 
                 if (useOrgScope) {
+                    await ensureOrphanUserOrgLink(actorId).catch(() => {});
                     const orgRootId = await resolveActorOrgRootId(actorId);
                     if (!(await actorCanReadOrgAssessmentStore(actorId, orgRootId))) {
                         return res.status(403).json({ error: 'Forbidden' });
                     }
                     if (await actorHasFullOrgAuditVisibility(actorId)) {
                         const subtreeIds = await collectOrgSubtreeUserIds(orgRootId);
-                        whereClause.OR = buildOrgSubtreePlanVisibilityOr(subtreeIds);
+                        const memberIds = await collectOrgMemberUserIds(actorId);
+                        const scopeIds = memberIds.length > 0 ? memberIds : subtreeIds;
+                        whereClause.OR = buildOrgSubtreePlanVisibilityOr(scopeIds);
                     } else {
-                        whereClause.OR = buildAssignedAuditPlanVisibilityOr(actorId);
+                        whereClause.OR = await buildTeammateAuditPlanVisibilityOr(actorId);
                     }
                 } else {
                     let scopeUserId = Number.parseInt(String(userId), 10);
@@ -508,21 +515,13 @@ export function createAuditsRouter({ authenticateToken, checkTrialExpiration }) 
                         return res.status(403).json({ error: 'Forbidden' });
                     }
 
-                    const uId = scopeUserId;
-                    const user = await prisma.user.findUnique({ where: { id: uId } });
-                    const effectiveAdminId = user?.creatorId || uId;
-
-                    whereClause.OR = [
-                        { userId: uId },
-                        { leadAuditorId: uId },
-                        { auditors: { some: { id: uId } } },
-                        { user: { is: { creatorId: uId } } },
-                        { user: { is: { id: effectiveAdminId } } },
-                        { user: { is: { creatorId: effectiveAdminId } } },
-                        { auditProgram: { is: { userId: uId } } },
-                        { auditProgram: { is: { leadAuditorId: uId } } },
-                        { auditProgram: { is: { auditors: { some: { id: uId } } } } }
-                    ];
+                    await ensureOrphanUserOrgLink(actorId).catch(() => {});
+                    const memberIds = await collectOrgMemberUserIds(scopeUserId);
+                    if (memberIds.length > 0) {
+                        whereClause.OR = buildOrgSubtreePlanVisibilityOr(memberIds);
+                    } else {
+                        whereClause.OR = await buildTeammateAuditPlanVisibilityOr(scopeUserId);
+                    }
                 }
                 }
             }
@@ -711,9 +710,16 @@ export function createAuditsRouter({ authenticateToken, checkTrialExpiration }) 
             };
 
             const listStartedAt = performance.now();
+            const sortParam = String(req.query.sort || 'date').trim().toLowerCase();
+            const orderParam = String(req.query.order || 'desc').trim().toLowerCase() === 'asc' ? 'asc' : 'desc';
+            // Default latest audit date first (was createdAt desc). Null dates fall back via createdAt.
+            const orderBy =
+                sortParam === 'createdat' || sortParam === 'created_at'
+                    ? [{ createdAt: orderParam }]
+                    : [{ date: orderParam }, { createdAt: orderParam }];
             const findManyArgs = {
                 where: listWhere,
-                orderBy: { createdAt: 'desc' },
+                orderBy,
                 select: planSelect,
                 skip: pagination.paginate ? pagination.skip : 0,
                 take: pagination.paginate ? pagination.limit : pagination.take,
@@ -955,6 +961,7 @@ export function createAuditsRouter({ authenticateToken, checkTrialExpiration }) 
                         select: {
                             id: true,
                             name: true,
+                            isoStandard: true,
                             frequency: true,
                             duration: true,
                             createdAt: true,
@@ -1014,7 +1021,7 @@ export function createAuditsRouter({ authenticateToken, checkTrialExpiration }) 
         const {
             auditProgramId, executionId, auditType, auditName, templateId, date, location,
             scope, objective, criteria,
-            leadAuditorId, auditorIds, itinerary, userId
+            leadAuditorId, auditorIds, itinerary
         } = req.body;
 
         if (!auditProgramId) {
@@ -1032,21 +1039,27 @@ export function createAuditsRouter({ authenticateToken, checkTrialExpiration }) 
                 },
             });
             if (!program) return res.status(404).json({ error: 'Audit program not found' });
+            await ensureOrphanUserOrgLink(req.user.id).catch(() => {});
             if (!(await actorCanAccessAuditProgram(req.user.id, program))) {
                 return res.status(403).json({ error: 'You do not have permission to create an audit plan for this program' });
             }
 
             const actorId = Number(req.user.id);
-            const planOwnerId = userId != null ? Number.parseInt(String(userId), 10) : actorId;
-            if (!Number.isInteger(planOwnerId) || planOwnerId < 1 || !(await actorCanAccessTargetUser(actorId, planOwnerId))) {
-                return res.status(403).json({ error: 'You do not have permission to create an audit plan for this user' });
-            }
+            // Plans are always owned by the signed-in user (invitees create under their own id
+            // while using programs/sites from their org admin).
+            const planOwnerId = actorId;
 
             const programCompanyId = await resolveAuditProgramCompanyId(program);
+            // Pre-filled lead/team auditors from the parent program must remain selectable on create.
+            const grandfatherIds = [
+                program.leadAuditorId,
+                ...(Array.isArray(program.auditors) ? program.auditors.map((a) => a.id) : []),
+            ];
             const auditorCheck = await validateAuditPlanAuditorAssignments(actorId, {
                 companyId: programCompanyId,
                 leadAuditorId,
                 auditorIds,
+                grandfatherIds,
             });
             if (!auditorCheck.ok) {
                 return res.status(auditorCheck.status).json({ error: auditorCheck.error });
@@ -1071,7 +1084,20 @@ export function createAuditsRouter({ authenticateToken, checkTrialExpiration }) 
                     itinerary: itinerary || [],
                     userId: planOwnerId,
                     status: AUDIT_LIFECYCLE.PLANNED,
-                }
+                },
+                include: {
+                    leadAuditor: {
+                        select: { id: true, firstName: true, lastName: true },
+                    },
+                    auditProgram: {
+                        select: {
+                            id: true,
+                            name: true,
+                            isoStandard: true,
+                            site: { select: { id: true, name: true } },
+                        },
+                    },
+                },
             });
             res.status(201).json(plan);
         } catch (error) {
@@ -1102,12 +1128,13 @@ export function createAuditsRouter({ authenticateToken, checkTrialExpiration }) 
                         include: {
                             auditors: true,
                             leadAuditor: true,
-                            site: { select: { companyId: true } },
+                            site: { select: { id: true, companyId: true } },
                         },
                     },
                 },
             });
             if (!existing) return res.status(404).json({ error: 'Audit plan not found' });
+            await ensureOrphanUserOrgLink(req.user.id).catch(() => {});
             if (!(await actorCanAccessAuditPlan(req.user.id, existing))) {
                 return res.status(403).json({ error: 'You do not have permission to update this audit plan' });
             }
@@ -1127,11 +1154,14 @@ export function createAuditsRouter({ authenticateToken, checkTrialExpiration }) 
                     auditorIds !== undefined
                         ? auditorIds
                         : existing.auditors.map((a) => a.id);
-                // Keep currently assigned auditors allowed even if they became inactive,
-                // so saving an existing plan does not randomly return 403.
+                // Keep currently assigned + parent-program auditors allowed on save.
                 const grandfatherIds = [
                     existing.leadAuditorId,
                     ...existing.auditors.map((a) => a.id),
+                    existing.auditProgram?.leadAuditorId,
+                    ...(Array.isArray(existing.auditProgram?.auditors)
+                        ? existing.auditProgram.auditors.map((a) => a.id)
+                        : []),
                 ];
                 validatedAuditors = await validateAuditPlanAuditorAssignments(actorId, {
                     companyId: programCompanyId,
@@ -1184,7 +1214,31 @@ export function createAuditsRouter({ authenticateToken, checkTrialExpiration }) 
                             : incoming;
                 }
             }
-            if (req.body.findingsData !== undefined) updateData.findingsData = req.body.findingsData;
+            if (req.body.findingsData !== undefined) {
+                const incomingFindings = req.body.findingsData;
+                const existingFindings = existing.findingsData;
+                const incomingEmpty =
+                    incomingFindings == null ||
+                    (typeof incomingFindings === 'object' &&
+                        !Array.isArray(incomingFindings) &&
+                        Object.keys(incomingFindings).length === 0) ||
+                    (Array.isArray(incomingFindings) && incomingFindings.length === 0);
+                const existingHasData =
+                    existingFindings != null &&
+                    ((typeof existingFindings === 'object' &&
+                        !Array.isArray(existingFindings) &&
+                        Object.keys(existingFindings).length > 0) ||
+                        (Array.isArray(existingFindings) && existingFindings.length > 0));
+                if (
+                    incomingEmpty &&
+                    existingHasData &&
+                    req.body.forceReplaceFindingsData !== true
+                ) {
+                    // Keep existing findings — refuse accidental empty overwrite.
+                } else {
+                    updateData.findingsData = incomingFindings;
+                }
+            }
             updateData.updatedAt = new Date();
 
             // Do not echo multi‑MB auditData back to the client — Save Audit only needs ack + progress.

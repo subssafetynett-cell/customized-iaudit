@@ -9,10 +9,13 @@ import {
     Table as DocxTable,
     TableRow as DocxTableRow,
     TableCell as DocxTableCell,
+    TableLayoutType,
     WidthType,
     BorderStyle,
     UnderlineType,
     Header,
+    VerticalAlign,
+    AlignmentType,
 } from "docx";
 import { saveAs } from "file-saver";
 import * as XLSX from "xlsx";
@@ -25,6 +28,7 @@ import {
     type AuditTemplate,
 } from "@/data/auditTemplates";
 import { sanitizeAuditEvidenceMediaMap, type AuditEvidenceMedia } from "@/lib/evidenceImageUpload";
+import { CLAUSE_MATRIX } from "@/data/clauseMapping";
 import {
     collectReportEvidenceFileList,
     collectReportEvidenceSources,
@@ -50,6 +54,8 @@ import {
     buildChecklistFindingExtraBlocks,
     buildChecklistReportTable,
     buildFindingEvidenceText,
+    buildImsChecklistFindingExtraBlocks,
+    buildImsChecklistReportTable,
     collectFindingAttachmentMedia,
     extractFindingDetailFields,
     findingDetailCells,
@@ -59,13 +65,20 @@ import {
     isModuleAuditPlan,
     normalizeReportNonConformances,
     resolveChecklistContent,
+    resolveChecklistContentWithAnswers,
+    resolveModuleAuditFacetCategory,
     resolveQfsScoreModeForPlan,
+    resolveReportManagementSystemLabel,
     resolveReportTemplate,
     type ChecklistFindingExtraBlock,
     type ChecklistReportCell,
     type ChecklistReportHeaderCell,
     type ReportNonConformance,
 } from "@/lib/auditReportFindings";
+import {
+    buildModuleAuditReportFileName,
+    resolveModuleAuditFacetCategory,
+} from "@/lib/moduleAuditFacet";
 import {
     computeEoshCapabilityScores,
     isEoshScoredCapabilityChecklist,
@@ -81,6 +94,7 @@ import {
     normalizeFindingsReportForm,
 } from "@/lib/findingsReportForm";
 import { apiFetch } from "@/lib/api";
+import { normalizePlanForReport } from "@/lib/auditPlanModules";
 import {
     formatDepartmentNames,
     resolveDepartmentsFromProgram,
@@ -113,6 +127,76 @@ const PDF_SECTION_BLUE: [number, number, number] = [41, 99, 170];
 const DOCX_SECTION_BLUE = "29599F";
 const MANAGEMENT_LABEL_COL_WIDTH_MM = 52;
 
+function calculatePeriods(frequency: string, duration: number, startDate?: string | Date) {
+    const count =
+        frequency === "Monthly"
+            ? duration * 12
+            : frequency === "Quarterly"
+              ? duration * 4
+              : frequency === "Bi-annually"
+                ? duration * 2
+                : duration;
+    const result: string[] = [];
+    const currentDate = startDate ? new Date(startDate) : new Date();
+    currentDate.setDate(1); // Start from the beginning of the month
+    for (let i = 0; i < count; i++) {
+        const monthLabel = currentDate
+            .toLocaleString("default", { month: "short" })
+            .toUpperCase();
+        const yearLabel = currentDate.getFullYear().toString();
+        result.push(`${monthLabel} ${yearLabel}`);
+        if (frequency === "Monthly") currentDate.setMonth(currentDate.getMonth() + 1);
+        else if (frequency === "Quarterly") currentDate.setMonth(currentDate.getMonth() + 3);
+        else if (frequency === "Bi-annually") currentDate.setMonth(currentDate.getMonth() + 6);
+        else currentDate.setFullYear(currentDate.getFullYear() + 1);
+    }
+    return result;
+}
+
+function resolveIsoClauseSelectionPredicate(plan: Record<string, any>): ((clauseStr: string) => boolean) | undefined {
+    const auditProgram = plan?.auditProgram;
+    const scheduleData = auditProgram?.scheduleData;
+    const executionId = plan?.executionId;
+
+    if (!auditProgram || !scheduleData || !executionId) return undefined;
+    if (typeof scheduleData !== "object") return undefined;
+
+    const executionIdStr = String(executionId);
+    const parts = executionIdStr.split(" - ");
+    const periodLabel = parts.length > 1 ? parts.slice(1).join(" - ") : parts[0];
+
+    const activeScheduleData = scheduleData as Record<string, boolean>;
+    if (!activeScheduleData || Object.keys(activeScheduleData).length === 0) return undefined;
+
+    const loadData = scheduleData as Record<string, unknown>;
+    const programPeriods = calculatePeriods(
+        String(auditProgram.frequency),
+        Number(auditProgram.duration),
+        (loadData.startDate as any) || auditProgram.createdAt,
+    );
+
+    const colIndex = programPeriods.indexOf(periodLabel);
+    if (colIndex === -1) return undefined;
+
+    const explicitlySelectedClauses = [];
+    CLAUSE_MATRIX.forEach((clause, rowIndex) => {
+        if (activeScheduleData[`${rowIndex}-${colIndex}`] === true) {
+            explicitlySelectedClauses.push(clause);
+        }
+    });
+
+    return (clauseStr: string) => {
+        const match = clauseStr.match(/^(\d+(?:\.\d+)*)/);
+        // Custom refs (e.g. CM-1) are not ISO schedule cells — always show.
+        if (!match) return true;
+
+        const cleanId = match[1];
+        return explicitlySelectedClauses.some(
+            (c) => c.id === cleanId || c.id.startsWith(cleanId + ".") || cleanId.startsWith(c.id + "."),
+        );
+    };
+}
+
 type PdfPageLayout = {
     contentStartY: number;
     logo: { dataUrl: string; ratio: number } | null;
@@ -135,6 +219,86 @@ export function getAuditData(plan: { auditData?: unknown }) {
         console.warn("[auditReportExport] Failed to parse auditData", err);
     }
     return {};
+}
+
+type ReportChecklistSection = {
+    title: string;
+    headerCells: ChecklistReportHeaderCell[];
+    bodyCells: ChecklistReportCell[][];
+    extrasBlocks: ChecklistFindingExtraBlock[];
+    checklistContent: ChecklistContent[];
+};
+
+function buildReportChecklistSection(
+    plan: Record<string, any>,
+    template: AuditTemplate,
+    auditData: Record<string, unknown>,
+    clauseFiles: Record<string, AuditEvidenceMedia[]>,
+    genericFiles: Record<string, AuditEvidenceMedia[]>,
+    isModule: boolean,
+    isClauseSelected?: (clauseStr: string) => boolean,
+): ReportChecklistSection | null {
+    if (!template?.content) return null;
+    const { content: checklistContent, checklistData } =
+        resolveChecklistContentWithAnswers(
+            auditData,
+            template.content as ChecklistContent[],
+        );
+    if (checklistContent.length === 0) return null;
+
+    const collectEvidence = (clauseKey: string, itemIndex: number, textEvidence?: string) =>
+        buildFindingEvidenceText(
+            textEvidence,
+            collectFindingAttachmentMedia(clauseFiles, genericFiles, clauseKey, itemIndex),
+        );
+
+    if (template.isTripleMapping) {
+        const { headerCells, bodyCells, rowMeta } = buildImsChecklistReportTable({
+            content: checklistContent,
+            checklistData,
+            programIsoStandard: plan.auditProgram?.isoStandard,
+            criteria: plan.criteria,
+            collectEvidence,
+        });
+        const extrasBlocks = buildImsChecklistFindingExtraBlocks({
+            content: checklistContent,
+            checklistData,
+            rowMeta,
+        });
+        return {
+            title: "Integrated Audit Checklist",
+            headerCells,
+            bodyCells,
+            extrasBlocks,
+            checklistContent,
+        };
+    }
+
+    const { bodyCells, headerCells } = buildChecklistReportTable({
+        content: checklistContent,
+        checklistData,
+        isModule,
+        isEosh: planUsesEoshTotals(plan),
+        qfsScoreMode: resolveQfsScoreModeForPlan(plan),
+        templateId: template.id || plan.templateId,
+        collectEvidence,
+        isClauseSelected,
+    });
+    const extrasBlocks = buildChecklistFindingExtraBlocks({
+        content: checklistContent,
+        checklistData,
+        isModule,
+        isEosh: planUsesEoshTotals(plan),
+        qfsScoreMode: resolveQfsScoreModeForPlan(plan),
+        isClauseSelected,
+    });
+    return {
+        title: "Checklist",
+        headerCells,
+        bodyCells,
+        extrasBlocks,
+        checklistContent,
+    };
 }
 
 function safeFormatDate(value: unknown, pattern: string, fallback = "—"): string {
@@ -166,8 +330,37 @@ function docxImageRun(data: Uint8Array | ArrayBuffer, width: number, height: num
     });
 }
 
-export function auditReportBaseName(plan: { auditName?: string; id?: number }) {
-    return `Audit_Findings_Report_${(plan.auditName || "Audit").replace(/[^a-z0-9]/gi, "_") || plan.id}`;
+/** Flatten transparent signature PNGs onto white so they render in PDF/Word. */
+async function flattenSignatureDataUrl(signature: string): Promise<string> {
+    const raw = String(signature || "").trim();
+    if (!raw.startsWith("data:image/")) return raw;
+    try {
+        const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+            const el = new Image();
+            el.onload = () => resolve(el);
+            el.onerror = () => reject(new Error("signature image load failed"));
+            el.src = raw;
+        });
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, img.naturalWidth || img.width || 1);
+        canvas.height = Math.max(1, img.naturalHeight || img.height || 1);
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return raw;
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0);
+        return canvas.toDataURL("image/png");
+    } catch {
+        return raw;
+    }
+}
+
+export function auditReportBaseName(plan: Record<string, unknown>) {
+    const moduleFileName = buildModuleAuditReportFileName(plan);
+    if (moduleFileName) return moduleFileName;
+    const auditName = (plan as { auditName?: string; id?: number }).auditName;
+    const id = (plan as { id?: number }).id;
+    return `Audit_Findings_Report_${(auditName || "Audit").replace(/[^a-z0-9]/gi, "_") || id}`;
 }
 
 interface ReportContext {
@@ -182,6 +375,8 @@ interface ReportContext {
     auditees: string;
     scope: string;
     criteriaAndMethod: string;
+    facet: string;
+    category: string;
     executiveSummary: string;
     nonConformances: ReportNonConformance[];
     isModuleAudit: boolean;
@@ -289,6 +484,9 @@ async function buildReportContext(plan: Record<string, any>): Promise<ReportCont
 
     const nonConformances = normalizeReportNonConformances(auditData.nonConformances);
 
+    const { facet: moduleFacet, category: moduleCategory } =
+        resolveModuleAuditFacetCategory(auditData);
+
     const criteriaParts = [plan.criteria, plan.objective].filter(Boolean);
     const defaultCriteriaAndMethod =
         criteriaParts.length > 0
@@ -299,6 +497,10 @@ async function buildReportContext(plan: Record<string, any>): Promise<ReportCont
         ? form.generalComment
         : String(auditData.executiveSummary || "");
 
+    const moduleFacetCategory = isModuleAudit
+        ? resolveModuleAuditFacetCategory(auditData)
+        : { facet: "", category: "" };
+
     const findingsForm = normalizeFindingsReportForm({
         ...form,
         docNumber: form?.docNumber?.trim() || DEFAULT_DOC_NUMBER,
@@ -307,6 +509,7 @@ async function buildReportContext(plan: Record<string, any>): Promise<ReportCont
         managementSystem:
             form?.managementSystem ||
             globalInfo.clauseNo ||
+            resolveReportManagementSystemLabel(plan) ||
             plan.criteria ||
             template?.standard ||
             plan.standard ||
@@ -352,8 +555,12 @@ async function buildReportContext(plan: Record<string, any>): Promise<ReportCont
         auditDate: findingsForm.auditDate,
         auditors: findingsForm.auditors,
         auditees: findingsForm.auditees,
-        scope: findingsForm.auditScope,
-        criteriaAndMethod: findingsForm.auditCriteriaAndMethod,
+        scope: isModuleAudit ? moduleFacetCategory.facet : findingsForm.auditScope,
+        criteriaAndMethod: isModuleAudit
+            ? moduleFacetCategory.category
+            : findingsForm.auditCriteriaAndMethod,
+        facet: moduleFacetCategory.facet,
+        category: moduleFacetCategory.category,
         executiveSummary,
         nonConformances,
         isModuleAudit,
@@ -909,7 +1116,7 @@ function pdfDottedLine(doc: jsPDF, label: string, y: number, pageW: number, x = 
     return y + 10;
 }
 
-function renderPdfSignatureColumn(
+async function renderPdfSignatureColumn(
     doc: jsPDF,
     label: string,
     signature: string,
@@ -917,7 +1124,7 @@ function renderPdfSignatureColumn(
     x: number,
     y: number,
     colWidth: number,
-): number {
+): Promise<number> {
     let cy = y;
     doc.setFont(FONT, "bold");
     doc.setFontSize(10);
@@ -925,19 +1132,20 @@ function renderPdfSignatureColumn(
     doc.text(`${label}:`, x, cy);
     cy += 7;
 
-    if (signature.startsWith("data:image/")) {
+    const flatSignature = await flattenSignatureDataUrl(signature);
+    if (flatSignature.startsWith("data:image/")) {
         try {
-            const format = signature.includes("image/jpeg") ? "JPEG" : "PNG";
-            doc.addImage(signature, format, x, cy, Math.min(colWidth - 6, 48), 14, undefined, "FAST");
+            const format = flatSignature.includes("image/jpeg") ? "JPEG" : "PNG";
+            doc.addImage(flatSignature, format, x, cy, Math.min(colWidth - 6, 48), 14, undefined, "FAST");
             cy += 16;
         } catch {
             doc.setFont(FONT, "normal");
             doc.text("[Invalid Image]", x, cy);
             cy += 8;
         }
-    } else if (signature.trim()) {
+    } else if (flatSignature.trim() && flatSignature.trim() !== "[omitted]") {
         doc.setFont(FONT, "normal");
-        const lines = doc.splitTextToSize(signature, colWidth - 4);
+        const lines = doc.splitTextToSize(flatSignature, colWidth - 4);
         doc.text(lines, x, cy);
         cy += lines.length * 5 + 2;
     } else {
@@ -955,13 +1163,13 @@ function renderPdfSignatureColumn(
     return cy + 12;
 }
 
-function renderAcknowledgementSectionPdf(
+async function renderAcknowledgementSectionPdf(
     doc: jsPDF,
     ctx: ReportContext,
     y: number,
     pageH: number,
     pageW: number,
-): number {
+): Promise<number> {
     y = checkPage(doc, y, 50, pageH);
     y = pdfBlueSectionHeading(
         doc,
@@ -973,7 +1181,7 @@ function renderAcknowledgementSectionPdf(
     const leftX = MARGIN;
     const rightX = MARGIN + colWidth + 8;
     const startY = y + 4;
-    const leftEnd = renderPdfSignatureColumn(
+    const leftEnd = await renderPdfSignatureColumn(
         doc,
         "Auditee Signature",
         ctx.acknowledgement.auditeeSignature,
@@ -982,7 +1190,7 @@ function renderAcknowledgementSectionPdf(
         startY,
         colWidth,
     );
-    const rightEnd = renderPdfSignatureColumn(
+    const rightEnd = await renderPdfSignatureColumn(
         doc,
         "Auditor Signature",
         ctx.acknowledgement.auditorSignature,
@@ -1015,29 +1223,39 @@ async function renderSzlReportHeaderAndMetadataAsync(
         );
     }
 
-    if (isFieldVisible(ctx.findingsForm, "auditScope")) {
-        y = renderBlueTextSectionPdf(
-            doc,
-            `${getSectionLabel(ctx.findingsForm, "auditScope")}:`,
-            ctx.scope,
-            y,
-            pageH,
-        );
+    if (ctx.isModuleAudit) {
+        y = renderBlueTextSectionPdf(doc, "Facet:", ctx.facet || "—", y, pageH);
+        y = renderBlueTextSectionPdf(doc, "Category:", ctx.category || "—", y, pageH);
         for (const field of getCustomFieldsBySection(ctx.findingsForm, "content")) {
             y = checkPage(doc, y, 20, pageH);
             y = pdfSubHeading(doc, `${field.label}:`, y);
             y = pdfBorderedContentBox(doc, field.value, y, pageH);
         }
-    }
+    } else {
+        if (isFieldVisible(ctx.findingsForm, "auditScope")) {
+            y = renderBlueTextSectionPdf(
+                doc,
+                `${getSectionLabel(ctx.findingsForm, "auditScope")}:`,
+                ctx.scope,
+                y,
+                pageH,
+            );
+            for (const field of getCustomFieldsBySection(ctx.findingsForm, "content")) {
+                y = checkPage(doc, y, 20, pageH);
+                y = pdfSubHeading(doc, `${field.label}:`, y);
+                y = pdfBorderedContentBox(doc, field.value, y, pageH);
+            }
+        }
 
-    if (isFieldVisible(ctx.findingsForm, "auditCriteriaAndMethod")) {
-        y = renderBlueTextSectionPdf(
-            doc,
-            `${getSectionLabel(ctx.findingsForm, "auditCriteria")}:`,
-            ctx.criteriaAndMethod,
-            y,
-            pageH,
-        );
+        if (isFieldVisible(ctx.findingsForm, "auditCriteriaAndMethod")) {
+            y = renderBlueTextSectionPdf(
+                doc,
+                `${getSectionLabel(ctx.findingsForm, "auditCriteria")}:`,
+                ctx.criteriaAndMethod,
+                y,
+                pageH,
+            );
+        }
     }
 
     y = renderPreviousFindingsSectionPdf(doc, auditData, y, pageH);
@@ -1045,7 +1263,7 @@ async function renderSzlReportHeaderAndMetadataAsync(
     return y;
 }
 
-function renderSzlReportSummaryAndSignatures(doc: jsPDF, ctx: ReportContext, y: number): number {
+async function renderSzlReportSummaryAndSignatures(doc: jsPDF, ctx: ReportContext, y: number): Promise<number> {
     const pageW = doc.internal.pageSize.getWidth();
     const pageH = doc.internal.pageSize.getHeight();
     const form = ctx.findingsForm;
@@ -1165,6 +1383,33 @@ const NC_BOX_FILL: [number, number, number] = [255, 251, 235];
 const NC_BOX_BORDER: [number, number, number] = [245, 158, 11];
 const NC_BOX_TITLE: [number, number, number] = [120, 53, 15];
 
+function isChecklistScoreHeader(text: string): boolean {
+    const t = text.toLowerCase();
+    return (
+        t.includes("compliance") ||
+        t.includes("exception") ||
+        t.includes("non-compliance") ||
+        t.includes("non compliance") ||
+        /\(\s*[012]\s*\)/.test(t) ||
+        t === "finding" ||
+        t.includes("score / finding") ||
+        t.includes("score/finding") ||
+        (t.includes("score") && !t.includes("comments"))
+    );
+}
+
+/** Relative weights — same proportions for PDF (mm) and Word (%). */
+function checklistColumnWeight(headerText: string): number {
+    const t = headerText.trim().toLowerCase();
+    if (t === "clause" || t === "#") return 10;
+    if (t === "intent") return 16;
+    if (t === "evidence" || t === "comments") return 16;
+    if (t === "comment") return 12;
+    if (isChecklistScoreHeader(headerText)) return 9;
+    // Question / Requirement / unknown flex columns
+    return 28;
+}
+
 /**
  * Explicit checklist column widths so long questions wrap by word — not letter-by-letter.
  * Score columns stay narrow; Question takes the remaining width.
@@ -1173,24 +1418,13 @@ function buildChecklistPdfColumnStyles(
     headerCells: ChecklistReportHeaderCell[],
     contentWidthMm: number,
 ): Record<number, { cellWidth: number; overflow?: "linebreak"; halign?: "left" | "center" }> {
-    const isScoreHeader = (text: string) => {
-        const t = text.toLowerCase();
-        return (
-            t.includes("compliance") ||
-            t.includes("exception") ||
-            t.includes("non-compliance") ||
-            t.includes("non compliance") ||
-            /\(\s*[012]\s*\)/.test(t) ||
-            t === "finding" ||
-            t.includes("score")
-        );
-    };
+    const isScoreHeader = isChecklistScoreHeader;
 
     const widths = headerCells.map((h) => {
         const t = h.text.trim().toLowerCase();
         if (t === "clause" || t === "#") return 16;
         if (t === "intent") return 28;
-        if (t === "evidence") return 32;
+        if (t === "evidence" || t === "comments") return 32;
         if (t === "comment") return 24;
         if (isScoreHeader(h.text)) return 22;
         if (t === "question" || t === "requirement") return -1; // flex
@@ -1223,6 +1457,52 @@ function buildChecklistPdfColumnStyles(
         }
     });
     return styles;
+}
+
+/**
+ * Percentage widths for Word checklist tables (sum = 100).
+ * Fixed layout + these widths keep Clause/Question readable like the PDF.
+ */
+function buildChecklistDocxColumnWidthsPct(
+    headerCells: ChecklistReportHeaderCell[],
+): number[] {
+    const weights = headerCells.map((h) => checklistColumnWeight(h.text));
+    const total = weights.reduce((sum, w) => sum + w, 0) || 1;
+    const raw = weights.map((w) => (w / total) * 100);
+    const floors = raw.map((w) => Math.max(4, Math.floor(w)));
+    let rem = 100 - floors.reduce((sum, w) => sum + w, 0);
+    const order = raw
+        .map((w, i) => ({ i, frac: w - Math.floor(w) }))
+        .sort((a, b) => b.frac - a.frac);
+    let idx = 0;
+    while (rem !== 0 && order.length > 0) {
+        const target = order[idx % order.length].i;
+        if (rem > 0) {
+            floors[target] += 1;
+            rem -= 1;
+        } else if (floors[target] > 4) {
+            floors[target] -= 1;
+            rem += 1;
+        } else {
+            idx += 1;
+            if (idx > order.length * 3) break;
+            continue;
+        }
+        idx += 1;
+    }
+    return floors;
+}
+
+/** Soft-break long unbroken tokens so Word wraps instead of stretching columns. */
+function softWrapDocxCellText(text: string, chunk = 28): string {
+    if (!text) return text;
+    return text.replace(/\S{30,}/g, (token) => {
+        const parts: string[] = [];
+        for (let i = 0; i < token.length; i += chunk) {
+            parts.push(token.slice(i, i + chunk));
+        }
+        return parts.join("\u200B");
+    });
 }
 
 /** Stacked label/value NC box (separate table — does not distort checklist columns). */
@@ -1372,6 +1652,7 @@ function renderChecklistPdfWithInlineExtras(
 
 /** Full audit execution report as PDF */
 export async function generateAuditReportPdf(plan: Record<string, any>) {
+    plan = normalizePlanForReport(plan);
     const doc = new jsPDF();
     const pageW = doc.internal.pageSize.getWidth();
     const pageH = doc.internal.pageSize.getHeight();
@@ -1382,6 +1663,10 @@ export async function generateAuditReportPdf(plan: Record<string, any>) {
     const logo = await loadSzlLogoBase64();
     const form = ctx.findingsForm;
     const isModule = ctx.isModuleAudit;
+    const isoClausePredicate =
+        !isModule && template?.type === "checklist"
+            ? resolveIsoClauseSelectionPredicate(plan)
+            : undefined;
 
     activePdfPageLayout = {
         contentStartY: computeSzlPdfHeaderContentStartY(form, !!logo),
@@ -1449,41 +1734,22 @@ export async function generateAuditReportPdf(plan: Record<string, any>) {
     );
 
     if (template?.content && (template.type === "checklist" || auditData.checklistData)) {
-        const checklistContent = resolveChecklistContent(
+        const checklistSection = buildReportChecklistSection(
+            plan,
+            template,
             auditData,
-            template.content as ChecklistContent[],
+            clauseFilesForReport,
+            genericFilesForReport,
+            isModule,
+            isoClausePredicate,
         );
-        if (checklistContent.length > 0) {
-            const { bodyCells, headerCells } = buildChecklistReportTable({
-                content: checklistContent,
-                checklistData: (auditData.checklistData as Record<string, any>) || {},
-                isModule,
-                isEosh: planUsesEoshTotals(plan),
-                qfsScoreMode: resolveQfsScoreModeForPlan(plan),
-                collectEvidence: (clauseKey, itemIndex, textEvidence) =>
-                    buildFindingEvidenceText(
-                        textEvidence,
-                        collectFindingAttachmentMedia(
-                            clauseFilesForReport,
-                            genericFilesForReport,
-                            clauseKey,
-                            itemIndex,
-                        ),
-                    ),
-            });
+        if (checklistSection && checklistSection.checklistContent.length > 0) {
             y = checkPage(doc, y, 20, pageH);
-            y = sectionHeading("Checklist", y);
-            const extrasBlocks = buildChecklistFindingExtraBlocks({
-                content: checklistContent,
-                checklistData: (auditData.checklistData as Record<string, any>) || {},
-                isModule,
-                isEosh: planUsesEoshTotals(plan),
-                qfsScoreMode: resolveQfsScoreModeForPlan(plan),
-            });
+            y = sectionHeading(checklistSection.title || "Checklist", y);
             y = renderChecklistPdfWithInlineExtras(doc, {
-                headerCells,
-                bodyCells,
-                extrasBlocks,
+                headerCells: checklistSection.headerCells,
+                bodyCells: checklistSection.bodyCells,
+                extrasBlocks: checklistSection.extrasBlocks,
                 startY: y,
                 pageH,
             });
@@ -1492,7 +1758,7 @@ export async function generateAuditReportPdf(plan: Record<string, any>) {
                 y = renderEoshTotalsPdf(
                     doc,
                     (auditData.checklistData as Record<string, { findings?: string }>) || {},
-                    checklistContent.length,
+                    checklistSection.checklistContent.length,
                     y,
                     pageH,
                     sectionHeading,
@@ -1621,7 +1887,7 @@ export async function generateAuditReportPdf(plan: Record<string, any>) {
     }
 
     // Now render 4. AUDIT SUMMARY and 5. ACKNOWLEDGEMENT OF FINDINGS (Signatures)
-    y = renderSzlReportSummaryAndSignatures(doc, ctx, y);
+    y = await renderSzlReportSummaryAndSignatures(doc, ctx, y);
 
     const iauditFooterAsset: PdfImageAsset | null = await loadImageAsset(
         IAUDIT_FOOTER_LOGO_SRC,
@@ -1651,17 +1917,19 @@ export async function generateAuditReportPdf(plan: Record<string, any>) {
 function docxBorderedCell(
     children: Paragraph[],
     widthPct = 33,
-    options?: { fillHex?: string },
+    options?: { fillHex?: string; columnSpan?: number; center?: boolean },
 ) {
     return new DocxTableCell({
         children,
         width: { size: widthPct, type: WidthType.PERCENTAGE },
+        verticalAlign: VerticalAlign.TOP,
         borders: {
             top: { style: BorderStyle.SINGLE, size: 1 },
             bottom: { style: BorderStyle.SINGLE, size: 1 },
             left: { style: BorderStyle.SINGLE, size: 1 },
             right: { style: BorderStyle.SINGLE, size: 1 },
         },
+        ...(options?.columnSpan ? { columnSpan: options.columnSpan } : {}),
         ...(options?.fillHex
             ? { shading: { fill: options.fillHex.replace("#", "") } }
             : {}),
@@ -1689,7 +1957,7 @@ function docxChecklistFindingExtraBox(
                         }),
                     ],
                     100,
-                    { fillHex: "#FEF3C7" },
+                    { fillHex: "#FEF3C7", columnSpan: 2 },
                 ),
             ],
         }),
@@ -1702,15 +1970,25 @@ function docxChecklistFindingExtraBox(
                         [
                             new Paragraph({
                                 children: [
+                                    new TextRun({ text: "Finding", bold: true, size: 16 }),
+                                ],
+                            }),
+                        ],
+                        28,
+                        { fillHex: "#FFFBEB" },
+                    ),
+                    docxBorderedCell(
+                        [
+                            new Paragraph({
+                                children: [
                                     new TextRun({
-                                        text: `Finding: ${block.finding}`,
-                                        bold: true,
+                                        text: softWrapDocxCellText(block.finding),
                                         size: 16,
                                     }),
                                 ],
                             }),
                         ],
-                        100,
+                        72,
                         { fillHex: "#FFFBEB" },
                     ),
                 ],
@@ -1743,7 +2021,7 @@ function docxChecklistFindingExtraBox(
                                 }),
                             ],
                             100,
-                            { fillHex: "#FEF3C7" },
+                            { fillHex: "#FEF3C7", columnSpan: 2 },
                         ),
                     ],
                 }),
@@ -1767,7 +2045,12 @@ function docxChecklistFindingExtraBox(
                     docxBorderedCell(
                         [
                             new Paragraph({
-                                children: [new TextRun({ text: field.value, size: 16 })],
+                                children: [
+                                    new TextRun({
+                                        text: softWrapDocxCellText(field.value || "—"),
+                                        size: 16,
+                                    }),
+                                ],
                             }),
                         ],
                         72,
@@ -1779,6 +2062,7 @@ function docxChecklistFindingExtraBox(
     }
     return new DocxTable({
         width: { size: 100, type: WidthType.PERCENTAGE },
+        layout: TableLayoutType.FIXED,
         rows,
     });
 }
@@ -1853,16 +2137,16 @@ function buildBlueTextSectionDocx(heading: string, content: string): (Paragraph 
     return [docxBlueSectionHeading(heading), docxBorderedContentTable(content)];
 }
 
-function buildAcknowledgementSectionDocx(ctx: ReportContext): (Paragraph | DocxTable)[] {
+async function buildAcknowledgementSectionDocx(ctx: ReportContext): Promise<(Paragraph | DocxTable)[]> {
     const blocks: (Paragraph | DocxTable)[] = [
         docxBlueSectionHeading(`${getSectionLabel(ctx.findingsForm, "acknowledgement")}:`),
     ];
 
-    const buildSignatureCell = (
+    const buildSignatureCell = async (
         label: string,
         signature: string,
         date: string,
-    ): DocxTableCell => {
+    ): Promise<DocxTableCell> => {
         const children: Paragraph[] = [
             new Paragraph({
                 children: [new TextRun({ text: `${label}:`, bold: true })],
@@ -1870,20 +2154,21 @@ function buildAcknowledgementSectionDocx(ctx: ReportContext): (Paragraph | DocxT
             }),
         ];
 
-        if (signature.startsWith("data:image/")) {
+        const flatSignature = await flattenSignatureDataUrl(signature);
+        if (flatSignature.startsWith("data:image/")) {
             try {
-                const buffer = dataUrlToUint8Array(signature);
+                const buffer = dataUrlToUint8Array(flatSignature);
                     children.push(
                         new Paragraph({
-                            children: [docxImageRun(buffer, 120, 45, signature)],
+                            children: [docxImageRun(buffer, 120, 45, flatSignature)],
                             spacing: { after: 80 },
                         }),
                     );
             } catch {
                 children.push(new Paragraph({ text: "[Invalid Image]", spacing: { after: 80 } }));
             }
-        } else if (signature.trim()) {
-            children.push(new Paragraph({ text: signature, spacing: { after: 80 } }));
+        } else if (flatSignature.trim() && flatSignature.trim() !== "[omitted]") {
+            children.push(new Paragraph({ text: flatSignature, spacing: { after: 80 } }));
         } else {
             children.push(
                 new Paragraph({
@@ -1909,12 +2194,12 @@ function buildAcknowledgementSectionDocx(ctx: ReportContext): (Paragraph | DocxT
             rows: [
                 new DocxTableRow({
                     children: [
-                        buildSignatureCell(
+                        await buildSignatureCell(
                             "Auditee Signature",
                             ctx.acknowledgement.auditeeSignature,
                             ctx.acknowledgement.auditeeDate,
                         ),
-                        buildSignatureCell(
+                        await buildSignatureCell(
                             "Auditor Signature",
                             ctx.acknowledgement.auditorSignature,
                             ctx.acknowledgement.auditorDate,
@@ -2037,10 +2322,16 @@ function buildSzlDocxPageHeader(
 
 /** Full audit execution report as Word */
 export async function generateAuditReportDocx(plan: Record<string, any>) {
+    plan = normalizePlanForReport(plan);
     const auditData = getAuditData(plan);
     const fileName = auditReportBaseName(plan);
     const ctx = await buildReportContext(plan);
     const template = resolveReportTemplate(plan);
+    const isModule = ctx.isModuleAudit;
+    const isoClausePredicate =
+        !isModule && template?.type === "checklist"
+            ? resolveIsoClauseSelectionPredicate(plan)
+            : undefined;
     const logoBuffer = await loadSzlLogoBuffer();
     const form = ctx.findingsForm;
     const pageHeader = buildSzlDocxPageHeader(form, ctx, logoBuffer);
@@ -2058,21 +2349,30 @@ export async function generateAuditReportDocx(plan: Record<string, any>) {
 
     children.push(...buildManagementSystemSectionDocx(form, ctx.managementRows));
 
-    if (isFieldVisible(form, "auditScope")) {
-        children.push(...buildBlueTextSectionDocx(`${getSectionLabel(form, "auditScope")}:`, ctx.scope));
+    if (ctx.isModuleAudit) {
+        children.push(...buildBlueTextSectionDocx("Facet:", ctx.facet || "—"));
+        children.push(...buildBlueTextSectionDocx("Category:", ctx.category || "—"));
         getCustomFieldsBySection(form, "content").forEach((field) => {
             children.push(docxSubHeading(`${field.label}:`));
             children.push(docxBorderedContentTable(field.value));
         });
-    }
+    } else {
+        if (isFieldVisible(form, "auditScope")) {
+            children.push(...buildBlueTextSectionDocx(`${getSectionLabel(form, "auditScope")}:`, ctx.scope));
+            getCustomFieldsBySection(form, "content").forEach((field) => {
+                children.push(docxSubHeading(`${field.label}:`));
+                children.push(docxBorderedContentTable(field.value));
+            });
+        }
 
-    if (isFieldVisible(form, "auditCriteriaAndMethod")) {
-        children.push(
-            ...buildBlueTextSectionDocx(
-                `${getSectionLabel(form, "auditCriteria")}:`,
-                ctx.criteriaAndMethod,
-            ),
-        );
+        if (isFieldVisible(form, "auditCriteriaAndMethod")) {
+            children.push(
+                ...buildBlueTextSectionDocx(
+                    `${getSectionLabel(form, "auditCriteria")}:`,
+                    ctx.criteriaAndMethod,
+                ),
+            );
+        }
     }
 
     children.push(...buildPreviousFindingsSectionDocx(auditData));
@@ -2108,109 +2408,127 @@ export async function generateAuditReportDocx(plan: Record<string, any>) {
 
         // Checklist / Clause Checklist Table / Process Audit Record Table
         if ((template?.type === "checklist" || auditData.checklistData) && template?.content) {
-            const checklistContent = resolveChecklistContent(
+            const checklistSection = buildReportChecklistSection(
+                plan,
+                template,
                 auditData,
-                template.content as ChecklistContent[],
+                clauseFilesForReport,
+                genericFilesForReport,
+                ctx.isModuleAudit,
+                isoClausePredicate,
             );
-            if (checklistContent.length > 0) {
-                const { headerCells, bodyCells } = buildChecklistReportTable({
-                    content: checklistContent,
-                    checklistData: (auditData.checklistData as Record<string, any>) || {},
-                    isModule: ctx.isModuleAudit,
-                    isEosh: planUsesEoshTotals(plan),
-                    qfsScoreMode: resolveQfsScoreModeForPlan(plan),
-                    collectEvidence: (clauseKey, itemIndex, textEvidence) =>
-                        buildFindingEvidenceText(
-                            textEvidence,
-                            collectFindingAttachmentMedia(
-                                clauseFilesForReport,
-                                genericFilesForReport,
-                                clauseKey,
-                                itemIndex,
+            if (checklistSection && checklistSection.checklistContent.length > 0) {
+                const { headerCells, bodyCells, extrasBlocks } = checklistSection;
+                const colWidths = buildChecklistDocxColumnWidthsPct(headerCells);
+                const extrasByIndex = new Map(extrasBlocks.map((b) => [b.itemIndex, b]));
+                children.push(docxSubHeading(checklistSection.title || "Checklist"));
+
+                const checklistRows: DocxTableRow[] = [
+                    new DocxTableRow({
+                        children: headerCells.map((header, colIndex) =>
+                            docxBorderedCell(
+                                [
+                                    new Paragraph({
+                                        children: [
+                                            new TextRun({
+                                                text: softWrapDocxCellText(header.text),
+                                                bold: true,
+                                                size: 15,
+                                                color: header.textHex
+                                                    ? header.textHex.replace("#", "")
+                                                    : undefined,
+                                            }),
+                                        ],
+                                    }),
+                                ],
+                                colWidths[colIndex] ?? 10,
+                                { fillHex: header.fillHex },
                             ),
                         ),
+                    }),
+                ];
+
+                bodyCells.forEach((row, rowIndex) => {
+                    checklistRows.push(
+                        new DocxTableRow({
+                            children: row.map((cell, colIndex) => {
+                                const headerText = headerCells[colIndex]?.text || "";
+                                const scoreCol = isChecklistScoreHeader(headerText);
+                                return docxBorderedCell(
+                                    [
+                                        new Paragraph({
+                                            alignment:
+                                                scoreCol || cell.align === "center"
+                                                    ? AlignmentType.CENTER
+                                                    : AlignmentType.LEFT,
+                                            children: [
+                                                new TextRun({
+                                                    text: softWrapDocxCellText(
+                                                        cell.text ||
+                                                            (cell.fillHex ? " " : ""),
+                                                    ),
+                                                    size: 15,
+                                                    color: cell.textHex
+                                                        ? cell.textHex.replace("#", "")
+                                                        : undefined,
+                                                }),
+                                            ],
+                                        }),
+                                    ],
+                                    colWidths[colIndex] ?? 10,
+                                    { fillHex: cell.fillHex },
+                                );
+                            }),
+                        }),
+                    );
+
+                    const extra = extrasByIndex.get(rowIndex);
+                    if (extra) {
+                        // Full-width NC details row — same placement as PDF (under the question).
+                        checklistRows.push(
+                            new DocxTableRow({
+                                children: [
+                                    new DocxTableCell({
+                                        columnSpan: headerCells.length,
+                                        width: { size: 100, type: WidthType.PERCENTAGE },
+                                        borders: {
+                                            top: { style: BorderStyle.SINGLE, size: 1, color: "F59E0B" },
+                                            bottom: {
+                                                style: BorderStyle.SINGLE,
+                                                size: 1,
+                                                color: "F59E0B",
+                                            },
+                                            left: { style: BorderStyle.SINGLE, size: 1, color: "F59E0B" },
+                                            right: {
+                                                style: BorderStyle.SINGLE,
+                                                size: 1,
+                                                color: "F59E0B",
+                                            },
+                                        },
+                                        children: [
+                                            new Paragraph({ text: "", spacing: { after: 40 } }),
+                                            docxChecklistFindingExtraBox(extra),
+                                            new Paragraph({ text: "", spacing: { after: 40 } }),
+                                        ],
+                                    }),
+                                ],
+                            }),
+                        );
+                    }
                 });
-                const colWidth = Math.max(4, Math.floor(100 / Math.max(headerCells.length, 1)));
-                const extras = buildChecklistFindingExtraBlocks({
-                    content: checklistContent,
-                    checklistData: (auditData.checklistData as Record<string, any>) || {},
-                    isModule: ctx.isModuleAudit,
-                    isEosh: planUsesEoshTotals(plan),
-                    qfsScoreMode: resolveQfsScoreModeForPlan(plan),
-                });
-                const extrasByIndex = new Map(extras.map((b) => [b.itemIndex, b]));
-                children.push(docxSubHeading("Checklist"));
-                // Header row once, then each question (+ optional NC box) as its own table
-                // so NC details sit directly under the raised question.
+
                 children.push(
                     new DocxTable({
                         width: { size: 100, type: WidthType.PERCENTAGE },
-                        rows: [
-                            new DocxTableRow({
-                                children: headerCells.map((header) =>
-                                    docxBorderedCell(
-                                        [
-                                            new Paragraph({
-                                                children: [
-                                                    new TextRun({
-                                                        text: header.text,
-                                                        bold: true,
-                                                        size: 16,
-                                                        color: header.textHex
-                                                            ? header.textHex.replace("#", "")
-                                                            : undefined,
-                                                    }),
-                                                ],
-                                            }),
-                                        ],
-                                        colWidth,
-                                        { fillHex: header.fillHex },
-                                    ),
-                                ),
-                            }),
-                        ],
+                        layout: TableLayoutType.FIXED,
+                        rows: checklistRows,
                     }),
                 );
-                bodyCells.forEach((row, rowIndex) => {
-                    children.push(
-                        new DocxTable({
-                            width: { size: 100, type: WidthType.PERCENTAGE },
-                            rows: [
-                                new DocxTableRow({
-                                    children: row.map((cell) =>
-                                        docxBorderedCell(
-                                            [
-                                                new Paragraph({
-                                                    children: [
-                                                        new TextRun({
-                                                            text:
-                                                                cell.text ||
-                                                                (cell.fillHex ? " " : ""),
-                                                            size: 16,
-                                                        }),
-                                                    ],
-                                                }),
-                                            ],
-                                            colWidth,
-                                            { fillHex: cell.fillHex },
-                                        ),
-                                    ),
-                                }),
-                            ],
-                        }),
-                    );
-                    const extra = extrasByIndex.get(rowIndex);
-                    if (extra) {
-                        children.push(new Paragraph({ text: "", spacing: { after: 60 } }));
-                        children.push(docxChecklistFindingExtraBox(extra));
-                        children.push(new Paragraph({ text: "", spacing: { after: 120 } }));
-                    }
-                });
 
                 if (planUsesEoshTotals(plan)) {
                     const scores = computeEoshCapabilityScores(
                         (auditData.checklistData as Record<string, { findings?: string }>) || {},
-                        checklistContent.length,
+                        checklistSection.checklistContent.length,
                     );
                     children.push(docxSubHeading("EOSH Score Summary"));
                     children.push(
@@ -2410,7 +2728,7 @@ export async function generateAuditReportDocx(plan: Record<string, any>) {
         }),
     );
 
-    children.push(...buildAcknowledgementSectionDocx(ctx));
+    children.push(...(await buildAcknowledgementSectionDocx(ctx)));
 
     const doc = new Document({
         sections: [
@@ -2431,11 +2749,17 @@ export async function generateAuditReportDocx(plan: Record<string, any>) {
 
 /** Full audit execution report as Excel */
 export async function generateAuditReportExcel(plan: Record<string, any>) {
+    plan = normalizePlanForReport(plan);
     const template = resolveReportTemplate(plan);
     const auditData = getAuditData(plan);
     const fileName = auditReportBaseName(plan);
     const ctx = await buildReportContext(plan);
     const wb = XLSX.utils.book_new();
+    const isModule = ctx.isModuleAudit;
+    const isoClausePredicate =
+        !isModule && template?.type === "checklist"
+            ? resolveIsoClauseSelectionPredicate(plan)
+            : undefined;
 
     const form = ctx.findingsForm;
     const summaryData: string[][] = [["Field", "Value"]];
@@ -2462,11 +2786,19 @@ export async function generateAuditReportExcel(plan: Record<string, any>) {
         summaryData.push([row.label, row.value]);
     }
 
-    pushSummaryRow("auditScope", ctx.scope);
-    getCustomFieldsBySection(form, "content").forEach((field) => {
-        summaryData.push([field.label || "Field", field.value || "—"]);
-    });
-    pushSummaryRow("auditCriteriaAndMethod", ctx.criteriaAndMethod);
+    if (ctx.isModuleAudit) {
+        summaryData.push(["Facet", ctx.facet || "—"]);
+        summaryData.push(["Category", ctx.category || "—"]);
+        getCustomFieldsBySection(form, "content").forEach((field) => {
+            summaryData.push([field.label || "Field", field.value || "—"]);
+        });
+    } else {
+        pushSummaryRow("auditScope", ctx.scope);
+        getCustomFieldsBySection(form, "content").forEach((field) => {
+            summaryData.push([field.label || "Field", field.value || "—"]);
+        });
+        pushSummaryRow("auditCriteriaAndMethod", ctx.criteriaAndMethod);
+    }
 
     summaryData.push(["Template", template?.title || plan.templateId || "N/A"]);
     summaryData.push(["Status", plan.status || "N/A"]);
@@ -2496,38 +2828,21 @@ export async function generateAuditReportExcel(plan: Record<string, any>) {
     );
 
     if (template?.content && (template.type === "checklist" || auditData.checklistData)) {
-        const checklistContent = resolveChecklistContent(
+        const checklistSection = buildReportChecklistSection(
+            plan,
+            template,
             auditData,
-            template.content as ChecklistContent[],
+            clauseFilesForExcel,
+            genericFilesForExcel,
+            ctx.isModuleAudit,
+            isoClausePredicate,
         );
-        if (checklistContent.length > 0) {
-            const { bodyCells, headerCells } = buildChecklistReportTable({
-                content: checklistContent,
-                checklistData: (auditData.checklistData as Record<string, any>) || {},
-                isModule: ctx.isModuleAudit,
-                isEosh: planUsesEoshTotals(plan),
-                qfsScoreMode: resolveQfsScoreModeForPlan(plan),
-                collectEvidence: (clauseKey, itemIndex, textEvidence) =>
-                    buildFindingEvidenceText(
-                        textEvidence,
-                        collectFindingAttachmentMedia(
-                            clauseFilesForExcel,
-                            genericFilesForExcel,
-                            clauseKey,
-                            itemIndex,
-                        ),
-                    ),
-            });
+        if (checklistSection && checklistSection.checklistContent.length > 0) {
+            const { headerCells, bodyCells, extrasBlocks } = checklistSection;
             // Excel (community xlsx) has limited cell fills — mark selected QFS score with ●.
-            const extrasBlocks = buildChecklistFindingExtraBlocks({
-                content: checklistContent,
-                checklistData: (auditData.checklistData as Record<string, any>) || {},
-                isModule: ctx.isModuleAudit,
-                isEosh: planUsesEoshTotals(plan),
-                qfsScoreMode: resolveQfsScoreModeForPlan(plan),
-            });
             const extrasByIndex = new Map(extrasBlocks.map((b) => [b.itemIndex, b]));
             const colCount = Math.max(headerCells.length, 1);
+            const sheetName = template.isTripleMapping ? "IMS Checklist" : "Checklist";
             const cData: string[][] = [headerCells.map((h) => h.text)];
             bodyCells.forEach((row, rowIndex) => {
                 cData.push(
@@ -2536,6 +2851,7 @@ export async function generateAuditReportExcel(plan: Record<string, any>) {
                             if (cell.fillHex === "#92D050") return "● GREEN";
                             if (cell.fillHex === "#FF0000") return "● RED";
                             if (cell.fillHex === "#FFC000") return "● AMBER";
+                            if (cell.fillHex === "#213847") return cell.text;
                             return "●";
                         }
                         return cell.text;
@@ -2548,12 +2864,12 @@ export async function generateAuditReportExcel(plan: Record<string, any>) {
                     cData.push(ncRow);
                 }
             });
-            XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(cData), "Checklist");
+            XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(cData), sheetName);
 
             if (planUsesEoshTotals(plan)) {
                 const scores = computeEoshCapabilityScores(
                     (auditData.checklistData as Record<string, { findings?: string }>) || {},
-                    checklistContent.length,
+                    checklistSection.checklistContent.length,
                 );
                 XLSX.utils.book_append_sheet(
                     wb,

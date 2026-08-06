@@ -244,6 +244,8 @@ async function actorCanAccessOrgCompanyOwner(actorId, companyOwnerUserId) {
     if (!actor) return false;
     if (normalizeUserRole(actor.role) === 'superadmin') return true;
     if (normalizeUserRole(actor.role) === 'auditee') return false;
+    // Same creatorId org tree (User A owns company; User B invited by A).
+    if (await actorInSameOrgAs(a, owner)) return true;
     const ownerIds = await resolveOrgCompanyOwnerUserIds(a);
     return ownerIds.includes(owner);
 }
@@ -558,6 +560,34 @@ async function actorCanAccessAuditProgram(actorId, program) {
         return true;
     }
 
+    // Any non-auditee org teammate may use programs on sites in their shared company catalog
+    // (User A creates sites; User B invited by A can create plans / audits on those sites).
+    if (program.siteId != null && (await actorCanAssignAuditeeToSite(actorIdNum, program.siteId))) {
+        return true;
+    }
+    // Fallback when siteId missing but company is loaded on the program include.
+    if (program.site?.companyId != null || program.site?.id != null) {
+        const siteIdForAccess = program.site?.id ?? program.siteId;
+        if (siteIdForAccess != null && (await actorCanAssignAuditeeToSite(actorIdNum, siteIdForAccess))) {
+            return true;
+        }
+        if (program.site?.companyId != null) {
+            const company = await prisma.company.findUnique({
+                where: { id: Number(program.site.companyId) },
+                select: { userId: true },
+            });
+            if (
+                company?.userId != null
+                && (
+                    (await actorInSameOrgAs(actorIdNum, company.userId))
+                    || (await actorCanAccessOrgCompanyOwner(actorIdNum, company.userId))
+                )
+            ) {
+                return true;
+            }
+        }
+    }
+
     if (await actorHasFullOrgAuditVisibility(actorIdNum)) {
         if (program.userId != null && (await actorCanAccessTargetUser(actorIdNum, program.userId))) {
             return true;
@@ -575,7 +605,13 @@ async function actorCanAccessAuditProgram(actorId, program) {
                     where: { id: Number(site.companyId) },
                     select: { userId: true },
                 });
-                if (company?.userId != null && (await actorInSameOrgAs(actorIdNum, company.userId))) {
+                if (
+                    company?.userId != null
+                    && (
+                        (await actorInSameOrgAs(actorIdNum, company.userId))
+                        || (await actorCanAccessOrgCompanyOwner(actorIdNum, company.userId))
+                    )
+                ) {
                     return true;
                 }
             }
@@ -625,9 +661,22 @@ async function actorCanAccessAuditPlan(actorId, plan) {
         }
     }
 
+    // Shared org sites: invitees may open / execute plans for programs on User A's sites.
+    const planSiteId =
+        plan.auditProgram?.siteId
+        ?? plan.siteId
+        ?? null;
+    if (planSiteId != null && (await actorCanAssignAuditeeToSite(actorIdNum, planSiteId))) {
+        return true;
+    }
+
+    // Anyone who can use the parent audit program may view/update its plans (create + save).
+    if (plan.auditProgram && (await actorCanAccessAuditProgram(actorIdNum, plan.auditProgram))) {
+        return true;
+    }
+
     if (await actorHasFullOrgAuditVisibility(actorIdNum)) {
         if (plan.userId != null && (await actorCanAccessTargetUser(actorIdNum, plan.userId))) return true;
-        if (plan.auditProgram && (await actorCanAccessAuditProgram(actorIdNum, plan.auditProgram))) return true;
     }
 
     if (await actorIsFindingAssignee(actorIdNum, plan)) return true;
@@ -753,6 +802,21 @@ async function actorCanManageOrgUsers(actorId) {
     // Organization root (no creator) may manage users in their org; auditees never may.
     if (actor.creatorId == null && r !== 'auditee') return true;
     return false;
+}
+
+/**
+ * Users directory edit rights: org admins plus lead auditors (role or assigned as lead
+ * on a program/plan) may edit every org user on the Users page.
+ */
+async function actorCanEditOrgUsers(actorId) {
+    if (await actorCanManageOrgUsers(actorId)) return true;
+    const actor = await prisma.user.findUnique({
+        where: { id: Number(actorId) },
+        select: { role: true, isActive: true },
+    });
+    if (!actor || actor.isActive === false) return false;
+    if (normalizeUserRole(actor.role) === 'lead_auditor') return true;
+    return actorIsLeadAuditor(actorId);
 }
 
 const PROTECTED_COMPANY_OWNER_MESSAGE =
@@ -1058,11 +1122,54 @@ async function siteIdsInActorOrg(actorId) {
     return new Set(sites.map((s) => s.id));
 }
 
+/**
+ * True when actor may use a site for audits / programs / plans / auditee assignment.
+ * Invitees (User B created by User A) must pass when the site's company is owned by
+ * anyone in their shared creatorId org tree — not only when the bulk company catalog hits.
+ */
 async function actorCanAssignAuditeeToSite(actorId, siteId) {
     const parsed = Number.parseInt(String(siteId), 10);
     if (Number.isNaN(parsed) || parsed < 1) return false;
-    const allowed = await siteIdsInActorOrg(actorId);
-    return allowed.has(parsed);
+    const a = Number(actorId);
+    if (!Number.isInteger(a) || a < 1) return false;
+
+    const site = await prisma.site.findUnique({
+        where: { id: parsed },
+        select: {
+            id: true,
+            companyId: true,
+            company: { select: { id: true, userId: true } },
+        },
+    });
+    if (!site) return false;
+
+    const actor = await prisma.user.findUnique({
+        where: { id: a },
+        select: { role: true },
+    });
+    if (!actor) return false;
+    const role = normalizeUserRole(actor.role);
+    if (role === 'superadmin') return true;
+    if (role === 'auditee') {
+        return auditeeCanAccessSiteId(a, parsed);
+    }
+
+    const ownerId = site.company?.userId != null ? Number(site.company.userId) : null;
+    if (Number.isInteger(ownerId) && ownerId > 0) {
+        if (ownerId === a) return true;
+        // Primary rule for A→B: same organization tree via creatorId.
+        if (await actorInSameOrgAs(a, ownerId)) return true;
+        // Expanded membership (company / program collaboration links).
+        if (await actorCanAccessOrgCompanyOwner(a, ownerId)) return true;
+    }
+
+    const allowed = await siteIdsInActorOrg(a);
+    if (allowed.has(parsed)) return true;
+    if (site.companyId != null && Number.isInteger(Number(site.companyId))) {
+        const companyIds = await resolveOrgVisibleCompanyIds(a);
+        if (companyIds.includes(Number(site.companyId))) return true;
+    }
+    return false;
 }
 
 /** Batch site-assignment check (one org lookup instead of N). */
@@ -1071,8 +1178,11 @@ async function actorCanAssignAuditeeToAllSites(actorId, siteIds) {
         .map((id) => Number.parseInt(String(id), 10))
         .filter((n) => Number.isInteger(n) && n >= 1);
     if (ids.length === 0) return false;
-    const allowed = await siteIdsInActorOrg(actorId);
-    return ids.every((id) => allowed.has(id));
+    // Per-site checks (same-org company owner) — avoid false negatives from catalog-only Sets.
+    for (const id of ids) {
+        if (!(await actorCanAssignAuditeeToSite(actorId, id))) return false;
+    }
+    return true;
 }
 
 /** PSZL-010: site must exist and belong to the actor's organization before mutate. */
@@ -1152,7 +1262,79 @@ async function orgAuditorUserIdSet(actorId) {
         },
         select: { id: true },
     });
-    return new Set(users.map((u) => u.id));
+    return new Set(users.map((u) => Number(u.id)));
+}
+
+/**
+ * Users the actor may pick as lead/team auditor when creating programs/plans.
+ * Union of: actor's org list (matches GET /users picker) + site company org + self.
+ */
+async function assignableAuditorUserIdSet(actorId, companyId = null) {
+    const allowed = await orgAuditorUserIdSet(actorId);
+    const parsedCompanyId = companyId != null ? Number.parseInt(String(companyId), 10) : null;
+    if (Number.isInteger(parsedCompanyId) && parsedCompanyId > 0) {
+        const companySet = await companyAuditorUserIdSet(parsedCompanyId);
+        for (const id of companySet) allowed.add(Number(id));
+    }
+    const selfId = Number(actorId);
+    if (Number.isInteger(selfId) && selfId > 0) {
+        const me = await prisma.user.findUnique({
+            where: { id: selfId },
+            select: { id: true, role: true, isActive: true },
+        });
+        if (me && me.isActive !== false && normalizeUserRole(me.role) !== 'auditee') {
+            allowed.add(Number(me.id));
+        }
+    }
+    return allowed;
+}
+
+/**
+ * Allow any auditor the UI can list for this actor (org catalog), plus company-org teammates.
+ * Falls back to actorCanAccessTargetUser for edge cases (invitee / catalog skew).
+ */
+async function assertAssignableAuditorUserIds(
+    actorId,
+    userIds,
+    { allowEmpty = true, companyId = null, grandfatherIds = [] } = {},
+) {
+    const normalized = parsePositiveIntIds(userIds);
+    if (normalized.length === 0) {
+        return allowEmpty
+            ? { ok: true, ids: [] }
+            : { ok: false, status: 400, error: 'Auditor user id is required' };
+    }
+
+    const allowed = await assignableAuditorUserIdSet(actorId, companyId);
+    for (const id of parsePositiveIntIds(grandfatherIds)) {
+        allowed.add(Number(id));
+    }
+
+    const rejected = [];
+    for (const id of normalized) {
+        if (allowed.has(id)) continue;
+        // Same org visibility as the Users picker — accept if actor can see this teammate.
+        if (await actorCanAccessTargetUser(actorId, id)) {
+            const row = await prisma.user.findUnique({
+                where: { id },
+                select: { role: true, isActive: true },
+            });
+            if (row && row.isActive !== false && normalizeUserRole(row.role) !== 'auditee') {
+                allowed.add(id);
+                continue;
+            }
+        }
+        rejected.push(id);
+    }
+
+    if (rejected.length > 0) {
+        return {
+            ok: false,
+            status: 403,
+            error: 'One or more selected auditors are not allowed for this organization',
+        };
+    }
+    return { ok: true, ids: normalized };
 }
 
 function parsePositiveIntIds(raw) {
@@ -1169,21 +1351,7 @@ function parsePositiveIntIds(raw) {
 
 /** Reject lead/team auditor ids outside the actor's org (403 on tampered ids). */
 async function assertOrgAuditorUserIds(actorId, userIds, { allowEmpty = true } = {}) {
-    const normalized = parsePositiveIntIds(userIds);
-    if (normalized.length === 0) {
-        return allowEmpty
-            ? { ok: true, ids: [] }
-            : { ok: false, status: 400, error: 'Auditor user id is required' };
-    }
-    const allowed = await orgAuditorUserIdSet(actorId);
-    if (normalized.some((id) => !allowed.has(id))) {
-        return {
-            ok: false,
-            status: 400,
-            error: 'One or more selected auditors are not allowed for this organization',
-        };
-    }
-    return { ok: true, ids: normalized };
+    return assertAssignableAuditorUserIds(actorId, userIds, { allowEmpty, companyId: null });
 }
 
 /** scheduleData.departmentIds must belong to the program site within the actor's org. */
@@ -1200,7 +1368,11 @@ async function assertOrgSiteDepartments(actorId, siteId, scheduleData) {
         return { ok: false, status: 400, error: 'Invalid site ID' };
     }
     if (!(await actorCanAssignAuditeeToSite(actorId, parsedSiteId))) {
-        return { ok: false, status: 403, error: 'Forbidden' };
+        return {
+            ok: false,
+            status: 403,
+            error: 'You do not have access to the selected site or its departments',
+        };
     }
     const deptIds = parsePositiveIntIds(rawIds);
     if (deptIds.length === 0) {
@@ -1228,33 +1400,54 @@ async function validateAuditProgramAssignments(actorId, { siteId, leadAuditorId,
     if (!Number.isInteger(parsedSiteId) || parsedSiteId < 1) {
         return { ok: false, status: 400, error: 'Invalid site ID' };
     }
+
+    await ensureOrphanUserOrgLink(actorId).catch(() => {});
+
     if (!(await actorCanAssignAuditeeToSite(actorId, parsedSiteId))) {
-        return { ok: false, status: 403, error: 'You do not have access to the selected site' };
+        return {
+            ok: false,
+            status: 403,
+            error: 'You do not have access to the selected site. Use a site from your organization (sites created by your admin or teammates).',
+        };
     }
+
+    const site = await prisma.site.findUnique({
+        where: { id: parsedSiteId },
+        select: { companyId: true },
+    });
+    const companyId = site?.companyId != null ? Number(site.companyId) : null;
+
+    // Allow any auditor shown in the org user picker (actor org ∪ company org ∪ accessible teammates).
+    let resolvedLead = null;
     if (leadAuditorId != null && leadAuditorId !== '') {
-        const leadCheck = await assertOrgAuditorUserIds(actorId, [leadAuditorId], { allowEmpty: false });
+        const leadCheck = await assertAssignableAuditorUserIds(actorId, [leadAuditorId], {
+            allowEmpty: false,
+            companyId,
+        });
         if (!leadCheck.ok) {
             return {
                 ok: false,
-                status: leadCheck.status || 400,
+                status: leadCheck.status || 403,
                 error: leadCheck.error === 'Auditor user id is required'
                     ? 'Lead auditor is required'
                     : (leadCheck.error || 'Invalid lead auditor'),
             };
         }
+        resolvedLead = leadCheck.ids[0] ?? null;
     }
-    const auditorCheck = await assertOrgAuditorUserIds(actorId, auditorIds ?? [], { allowEmpty: true });
+    const auditorCheck = await assertAssignableAuditorUserIds(actorId, auditorIds ?? [], {
+        allowEmpty: true,
+        companyId,
+    });
     if (!auditorCheck.ok) return auditorCheck;
+
     const deptCheck = await assertOrgSiteDepartments(actorId, parsedSiteId, scheduleData);
     if (!deptCheck.ok) return deptCheck;
-    const parsedLead =
-        leadAuditorId != null && leadAuditorId !== ''
-            ? Number.parseInt(String(leadAuditorId), 10)
-            : null;
+
     return {
         ok: true,
         siteId: parsedSiteId,
-        leadAuditorId: Number.isInteger(parsedLead) && parsedLead > 0 ? parsedLead : null,
+        leadAuditorId: resolvedLead,
         auditorIds: auditorCheck.ids,
     };
 }
@@ -1275,13 +1468,16 @@ async function companyAuditorUserIdSet(companyId) {
     // Use the org root of the company owner so peer admins / teammates are included,
     // not only the owner's direct invite subtree (which caused intermittent 403 on save).
     const ownerRootId = (await getOrgRootUserId(company.userId)) ?? Number(company.userId);
-    const memberIds = await collectOrgSubtreeUserIds(ownerRootId);
-    if (memberIds.length === 0) {
+    const memberIds = await collectOrgMemberUserIds(ownerRootId);
+    const subtreeIds = memberIds.length > 0
+        ? memberIds
+        : await collectOrgSubtreeUserIds(ownerRootId);
+    if (subtreeIds.length === 0) {
         return new Set();
     }
     const users = await prisma.user.findMany({
         where: {
-            id: { in: memberIds },
+            id: { in: subtreeIds },
             isActive: true,
             role: { not: 'auditee' },
         },
@@ -1294,8 +1490,16 @@ async function companyAuditorUserIdSet(companyId) {
 async function assertCompanyAuditorUserIds(
     companyId,
     userIds,
-    { allowEmpty = true, grandfatherIds = [] } = {},
+    { allowEmpty = true, grandfatherIds = [], actorId = null } = {},
 ) {
+    // When actorId is known, use the same allow-list as the Users picker (org ∪ company).
+    if (actorId != null) {
+        return assertAssignableAuditorUserIds(actorId, userIds, {
+            allowEmpty,
+            companyId,
+            grandfatherIds,
+        });
+    }
     const normalized = parsePositiveIntIds(userIds);
     if (normalized.length === 0) {
         return allowEmpty
@@ -1337,33 +1541,41 @@ async function validateAuditPlanAuditorAssignments(
     { companyId, leadAuditorId, auditorIds, grandfatherIds = [] },
 ) {
     const parsedCompanyId = Number.parseInt(String(companyId), 10);
-    if (!Number.isInteger(parsedCompanyId) || parsedCompanyId < 1) {
-        return { ok: false, status: 400, error: 'Invalid company for audit plan' };
-    }
-    const company = await prisma.company.findUnique({
-        where: { id: parsedCompanyId },
-        select: { userId: true },
-    });
-    if (!company?.userId) {
-        return { ok: false, status: 403, error: 'You do not have access to this company' };
-    }
-    // Same-org check (not shallow creator-only) — peer admins must be able to save plans.
-    if (!(await actorInSameOrgAs(actorId, company.userId))) {
-        return { ok: false, status: 403, error: 'You do not have access to this company' };
+    const hasCompany = Number.isInteger(parsedCompanyId) && parsedCompanyId > 0;
+
+    // Company scope is preferred but not required — program/site access is enforced by the route.
+    // Invitees saving plans on User A's sites must not fail solely on company-owner lookup skew.
+    if (hasCompany) {
+        const company = await prisma.company.findUnique({
+            where: { id: parsedCompanyId },
+            select: { userId: true },
+        });
+        if (company?.userId != null) {
+            const ownerOk = await actorCanAccessOrgCompanyOwner(actorId, company.userId);
+            if (!ownerOk) {
+                // Still allow when the actor can see the selected auditors via org picker rules.
+                console.warn(
+                    '[orgAccess] plan auditor validate: company owner check soft-failed; using assignable auditor union',
+                    { actorId, companyId: parsedCompanyId, ownerId: company.userId },
+                );
+            }
+        }
     }
 
     const existingIds = parsePositiveIntIds(grandfatherIds);
+    const companyScope = hasCompany ? parsedCompanyId : null;
 
     if (leadAuditorId != null && leadAuditorId !== '') {
-        const leadCheck = await assertCompanyAuditorUserIds(
-            parsedCompanyId,
+        const leadCheck = await assertAssignableAuditorUserIds(
+            actorId,
             [leadAuditorId],
-            { allowEmpty: false, grandfatherIds: existingIds },
+            { allowEmpty: false, companyId: companyScope, grandfatherIds: existingIds },
         );
         if (!leadCheck.ok) return leadCheck;
     }
-    const auditorCheck = await assertCompanyAuditorUserIds(parsedCompanyId, auditorIds ?? [], {
+    const auditorCheck = await assertAssignableAuditorUserIds(actorId, auditorIds ?? [], {
         allowEmpty: true,
+        companyId: companyScope,
         grandfatherIds: existingIds,
     });
     if (!auditorCheck.ok) return auditorCheck;
@@ -1677,15 +1889,27 @@ async function ensureUserGapAnalysisStore(actorId) {
             data: { userId: actorId, analyses, draft },
         });
     }
-    let analyses = filterGapAnalysesForUser(row.analyses, actorId);
+    const raw = Array.isArray(row.analyses) ? row.analyses : [];
     const draft = gapAnalysisDraftForUser(row.draft, actorId);
-    const storedLen = Array.isArray(row.analyses) ? row.analyses.length : 0;
-    if (analyses.length !== storedLen || draft !== row.draft) {
+    // Keep owned + unowned (legacy). Never permanently drop rows on GET.
+    const keepable = raw.filter((a) => {
+        const owner = gapAnalysisOwnerId(a);
+        return owner === null || owner === actorId;
+    });
+    const needsStamp = keepable.some((a) => gapAnalysisOwnerId(a) === null);
+    const analyses = stampGapAnalysesForUser(keepable, actorId);
+    if (needsStamp) {
+        const foreign = raw.filter((a) => {
+            const owner = gapAnalysisOwnerId(a);
+            return owner !== null && owner !== actorId;
+        });
         row = await prisma.userGapAnalysisStore.update({
             where: { userId: actorId },
-            data: { analyses: stampGapAnalysesForUser(analyses, actorId), draft },
+            data: {
+                analyses: [...analyses, ...foreign],
+                draft,
+            },
         });
-        analyses = filterGapAnalysesForUser(row.analyses, actorId);
     }
     return { userId: actorId, analyses, draft, row };
 }
@@ -1780,18 +2004,27 @@ async function ensureUserSelfAssessmentStore(actorId) {
             data: { userId: actorId, assessments, draft },
         });
     }
-    let assessments = filterSelfAssessmentsForUser(row.assessments, actorId);
+    const raw = Array.isArray(row.assessments) ? row.assessments : [];
     const draft = selfAssessmentDraftForUser(row.draft, actorId);
-    const storedLen = Array.isArray(row.assessments) ? row.assessments.length : 0;
-    if (assessments.length !== storedLen || draft !== row.draft) {
+    // Keep owned + unowned (legacy). Never permanently drop rows on GET.
+    const keepable = raw.filter((a) => {
+        const owner = selfAssessmentOwnerId(a);
+        return owner === null || owner === actorId;
+    });
+    const needsStamp = keepable.some((a) => selfAssessmentOwnerId(a) === null);
+    const assessments = stampSelfAssessmentsForUser(keepable, actorId);
+    if (needsStamp) {
+        const foreign = raw.filter((a) => {
+            const owner = selfAssessmentOwnerId(a);
+            return owner !== null && owner !== actorId;
+        });
         row = await prisma.userSelfAssessmentStore.update({
             where: { userId: actorId },
             data: {
-                assessments: stampSelfAssessmentsForUser(assessments, actorId),
+                assessments: [...assessments, ...foreign],
                 draft,
             },
         });
-        assessments = filterSelfAssessmentsForUser(row.assessments, actorId);
     }
     return { userId: actorId, assessments, draft, row };
 }
@@ -1804,22 +2037,51 @@ function buildOrgSubtreeProgramVisibilityOr(subtreeIds) {
         { leadAuditorId: { in: subtreeIds } },
         { auditors: { some: { id: { in: subtreeIds } } } },
         { user: { is: { creatorId: { in: subtreeIds } } } },
-        { user: { is: { id: { in: subtreeIds } } } }
+        { user: { is: { id: { in: subtreeIds } } } },
+        // Programs on companies owned by anyone in the org tree (A's sites visible to B).
+        { site: { is: { company: { is: { userId: { in: subtreeIds } } } } } },
     ];
 }
 
-/** Org-wide visibility for audit plans (includes linked programs). */
+/** Org-wide visibility for audit plans (includes linked programs).
+ * Do NOT spread program-visibility clauses — AuditPlan has no top-level `site` relation.
+ */
 function buildOrgSubtreePlanVisibilityOr(subtreeIds) {
     if (!subtreeIds.length) return [{ userId: -1 }];
     return [
-        ...buildOrgSubtreeProgramVisibilityOr(subtreeIds),
+        { userId: { in: subtreeIds } },
+        { leadAuditorId: { in: subtreeIds } },
+        { auditors: { some: { id: { in: subtreeIds } } } },
+        { user: { is: { creatorId: { in: subtreeIds } } } },
+        { user: { is: { id: { in: subtreeIds } } } },
         { auditProgram: { is: { userId: { in: subtreeIds } } } },
         { auditProgram: { is: { leadAuditorId: { in: subtreeIds } } } },
-        { auditProgram: { is: { auditors: { some: { id: { in: subtreeIds } } } } } }
+        { auditProgram: { is: { auditors: { some: { id: { in: subtreeIds } } } } } },
+        {
+            auditProgram: {
+                is: { site: { is: { company: { is: { userId: { in: subtreeIds } } } } } },
+            },
+        },
     ];
 }
 
-/** Programs visible to a user through direct ownership or auditor assignment only. */
+/** Programs on concrete company ids (shared catalog for invitees). */
+function buildOrgCompanySiteProgramVisibilityOr(companyIds) {
+    const ids = normalizePositiveIntIds(companyIds);
+    if (!ids.length) return [];
+    return [{ site: { is: { companyId: { in: ids } } } }];
+}
+
+/** Plans whose program sits on org-visible companies. */
+function buildOrgCompanySitePlanVisibilityOr(companyIds) {
+    const ids = normalizePositiveIntIds(companyIds);
+    if (!ids.length) return [];
+    return [
+        { auditProgram: { is: { site: { is: { companyId: { in: ids } } } } } },
+    ];
+}
+
+/** Programs visible to a user through ownership, assignment, or shared org sites. */
 function buildAssignedAuditProgramVisibilityOr(actorId) {
     const id = Number(actorId);
     if (!Number.isInteger(id) || id < 1) return [{ userId: -1 }];
@@ -1841,6 +2103,30 @@ function buildAssignedAuditPlanVisibilityOr(actorId) {
         { auditProgram: { is: { userId: id } } },
         { auditProgram: { is: { leadAuditorId: id } } },
         { auditProgram: { is: { auditors: { some: { id } } } } },
+    ];
+}
+
+/**
+ * Teammate (non-admin) catalog: assignments plus every program/plan on org-visible company sites
+ * so User B can work on sites/departments created by User A.
+ */
+async function buildTeammateAuditProgramVisibilityOr(actorId) {
+    const id = Number(actorId);
+    if (!Number.isInteger(id) || id < 1) return [{ userId: -1 }];
+    const companyIds = await resolveOrgVisibleCompanyIds(id);
+    return [
+        ...buildAssignedAuditProgramVisibilityOr(id),
+        ...buildOrgCompanySiteProgramVisibilityOr(companyIds),
+    ];
+}
+
+async function buildTeammateAuditPlanVisibilityOr(actorId) {
+    const id = Number(actorId);
+    if (!Number.isInteger(id) || id < 1) return [{ userId: -1 }];
+    const companyIds = await resolveOrgVisibleCompanyIds(id);
+    return [
+        ...buildAssignedAuditPlanVisibilityOr(id),
+        ...buildOrgCompanySitePlanVisibilityOr(companyIds),
     ];
 }
 
@@ -1959,6 +2245,7 @@ export {
     USER_ASSIGNABLE_ROLES,
     normalizeUserRole,
     actorCanManageOrgUsers,
+    actorCanEditOrgUsers,
     PROTECTED_COMPANY_OWNER_MESSAGE,
     isProtectedCompanyOwnerUserId,
     assertActorMayModifyProtectedCompanyOwner,
@@ -2015,6 +2302,8 @@ export {
     buildOrgSubtreePlanVisibilityOr,
     buildAssignedAuditProgramVisibilityOr,
     buildAssignedAuditPlanVisibilityOr,
+    buildTeammateAuditProgramVisibilityOr,
+    buildTeammateAuditPlanVisibilityOr,
     actorHasFullOrgAuditVisibility,
     checkTrialExpiration,
     TRIAL_GAP_ANALYSIS_LIMIT,

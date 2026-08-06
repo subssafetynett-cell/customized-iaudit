@@ -65,12 +65,13 @@ import {
     findAuditTemplates,
     getAuditPlanTemplateLabel,
     parseAuditPlanTemplateIds,
+    resolveAuditPlanStandards,
     type AuditTemplate,
 } from "@/data/auditTemplates";
 import { resolveAuditModuleDisplayName } from "@/lib/auditFindings";
 import { AuditModuleSelectDialog } from "@/components/AuditModuleSelectDialog";
 import {
-    MoreVertical, FileText, Trash2, Calendar, Search, Download, Loader2
+    MoreVertical, FileText, Trash2, Calendar, Search, Download, Loader2, ArrowUpDown
 } from "lucide-react";
 /** Subtitle under Audit column: module name(s) or ISO Standards. */
 function resolveAuditListTypeLabel(plan: {
@@ -90,6 +91,21 @@ function resolveAuditListTypeLabel(plan: {
     if (moduleTemplates.length > 0) {
         const labels = moduleTemplates.map((t) => getAuditPlanTemplateLabel(t));
         return [...new Set(labels)].join("; ");
+    }
+
+    const performModules = getPlanModuleOptions(
+        plan.templateId,
+        plan.auditProgram?.isoStandard,
+    );
+    if (performModules.length === 1 && performModules[0].isTripleMapping) {
+        const stds = resolveAuditPlanStandards(
+            String(plan.auditProgram?.isoStandard || ""),
+            plan.auditProgram?.isoStandard,
+        );
+        return stds.length > 0 ? stds.join(", ") : "IMS Checklist";
+    }
+    if (performModules.length === 1 && performModules[0].standard) {
+        return performModules[0].standard;
     }
 
     const fromIds = parseAuditPlanTemplateIds(plan.templateId)
@@ -148,6 +164,8 @@ function isModuleAuditListPlan(plan: Parameters<typeof resolveAuditListTypeLabel
 
 type AuditTypeFilter = "all" | "module" | "iso";
 type AuditStatusTab = "planned" | "in_progress" | "completed";
+type AuditListSortKey = "date" | "type";
+type AuditListSortDir = "asc" | "desc";
 
 const STATUS_TAB_TO_API: Record<AuditStatusTab, string> = {
     planned: "PLANNED",
@@ -176,8 +194,9 @@ const AuditList = () => {
     });
     const [searchQuery, setSearchQuery] = useState("");
     const [typeFilter, setTypeFilter] = useState<AuditTypeFilter>("all");
-    /** Status tab — default Planned; each click fetches that status from the API. */
-    const [statusTab, setStatusTab] = useState<AuditStatusTab>("planned");
+    /** Default: latest audit date first. Audit column sorts by module / ISO type label. */
+    const [sortKey, setSortKey] = useState<AuditListSortKey>("date");
+    const [sortDir, setSortDir] = useState<AuditListSortDir>("desc");
     const [selectedSite, setSelectedSite] = useState("all");
     const seededOnMount = React.useRef(false);
     // Will set properly after we know if we had seed — use lazy init for loading
@@ -246,30 +265,15 @@ const AuditList = () => {
     const auditExecuteTourStepConfig =
         getAuditExecuteTourStepConfig(auditExecuteTourStep);
 
-    const auditPlanTourActive = searchParams.get("auditPlanTour") === "true";
-    const auditPlanTourStep = Math.min(
-        AUDIT_PLAN_TOUR_TOTAL_STEPS,
-        Math.max(
-            AUDIT_PLAN_TOUR_STEP.COMPLETE,
-            parseInt(
-                searchParams.get("auditPlanStep") || String(AUDIT_PLAN_TOUR_STEP.COMPLETE),
-                10,
-            ),
-        ),
-    );
-    const auditPlanTourStepConfig = getAuditPlanTourStepConfig(auditPlanTourStep);
-    const highlightPlanIdParam = searchParams.get("highlightPlanId");
-    const highlightPlanId = highlightPlanIdParam
-        ? Number.parseInt(highlightPlanIdParam, 10)
-        : null;
-    const [highlightedPlan, setHighlightedPlan] = useState<any | null>(() => {
-        if (!highlightPlanIdParam) return null;
-        const id = Number.parseInt(highlightPlanIdParam, 10);
-        if (!Number.isFinite(id)) return null;
-        const ctx = loadAuditPlanTourContext();
-        const plan = ctx?.plan;
-        return plan && Number(plan.id) === id ? plan : null;
-    });
+    const statusFromUrl = searchParams.get("status");
+    const initialStatusTab: AuditStatusTab =
+        statusFromUrl === "planned" ||
+        statusFromUrl === "in_progress" ||
+        statusFromUrl === "completed"
+            ? statusFromUrl
+            : "planned";
+    /** Status tab — default Planned; each click fetches that status from the API. */
+    const [statusTab, setStatusTab] = useState<AuditStatusTab>(initialStatusTab);
 
     const setAuditExecuteTourStep = (step: number) => {
         setSearchParams(
@@ -387,9 +391,37 @@ const AuditList = () => {
         return () => window.clearTimeout(t);
     }, [searchQuery]);
 
+    // After creating a plan, land on Planned with filters cleared so the new row is visible.
+    useEffect(() => {
+        if (searchParams.get("saved") !== "1") return;
+        setStatusTab("planned");
+        setSelectedSite("all");
+        setTypeFilter("all");
+        setSearchQuery("");
+        setDebouncedSearch("");
+        setCurrentPage(1);
+        hasLoadedOnceRef.current = false;
+        setSearchParams(
+            (prev) => {
+                const next = new URLSearchParams(prev);
+                next.delete("saved");
+                next.set("status", "planned");
+                return next;
+            },
+            { replace: true },
+        );
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot after save redirect
+    }, [searchParams.get("saved")]);
+
     useEffect(() => {
         setCurrentPage(1);
     }, [debouncedSearch, selectedSite, typeFilter, statusTab]);
+
+    useEffect(() => {
+        if (sortKey === "date") setCurrentPage(1);
+    }, [sortKey, sortDir]);
+
+    const dateOrderForApi = sortKey === "date" ? sortDir : "desc";
 
     const fetchPlans = async () => {
         const isInitial = !hasLoadedOnceRef.current;
@@ -404,8 +436,19 @@ const AuditList = () => {
                 site: selectedSite !== "all" ? selectedSite : undefined,
                 type: typeFilter !== "all" ? typeFilter : undefined,
                 status: STATUS_TAB_TO_API[statusTab],
+                // Server sorts by date for pagination; type sort is applied on the page.
+                sort: "date",
+                order: dateOrderForApi,
             });
             const res = await apiFetch(`/audit-plans${qs}`);
+            if (!res.ok) {
+                const errBody = await res.json().catch(() => ({}));
+                throw new Error(
+                    (errBody as { error?: string; details?: string })?.details ||
+                        (errBody as { error?: string })?.error ||
+                        `Failed to load audit plans (${res.status})`,
+                );
+            }
             const data = await res.json();
             const parsed = parsePaginatedResponse<any>(data, currentPage, itemsPerPage);
             setAuditPlans((prev) => {
@@ -438,8 +481,8 @@ const AuditList = () => {
 
     useEffect(() => {
         void fetchPlans();
-        // eslint-disable-next-line react-hooks/exhaustive-deps -- fetch when tab/filters/page change
-    }, [currentPage, debouncedSearch, selectedSite, typeFilter, statusTab]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- fetch when tab/filters/page/date-sort change
+    }, [currentPage, debouncedSearch, selectedSite, typeFilter, statusTab, dateOrderForApi]);
 
     useEffect(() => {
         let cancelled = false;
@@ -520,7 +563,10 @@ const AuditList = () => {
         plan: any,
         downloadFormat?: AuditReportFormat,
     ) => {
-        const modules = getPlanModuleOptions(plan.templateId);
+        const modules = getPlanModuleOptions(
+            plan.templateId,
+            plan.auditProgram?.isoStandard,
+        );
         // List payloads omit auditData — always load the full plan before opening/downloading.
         if (modules.length <= 1) {
             if (mode === "perform") {
@@ -600,7 +646,10 @@ const AuditList = () => {
         status?: string;
         progress?: number;
     }) => {
-        const ids = parseAuditPlanTemplateIds(fullPlan?.templateId);
+        const ids = getPlanModuleOptions(
+            fullPlan?.templateId,
+            fullPlan?.auditProgram?.isoStandard,
+        ).map((m) => m.id);
         if (!fullPlan?.id || ids.length <= 1 || fullPlan.auditData == null) return;
 
         const overall = getPlanOverallChecklistProgress(fullPlan);
@@ -722,23 +771,38 @@ const AuditList = () => {
     };
 
     const filteredPlans = auditPlans;
-    const paginatedPlans = auditPlans;
     const uniqueSites = siteOptions;
 
-    const modulePlans = paginatedPlans.filter((p) => isModuleAuditListPlan(p));
-    const isoPlans = paginatedPlans.filter((p) => !isModuleAuditListPlan(p));
-    const listSections =
-        typeFilter === "all"
-            ? [
-                  { id: "module" as const, label: "Modules", plans: modulePlans },
-                  { id: "iso" as const, label: "ISO Standards", plans: isoPlans },
-              ].filter((s) => s.plans.length > 0)
-            : typeFilter === "module"
-              ? [{ id: "module" as const, label: "Modules", plans: paginatedPlans }]
-              : [{ id: "iso" as const, label: "ISO Standards", plans: paginatedPlans }];
+    const toggleListSort = (key: AuditListSortKey) => {
+        if (sortKey === key) {
+            setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+            return;
+        }
+        setSortKey(key);
+        setSortDir(key === "date" ? "desc" : "asc");
+    };
 
-    const tourTargetPlan =
-        paginatedPlans[0] ?? auditPlans[0] ?? null;
+    /** Flat list — no Modules / ISO section headers. Type sort applied on this page. */
+    const displayedPlans = React.useMemo(() => {
+        const plans = [...auditPlans];
+        if (sortKey !== "type") return plans;
+        const mul = sortDir === "asc" ? 1 : -1;
+        plans.sort((a, b) => {
+            const aMod = isModuleAuditListPlan(a) ? 0 : 1;
+            const bMod = isModuleAuditListPlan(b) ? 0 : 1;
+            if (aMod !== bMod) return (aMod - bMod) * mul;
+            return (
+                resolveAuditListTypeLabel(a).localeCompare(
+                    resolveAuditListTypeLabel(b),
+                    undefined,
+                    { sensitivity: "base" },
+                ) * mul
+            );
+        });
+        return plans;
+    }, [auditPlans, sortKey, sortDir]);
+
+    const tourTargetPlan = displayedPlans[0] ?? auditPlans[0] ?? null;
 
     const createdPlanTourTarget = Number.isFinite(highlightPlanId)
         ? auditPlans.find((p) => Number(p.id) === highlightPlanId) ??
@@ -961,9 +1025,51 @@ const AuditList = () => {
                             <TableHeader className="bg-[#213847]">
                                 <TableRow className="hover:bg-[#213847] border-none">
                                     <TableHead className="font-medium text-white h-12 py-3">Plan Name</TableHead>
-                                    <TableHead className="font-medium text-white h-12 py-3">Audit</TableHead>
+                                    <TableHead className="font-medium text-white h-12 py-3">
+                                        <button
+                                            type="button"
+                                            onClick={() => toggleListSort("type")}
+                                            className="inline-flex items-center gap-1.5 font-medium text-white hover:text-emerald-200 transition-colors"
+                                            title="Sort by module / ISO standard"
+                                            aria-label="Sort by module or ISO standard"
+                                        >
+                                            Audit
+                                            <ArrowUpDown
+                                                className={cn(
+                                                    "w-3.5 h-3.5 opacity-70",
+                                                    sortKey === "type" && "opacity-100 text-emerald-300",
+                                                )}
+                                            />
+                                            {sortKey === "type" ? (
+                                                <span className="text-[10px] font-bold uppercase tracking-wide text-emerald-200/90">
+                                                    {sortDir === "asc" ? "A–Z" : "Z–A"}
+                                                </span>
+                                            ) : null}
+                                        </button>
+                                    </TableHead>
                                     <TableHead className="font-medium text-white h-12 py-3">Site</TableHead>
-                                    <TableHead className="font-medium text-white h-12 py-3">Date</TableHead>
+                                    <TableHead className="font-medium text-white h-12 py-3">
+                                        <button
+                                            type="button"
+                                            onClick={() => toggleListSort("date")}
+                                            className="inline-flex items-center gap-1.5 font-medium text-white hover:text-emerald-200 transition-colors"
+                                            title="Sort by date"
+                                            aria-label="Sort by date"
+                                        >
+                                            Date
+                                            <ArrowUpDown
+                                                className={cn(
+                                                    "w-3.5 h-3.5 opacity-70",
+                                                    sortKey === "date" && "opacity-100 text-emerald-300",
+                                                )}
+                                            />
+                                            {sortKey === "date" ? (
+                                                <span className="text-[10px] font-bold uppercase tracking-wide text-emerald-200/90">
+                                                    {sortDir === "desc" ? "Newest" : "Oldest"}
+                                                </span>
+                                            ) : null}
+                                        </button>
+                                    </TableHead>
                                     <TableHead className="font-medium text-white h-12 py-3">Lead Auditor</TableHead>
                                     <TableHead className="font-medium text-white h-12 py-3">Status</TableHead>
                                     <TableHead className="text-right font-medium text-white h-12 py-3">Actions</TableHead>
@@ -990,22 +1096,7 @@ const AuditList = () => {
                                         </TableCell>
                                     </TableRow>
                                 ) : (
-                                    listSections.flatMap((section) => [
-                                        <TableRow
-                                            key={`section-${section.id}`}
-                                            className="bg-slate-50 hover:bg-slate-50 border-b border-slate-200"
-                                        >
-                                            <TableCell
-                                                colSpan={7}
-                                                className="py-2.5 px-4 text-xs font-bold uppercase tracking-wide text-[#213847]"
-                                            >
-                                                {section.label}
-                                                <span className="ml-2 font-semibold normal-case tracking-normal text-slate-400">
-                                                    ({section.plans.length})
-                                                </span>
-                                            </TableCell>
-                                        </TableRow>,
-                                        ...section.plans.map((plan) => {
+                                    displayedPlans.map((plan) => {
                                         const auditTypeLabel = resolveAuditListTypeLabel(plan);
                                         const isTourTargetRow =
                                             tourTargetPlan?.id === plan.id;
@@ -1148,8 +1239,7 @@ const AuditList = () => {
                                                 </TableCell>
                                             </TableRow>
                                         );
-                                    }),
-                                    ])
+                                    })
                                 )}
                             </TableBody>
                         </Table>

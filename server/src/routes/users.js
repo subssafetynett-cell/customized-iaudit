@@ -40,6 +40,7 @@ import {
     USER_ASSIGNABLE_ROLES,
     normalizeUserRole,
     actorCanManageOrgUsers,
+    actorCanEditOrgUsers,
     assertActorMayModifyProtectedCompanyOwner,
     userRowHasOrgAdminPrivileges,
     countActiveOrgAdministrators,
@@ -450,7 +451,9 @@ export function createUsersRouter({ authenticateToken, checkTrialExpiration }) {
                 isActive: true,
                 emailVerifiedAt: true,
                 creatorId: true,
-                createdAt: true
+                createdAt: true,
+                firstLoginAt: true,
+                lastLoginAt: true,
             };
 
             const attachAuditeeSites = async (users) => {
@@ -559,16 +562,20 @@ export function createUsersRouter({ authenticateToken, checkTrialExpiration }) {
     router.get('/users/manage-access', authenticateToken, async (req, res) => {
         const actorId = Number(req.user.id);
         try {
-            const [canManageUsers, canInviteUsers, canInviteAuditee] = await Promise.all([
+            const [canManageUsers, canInviteUsers, canInviteAuditee, canEditUsers] = await Promise.all([
                 actorCanManageOrgUsers(actorId),
                 actorCanInviteOrgUser(actorId),
                 actorCanInviteAuditee(actorId),
+                actorCanEditOrgUsers(actorId),
             ]);
             res.json({
                 allowed: canInviteUsers,
                 canInviteUsers,
-                canManageUsers,
+                // Directory edit (roles/status/details): admins + lead auditors.
+                canManageUsers: canManageUsers || canEditUsers,
+                canEditUsers,
                 canInviteAuditee,
+                isLeadAuditorEditor: canEditUsers && !canManageUsers,
             });
         } catch (error) {
             console.error('Error checking user management access:', error);
@@ -782,8 +789,8 @@ export function createUsersRouter({ authenticateToken, checkTrialExpiration }) {
             return res.status(400).json({ error: 'Invalid user id' });
         }
         try {
-            if (!(await actorCanManageOrgUsers(actorId))) {
-                return res.status(403).json({ error: 'Forbidden', message: 'Only administrators can resend verification.' });
+            if (!(await actorCanEditOrgUsers(actorId))) {
+                return res.status(403).json({ error: 'Forbidden', message: 'Only administrators and lead auditors can resend verification.' });
             }
             if (!(await actorCanAccessTargetUser(actorId, targetId))) {
                 return res.status(403).json({ error: 'Forbidden' });
@@ -880,6 +887,8 @@ export function createUsersRouter({ authenticateToken, checkTrialExpiration }) {
 
         try {
             const hashedPassword = await bcrypt.hash(password, 10);
+            const auditeeCreatorFk =
+                (await getOrgRootUserId(creatorId)) ?? (Number.isInteger(creatorId) ? creatorId : null);
             const user = await prisma.$transaction(async (tx) => {
                 const sites = await tx.site.findMany({
                     where: { id: { in: parsedSiteIds } },
@@ -915,7 +924,7 @@ export function createUsersRouter({ authenticateToken, checkTrialExpiration }) {
                         isActive: false,
                         emailVerifiedAt: null,
                         password: hashedPassword,
-                        creatorId: Number.isInteger(creatorId) ? creatorId : null,
+                        creatorId: auditeeCreatorFk,
                     },
                 });
 
@@ -1104,12 +1113,12 @@ export function createUsersRouter({ authenticateToken, checkTrialExpiration }) {
             }
 
             const creatorIdNum = Number(creatorId);
-            // Always attach invitees under the inviter (keeps A→B→C tree for shared catalogs).
-            const creatorFk =
-                Number.isInteger(creatorIdNum) && creatorIdNum > 0 ? creatorIdNum : null;
-            if (!creatorFk) {
+            if (!Number.isInteger(creatorIdNum) || creatorIdNum < 1) {
                 return res.status(401).json({ error: 'Invalid session. Please log in again.' });
             }
+            // Attach under the inviter's org root so A→B→C always share one company/site catalog.
+            const orgRoot = await getOrgRootUserId(creatorIdNum);
+            const creatorFk = (Number.isInteger(orgRoot) && orgRoot > 0) ? orgRoot : creatorIdNum;
 
             const user = await prisma.$transaction(async (tx) => {
                 if (roleNorm === 'auditee' && parsedSiteIds) {
@@ -1253,9 +1262,10 @@ export function createUsersRouter({ authenticateToken, checkTrialExpiration }) {
         const { firstName, lastName, email, mobile, phoneCountry, role, customRoleName, isActive, password, onboardingCompleted, emailChangeOtp, siteId, siteIds: rawSiteIds } = req.body;
         const actorId = Number(req.user.id);
         try {
-            const [canAccess, canManageUsers, canManageAuditee, targetUser] = await Promise.all([
+            const [canAccess, canManageUsers, canEditUsers, canManageAuditee, targetUser] = await Promise.all([
                 actorCanAccessTargetUser(actorId, targetId),
                 actorCanManageOrgUsers(actorId),
+                actorCanEditOrgUsers(actorId),
                 actorCanManageAuditee(actorId, targetId),
                 prisma.user.findUnique({
                     where: { id: targetId },
@@ -1270,12 +1280,13 @@ export function createUsersRouter({ authenticateToken, checkTrialExpiration }) {
             }
 
             const targetRoleNorm = normalizeUserRole(targetUser.role);
+            const canEditDirectory = canManageUsers || canEditUsers;
 
-            if (!canManageUsers && targetId !== actorId) {
+            if (!canEditDirectory && targetId !== actorId) {
                 if (!(canManageAuditee && targetRoleNorm === 'auditee')) {
                     return res.status(403).json({
                         error: 'Forbidden',
-                        message: 'Only administrators can edit other users.'
+                        message: 'Only administrators and lead auditors can edit other users.'
                     });
                 }
             }
@@ -1315,17 +1326,17 @@ export function createUsersRouter({ authenticateToken, checkTrialExpiration }) {
                 role !== undefined ||
                 customRoleName !== undefined ||
                 (isActive !== undefined && targetId !== actorId);
-            if (privilegeFieldsRequested && !canManageUsers) {
+            if (privilegeFieldsRequested && !canEditDirectory) {
                 if (!(canManageAuditee && targetRoleNorm === 'auditee')) {
                     return res.status(403).json({
                         error: 'Forbidden',
-                        message: 'Only administrators can change user roles or account status.'
+                        message: 'Only administrators and lead auditors can change user roles or account status.'
                     });
                 }
                 if (role !== undefined || customRoleName !== undefined) {
                     return res.status(403).json({
                         error: 'Forbidden',
-                        message: 'Only administrators can change user roles.'
+                        message: 'Only administrators and lead auditors can change user roles.'
                     });
                 }
             }
@@ -1590,7 +1601,8 @@ export function createUsersRouter({ authenticateToken, checkTrialExpiration }) {
             const canManageOrg =
                 isSuperAdmin ||
                 actorRole === 'admin' ||
-                (actor.creatorId == null && actorRole !== 'auditee');
+                (actor.creatorId == null && actorRole !== 'auditee') ||
+                (await actorCanEditOrgUsers(actorId));
 
             if (!isSuperAdmin) {
                 if (!(await actorCanAccessTargetUser(actorId, targetId))) {

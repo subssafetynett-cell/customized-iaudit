@@ -348,19 +348,13 @@ const AuditProgramPage = () => {
     );
     const activeSiteCached = Boolean(activeSiteId && siteCache[activeSiteId]);
 
-    const loadSiteData = useCallback(async (siteId: string, opts?: { background?: boolean }) => {
+    const loadSiteData = useCallback(async (siteId: string, opts?: { background?: boolean; force?: boolean }) => {
         const id = String(siteId || "").trim();
         if (!id) return;
-        if (siteCacheRef.current[id]) return;
-        if (auditPlanPageSiteCache[id]) {
-            setSiteCache((prev) =>
-                prev[id] ? prev : { ...prev, [id]: auditPlanPageSiteCache[id] },
-            );
-            return;
-        }
+        if (!opts?.force && siteCacheRef.current[id]) return;
         if (inflightSiteRef.current[id]) {
             await inflightSiteRef.current[id];
-            return;
+            if (!opts?.force && siteCacheRef.current[id]) return;
         }
 
         const task = (async () => {
@@ -373,8 +367,8 @@ const AuditProgramPage = () => {
             const entry = { programs, plans };
             auditPlanPageSiteCache[id] = entry;
             setSiteCache((prev) => {
-                if (prev[id]) return prev;
-                return { ...prev, [id]: entry };
+                if (!opts?.force && prev[id]) return prev;
+                return { ...prev, [id]: { programs, plans } };
             });
         })();
 
@@ -467,16 +461,20 @@ const AuditProgramPage = () => {
         }
     }, [storeCompanies]);
 
-    // 2) Lazy-load the active site's programs + plans; cache for instant tab switches.
+    // 2) Lazy-load the active site's programs + plans; force-refresh once on mount
+    // so newly saved plans appear as VIEW / EDIT PLAN after returning from create.
+    const didForceRefreshOnMountRef = useRef(false);
     useEffect(() => {
         if (!activeSiteId) return;
-        if (siteCacheRef.current[activeSiteId]) {
-            setContentLoading(false);
-            return;
-        }
         let cancelled = false;
-        setContentLoading(true);
-        void loadSiteData(activeSiteId).finally(() => {
+        const force = !didForceRefreshOnMountRef.current;
+        didForceRefreshOnMountRef.current = true;
+        const hadCache = Boolean(siteCacheRef.current[activeSiteId]);
+        if (!hadCache) setContentLoading(true);
+        void loadSiteData(activeSiteId, {
+            force,
+            background: hadCache && force,
+        }).finally(() => {
             if (!cancelled) setContentLoading(false);
         });
         return () => {

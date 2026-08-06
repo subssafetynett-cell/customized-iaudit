@@ -23,6 +23,7 @@ export interface SavedGapAnalysis {
     location: string;
     representatives: string;
     auditorName: string;
+    auditorPosition?: string;
     contactEmail: string;
     scope: string;
     auditCompany?: string;

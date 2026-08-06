@@ -34,10 +34,24 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { AutoResizeTextarea } from "@/components/ui/auto-resize-textarea";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import {
   Table,
   TableBody,
@@ -60,6 +74,11 @@ import {
   resolveAuditTemplateId,
   usesYesNoChecklistFindings,
   usesOkNotOkChecklistFindings,
+  normalizeOkNotOkFindingValue,
+  resolvePerformAuditTemplateIds,
+  resolveAuditPlanStandards,
+  resolveImsStandardFlags,
+  imsClauseTextForRow,
 } from "@/data/auditTemplates";
 import { IsoOkNotOkFindingSelect } from "@/components/IsoOkNotOkFindingSelect";
 import { toast } from "sonner";
@@ -103,6 +122,7 @@ import {
   ensureModuleStorePreservesTopLevel,
   moduleStoreEntryFromTopLevel,
   lookupModuleStoreEntry,
+  lookupPerformAuditModuleEntry,
   mergeModuleStoreEntries,
   moduleStoreEntryHasAnswers,
   countModuleStoreAnswers,
@@ -116,7 +136,10 @@ import {
   syncNonConformancesFromSources,
   syncOpportunitiesFromSources,
 } from "@/lib/syncAuditFindingsSummary";
+import { MODULE_AUDIT_FACET_OPTIONS } from "@/lib/auditReportFindings";
 import { AuditFindingsReportForm } from "@/components/AuditFindingsReportForm";
+import { isModuleAuditPlan } from "@/lib/auditReportFindings";
+import { MODULE_AUDIT_FACET_OPTIONS } from "@/lib/moduleAuditFacet";
 import {
   buildFindingsReportDefaults,
   defaultFindingsReportForm,
@@ -486,14 +509,18 @@ const AuditExecute = () => {
       ? location.state.focusFindingId
       : undefined;
 
-  // Use the template(s) attached to the plan (resolve legacy/alias ids)
+  // Use the template(s) attached to the plan (resolve legacy/alias ids; multi-ISO → IMS)
   const planTemplateIds = useMemo(
-    () => parseAuditPlanTemplateIds(plan?.templateId),
-    [plan?.templateId],
+    () =>
+      resolvePerformAuditTemplateIds(
+        plan?.templateId,
+        plan?.auditProgram?.isoStandard,
+      ),
+    [plan?.templateId, plan?.auditProgram?.isoStandard],
   );
   const planTemplates = useMemo(
-    () => findAuditTemplates(plan?.templateId),
-    [plan?.templateId],
+    () => planTemplateIds.map((id) => findAuditTemplate(id)).filter(Boolean) as typeof auditTemplates,
+    [planTemplateIds],
   );
   const [activeModuleId, setActiveModuleId] = useState(
     () => lockedModuleId || "",
@@ -516,6 +543,8 @@ const AuditExecute = () => {
           auditDoneBy: string;
           auditeeDept: string;
           auditDate: string;
+          facet?: string;
+          category?: string;
         };
       }
     >
@@ -529,6 +558,8 @@ const AuditExecute = () => {
     auditDoneBy: "",
     auditeeDept: "",
     auditDate: "",
+    facet: "",
+    category: "",
   });
 
   const [checklistData, setChecklistData] = useState<
@@ -619,14 +650,17 @@ const AuditExecute = () => {
       findingsReportForm: findingsReportFormRef.current,
       auditGlobalInfo: auditGlobalInfoRef.current,
     };
-    // Never replace a richer saved module blob with an empty in-memory snapshot.
+    // Absolute snapshot of the checklist on screen — never merge-prefer-richer
+    // another template's answers into this module id when leaving it.
     const updatedStore = currentId
       ? {
           ...moduleDataByTemplateIdRef.current,
-          [currentId]: mergeModuleStoreEntries(
-            lookupModuleStoreEntry(moduleDataByTemplateIdRef.current, currentId),
-            snapshot,
-          ),
+          [currentId]: answersHydrated
+            ? snapshot
+            : mergeModuleStoreEntries(
+                lookupModuleStoreEntry(moduleDataByTemplateIdRef.current, currentId),
+                snapshot,
+              ),
         }
       : { ...moduleDataByTemplateIdRef.current };
     moduleDataByTemplateIdRef.current = updatedStore;
@@ -708,6 +742,7 @@ const AuditExecute = () => {
     resolveAuditTemplateId(activeModuleId || planTemplateIds[0]) ??
     (activeModuleId || planTemplateIds[0] || plan?.templateId);
   const template = findAuditTemplate(templateId);
+  const isModuleCriteriaAudit = Boolean(template && isModuleAuditPlan(templateId, template));
   const templateSectionLabels = template
     ? getAuditExecuteSectionLabels(template)
     : { divider: "Audit Execution", detailsTitle: null as string | null };
@@ -761,17 +796,56 @@ const AuditExecute = () => {
     );
   };
 
-  const activeStandards = {
-    iso9001: plan?.criteria?.includes("9001") || plan?.standard?.includes("9001") || plan?.criteria?.toLowerCase().includes("quality") || plan?.criteria?.toLowerCase().includes("9001"),
-    iso14001: plan?.criteria?.includes("14001") || plan?.standard?.includes("14001") || plan?.criteria?.toLowerCase().includes("environment") || plan?.criteria?.toLowerCase().includes("14001"),
-    iso45001: plan?.criteria?.includes("45001") || plan?.standard?.includes("45001") || plan?.criteria?.toLowerCase().includes("health") || plan?.criteria?.toLowerCase().includes("safety") || plan?.criteria?.toLowerCase().includes("ohs") || plan?.criteria?.toLowerCase().includes("45001"),
-  };
+  const programIsoStandards = useMemo(() => {
+    const fromProgram = resolveAuditPlanStandards(
+      "",
+      plan?.auditProgram?.isoStandard,
+    );
+    if (fromProgram.length > 0) return fromProgram;
+    // Fallback when program iso is missing: parse explicit ISO mentions from plan text.
+    return resolveAuditPlanStandards(
+      [plan?.scope, plan?.objective, plan?.criteria].filter(Boolean).join(" "),
+      undefined,
+    );
+  }, [
+    plan?.auditProgram?.isoStandard,
+    plan?.scope,
+    plan?.objective,
+    plan?.criteria,
+  ]);
 
-  // If no standards match, and it's triple mapping, show all as fallback
-  const anyStandardMatched = activeStandards.iso9001 || activeStandards.iso14001 || activeStandards.iso45001;
-  const showISO9001 = activeStandards.iso9001 || !anyStandardMatched;
-  const showISO14001 = activeStandards.iso14001 || !anyStandardMatched;
-  const showISO45001 = activeStandards.iso45001 || !anyStandardMatched;
+  const imsStandardFlags = useMemo(
+    () => resolveImsStandardFlags(programIsoStandards),
+    [programIsoStandards],
+  );
+
+  const showISO9001 = template?.isTripleMapping
+    ? imsStandardFlags.iso9001
+    : programIsoStandards.length > 0
+      ? imsStandardFlags.iso9001
+      : Boolean(
+          plan?.criteria?.includes("9001") ||
+            plan?.standard?.includes("9001") ||
+            plan?.criteria?.toLowerCase().includes("9001"),
+        );
+  const showISO14001 = template?.isTripleMapping
+    ? imsStandardFlags.iso14001
+    : programIsoStandards.length > 0
+      ? imsStandardFlags.iso14001
+      : Boolean(
+          plan?.criteria?.includes("14001") ||
+            plan?.standard?.includes("14001") ||
+            plan?.criteria?.toLowerCase().includes("14001"),
+        );
+  const showISO45001 = template?.isTripleMapping
+    ? imsStandardFlags.iso45001
+    : programIsoStandards.length > 0
+      ? imsStandardFlags.iso45001
+      : Boolean(
+          plan?.criteria?.includes("45001") ||
+            plan?.standard?.includes("45001") ||
+            plan?.criteria?.toLowerCase().includes("45001"),
+        );
 
   const activeCount = [showISO9001, showISO14001, showISO45001].filter(Boolean).length;
 
@@ -958,7 +1032,11 @@ const AuditExecute = () => {
             })()
           : found.auditData;
       if (!incoming || typeof incoming !== "object") return;
-      const idsProbe = parseAuditPlanTemplateIds(found.templateId);
+      const rawIdsProbe = parseAuditPlanTemplateIds(found.templateId);
+      const idsProbe = resolvePerformAuditTemplateIds(
+        found.templateId,
+        found.auditProgram?.isoStandard,
+      );
       const preferredProbe =
         (lockedModuleId &&
           (idsProbe.includes(lockedModuleId)
@@ -976,9 +1054,11 @@ const AuditExecute = () => {
         incoming as Record<string, unknown>,
         idsProbe,
       );
-      const incomingMod = preferredProbe
-        ? lookupModuleStoreEntry(incomingStore, preferredProbe)
-        : null;
+      const incomingMod =
+        lookupPerformAuditModuleEntry(incomingStore, idsProbe, rawIdsProbe) ??
+        (preferredProbe
+          ? lookupModuleStoreEntry(incomingStore, preferredProbe)
+          : null);
       const currentMod = preferredProbe
         ? lookupModuleStoreEntry(moduleDataByTemplateIdRef.current, preferredProbe)
         : null;
@@ -1008,7 +1088,11 @@ const AuditExecute = () => {
           ? (dataRaw as Record<string, unknown>)
           : {},
       );
-      const ids = parseAuditPlanTemplateIds(found.templateId);
+      const rawIds = parseAuditPlanTemplateIds(found.templateId);
+      const ids = resolvePerformAuditTemplateIds(
+        found.templateId,
+        found.auditProgram?.isoStandard,
+      );
       const multiModule = ids.length > 1;
       const lockedResolved =
         resolveAuditTemplateId(lockedModuleId) || lockedModuleId;
@@ -1050,9 +1134,11 @@ const AuditExecute = () => {
       moduleDataByTemplateIdRef.current = store;
       setAutosaveBaseline(data as Record<string, unknown>);
 
-      const mod = preferredActive
-        ? lookupModuleStoreEntry(store, preferredActive)
-        : null;
+      const mod =
+        lookupPerformAuditModuleEntry(store, ids, rawIds) ??
+        (preferredActive
+          ? lookupModuleStoreEntry(store, preferredActive)
+          : null);
 
       // Still fetching and this module looks empty — wait for full plan before
       // locking empty UI (stale cache must not block real answers).
@@ -1066,57 +1152,57 @@ const AuditExecute = () => {
         return;
       }
 
-      // Multi-module: never reuse another module's top-level answers/evidence.
+      // Multi-module: top-level answers belong only to the last-active module.
+      // Never fall back to "empty store" — that reuses another module's blob.
       const previousResolved =
         resolveAuditTemplateId(previousActive) || previousActive;
       const preferredResolved =
         resolveAuditTemplateId(preferredActive) || preferredActive;
       const canUseTopLevelAnswers =
         !multiModule ||
-        previousResolved === preferredResolved ||
-        previousActive === preferredActive ||
-        (!previousActive && !Object.keys(store).length);
+        (Boolean(preferredResolved) &&
+          Boolean(previousResolved) &&
+          previousResolved === preferredResolved);
 
       const incomingChecklist =
         (mod?.checklistData as Record<number, any> | undefined) ||
         (canUseTopLevelAnswers && data.checklistData
           ? data.checklistData
-          : multiModule &&
-              preferredResolved &&
-              previousResolved === preferredResolved &&
-              data.checklistData
+          : !multiModule && data.checklistData
             ? data.checklistData
-            : !multiModule && data.checklistData
-              ? data.checklistData
-              : null);
+            : null);
 
-      setChecklistData((prev) => {
-        const prevCount = countModuleStoreAnswers({ checklistData: prev });
-        const nextCount = countModuleStoreAnswers({
-          checklistData: incomingChecklist || undefined,
+      // Multi-module: absolute replace — never keep prev module's checkboxes in React state.
+      if (multiModule) {
+        setChecklistData(
+          incomingChecklist
+            ? (incomingChecklist as Record<number, any>)
+            : {},
+        );
+      } else {
+        setChecklistData((prev) => {
+          const prevCount = countModuleStoreAnswers({ checklistData: prev });
+          const nextCount = countModuleStoreAnswers({
+            checklistData: incomingChecklist || undefined,
+          });
+          // Never replace filled answers with an empty hydrate for the same module.
+          if (prevCount > 0 && nextCount < prevCount) return prev;
+          if (incomingChecklist) return incomingChecklist as Record<number, any>;
+          return prev;
         });
-        // Never replace filled answers with an empty hydrate for the same module.
-        if (prevCount > 0 && nextCount < prevCount) return prev;
-        if (incomingChecklist) return incomingChecklist as Record<number, any>;
-        if (multiModule && prevCount > 0) return prev;
-        if (multiModule) return {};
-        return prev;
-      });
+      }
 
       if (mod?.sectionData) setSectionData(mod.sectionData as Record<number, string>);
       else if (canUseTopLevelAnswers && data.sectionData) setSectionData(data.sectionData);
-      else if (multiModule) {
-        setSectionData((prev) => (Object.keys(prev).length > 0 ? prev : {}));
-      }
+      else if (multiModule) setSectionData({});
+      else if (!multiModule && data.sectionData) setSectionData(data.sectionData);
 
       if (mod?.extraChecklistItems) {
         setExtraChecklistItems(mod.extraChecklistItems as Record<string, any[]>);
       } else if (canUseTopLevelAnswers && data.extraChecklistItems) {
         setExtraChecklistItems(data.extraChecklistItems);
       } else if (multiModule) {
-        setExtraChecklistItems((prev) =>
-          Object.keys(prev).length > 0 ? prev : {},
-        );
+        setExtraChecklistItems({});
       }
 
       // Only seed preferred module from top-level when that blob actually belongs to it.
@@ -1188,12 +1274,15 @@ const AuditExecute = () => {
         Object.keys(sharedFromTop).length > 0
       ) {
         const sanitized = sanitizeAuditEvidenceMediaMap(evidenceSource || {});
-        const localFiles = preferredActive
+        // Only claim legacy unscoped checklist evidence when top-level belongs to this module.
+        // Multi-module: never claim another checklist's legacy unscoped evidence.
+      const localFiles = preferredActive
           ? toActiveModuleLocalEvidenceMap(
-              multiModule && !mod?.genericFiles && data.genericFiles
+              multiModule && !mod?.genericFiles && canUseTopLevelAnswers && data.genericFiles
                 ? sanitizeAuditEvidenceMediaMap(data.genericFiles)
                 : sanitized,
               preferredActive,
+              { includeLegacyUnscoped: Boolean(canUseTopLevelAnswers) },
             )
           : sanitized;
         const combined = { ...sharedFromTop, ...localFiles };
@@ -1280,7 +1369,11 @@ const AuditExecute = () => {
       setAnswersHydrated(true);
     } else {
       setFindingsReportForm(buildFindingsReportDefaults(found));
-      const ids = parseAuditPlanTemplateIds(found.templateId);
+      const rawIds = parseAuditPlanTemplateIds(found.templateId);
+      const ids = resolvePerformAuditTemplateIds(
+        found.templateId,
+        found.auditProgram?.isoStandard,
+      );
       const lockedResolved =
         resolveAuditTemplateId(lockedModuleId) || lockedModuleId;
       const preferred =
@@ -1718,18 +1811,17 @@ const AuditExecute = () => {
       const syncedModuleStore = currentModuleId
         ? {
             ...baseStore,
-            [currentModuleId]: mergeModuleStoreEntries(
-              lookupModuleStoreEntry(baseStore, currentModuleId),
-              {
-                checklistData,
-                editableChecklist,
-                extraChecklistItems,
-                sectionData,
-                genericFiles: activeModuleOnlyFiles,
-                findingsReportForm: protectedFindingsReportForm,
-                auditGlobalInfo,
-              },
-            ),
+            // Absolute replace for the active checklist only — do not keep a
+            // richer blob from another template under this module id.
+            [currentModuleId]: {
+              checklistData,
+              editableChecklist,
+              extraChecklistItems,
+              sectionData,
+              genericFiles: activeModuleOnlyFiles,
+              findingsReportForm: protectedFindingsReportForm,
+              auditGlobalInfo: { ...auditGlobalInfo },
+            },
           }
         : baseStore;
 
@@ -2062,9 +2154,9 @@ const AuditExecute = () => {
                 ? `Clause ${item.clause}`
                 : `Item ${Number(idx) + 1}`,
               type: "NC",
-              description: data.description || "",
-              actionBy: data.actionBy || "",
-              closeDate: data.closeDate || "",
+              description: data.details || data.description || "",
+              actionBy: data.raisedBy || data.actionBy || "",
+              closeDate: data.targetDate || data.closeDate || "",
               assignTo: data.assignTo || "",
               assignToName: data.assignToName || "",
               assignToEmail: data.assignToEmail || "",
@@ -2336,6 +2428,7 @@ const AuditExecute = () => {
     field: string,
     value: string,
   ) => {
+    userEditedRef.current = true;
     setChecklistData((prev) => {
       const current = prev[index] || {};
       const creatorStamp = stampFindingCreator(field, value, current);
@@ -2692,6 +2785,7 @@ const AuditExecute = () => {
     field: keyof ClauseChecklistContent,
     value: any,
   ) => {
+    userEditedRef.current = true;
     setClauseData((prev) => {
       const current = prev[clauseId] || {};
       const creatorStamp = stampFindingCreator(field, value, current);
@@ -2709,7 +2803,12 @@ const AuditExecute = () => {
     }
 
     const incompleteExceptionRows: number[] = [];
-    if (template && (usesEoshScoredChecklistLayout(template) || usesQfsKoreScoredChecklistLayout(template))) {
+    if (
+      template &&
+      (usesEoshScoredChecklistLayout(template) ||
+        usesQfsKoreScoredChecklistLayout(template) ||
+        usesOkNotOkChecklistFindings(template))
+    ) {
       const items =
         editableChecklist.length > 0
           ? editableChecklist
@@ -2717,8 +2816,16 @@ const AuditExecute = () => {
             ? template.content
             : [];
       const qfsMode = getQfsScoreMode(templateId);
+      const isoOkNotOk = usesOkNotOkChecklistFindings(template);
       items.forEach((_item: unknown, index: number) => {
         const row = checklistData[index] || {};
+        if (isoOkNotOk) {
+          const okNotOk = normalizeOkNotOkFindingValue(row.findings);
+          if (okNotOk === "NC" && !isEoshExceptionFollowUpComplete(row)) {
+            incompleteExceptionRows.push(index + 1);
+          }
+          return;
+        }
         const score = eoshScoreFromFindings(row.findings);
         const needsFollowUp = usesQfsKoreScoredChecklistLayout(template)
           ? needsQfsExceptionFollowUp(score as "2" | "1" | "0" | "", qfsMode)
@@ -2742,6 +2849,17 @@ const AuditExecute = () => {
       return;
     }
     setShowExceptionFollowUpErrors(false);
+
+    if (isModuleCriteriaAudit) {
+      if (!String(auditGlobalInfo.facet || "").trim()) {
+        toast.error("Select a Facet (Health and Safety, Environmental, or Quality).");
+        return;
+      }
+      if (!String(auditGlobalInfo.category || "").trim()) {
+        toast.error("Enter a Category for this audit.");
+        return;
+      }
+    }
 
     const toastId = toast.loading("Saving audit…");
     try {
@@ -2875,6 +2993,16 @@ const AuditExecute = () => {
 
     const exportToPDF = async () => {
         try {
+            if (isModuleCriteriaAudit) {
+                if (!String(auditGlobalInfo.facet || "").trim()) {
+                    toast.error("Select a Facet before downloading the report.");
+                    return;
+                }
+                if (!String(auditGlobalInfo.category || "").trim()) {
+                    toast.error("Enter a Category before downloading the report.");
+                    return;
+                }
+            }
             toast.loading("Generating PDF report…", { id: "audit-export" });
             const moduleId = activeModuleId || planTemplateIds[0];
             const payload = { ...plan, auditData: buildAuditDataPayload() };
@@ -2896,6 +3024,16 @@ const AuditExecute = () => {
 
     const exportToExcel = async () => {
         try {
+            if (isModuleCriteriaAudit) {
+                if (!String(auditGlobalInfo.facet || "").trim()) {
+                    toast.error("Select a Facet before downloading the report.");
+                    return;
+                }
+                if (!String(auditGlobalInfo.category || "").trim()) {
+                    toast.error("Enter a Category before downloading the report.");
+                    return;
+                }
+            }
             toast.loading("Generating Excel report…", { id: "audit-export" });
             const moduleId = activeModuleId || planTemplateIds[0];
             const payload = { ...plan, auditData: buildAuditDataPayload() };
@@ -2916,6 +3054,16 @@ const AuditExecute = () => {
 
     const exportToWord = async () => {
         try {
+            if (isModuleCriteriaAudit) {
+                if (!String(auditGlobalInfo.facet || "").trim()) {
+                    toast.error("Select a Facet before downloading the report.");
+                    return;
+                }
+                if (!String(auditGlobalInfo.category || "").trim()) {
+                    toast.error("Enter a Category before downloading the report.");
+                    return;
+                }
+            }
             toast.loading("Generating Word report…", { id: "audit-export" });
             const moduleId = activeModuleId || planTemplateIds[0];
             const payload = { ...plan, auditData: buildAuditDataPayload() };
@@ -3115,30 +3263,74 @@ const AuditExecute = () => {
               </div>
 
               <div className="space-y-4">
-                <div>
-                  <span className="block text-xs font-semibold text-slate-500 mb-1.5">
-                    Objective
-                  </span>
-                  <p className="text-sm text-slate-800">
-                    {plan.objective || "N/A"}
-                  </p>
-                </div>
-                <div>
-                  <span className="block text-xs font-semibold text-slate-500 mb-1.5">
-                    Scope
-                  </span>
-                  <p className="text-sm text-slate-800">
-                    {plan.scope || "N/A"}
-                  </p>
-                </div>
-                <div>
-                  <span className="block text-xs font-semibold text-slate-500 mb-1.5">
-                    Audit Criteria
-                  </span>
-                  <p className="text-sm text-slate-800">
-                    {plan.criteria || "N/A"}
-                  </p>
-                </div>
+                {isModuleCriteriaAudit ? (
+                  <>
+                    <div>
+                      <Label className="block text-xs font-semibold text-slate-500 mb-1.5 uppercase tracking-wider">
+                        Facet
+                      </Label>
+                      <Select
+                        value={auditGlobalInfo.facet || ""}
+                        onValueChange={(value) =>
+                          setAuditGlobalInfo({ ...auditGlobalInfo, facet: value })
+                        }
+                        disabled={isAuditeeReadOnly}
+                      >
+                        <SelectTrigger className="h-11 bg-[#F9FAFB] border-[#E5E7EB] rounded-xl text-sm">
+                          <SelectValue placeholder="Select facet…" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {MODULE_AUDIT_FACET_OPTIONS.map((opt) => (
+                            <SelectItem key={opt.value} value={opt.value}>
+                              {opt.label}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div>
+                      <Label className="block text-xs font-semibold text-slate-500 mb-1.5 uppercase tracking-wider">
+                        Category
+                      </Label>
+                      <Input
+                        placeholder="Enter category"
+                        value={auditGlobalInfo.category || ""}
+                        onChange={(e) =>
+                          setAuditGlobalInfo({ ...auditGlobalInfo, category: e.target.value })
+                        }
+                        disabled={isAuditeeReadOnly}
+                        className="h-11 bg-[#F9FAFB] border-[#E5E7EB] rounded-xl text-sm"
+                      />
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div>
+                      <span className="block text-xs font-semibold text-slate-500 mb-1.5">
+                        Objective
+                      </span>
+                      <p className="text-sm text-slate-800">
+                        {plan.objective || "N/A"}
+                      </p>
+                    </div>
+                    <div>
+                      <span className="block text-xs font-semibold text-slate-500 mb-1.5">
+                        Scope
+                      </span>
+                      <p className="text-sm text-slate-800">
+                        {plan.scope || "N/A"}
+                      </p>
+                    </div>
+                    <div>
+                      <span className="block text-xs font-semibold text-slate-500 mb-1.5">
+                        Audit Criteria
+                      </span>
+                      <p className="text-sm text-slate-800">
+                        {plan.criteria || "N/A"}
+                      </p>
+                    </div>
+                  </>
+                )}
               </div>
             </Card>
           </div>
@@ -3287,7 +3479,12 @@ const AuditExecute = () => {
             value={findingsReportForm}
             onChange={handleFindingsReportFormChange}
             section="header"
-            headerClassName={tourExecuteHighlight(AUDIT_EXECUTE_TOUR_STEP.FINDINGS_REPORT)}
+            hideScopeAndCriteria={
+              usesEoshScoredChecklistLayout(template) ||
+              usesQfsKoreScoredChecklistLayout(template) ||
+              template.module === "EOSH" ||
+              template.module === "QFS KORE"
+            }
           />
         </div>
       )}
@@ -3991,12 +4188,14 @@ const AuditExecute = () => {
           <div className="h-0.5 flex-1 bg-slate-200"></div>
         </div>
 
-        {planTemplates.length > 1 && (
+        {planTemplates.length > 1 && !template?.isTripleMapping && (
           <div className="rounded-xl border border-emerald-200 bg-emerald-50/40 p-3 space-y-2">
             <p className="text-xs font-bold uppercase tracking-wide text-emerald-800">
               {lockToSelectedModule
                 ? "Selected checklist"
-                : `Assigned modules (${planTemplates.length})`}
+                : planTemplates.some((t) => t.module === "EOSH" || t.module === "QFS KORE")
+                  ? `Assigned modules (${planTemplates.length})`
+                  : `Assigned checklists (${planTemplates.length})`}
             </p>
             <div className="flex flex-wrap gap-2">
               {(lockToSelectedModule
@@ -4273,12 +4472,43 @@ const AuditExecute = () => {
                               e.target.value,
                             )
                           }
+                          readOnly={isAuditeeReadOnly}
+                          titleCase={false}
                         />
                       </div>
                     )}
 
                     {/* Extended Fields for Non-Compliance/OFI */}
-                    {showExtended && (
+                    {showExtended && usesOkNotOkChecklistFindings(template) && type === "NC" ? (
+                      <div className="space-y-3 pt-5 border-t border-slate-100 animate-in fade-in slide-in-from-top-4">
+                        <div className="flex items-center gap-2 mb-1">
+                          <div className="px-2 py-0.5 rounded text-xs font-bold text-white uppercase tracking-wider bg-red-600">
+                            NC (Not OK)
+                          </div>
+                          <span className="text-slate-500 text-xs font-medium">
+                            Marked as nonconformance — fill the required fields below.
+                          </span>
+                        </div>
+                        <EoshExceptionFollowUp
+                          values={currentData as any}
+                          users={eoshOrgUsers}
+                          disabled={isAuditeeReadOnly}
+                          showErrors={showExceptionFollowUpErrors}
+                          onChange={(field, value) =>
+                            handleClauseChange(clause.id, field as any, value)
+                          }
+                          onAssignToSelect={(user) => {
+                            void notifyExceptionAssignment(
+                              Number(clause.id) || 0,
+                              user,
+                              currentData as any,
+                              `Clause ${clause.id}`,
+                            );
+                          }}
+                        />
+                      </div>
+                    ) : (
+                    showExtended && (
                       <div className="space-y-5 pt-5 border-t border-slate-100 animate-in fade-in slide-in-from-top-4">
                         <div className="flex items-center gap-2 mb-2">
                           <div
@@ -4435,6 +4665,7 @@ const AuditExecute = () => {
                           />
                         )}
                       </div>
+                    )
                     )}
 
                     {/* Footer / Upload */}
@@ -5305,7 +5536,7 @@ const AuditExecute = () => {
                                   />
                                 ) : (
                                   <>
-                                    {item.question}
+                                    {imsClauseTextForRow(row, imsStandardFlags) || item.question}
                                   </>
                                 )}
                               </div>
@@ -5359,12 +5590,14 @@ const AuditExecute = () => {
                                   <div className="flex flex-col gap-1">
                                     {(usesOkNotOkChecklistFindings(template)
                                       ? type !== "NC"
-                                      : !["OFI", "Min", "Maj"].includes(type)) && (
+                                      : true) && (
                                       <AutoResizeTextarea
                                         className="min-h-[80px] text-[11px] border-slate-200 bg-slate-50/50 focus:bg-white shadow-none p-2"
                                         placeholder="Evidence..."
                                         value={checklistData[dataIndex]?.evidence || ""}
                                         onChange={(e) => handleChecklistChange(dataIndex, "evidence", e.target.value)}
+                                        readOnly={isAuditeeReadOnly}
+                                        titleCase={false}
                                       />
                                     )}
                                     <QuestionEvidenceUpload
@@ -5402,9 +5635,40 @@ const AuditExecute = () => {
 
 
                           {/* Extended findings for Mapping rows */}
-                          {(usesOkNotOkChecklistFindings(template)
-                            ? type === "NC"
-                            : ["OFI", "Min", "Maj"].includes(type)) && (
+                          {usesOkNotOkChecklistFindings(template) && type === "NC" ? (
+                            <TableRow className="border-slate-300 bg-amber-50/20">
+                              <TableCell colSpan={5} className="border border-slate-200 p-3">
+                                <div className="mb-2 flex items-center gap-2">
+                                  <span className="px-2.5 py-1 rounded-md text-xs font-black text-white uppercase tracking-wider bg-red-600">
+                                    NC (Not OK)
+                                  </span>
+                                  <span className="text-slate-500 text-xs font-medium">
+                                    Marked as nonconformance — fill the required fields below.
+                                  </span>
+                                </div>
+                                <EoshExceptionFollowUp
+                                  values={checklistData[dataIndex] || {}}
+                                  users={eoshOrgUsers}
+                                  disabled={isAuditeeReadOnly}
+                                  showErrors={showExceptionFollowUpErrors}
+                                  onChange={(field, value) =>
+                                    handleChecklistChange(dataIndex, field, value)
+                                  }
+                                  onAssignToSelect={(user) => {
+                                    void notifyExceptionAssignment(
+                                      dataIndex,
+                                      user,
+                                      checklistData[dataIndex] || {},
+                                      checklistData[dataIndex]?.question ||
+                                        row?.iso9001 ||
+                                        row?.id,
+                                    );
+                                  }}
+                                />
+                              </TableCell>
+                            </TableRow>
+                          ) : (
+                            ["OFI", "Min", "Maj"].includes(type) && (
                             <TableRow className="bg-slate-50 border-b-4 border-slate-200 text-sm">
                               <TableCell colSpan={5} className="p-0">
                                 <div className="p-5 m-3 border bg-white rounded-xl shadow-sm border-slate-200">
@@ -5494,6 +5758,7 @@ const AuditExecute = () => {
                                 </div>
                               </TableCell>
                             </TableRow>
+                          )
                           )}
                         </React.Fragment>
                       );
@@ -5726,6 +5991,7 @@ const AuditExecute = () => {
                                 value={checklistData[index]?.ofi || ""}
                                 onChange={(e) => handleChecklistChange(index, "ofi", e.target.value)}
                                 readOnly={isAuditeeReadOnly}
+                                titleCase={false}
                               />
                             </TableCell>
                             <TableCell className="border border-slate-300 align-top p-2 min-w-[180px]">
@@ -5736,6 +6002,7 @@ const AuditExecute = () => {
                                   value={checklistData[index]?.evidence || ""}
                                   onChange={(e) => handleChecklistChange(index, "evidence", e.target.value)}
                                   readOnly={isAuditeeReadOnly}
+                                  titleCase={false}
                                 />
                                 <QuestionEvidenceUpload
                                   compact
@@ -5819,6 +6086,7 @@ const AuditExecute = () => {
                                   value={checklistData[index]?.evidence || ""}
                                   onChange={(e) => handleChecklistChange(index, "evidence", e.target.value)}
                                   readOnly={isAuditeeReadOnly}
+                                  titleCase={false}
                                 />
                                 <QuestionEvidenceUpload
                                   compact
@@ -5841,6 +6109,7 @@ const AuditExecute = () => {
                                 value={checklistData[index]?.ofi || ""}
                                 onChange={(e) => handleChecklistChange(index, "ofi", e.target.value)}
                                 readOnly={isAuditeeReadOnly}
+                                titleCase={false}
                               />
                             </TableCell>
                           </TableRow>
@@ -6020,12 +6289,10 @@ const AuditExecute = () => {
                                   )}
                                 </TableCell>
 
-                                {/* Evidence / Comments */}
+                                {/* Evidence / Comments — always editable for ISO rows (OFI/Min/Maj keep this plus the follow-up form). */}
                                 <TableCell className="p-3 align-top">
                                   <div className="flex flex-col h-full gap-1">
-                                    {(okNotOkFindings
-                                      ? type !== "NC"
-                                      : yesNoFindings || !["OFI", "Min", "Maj"].includes(type)) && (
+                                    {(okNotOkFindings ? type !== "NC" : true) && (
                                       <AutoResizeTextarea
                                         className="min-h-[100px] text-sm border-slate-200 bg-slate-50/50 focus:bg-white shadow-sm transition-colors placeholder:text-slate-400 p-3"
                                         placeholder={
@@ -6041,6 +6308,8 @@ const AuditExecute = () => {
                                             e.target.value,
                                           )
                                         }
+                                        readOnly={isAuditeeReadOnly}
+                                        titleCase={false}
                                       />
                                     )}
                                     <QuestionEvidenceUpload
@@ -6061,11 +6330,43 @@ const AuditExecute = () => {
                             )}
                           </TableRow>
 
-                          {/* Extended findings — NC for OK/Not OK; OFI/Min/Maj for legacy scales */}
-                          {((okNotOkFindings && type === "NC") ||
-                            (!okNotOkFindings &&
-                              !yesNoFindings &&
-                              ["OFI", "Min", "Maj"].includes(type))) && (
+                          {/* ISO Not OK → nonconformance follow-up (same fields as EOSH exception) */}
+                          {okNotOkFindings && type === "NC" && (
+                            <TableRow className="border-slate-300 bg-amber-50/20">
+                              <TableCell colSpan={4} className="border border-slate-200 p-3">
+                                <div className="mb-2 flex items-center gap-2">
+                                  <span className="px-2.5 py-1 rounded-md text-xs font-black text-white uppercase tracking-wider bg-red-600">
+                                    NC (Not OK)
+                                  </span>
+                                  <span className="text-slate-500 text-xs font-medium">
+                                    Marked as nonconformance — fill the required fields below.
+                                  </span>
+                                </div>
+                                <EoshExceptionFollowUp
+                                  values={checklistData[index] || {}}
+                                  users={eoshOrgUsers}
+                                  disabled={isAuditeeReadOnly}
+                                  showErrors={showExceptionFollowUpErrors}
+                                  onChange={(field, value) =>
+                                    handleChecklistChange(index, field, value)
+                                  }
+                                  onAssignToSelect={(user) => {
+                                    void notifyExceptionAssignment(
+                                      index,
+                                      user,
+                                      checklistData[index] || {},
+                                      item.question,
+                                    );
+                                  }}
+                                />
+                              </TableCell>
+                            </TableRow>
+                          )}
+
+                          {/* Legacy OFI / Min / Maj extended findings */}
+                          {!okNotOkFindings &&
+                            !yesNoFindings &&
+                            ["OFI", "Min", "Maj"].includes(type) && (
                             <TableRow className="bg-slate-50 border-b-4 border-slate-200 text-sm">
                               <TableCell colSpan={4} className="p-0">
                                 <div className="p-6 ml-6 mr-6 my-4 border bg-white rounded-xl shadow-[0_2px_10px_-3px_rgba(6,81,237,0.1)] border-slate-200">
@@ -6078,9 +6379,7 @@ const AuditExecute = () => {
                                         ? "Minor N/C"
                                         : type === "Maj"
                                           ? "Major N/C"
-                                          : type === "NC"
-                                            ? "NC (Not OK)"
-                                            : "OFI"}{" "}
+                                          : "OFI"}{" "}
                                       Details
                                     </div>
                                     <span className="text-slate-400 text-xs font-medium">
@@ -6337,10 +6636,45 @@ const AuditExecute = () => {
                                         />
                                       </TableCell>
                                     </TableRow>
-                                    {((okNotOkFindings && eqType === "NC") ||
-                                      (!okNotOkFindings &&
-                                        ["OFI", "Min", "Maj", "C"].includes(eqType) &&
-                                        !usesYesNoChecklistFindings(template))) && (
+                                    {okNotOkFindings && eqType === "NC" ? (
+                                      <TableRow className="border-slate-300 bg-amber-50/20">
+                                        <TableCell colSpan={4} className="border border-slate-200 p-3">
+                                          <div className="mb-2 flex items-center gap-2">
+                                            <span className="px-2.5 py-1 rounded-md text-xs font-black text-white uppercase tracking-wider bg-red-600">
+                                              NC (Not OK)
+                                            </span>
+                                            <span className="text-slate-500 text-xs font-medium">
+                                              Marked as nonconformance — fill the required fields below.
+                                            </span>
+                                          </div>
+                                          <EoshExceptionFollowUp
+                                            values={eq || {}}
+                                            users={eoshOrgUsers}
+                                            disabled={isAuditeeReadOnly}
+                                            showErrors={showExceptionFollowUpErrors}
+                                            onChange={(field, value) =>
+                                              handleExtraChecklistChange(
+                                                item.clause,
+                                                eqIdx,
+                                                field,
+                                                value,
+                                              )
+                                            }
+                                            onAssignToSelect={(user) => {
+                                              void notifyExceptionAssignment(
+                                                eqIdx,
+                                                user,
+                                                eq || {},
+                                                eq.question || `Clause ${item.clause} (Custom)`,
+                                              );
+                                            }}
+                                          />
+                                        </TableCell>
+                                      </TableRow>
+                                    ) : (
+                                      !okNotOkFindings &&
+                                      ["OFI", "Min", "Maj", "C"].includes(eqType) &&
+                                      !usesYesNoChecklistFindings(template) && (
                                       <TableRow className="bg-slate-50 border-b-2 border-slate-200 text-sm">
                                         <TableCell colSpan={4} className="p-0">
                                           <div className="p-4 ml-4 mr-4 my-3 border bg-white rounded-xl border-slate-200 grid grid-cols-2 gap-4">
@@ -6379,6 +6713,7 @@ const AuditExecute = () => {
                                           </div>
                                         </TableCell>
                                       </TableRow>
+                                    )
                                     )}
                                   </React.Fragment>
                                 );

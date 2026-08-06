@@ -49,6 +49,14 @@ import {
     NEW_PASSWORD_SAME_AS_CURRENT_MESSAGE,
 } from '../passwordPolicy.js';
 
+/** Case-insensitive email lookup — legacy rows may not be stored lowercased. */
+function findUserByEmailInsensitive(normalizedEmail, select) {
+    return prisma.user.findFirst({
+        where: { email: { equals: normalizedEmail, mode: 'insensitive' } },
+        select,
+    });
+}
+
 async function handleVerifyOtpAndSignup(req, res) {
     const badKeys = getDisallowedExtraKeysError(req.body, SIGNUP_COMPLETE_ALLOWED_BODY_KEYS);
     if (badKeys) {
@@ -316,7 +324,10 @@ async function handleResendInviteVerification(req, res) {
 // Also register under /api (mountedApiRouter) so Vite same-origin proxy always hits login
 // before the /api strip path — keeps Set-Cookie on the /api response the browser expects.
 
-/** Progressive SQL user lookup — never uses Prisma (adapter findFirst was 500ing in prod). */
+/**
+ * Progressive SQL user lookup for login (case-insensitive).
+ * Never uses Prisma — adapter findFirst was 500ing in production.
+ */
 async function lookupUserForLogin(email) {
     const queries = [
         `SELECT id, email, password, "isActive",
@@ -559,7 +570,7 @@ async function handleForgotPassword(req, res) {
     const sent = { message: 'A verification code has been sent to your email.' };
 
     try {
-        const user = await prisma.user.findFirst({ where: { email }, select: { id: true, isActive: true } });
+        const user = await findUserByEmailInsensitive(email, { id: true, isActive: true });
         if (!user) {
             // Same response as success so callers cannot enumerate registered emails.
             return res.status(200).json(sent);
@@ -621,9 +632,13 @@ async function handleResetPassword(req, res) {
     }
 
     try {
-        const user = await prisma.user.findFirst({
-            where: { email },
-            select: { id: true, isActive: true, email: true, firstName: true, lastName: true, password: true },
+        const user = await findUserByEmailInsensitive(email, {
+            id: true,
+            isActive: true,
+            email: true,
+            firstName: true,
+            lastName: true,
+            password: true,
         });
         if (!user || !user.isActive) {
             return res.status(400).json({ error: 'Invalid or expired verification code' });

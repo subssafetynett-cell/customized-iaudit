@@ -2,6 +2,7 @@ import {
     auditTemplates,
     ChecklistContent,
     parseAuditPlanTemplateIds,
+    resolvePerformAuditTemplateIds,
 } from "@/data/auditTemplates";
 import { collectAuditEvidenceFromData } from "@/lib/auditEvidenceCollection";
 import { apiFetch } from "@/lib/api";
@@ -632,7 +633,10 @@ export function extractFindings(plan: {
 
     const checklistData = safeParse(data.checklistData);
     const moduleStoreRaw = safeParse(data.moduleDataByTemplateId);
-    const planTemplateIds = parseAuditPlanTemplateIds(plan.templateId);
+    const planTemplateIds = resolvePerformAuditTemplateIds(
+        plan.templateId,
+        plan.auditProgram?.isoStandard,
+    );
     const activeModuleId =
         typeof data.activeModuleId === "string" && data.activeModuleId.trim()
             ? data.activeModuleId.trim()

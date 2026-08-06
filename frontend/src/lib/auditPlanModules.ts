@@ -4,6 +4,8 @@ import {
     getAuditPlanTemplateLabel,
     parseAuditPlanTemplateIds,
     resolveAuditTemplateId,
+    resolvePerformAuditTemplateIds,
+    resolveAuditPlanStandards,
     type AuditTemplate,
 } from "@/data/auditTemplates";
 import { isQfsKoreSectionHeader } from "@/lib/qfsKoreChecklistUi";
@@ -14,14 +16,32 @@ import {
     pickRichestFindingsReportForm,
 } from "@/lib/findingsReportForm";
 
-/** True when the audit plan has more than one assigned checklist/module. */
-export function planHasMultipleModules(templateId?: string | null): boolean {
-    return parseAuditPlanTemplateIds(templateId).length > 1;
+/** True when the audit plan has more than one assigned checklist/module (after IMS normalization). */
+export function planHasMultipleModules(
+    templateId?: string | null,
+    programIsoStandard?: string | null,
+): boolean {
+    return (
+        resolvePerformAuditTemplateIds(templateId, programIsoStandard).length > 1
+    );
 }
 
-/** Templates assigned to a plan (resolved, de-duplicated). */
-export function getPlanModuleOptions(templateId?: string | null): AuditTemplate[] {
-    return findAuditTemplates(templateId);
+/** Templates used for perform audit / reports (multi-ISO → single IMS checklist). */
+export function getPlanModuleOptions(
+    templateId?: string | null,
+    programIsoStandard?: string | null,
+): AuditTemplate[] {
+    return resolvePerformAuditTemplateIds(templateId, programIsoStandard)
+        .map((id) => findAuditTemplate(id))
+        .filter((t): t is AuditTemplate => Boolean(t));
+}
+
+/** @deprecated Prefer passing program ISO — wraps {@link getPlanModuleOptions}. */
+export function getPlanModuleOptionsFromPlan(plan: {
+    templateId?: string | null;
+    auditProgram?: { isoStandard?: string | null } | null;
+} | null | undefined): AuditTemplate[] {
+    return getPlanModuleOptions(plan?.templateId, plan?.auditProgram?.isoStandard);
 }
 
 /** Evidence key for a checklist row — always namespaced by module when moduleId is known. */
@@ -75,22 +95,28 @@ export function parseSectionEvidenceStorageKey(
     return null;
 }
 
-/** Keep only evidence entries that belong to this module (or legacy unscoped keys). */
+/** Keep only evidence entries that belong to this module.
+ * @param opts.includeLegacyUnscoped — when true, also claim unscoped
+ *   `clause_checklist_N` / `section_N` keys (migration / last-active owner only).
+ *   Default false so multi-module checklists never inherit another module's files.
+ */
 export function filterEvidenceMapForModule(
     files: Record<string, AuditEvidenceMedia[]> | null | undefined,
     moduleId: string,
+    opts?: { includeLegacyUnscoped?: boolean },
 ): Record<string, AuditEvidenceMedia[]> {
     if (!files || typeof files !== "object") return {};
     const mid = String(moduleId || "").trim();
+    const includeLegacy = Boolean(opts?.includeLegacyUnscoped);
     const out: Record<string, AuditEvidenceMedia[]> = {};
     for (const [key, list] of Object.entries(files)) {
         if (!Array.isArray(list) || list.length === 0) continue;
         const checklist = parseChecklistEvidenceStorageKey(key);
         if (checklist) {
-            if (checklist.moduleId === mid || checklist.moduleId == null) {
-                // Normalize legacy keys to scoped form when we know the module.
+            const isLegacy = checklist.moduleId == null;
+            if (checklist.moduleId === mid || (includeLegacy && isLegacy)) {
                 const nextKey =
-                    checklist.moduleId == null
+                    isLegacy
                         ? checklistEvidenceStorageKey(mid, checklist.index)
                         : key;
                 out[nextKey] = list;
@@ -99,9 +125,10 @@ export function filterEvidenceMapForModule(
         }
         const section = parseSectionEvidenceStorageKey(key);
         if (section) {
-            if (section.moduleId === mid || section.moduleId == null) {
+            const isLegacy = section.moduleId == null;
+            if (section.moduleId === mid || (includeLegacy && isLegacy)) {
                 const nextKey =
-                    section.moduleId == null
+                    isLegacy
                         ? sectionEvidenceStorageKey(mid, section.index)
                         : key;
                 out[nextKey] = list;
@@ -117,18 +144,26 @@ export function filterEvidenceMapForModule(
 export function toActiveModuleLocalEvidenceMap(
     files: Record<string, AuditEvidenceMedia[]> | null | undefined,
     moduleId: string,
+    opts?: { includeLegacyUnscoped?: boolean },
 ): Record<string, AuditEvidenceMedia[]> {
-    const filtered = filterEvidenceMapForModule(files, moduleId);
+    const filtered = filterEvidenceMapForModule(files, moduleId, opts);
     const mid = String(moduleId || "").trim();
+    const includeLegacy = Boolean(opts?.includeLegacyUnscoped);
     const out: Record<string, AuditEvidenceMedia[]> = {};
     for (const [key, list] of Object.entries(filtered)) {
         const checklist = parseChecklistEvidenceStorageKey(key);
-        if (checklist && (checklist.moduleId === mid || checklist.moduleId == null)) {
+        if (
+            checklist &&
+            (checklist.moduleId === mid || (includeLegacy && checklist.moduleId == null))
+        ) {
             out[`clause_checklist_${checklist.index}`] = list;
             continue;
         }
         const section = parseSectionEvidenceStorageKey(key);
-        if (section && (section.moduleId === mid || section.moduleId == null)) {
+        if (
+            section &&
+            (section.moduleId === mid || (includeLegacy && section.moduleId == null))
+        ) {
             out[`section_${section.index}`] = list;
             continue;
         }
@@ -250,6 +285,7 @@ export function countModuleStoreAnswers(
             if (typeof r.details === "string" && r.details.trim()) n += 1;
             for (const k of [
                 "ofi",
+                "evidence",
                 "description",
                 "correction",
                 "rootCause",
@@ -335,13 +371,39 @@ export function mergeAuditDataPreferRicher(
     const mergedStore: Record<string, ModuleStoreEntry> = { ...baseStore };
     for (const [key, entry] of Object.entries(inStore)) {
         const existing = lookupModuleStoreEntry(mergedStore, key);
-        const merged = mergeModuleStoreEntries(existing, entry);
-        // Write under canonical key when possible.
         const resolved = resolveAuditTemplateId(key) || key;
-        mergedStore[resolved] = merged;
+        // Incoming module snapshot is authoritative for answer fields so one
+        // checklist cannot keep leaking "richer" answers into another template id.
+        const merged = mergeModuleStoreEntries(existing, entry);
+        mergedStore[resolved] = {
+            ...merged,
+            checklistData:
+                entry.checklistData !== undefined
+                    ? entry.checklistData
+                    : merged.checklistData,
+            sectionData:
+                entry.sectionData !== undefined
+                    ? entry.sectionData
+                    : merged.sectionData,
+            extraChecklistItems:
+                entry.extraChecklistItems !== undefined
+                    ? entry.extraChecklistItems
+                    : merged.extraChecklistItems,
+            auditGlobalInfo:
+                entry.auditGlobalInfo !== undefined
+                    ? entry.auditGlobalInfo
+                    : merged.auditGlobalInfo,
+            genericFiles:
+                entry.genericFiles !== undefined
+                    ? entry.genericFiles
+                    : merged.genericFiles,
+            editableChecklist:
+                entry.editableChecklist !== undefined
+                    ? entry.editableChecklist
+                    : merged.editableChecklist,
+        };
         if (key !== resolved && mergedStore[key]) {
-            // Keep alias key in sync too.
-            mergedStore[key] = merged;
+            mergedStore[key] = mergedStore[resolved];
         }
     }
 
@@ -355,8 +417,26 @@ export function mergeAuditDataPreferRicher(
         sectionData: baseline.sectionData as ModuleStoreEntry["sectionData"],
         auditGlobalInfo: baseline.auditGlobalInfo as ModuleStoreEntry["auditGlobalInfo"],
     });
-    // On ties, keep baseline to avoid overwriting filled data with emptier objects.
-    const useIncomingTop = incomingTop > baselineTop;
+
+    // Top-level checklist/section mirrors the *active* module only.
+    // When activeModuleId changes, always take incoming top-level — never keep a
+    // richer previous module's answers just because they have a higher count.
+    const incomingActive =
+        typeof incoming.activeModuleId === "string"
+            ? resolveAuditTemplateId(incoming.activeModuleId) ||
+              String(incoming.activeModuleId).trim()
+            : "";
+    const baselineActive =
+        typeof baseline.activeModuleId === "string"
+            ? resolveAuditTemplateId(baseline.activeModuleId) ||
+              String(baseline.activeModuleId).trim()
+            : "";
+    const activeModuleChanged =
+        Boolean(incomingActive) &&
+        Boolean(baselineActive) &&
+        incomingActive !== baselineActive;
+    // On ties (same active module), keep baseline to avoid overwriting filled data with emptier objects.
+    const useIncomingTop = activeModuleChanged || incomingTop > baselineTop;
 
     const mergeEvidenceMapsPreferNonEmpty = (
         a: Record<string, AuditEvidenceMedia[]> | undefined,
@@ -391,25 +471,32 @@ export function mergeAuditDataPreferRicher(
         incoming.findingsReportForm,
     );
 
+    // When switching active module, replace header fields absolutely (mirror of active module).
+    const chosenAuditGlobalInfo = activeModuleChanged
+        ? (incoming.auditGlobalInfo as Record<string, string> | undefined) ??
+          ({} as Record<string, string>)
+        : mergeStringMapPreferNonEmpty(
+              baseline.auditGlobalInfo as Record<string, string> | undefined,
+              incoming.auditGlobalInfo as Record<string, string> | undefined,
+          );
+
     return {
         ...baseline,
         ...incoming,
         checklistData: useIncomingTop
-            ? incoming.checklistData ?? baseline.checklistData
+            ? incoming.checklistData ?? (activeModuleChanged ? {} : baseline.checklistData)
             : baseline.checklistData ?? incoming.checklistData,
         sectionData: useIncomingTop
-            ? incoming.sectionData ?? baseline.sectionData
+            ? incoming.sectionData ?? (activeModuleChanged ? {} : baseline.sectionData)
             : baseline.sectionData ?? incoming.sectionData,
-        // Never let empty strings wipe already-filled header answers.
-        auditGlobalInfo: mergeStringMapPreferNonEmpty(
-            baseline.auditGlobalInfo as Record<string, string> | undefined,
-            incoming.auditGlobalInfo as Record<string, string> | undefined,
-        ),
+        auditGlobalInfo: chosenAuditGlobalInfo,
         editableChecklist:
             Array.isArray(incoming.editableChecklist) &&
             (incoming.editableChecklist as unknown[]).length > 0
                 ? incoming.editableChecklist
-                : baseline.editableChecklist ?? incoming.editableChecklist,
+                : activeModuleChanged
+                  ? incoming.editableChecklist ?? []
+                  : baseline.editableChecklist ?? incoming.editableChecklist,
         findingsReportForm: chosenFindingsReportForm,
         clauseData: incoming.clauseData ?? baseline.clauseData,
         genericFiles: mergeEvidenceMapsPreferNonEmpty(
@@ -440,6 +527,32 @@ export function lookupModuleStoreEntry(
         if ((resolveAuditTemplateId(key) || key) === resolved) return entry;
     }
     return null;
+}
+
+/**
+ * Find module answers when perform-audit uses normalized ids (e.g. legacy multi-ISO → single IMS).
+ */
+export function lookupPerformAuditModuleEntry(
+    store: Record<string, ModuleStoreEntry> | null | undefined,
+    performTemplateIds: string[],
+    savedTemplateIds: string[],
+): ModuleStoreEntry | null {
+    for (const id of performTemplateIds) {
+        const entry = lookupModuleStoreEntry(store, id);
+        if (entry && moduleStoreEntryHasAnswers(entry)) return entry;
+    }
+    let best: ModuleStoreEntry | null = null;
+    let bestCount = 0;
+    for (const id of savedTemplateIds) {
+        if (performTemplateIds.includes(id)) continue;
+        const entry = lookupModuleStoreEntry(store, id);
+        const count = countModuleStoreAnswers(entry);
+        if (count > bestCount) {
+            best = entry;
+            bestCount = count;
+        }
+    }
+    return best;
 }
 
 /** Prefer non-empty fields when merging two module snapshots (never wipe answers with {}). */
@@ -539,8 +652,11 @@ export function moduleStoreEntryFromTopLevel(
         sectionData: auditData.sectionData as ModuleStoreEntry["sectionData"],
         genericFiles: mid
             ? toActiveModuleLocalEvidenceMap(
-                  filterEvidenceMapForModule(topFiles, mid),
+                  filterEvidenceMapForModule(topFiles, mid, {
+                      includeLegacyUnscoped: true,
+                  }),
                   mid,
+                  { includeLegacyUnscoped: true },
               )
             : (topFiles as ModuleStoreEntry["genericFiles"]),
         findingsReportForm: auditData.findingsReportForm,
@@ -759,7 +875,11 @@ export function getModuleChecklistProgress(
 export function getPlanModulesProgressMap(
     plan: { templateId?: string | null; auditData?: unknown } | null | undefined,
 ): Record<string, number> {
-    const modules = getPlanModuleOptions(plan?.templateId);
+    const modules = getPlanModuleOptions(
+        plan?.templateId,
+        (plan as { auditProgram?: { isoStandard?: string | null } | null })?.auditProgram
+            ?.isoStandard,
+    );
     const out: Record<string, number> = {};
     for (const mod of modules) {
         out[mod.id] = getModuleChecklistProgress(plan, mod.id).percent;
@@ -774,7 +894,11 @@ export function getPlanModulesProgressMap(
 export function getPlanOverallChecklistProgress(
     plan: { templateId?: string | null; auditData?: unknown } | null | undefined,
 ): { percent: number; completed: number; total: number; byModuleId: Record<string, number> } {
-    const modules = getPlanModuleOptions(plan?.templateId);
+    const modules = getPlanModuleOptions(
+        plan?.templateId,
+        (plan as { auditProgram?: { isoStandard?: string | null } | null })?.auditProgram
+            ?.isoStandard,
+    );
     const byModuleId: Record<string, number> = {};
     let completed = 0;
     let total = 0;
@@ -835,9 +959,14 @@ export function scopePlanToModule(
     plan: Record<string, any>,
     moduleId: string,
 ): Record<string, any> {
-    const ids = parseAuditPlanTemplateIds(plan?.templateId);
+    const rawIds = parseAuditPlanTemplateIds(plan?.templateId);
+    const performIds = resolvePerformAuditTemplateIds(
+        plan?.templateId,
+        plan?.auditProgram?.isoStandard,
+    );
     const resolvedId =
-        ids.find((id) => id === moduleId) ||
+        performIds.find((id) => id === moduleId) ||
+        rawIds.find((id) => id === moduleId) ||
         findAuditTemplate(moduleId)?.id ||
         moduleId;
     const template = findAuditTemplate(resolvedId);
@@ -846,9 +975,10 @@ export function scopePlanToModule(
         : resolvedId;
 
     const auditData = parseAuditDataBlob(plan?.auditData);
-    const multiModule = ids.length > 1;
-    const store = ensureModuleStorePreservesTopLevel(auditData, ids);
+    const multiModule = performIds.length > 1;
+    const store = ensureModuleStorePreservesTopLevel(auditData, performIds);
     const mod =
+        lookupPerformAuditModuleEntry(store, performIds, rawIds) ||
         store[resolvedId] ||
         store[moduleId] ||
         getModuleStoreEntry(
@@ -873,8 +1003,19 @@ export function scopePlanToModule(
         ...sharedFiles,
         ...toActiveModuleLocalEvidenceMap(
             moduleGenericFiles ||
-                filterEvidenceMapForModule(topFiles, resolvedId),
+                filterEvidenceMapForModule(topFiles, resolvedId, {
+                    includeLegacyUnscoped:
+                        !multiModule ||
+                        auditData.activeModuleId === resolvedId ||
+                        auditData.activeModuleId === moduleId,
+                }),
             resolvedId,
+            {
+                includeLegacyUnscoped:
+                    !multiModule ||
+                    auditData.activeModuleId === resolvedId ||
+                    auditData.activeModuleId === moduleId,
+            },
         ),
     };
 
@@ -923,4 +1064,37 @@ export function scopePlanToModule(
         auditData: scopedAuditData,
         auditName: alreadyTagged ? baseName : `${baseName} — ${label}`,
     };
+}
+
+/** Normalize plan audit data for PDF/Word/Excel (IMS + legacy multi-ISO → single scoped blob). */
+export function normalizePlanForReport(plan: Record<string, any>): Record<string, any> {
+    const modules = getPlanModuleOptions(
+        plan?.templateId,
+        plan?.auditProgram?.isoStandard,
+    );
+    if (modules.length === 1) return scopePlanToModule(plan, modules[0].id);
+    if (modules.length > 1) {
+        const auditData =
+            typeof plan?.auditData === "string"
+                ? (() => {
+                      try {
+                          return JSON.parse(plan.auditData);
+                      } catch {
+                          return null;
+                      }
+                  })()
+                : plan?.auditData;
+        const active = String(auditData?.activeModuleId || "").trim();
+        if (active) {
+            const match =
+                modules.find((m) => m.id === active) ||
+                modules.find(
+                    (m) =>
+                        (resolveAuditTemplateId(m.id) || m.id) ===
+                        (resolveAuditTemplateId(active) || active),
+                );
+            if (match) return scopePlanToModule(plan, match.id);
+        }
+    }
+    return plan;
 }

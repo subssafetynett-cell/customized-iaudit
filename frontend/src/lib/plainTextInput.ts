@@ -144,6 +144,7 @@ export function sanitizeSavedGapAnalysis(analysis: SavedGapAnalysis): SavedGapAn
         location: sanitizeGapAnalysisShortField(analysis.location ?? "", true),
         representatives: sanitizeGapAnalysisLongField(analysis.representatives ?? "", true),
         auditorName: sanitizeGapAnalysisShortField(analysis.auditorName ?? "", true),
+        auditorPosition: sanitizeGapAnalysisShortField(analysis.auditorPosition ?? "", true),
         contactEmail: sanitizeGapAnalysisField(analysis.contactEmail ?? "", true),
         scope: sanitizeGapAnalysisLongField(analysis.scope ?? "", true),
         auditCompany: sanitizeGapAnalysisField(analysis.auditCompany ?? "", true),

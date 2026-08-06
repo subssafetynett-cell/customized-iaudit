@@ -12,6 +12,7 @@ import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { Textarea } from "@/components/ui/textarea";
 import { useCompanyStore } from "@/hooks/useCompanyStore";
+import { sitesFromCompanies } from "@/lib/orgSites";
 import { Progress } from "@/components/ui/progress";
 import { TourStepPopover } from "@/components/TourStepPopover";
 import { ONBOARDING_TOTAL_STEPS } from "@/lib/onboardingTour";
@@ -70,7 +71,8 @@ const GapAnalysis = () => {
     const [step, setStep] = useState<"list" | "setup" | "analysis" | "results">("list");
     const [showOnboardingGuide, setShowOnboardingGuide] = useState(searchParams.get("onboarding") === "true");
     const [onboardingStep, setOnboardingStep] = useState<number | null>(null);
-    const { companies } = useCompanyStore();
+    const OTHER_OPTION = "__other__";
+    const { companies, hasFetchedCompanies } = useCompanyStore();
 
     const setTourStep = (tourStep: number) => {
         setSearchParams(
@@ -152,11 +154,57 @@ const GapAnalysis = () => {
     const [auditDate, setAuditDate] = useState(new Date().toISOString().split('T')[0]);
     const [standard, setStandard] = useState<Standard | "">("");
     const [location, setLocation] = useState("");
+    const [companySelect, setCompanySelect] = useState("");
+    const [locationSelect, setLocationSelect] = useState("");
     const [representatives, setRepresentatives] = useState("");
     const [auditorName, setAuditorName] = useState("");
+    const [auditorPosition, setAuditorPosition] = useState("");
     const [contactEmail, setContactEmail] = useState("");
     const [scope, setScope] = useState("");
     const [auditCompany, setAuditCompany] = useState("");
+
+    const orgSites = React.useMemo(() => sitesFromCompanies(companies), [companies]);
+
+    const sitesForLocationDropdown = React.useMemo(() => {
+        if (companySelect && companySelect !== OTHER_OPTION) {
+            return orgSites.filter((s) => String(s.company.id) === companySelect);
+        }
+        return orgSites;
+    }, [orgSites, companySelect]);
+
+    const resolveCompanySelectFromName = React.useCallback(
+        (name: string) => {
+            const trimmed = name.trim();
+            if (!trimmed) {
+                setCompanySelect("");
+                return;
+            }
+            const match = companies.find(
+                (c) => c.name.trim().toLowerCase() === trimmed.toLowerCase(),
+            );
+            setCompanySelect(match ? String(match.id) : OTHER_OPTION);
+        },
+        [companies],
+    );
+
+    const resolveLocationSelectFromName = React.useCallback(
+        (loc: string, companyId?: string) => {
+            const trimmed = loc.trim();
+            if (!trimmed) {
+                setLocationSelect("");
+                return;
+            }
+            const pool =
+                companyId && companyId !== OTHER_OPTION
+                    ? orgSites.filter((s) => String(s.company.id) === companyId)
+                    : orgSites;
+            const match =
+                pool.find((s) => s.name.trim().toLowerCase() === trimmed.toLowerCase()) ||
+                orgSites.find((s) => s.name.trim().toLowerCase() === trimmed.toLowerCase());
+            setLocationSelect(match ? String(match.id) : OTHER_OPTION);
+        },
+        [orgSites],
+    );
 
     type OrgUser = {
         id: number | string;
@@ -232,6 +280,7 @@ const GapAnalysis = () => {
             location,
             representatives,
             auditorName,
+            auditorPosition,
             contactEmail,
             scope,
             auditCompany,
@@ -249,6 +298,7 @@ const GapAnalysis = () => {
         location,
         representatives,
         auditorName,
+        auditorPosition,
         contactEmail,
         scope,
         auditCompany,
@@ -338,11 +388,14 @@ const GapAnalysis = () => {
             if (draft && typeof draft === "object" && draft.step === "analysis" && Array.isArray(draft.questions)) {
                 const safe = sanitizeSavedGapAnalysis(draft as unknown as SavedGapAnalysis);
                 setCompanyName(safe.companyName);
+                setCompanySelect("");
                 setAuditDate(safe.auditDate);
                 setStandard(safe.standard);
                 setLocation(safe.location);
+                setLocationSelect("");
                 setRepresentatives(safe.representatives);
                 setAuditorName(safe.auditorName);
+                setAuditorPosition(safe.auditorPosition || "");
                 setContactEmail(safe.contactEmail);
                 setScope(safe.scope);
                 setAuditCompany(safe.auditCompany || "");
@@ -384,6 +437,7 @@ const GapAnalysis = () => {
             location,
             representatives,
             auditorName,
+            auditorPosition,
             contactEmail,
             scope,
             auditCompany,
@@ -421,11 +475,14 @@ const GapAnalysis = () => {
     const resumeAnalysis = (analysis: SavedGapAnalysis) => {
         const safe = sanitizeSavedGapAnalysis(analysis);
         setCompanyName(safe.companyName);
+        setCompanySelect("");
         setAuditDate(safe.auditDate);
         setStandard(safe.standard);
         setLocation(safe.location);
+        setLocationSelect("");
         setRepresentatives(safe.representatives);
         setAuditorName(safe.auditorName);
+        setAuditorPosition(safe.auditorPosition || "");
         setContactEmail(safe.contactEmail);
         setScope(safe.scope);
         setAuditCompany(safe.auditCompany || "");
@@ -437,6 +494,10 @@ const GapAnalysis = () => {
     const startAnalysis = () => {
         if (!companyName || !standard || !selectedAuditorUserId) {
             toast.error("Please fill in all required fields.");
+            return;
+        }
+        if (!auditorPosition.trim()) {
+            toast.error("Please enter the Auditor Position.");
             return;
         }
 
@@ -460,6 +521,7 @@ const GapAnalysis = () => {
             location,
             representatives,
             auditorName,
+            auditorPosition,
             contactEmail,
             scope,
             auditCompany,
@@ -489,7 +551,47 @@ const GapAnalysis = () => {
         if (step === "analysis" || step === "setup") {
             scheduleGapDraftSave();
         }
-    }, [step, questions, companyName, standard, auditorName, scheduleGapDraftSave]);
+    }, [step, questions, companyName, standard, auditorName, auditorPosition, scheduleGapDraftSave]);
+
+    // Restore company/location dropdown selection when companies load
+    React.useEffect(() => {
+        if (step !== "setup" && step !== "analysis") return;
+        if (!hasFetchedCompanies) return;
+        if (companies.length === 0) {
+            if (!companySelect) setCompanySelect(OTHER_OPTION);
+            return;
+        }
+        if (companyName.trim() && !companySelect) {
+            resolveCompanySelectFromName(companyName);
+        }
+    }, [
+        step,
+        companies,
+        companyName,
+        companySelect,
+        hasFetchedCompanies,
+        resolveCompanySelectFromName,
+    ]);
+
+    React.useEffect(() => {
+        if (step !== "setup" && step !== "analysis") return;
+        if (!hasFetchedCompanies) return;
+        if (orgSites.length === 0) {
+            if (!locationSelect) setLocationSelect(OTHER_OPTION);
+            return;
+        }
+        if (location.trim() && !locationSelect) {
+            resolveLocationSelectFromName(location, companySelect || undefined);
+        }
+    }, [
+        step,
+        orgSites,
+        location,
+        locationSelect,
+        companySelect,
+        hasFetchedCompanies,
+        resolveLocationSelectFromName,
+    ]);
 
     const handlePrevClause = () => {
         if (currentClauseIndex > 0) {
@@ -607,6 +709,7 @@ const GapAnalysis = () => {
             location,
             representatives,
             auditorName,
+            auditorPosition,
             contactEmail,
             scope,
             questions,
@@ -893,12 +996,55 @@ const GapAnalysis = () => {
                                     <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                                         <div id="tour-step-gap-analysis-company" className="space-y-2 rounded-xl p-1 -m-1">
                                             <Label className="text-sm font-semibold text-slate-700">Company Name <span className="text-red-500">*</span></Label>
-                                            <Input
-                                                value={companyName}
-                                                onChange={e => setCompanyName(sanitizeGapAnalysisShortField(e.target.value))}
-                                                placeholder="Audited Company"
-                                                className="h-12 rounded-xl border-slate-200 bg-slate-50 shadow-sm focus-visible:ring-1 focus-visible:ring-[#213847]/40 w-full"
-                                            />
+                                            <Select
+                                                value={companySelect || undefined}
+                                                onValueChange={(val) => {
+                                                    setCompanySelect(val);
+                                                    if (val === OTHER_OPTION) {
+                                                        setCompanyName("");
+                                                        return;
+                                                    }
+                                                    const company = companies.find((c) => String(c.id) === val);
+                                                    if (company) {
+                                                        setCompanyName(sanitizeGapAnalysisShortField(company.name));
+                                                    }
+                                                    if (locationSelect && locationSelect !== OTHER_OPTION) {
+                                                        const site = orgSites.find((s) => String(s.id) === locationSelect);
+                                                        if (site && String(site.company.id) !== val) {
+                                                            setLocationSelect("");
+                                                            setLocation("");
+                                                        }
+                                                    }
+                                                }}
+                                            >
+                                                <SelectTrigger className="h-12 rounded-xl border-slate-200 bg-slate-50 shadow-sm focus:ring-[#213847]/40 w-full">
+                                                    <SelectValue placeholder="Select company" />
+                                                </SelectTrigger>
+                                                <SelectContent className="rounded-xl border-slate-200 shadow-lg">
+                                                    {companies.map((c) => (
+                                                        <SelectItem
+                                                            key={String(c.id)}
+                                                            value={String(c.id)}
+                                                            className="rounded-lg cursor-pointer"
+                                                        >
+                                                            {c.name}
+                                                        </SelectItem>
+                                                    ))}
+                                                    <SelectItem value={OTHER_OPTION} className="rounded-lg cursor-pointer">
+                                                        Other
+                                                    </SelectItem>
+                                                </SelectContent>
+                                            </Select>
+                                            {companySelect === OTHER_OPTION && (
+                                                <Input
+                                                    value={companyName}
+                                                    onChange={(e) =>
+                                                        setCompanyName(sanitizeGapAnalysisShortField(e.target.value))
+                                                    }
+                                                    placeholder="Audited Company"
+                                                    className="h-12 rounded-xl border-slate-200 bg-slate-50 shadow-sm focus-visible:ring-1 focus-visible:ring-[#213847]/40 w-full"
+                                                />
+                                            )}
                                         </div>
                                         <div className="space-y-2">
                                             <Label className="text-sm font-semibold text-slate-700">Audit Date <span className="text-red-500">*</span></Label>
@@ -932,12 +1078,60 @@ const GapAnalysis = () => {
                                         </div>
                                         <div className="space-y-2">
                                             <Label className="text-sm font-semibold text-slate-700">Location</Label>
-                                            <Input
-                                                value={location}
-                                                onChange={e => setLocation(sanitizeGapAnalysisShortField(e.target.value))}
-                                                placeholder="Audit Location"
-                                                className="h-12 rounded-xl border-slate-200 bg-slate-50 shadow-sm focus-visible:ring-1 focus-visible:ring-[#213847]/40 w-full"
-                                            />
+                                            <Select
+                                                value={locationSelect || undefined}
+                                                onValueChange={(val) => {
+                                                    setLocationSelect(val);
+                                                    if (val === OTHER_OPTION) {
+                                                        setLocation("");
+                                                        return;
+                                                    }
+                                                    const site = orgSites.find((s) => String(s.id) === val);
+                                                    if (site) {
+                                                        setLocation(sanitizeGapAnalysisShortField(site.name));
+                                                        if (
+                                                            !companySelect ||
+                                                            companySelect === OTHER_OPTION ||
+                                                            String(site.company.id) !== companySelect
+                                                        ) {
+                                                            setCompanySelect(String(site.company.id));
+                                                            setCompanyName(
+                                                                sanitizeGapAnalysisShortField(site.company.name),
+                                                            );
+                                                        }
+                                                    }
+                                                }}
+                                            >
+                                                <SelectTrigger className="h-12 rounded-xl border-slate-200 bg-slate-50 shadow-sm focus:ring-[#213847]/40 w-full">
+                                                    <SelectValue placeholder="Select site" />
+                                                </SelectTrigger>
+                                                <SelectContent className="rounded-xl border-slate-200 shadow-lg">
+                                                    {sitesForLocationDropdown.map((s) => (
+                                                        <SelectItem
+                                                            key={String(s.id)}
+                                                            value={String(s.id)}
+                                                            className="rounded-lg cursor-pointer"
+                                                        >
+                                                            {companies.length > 1
+                                                                ? `${s.company.name} — ${s.name}`
+                                                                : s.name}
+                                                        </SelectItem>
+                                                    ))}
+                                                    <SelectItem value={OTHER_OPTION} className="rounded-lg cursor-pointer">
+                                                        Other
+                                                    </SelectItem>
+                                                </SelectContent>
+                                            </Select>
+                                            {locationSelect === OTHER_OPTION && (
+                                                <Input
+                                                    value={location}
+                                                    onChange={(e) =>
+                                                        setLocation(sanitizeGapAnalysisShortField(e.target.value))
+                                                    }
+                                                    placeholder="Audit Location"
+                                                    className="h-12 rounded-xl border-slate-200 bg-slate-50 shadow-sm focus-visible:ring-1 focus-visible:ring-[#213847]/40 w-full"
+                                                />
+                                            )}
                                         </div>
                                         <div className="space-y-2">
                                             <Label className="text-sm font-semibold text-slate-700">Representatives</Label>
@@ -982,6 +1176,19 @@ const GapAnalysis = () => {
                                                     ))}
                                                 </SelectContent>
                                             </Select>
+                                        </div>
+                                        <div className="space-y-2">
+                                            <Label className="text-sm font-semibold text-slate-700">
+                                                Auditor Position <span className="text-red-500">*</span>
+                                            </Label>
+                                            <Input
+                                                value={auditorPosition}
+                                                onChange={(e) =>
+                                                    setAuditorPosition(sanitizeGapAnalysisShortField(e.target.value))
+                                                }
+                                                placeholder="Enter auditor position"
+                                                className="h-12 rounded-xl border-slate-200 bg-slate-50 shadow-sm focus-visible:ring-1 focus-visible:ring-[#213847]/40 w-full"
+                                            />
                                         </div>
                                         <div className="space-y-2">
                                             <Label className="text-sm font-semibold text-slate-700">Contact Email</Label>
