@@ -191,7 +191,7 @@ export function collectReportEvidenceFileList(
     for (const [key, list] of Object.entries({ ...clauseFiles, ...genericFiles })) {
         for (const m of list) {
             if (!isReportableEvidenceFile(m.type)) continue;
-            const sig = `${key}::${m.name}::${m.type}`;
+            const sig = `${m.name}::${m.type}::${String(m.data || "").slice(0, 64)}::${String(m.data || "").slice(-64)}::${String(m.data || "").length}`;
             if (seen.has(sig)) continue;
             seen.add(sig);
             out.push({

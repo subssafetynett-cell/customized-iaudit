@@ -263,7 +263,8 @@ export function normalizeFindingsReportForm(
 function isMeaningfulFormText(v: unknown): boolean {
   if (typeof v !== "string") return false;
   const t = v.trim();
-  return t.length > 0 && t !== "—";
+  if (!t || t === "—" || t === "[omitted]") return false;
+  return true;
 }
 
 /** Count user-entered findings-report answers (ignores empty placeholders). */

@@ -779,6 +779,7 @@ const SelfAssessment = () => {
 
     const [deleteAssessmentOpen, setDeleteAssessmentOpen] = useState(false);
     const [assessmentToDelete, setAssessmentToDelete] = useState<SavedAssessment | null>(null);
+    const [cancelAssessmentOpen, setCancelAssessmentOpen] = useState(false);
 
     const requestDeleteSavedAssessment = (assessment: SavedAssessment) => {
         setAssessmentToDelete(assessment);
@@ -1126,7 +1127,6 @@ const SelfAssessment = () => {
         if (score >= 25) return {
             description: "Your organization has a basic QMS in place and is working toward maturity. Most requirements are addressed but need refinement.",
             actions: [
-                "Engage BSI or certified gap assessment consultant to identify specific gaps",
                 "Implement corrective actions from gap assessment findings",
                 "Enhance internal audit capability and frequency",
                 "Strengthen management review process with data-driven decisions",
@@ -1171,6 +1171,18 @@ const SelfAssessment = () => {
         setResultQuestions(null);
         setResultAssessment(null);
 
+    };
+
+    const confirmCancelAssessment = () => {
+        if (draftSaveTimerRef.current) {
+            clearTimeout(draftSaveTimerRef.current);
+            draftSaveTimerRef.current = null;
+        }
+        void persistSelfAssessmentDraft(null, dataOwnerOptions);
+        setCurrentClauseIndex(0);
+        resetAssessment();
+        setCancelAssessmentOpen(false);
+        toast.message("Assessment cancelled");
     };
 
     const resolveCompanySelectFromName = useCallback(
@@ -2923,15 +2935,24 @@ const SelfAssessment = () => {
                         </Card>
 
                         {/* Navigation Footer */}
-                        <div className="flex items-center justify-between pt-4">
-                            <Button
-                                variant="outline"
-                                onClick={handlePrevClause}
-                                disabled={currentClauseIndex === 0}
-                                className="gap-2 h-12 px-6"
-                            >
-                                <ArrowLeft className="w-4 h-4" /> Previous
-                            </Button>
+                        <div className="flex items-center justify-between pt-4 gap-3">
+                            <div className="flex items-center gap-3">
+                                <Button
+                                    variant="outline"
+                                    onClick={handlePrevClause}
+                                    disabled={currentClauseIndex === 0}
+                                    className="gap-2 h-12 px-6"
+                                >
+                                    <ArrowLeft className="w-4 h-4" /> Previous
+                                </Button>
+                                <Button
+                                    variant="outline"
+                                    onClick={() => setCancelAssessmentOpen(true)}
+                                    className="h-12 px-6 text-slate-600 hover:text-red-600 hover:border-red-300 hover:bg-red-50"
+                                >
+                                    Cancel
+                                </Button>
+                            </div>
 
                             <Button
                                 onClick={handleNextClause}
@@ -2990,12 +3011,13 @@ const SelfAssessment = () => {
                     const resultYesCount = resultQs.filter((q) => q.answer === "yes").length;
                     const resultGroupedQuestions = resultQs.reduce((acc, q) => {
                         if (!acc[q.clause]) acc[q.clause] = [];
+                        if (acc[q.clause].some((existing) => existing.id === q.id)) return acc;
                         acc[q.clause].push(q);
                         return acc;
                     }, {} as Record<string, Question[]>);
 
                     return (
-                    <div className="flex flex-col items-center justify-center py-12 animate-in fade-in zoom-in-95 duration-500 w-full max-w-5xl mx-auto space-y-8">
+                    <div className="flex flex-col items-stretch py-12 w-full max-w-5xl mx-auto space-y-8">
 
                         <div className="w-full flex items-center justify-between gap-3 px-2">
                             <Button variant="ghost" onClick={() => setStep("list")} className="gap-2 pl-0 hover:bg-transparent hover:text-emerald-600">
@@ -3228,8 +3250,114 @@ const SelfAssessment = () => {
                             </CardContent>
                         </Card>
 
+                        {/* Detailed question answers */}
+                        <div className="w-full space-y-4">
+                            <div className="px-1">
+                                <h3 className="text-xl font-semibold text-slate-900">Question responses</h3>
+                                <p className="text-sm text-slate-500 mt-1">
+                                    Each question with your Yes / No answer and compliance status.
+                                </p>
+                            </div>
+
+                            {Object.entries(resultGroupedQuestions).length > 0 ? (
+                                Object.entries(resultGroupedQuestions).map(([clause, clauseQuestions]) => {
+                                    const uniqueQuestions = clauseQuestions.filter(
+                                        (q, index, arr) =>
+                                            arr.findIndex((other) => other.id === q.id) === index,
+                                    );
+                                    return (
+                                        <Card
+                                            key={clause}
+                                            className="border border-slate-200 shadow-sm overflow-hidden bg-white"
+                                        >
+                                            <CardHeader className="bg-slate-50 border-b border-slate-200 py-3 px-5">
+                                                <CardTitle className="text-base font-semibold text-slate-800">
+                                                    {clause}
+                                                </CardTitle>
+                                            </CardHeader>
+                                            <CardContent className="p-0">
+                                                <Table>
+                                                    <TableHeader>
+                                                        <TableRow className="hover:bg-transparent border-slate-200">
+                                                            <TableHead className="w-12 text-slate-500">#</TableHead>
+                                                            <TableHead className="text-slate-500">Question</TableHead>
+                                                            <TableHead className="w-28 text-slate-500">Answer</TableHead>
+                                                            <TableHead className="w-40 text-slate-500">Status</TableHead>
+                                                        </TableRow>
+                                                    </TableHeader>
+                                                    <TableBody>
+                                                        {uniqueQuestions.map((q, qIndex) => (
+                                                            <TableRow
+                                                                key={`${clause}-${q.id}-${qIndex}`}
+                                                                className="border-slate-100"
+                                                            >
+                                                                <TableCell className="align-top text-slate-400 font-medium">
+                                                                    {qIndex + 1}
+                                                                </TableCell>
+                                                                <TableCell className="align-top text-slate-800 font-medium leading-snug">
+                                                                    {q.text}
+                                                                </TableCell>
+                                                                <TableCell className="align-top">
+                                                                    <span
+                                                                        className={cn(
+                                                                            "inline-flex items-center gap-1.5 text-sm font-semibold",
+                                                                            q.answer === "yes"
+                                                                                ? "text-emerald-700"
+                                                                                : q.answer === "no"
+                                                                                    ? "text-red-700"
+                                                                                    : "text-slate-500",
+                                                                        )}
+                                                                    >
+                                                                        {q.answer === "yes" ? (
+                                                                            <CheckCircle2 className="w-4 h-4 shrink-0" />
+                                                                        ) : q.answer === "no" ? (
+                                                                            <AlertCircle className="w-4 h-4 shrink-0" />
+                                                                        ) : (
+                                                                            <Minus className="w-4 h-4 shrink-0" />
+                                                                        )}
+                                                                        {q.answer === "yes"
+                                                                            ? "Yes"
+                                                                            : q.answer === "no"
+                                                                                ? "No"
+                                                                                : "—"}
+                                                                    </span>
+                                                                </TableCell>
+                                                                <TableCell className="align-top">
+                                                                    <Badge
+                                                                        variant="secondary"
+                                                                        className={cn(
+                                                                            "font-semibold uppercase tracking-wide",
+                                                                            q.answer === "yes"
+                                                                                ? "bg-emerald-50 text-emerald-700 hover:bg-emerald-50"
+                                                                                : q.answer === "no"
+                                                                                    ? "bg-red-50 text-red-700 hover:bg-red-50"
+                                                                                    : "bg-slate-100 text-slate-500 hover:bg-slate-100",
+                                                                        )}
+                                                                    >
+                                                                        {q.answer === "yes"
+                                                                            ? "Compliant"
+                                                                            : q.answer === "no"
+                                                                                ? "Non-Compliant"
+                                                                                : "Not Answered"}
+                                                                    </Badge>
+                                                                </TableCell>
+                                                            </TableRow>
+                                                        ))}
+                                                    </TableBody>
+                                                </Table>
+                                            </CardContent>
+                                        </Card>
+                                    );
+                                })
+                            ) : (
+                                <div className="text-center py-12 text-slate-400 border border-dashed border-slate-200 rounded-xl bg-white">
+                                    No questions found.
+                                </div>
+                            )}
+                        </div>
+
                         {/* Action Buttons */}
-                        <div className="flex flex-col sm:flex-row justify-center gap-4 w-full pt-8">
+                        <div className="flex flex-col sm:flex-row justify-center gap-4 w-full pt-4">
                             <Button onClick={resetAssessment} variant="outline" className="gap-2 h-12 flex-1">
                                 <RotateCcw className="w-4 h-4" /> Start New
                             </Button>
@@ -3242,47 +3370,6 @@ const SelfAssessment = () => {
                                 <FileText className="w-4 h-4" /> Download Word
                             </Button>
                         </div>
-                        {Object.entries(resultGroupedQuestions).length > 0 ? (
-                            Object.entries(resultGroupedQuestions).map(([clause, clauseQuestions]) => (
-                                <Card key={clause} className="border-none shadow-sm overflow-hidden bg-white/80 backdrop-blur-sm">
-                                    <CardHeader className="bg-slate-50/80 border-b border-slate-100 py-4 px-6">
-                                        <CardTitle className="text-lg font-bold text-slate-800">{clause}</CardTitle>
-                                    </CardHeader>
-                                    <CardContent className="p-0">
-                                        <div className="divide-y divide-slate-100">
-                                            {clauseQuestions.map((q) => (
-                                                <div key={q.id} className="p-6 flex gap-4 items-start hover:bg-slate-50 transition-colors">
-                                                    <div className={cn(
-                                                        "mt-1 w-6 h-6 rounded-full flex items-center justify-center shrink-0 border",
-                                                        q.answer === "yes" ? "bg-emerald-100 border-emerald-200 text-emerald-700" :
-                                                            q.answer === "no" ? "bg-red-100 border-red-200 text-red-700" : "bg-slate-100 border-slate-200 text-slate-400"
-                                                    )}>
-                                                        {q.answer === "yes" ? <CheckCircle2 className="w-3.5 h-3.5" /> :
-                                                            q.answer === "no" ? <AlertCircle className="w-3.5 h-3.5" /> : <Minus className="w-3.5 h-3.5" />}
-                                                    </div>
-                                                    <div className="space-y-2 flex-1">
-                                                        <p className="text-slate-800 font-medium">{q.text}</p>
-                                                        <div className="flex items-center gap-2">
-                                                            <span className={cn(
-                                                                "text-xs font-bold px-2 py-1 rounded-full uppercase tracking-wider",
-                                                                q.answer === "yes" ? "bg-emerald-50 text-emerald-700" :
-                                                                    q.answer === "no" ? "bg-red-50 text-red-700" : "bg-slate-100 text-slate-500"
-                                                            )}>
-                                                                {q.answer === "yes" ? "Compliant" : q.answer === "no" ? "Non-Compliant" : "Not Answered"}
-                                                            </span>
-                                                        </div>
-                                                    </div>
-                                                </div>
-                                            ))}
-                                        </div>
-                                    </CardContent>
-                                </Card>
-                            ))
-                        ) : (
-                            <div className="text-center py-12 text-slate-400">
-                                No questions found.
-                            </div>
-                        )}
                     </div>
                     );
                 })()}
@@ -3339,6 +3426,28 @@ const SelfAssessment = () => {
                             : "This will permanently remove this self assessment. This action cannot be undone."
                     }
                 />
+
+                <Dialog open={cancelAssessmentOpen} onOpenChange={setCancelAssessmentOpen}>
+                    <DialogContent>
+                        <DialogHeader>
+                            <DialogTitle>Cancel assessment?</DialogTitle>
+                            <DialogDescription>
+                                This will discard your current answers and return you to the assessment list.
+                            </DialogDescription>
+                        </DialogHeader>
+                        <DialogFooter>
+                            <Button variant="outline" onClick={() => setCancelAssessmentOpen(false)}>
+                                Keep assessing
+                            </Button>
+                            <Button
+                                variant="destructive"
+                                onClick={confirmCancelAssessment}
+                            >
+                                Yes, cancel
+                            </Button>
+                        </DialogFooter>
+                    </DialogContent>
+                </Dialog>
 
             </div>
         </div>
