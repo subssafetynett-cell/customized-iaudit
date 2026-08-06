@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import {
     Building2,
     MapPin,
@@ -78,6 +78,7 @@ function StepCardIcon({ children }: { children: ReactNode }) {
 
 export default function GettingStarted() {
     const navigate = useNavigate();
+    const [searchParams] = useSearchParams();
     const { companies } = useCompanyStore();
     const [userName, setUserName] = useState("there");
     const [userCount, setUserCount] = useState(0);
@@ -87,6 +88,13 @@ export default function GettingStarted() {
     const [auditStepsOpen, setAuditStepsOpen] = useState(false);
     const [auditPrograms, setAuditPrograms] = useState<unknown[]>([]);
     const [auditPlans, setAuditPlans] = useState<any[]>([]);
+    const nextAuditWorkflowStep = searchParams.get("nextAuditWorkflowStep");
+    const focusSection = searchParams.get("focusSection");
+    const highlightHowToStartAudits = focusSection === "how-to-start-audits";
+    const highlightAuditPlanStep = nextAuditWorkflowStep === "audit-plan";
+    const highlightAuditsStep = nextAuditWorkflowStep === "audits";
+    const highlightFindingsStep = nextAuditWorkflowStep === "findings";
+    const highlightAuditTemplatesStep = nextAuditWorkflowStep === "audit-templates";
 
     useEffect(() => {
         try {
@@ -150,6 +158,35 @@ export default function GettingStarted() {
             cancelled = true;
         };
     }, []);
+
+    useEffect(() => {
+        const nextStep = searchParams.get("nextAuditWorkflowStep");
+        const section = searchParams.get("focusSection");
+        if (!nextStep && !section) return;
+
+        if (
+            section === "how-to-start-audits" ||
+            nextStep === "audit-plan" ||
+            nextStep === "audits" ||
+            nextStep === "findings" ||
+            nextStep === "audit-templates"
+        ) {
+            setAuditStepsOpen(true);
+            requestAnimationFrame(() => {
+                const targetId =
+                    nextStep === "audit-plan"
+                        ? "getting-started-audit-workflow-audit-plan"
+                        : nextStep === "audits"
+                          ? "getting-started-audit-workflow-audits"
+                          : nextStep === "findings"
+                            ? "getting-started-audit-workflow-findings"
+                            : nextStep === "audit-templates"
+                              ? "getting-started-audit-workflow-audit-templates"
+                              : "getting-started-how-to-start-audits";
+                document.getElementById(targetId)?.scrollIntoView({ block: "center" });
+            });
+        }
+    }, [searchParams]);
 
     const totalSites = useMemo(
         () => companies.reduce((acc, c) => acc + (c.sites?.length ?? 0), 0),
@@ -361,9 +398,15 @@ export default function GettingStarted() {
                 </div>
 
                 {/* Step 2 — How to start audits? */}
-                <div>
+                <div id="getting-started-how-to-start-audits">
                     <OnboardingStepBadge step={2} />
-                    <Card className="border border-slate-200 shadow-sm rounded-2xl overflow-hidden bg-white">
+                    <Card
+                        className={cn(
+                            "border border-slate-200 shadow-sm rounded-2xl overflow-hidden bg-white transition-all",
+                            highlightHowToStartAudits &&
+                                "ring-4 ring-emerald-500/70 ring-offset-2 border-emerald-300 shadow-emerald-100/80 shadow-lg",
+                        )}
+                    >
                         <CardContent className="p-0">
                             <div className="px-6 py-5 border-b border-slate-100">
                                 <div className="flex gap-4">
@@ -433,7 +476,19 @@ export default function GettingStarted() {
                                             return (
                                                 <li
                                                     key={step.id}
-                                                    className="flex items-start gap-4 px-6 py-5 hover:bg-slate-50/80 transition-colors"
+                                                    id={`getting-started-audit-workflow-${step.id}`}
+                                                    className={cn(
+                                                        "flex items-start gap-4 px-6 py-5 hover:bg-slate-50/80 transition-colors",
+                                                        (highlightAuditPlanStep && step.id === "audit-plan") ||
+                                                            (highlightAuditsStep && step.id === "audits") ||
+                                                            (highlightFindingsStep && step.id === "findings") ||
+                                                            (highlightAuditTemplatesStep &&
+                                                                step.id === "audit-templates")
+                                                            ? "ring-4 ring-emerald-500/70 rounded-xl bg-emerald-50 border border-emerald-200 shadow-sm"
+                                                            : nextAuditWorkflowStep === step.id
+                                                              ? "ring-2 ring-emerald-500/60 rounded-xl bg-emerald-50/30"
+                                                              : "",
+                                                    )}
                                                 >
                                                     <div
                                                         className={`mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-full border-2 ${

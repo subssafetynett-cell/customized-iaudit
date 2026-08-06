@@ -853,15 +853,143 @@ async function actorCanInviteAuditee(actorId) {
 /**
  * User ids whose registered companies an actor may read (sites + departments included).
  * Any org member — regardless of role — shares the same company catalog as the account root.
+ *
+ * Legacy live orgs often have broken creatorId chains (invitee is an orphan root, or the
+ * company is owned by a peer admin). Bridge those via ancestors, audit participation, and
+ * same-name companies that already belong to a reachable teammate's richer org tree.
  */
 async function resolveOrgCompanyOwnerUserIds(actorId) {
     const id = Number(actorId);
     if (!Number.isInteger(id) || id < 1) return [];
-    const memberIds = await collectOrgMemberUserIds(id);
-    if (memberIds.length > 0) return memberIds;
-    const orgRootId = await resolveActorOrgRootId(id);
-    const fromRoot = await collectOrgSubtreeUserIds(orgRootId);
-    return fromRoot.length > 0 ? fromRoot : [id];
+
+    const idSet = new Set(await collectOrgMemberUserIds(id));
+    idSet.add(id);
+
+    // Explicit ancestor walk (covers invitee → admin → company owner).
+    let cursor = id;
+    for (let depth = 0; depth < ORG_ROOT_WALK_MAX_DEPTH; depth += 1) {
+        const row = await prisma.user.findUnique({
+            where: { id: cursor },
+            select: { creatorId: true },
+        });
+        const parentId = row?.creatorId != null ? Number(row.creatorId) : null;
+        if (!Number.isInteger(parentId) || parentId < 1) break;
+        if (idSet.has(parentId)) break;
+        idSet.add(parentId);
+        cursor = parentId;
+    }
+
+    const mergeOwnerTree = async (ownerId) => {
+        const oid = Number(ownerId);
+        if (!Number.isInteger(oid) || oid < 1) return;
+        idSet.add(oid);
+        const root = (await getOrgRootUserId(oid)) ?? oid;
+        for (const n of await collectOrgSubtreeUserIds(root)) {
+            idSet.add(n);
+        }
+    };
+
+    // Companies already owned by anyone currently in the set.
+    const owned = await prisma.company.findMany({
+        where: { userId: { in: [...idSet] } },
+        select: {
+            id: true,
+            name: true,
+            userId: true,
+            _count: { select: { sites: true } },
+        },
+    });
+    for (const company of owned) {
+        await mergeOwnerTree(company.userId);
+    }
+
+    // Legacy bridge: companies reached through audit programs / plans the actor (or teammates) touch.
+    const memberList = [...idSet];
+    if (memberList.length > 0) {
+        try {
+            const programs = await prisma.auditProgram.findMany({
+                where: {
+                    OR: [
+                        { userId: { in: memberList } },
+                        { leadAuditorId: { in: memberList } },
+                        { auditors: { some: { id: { in: memberList } } } },
+                    ],
+                },
+                select: {
+                    site: { select: { company: { select: { userId: true } } } },
+                },
+                take: 200,
+            });
+            for (const program of programs) {
+                await mergeOwnerTree(program.site?.company?.userId);
+            }
+
+            const plans = await prisma.auditPlan.findMany({
+                where: {
+                    OR: [
+                        { userId: { in: memberList } },
+                        { leadAuditorId: { in: memberList } },
+                        { auditors: { some: { id: { in: memberList } } } },
+                    ],
+                },
+                select: {
+                    auditProgram: {
+                        select: {
+                            site: { select: { company: { select: { userId: true } } } },
+                        },
+                    },
+                },
+                take: 200,
+            });
+            for (const plan of plans) {
+                await mergeOwnerTree(plan.auditProgram?.site?.company?.userId);
+            }
+        } catch (err) {
+            console.warn('[orgAccess] audit-linked company bridge failed:', err?.message || err);
+        }
+    }
+
+    // Legacy bridge: invitee sees an empty duplicate company while the real sites live on
+    // another company with the same name owned by a reachable org user / sibling tree.
+    const emptyNames = owned
+        .filter((c) => (c._count?.sites ?? 0) === 0 && c.name)
+        .map((c) => String(c.name).trim())
+        .filter(Boolean);
+    if (emptyNames.length > 0) {
+        try {
+            const richer = await prisma.company.findMany({
+                where: {
+                    OR: emptyNames.map((name) => ({
+                        name: { equals: name, mode: 'insensitive' },
+                    })),
+                    sites: { some: {} },
+                },
+                select: { userId: true, name: true },
+                take: 50,
+            });
+            for (const company of richer) {
+                const ownerId = Number(company.userId);
+                if (!Number.isInteger(ownerId) || ownerId < 1) continue;
+                if (idSet.has(ownerId) || (await actorInSameOrgAs(id, ownerId))) {
+                    await mergeOwnerTree(ownerId);
+                    continue;
+                }
+                // Single-tenant style fallback: exactly one richer company with this name.
+                const sameName = richer.filter(
+                    (r) =>
+                        String(r.name || '').trim().toLowerCase() ===
+                        String(company.name || '').trim().toLowerCase(),
+                );
+                if (sameName.length === 1) {
+                    await mergeOwnerTree(ownerId);
+                }
+            }
+        } catch (err) {
+            console.warn('[orgAccess] same-name company bridge failed:', err?.message || err);
+        }
+    }
+
+    return [...idSet];
 }
 
 /**

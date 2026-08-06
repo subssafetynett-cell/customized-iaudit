@@ -1,7 +1,23 @@
 # Local browser access: docker compose -f docker-compose.yaml -f docker-compose.local.yaml up -d --build
 # Default port 8083 avoids conflict with other local apps on 8082 (e.g. site-mate).
+#
+# Force local Postgres (do not inherit host Neon DATABASE_URL — unreachable from containers).
 
 services:
+  server:
+    environment:
+      DATABASE_URL: postgresql://appuser:apppassword@iaudit-app-postgres-1:5432/appdb
+    networks:
+      - app
+      - local_postgres
+
   frontend:
     ports:
       - "${FRONTEND_HOST_PORT:-8083}:80"
+    networks:
+      - app
+
+networks:
+  local_postgres:
+    external: true
+    name: iaudit-app_default

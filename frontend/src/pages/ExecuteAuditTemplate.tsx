@@ -15,6 +15,7 @@ import { TourStepPopover } from "@/components/TourStepPopover";
 import { QuestionEvidenceUploadPreview } from "@/components/QuestionEvidenceUploadPreview";
 import {
     AUDIT_TEMPLATES_LIST_MAX_STEP,
+    AUDIT_TEMPLATES_TOUR_STEP,
     AUDIT_TEMPLATES_TOUR_TOTAL_STEPS,
     getAuditTemplatesTourStepConfig,
 } from "@/lib/auditTemplatesOnboardingTour";
@@ -402,23 +403,27 @@ const ExecuteAuditTemplate = () => {
     };
 
     const handleAuditTemplatesTourNext = () => {
-        if (auditTemplatesTourStep >= AUDIT_TEMPLATES_TOUR_TOTAL_STEPS) {
+        if (auditTemplatesTourStep >= AUDIT_TEMPLATES_TOUR_STEP.COMPLETE) {
             exitAuditTemplatesTour();
             navigate("/getting-started");
-            toast.success("Audit workflow tour complete!");
+            toast.success("Thank you!", {
+                description:
+                    "You have completed the How to start audits workflow tour. You can revisit any step anytime from Start Onboarding.",
+                duration: 8000,
+            });
             return;
         }
         setAuditTemplatesTourStep(auditTemplatesTourStep + 1);
     };
 
     const handleAuditTemplatesTourBack = () => {
-        if (auditTemplatesTourStep === 6) {
+        if (auditTemplatesTourStep === AUDIT_TEMPLATES_TOUR_STEP.OVERVIEW) {
             navigate(
                 `/audit-templates?auditTemplatesTour=true&auditTemplatesStep=${AUDIT_TEMPLATES_LIST_MAX_STEP}`,
             );
             return;
         }
-        if (auditTemplatesTourStep > 6) {
+        if (auditTemplatesTourStep > AUDIT_TEMPLATES_TOUR_STEP.OVERVIEW) {
             setAuditTemplatesTourStep(auditTemplatesTourStep - 1);
         }
     };
@@ -2004,7 +2009,7 @@ const ExecuteAuditTemplate = () => {
             </div>
 
             {auditTemplatesTourActive &&
-                auditTemplatesTourStep >= 6 &&
+                auditTemplatesTourStep >= AUDIT_TEMPLATES_TOUR_STEP.OVERVIEW &&
                 auditTemplatesTourStepConfig && (
                     <TourStepPopover
                         key={auditTemplatesTourStep}
@@ -2021,7 +2026,9 @@ const ExecuteAuditTemplate = () => {
                             navigate("/getting-started");
                         }}
                         hideNext={false}
-                        disableShadow={false}
+                        disableShadow={
+                            auditTemplatesTourStep === AUDIT_TEMPLATES_TOUR_STEP.COMPLETE
+                        }
                     />
                 )}
         </div>

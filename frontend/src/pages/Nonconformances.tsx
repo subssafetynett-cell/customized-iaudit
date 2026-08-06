@@ -1,5 +1,5 @@
-import { useCallback, useMemo, useState, memo } from "react";
-import { useNavigate } from "react-router-dom";
+import { useCallback, useMemo, useState, memo, useEffect, useRef } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
     AlertTriangle,
@@ -404,9 +404,37 @@ const RecentFindingsList = memo(function RecentFindingsList({
 
 export default function Nonconformances() {
     const navigate = useNavigate();
+    const [searchParams, setSearchParams] = useSearchParams();
     const queryClient = useQueryClient();
     const { user } = useStoredUser();
     const [statusFilter, setStatusFilter] = useState<StatusCardKey>("all");
+    const findingsHandoffShownRef = useRef(false);
+
+    useEffect(() => {
+        if (searchParams.get("findingsTourHandoff") !== "1") return;
+        if (findingsHandoffShownRef.current) return;
+        findingsHandoffShownRef.current = true;
+
+        toast.message("Move to the final step", {
+            description:
+                "Explore the dashboard charts and status cards here. When you are ready, continue to Audit Templates — the final step in How to start audits.",
+            duration: 10000,
+            action: {
+                label: "Audit Templates",
+                onClick: () =>
+                    navigate("/getting-started?nextAuditWorkflowStep=audit-templates"),
+            },
+        });
+
+        setSearchParams(
+            (prev) => {
+                const next = new URLSearchParams(prev);
+                next.delete("findingsTourHandoff");
+                return next;
+            },
+            { replace: true },
+        );
+    }, [navigate, searchParams, setSearchParams]);
 
     const role = typeof user?.role === "string" ? user.role : undefined;
     const isSuperAdmin = String(role ?? "").toLowerCase() === "superadmin";

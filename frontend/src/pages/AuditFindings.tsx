@@ -43,8 +43,15 @@ import { Document, Packer, Paragraph, TextRun, Table as DocxTable, TableRow as D
 import { saveAs } from "file-saver";
 import { TourStepPopover } from "@/components/TourStepPopover";
 import {
+    AUDIT_FINDINGS_TOUR_STEP,
     AUDIT_FINDINGS_TOUR_TOTAL_STEPS,
+    clearFindingsTourPath,
     getAuditFindingsTourStepConfig,
+    getNextFindingsTourStep,
+    getPrevFindingsTourStep,
+    loadFindingsTourPath,
+    saveFindingsTourPath,
+    type FindingsTourPath,
 } from "@/lib/auditFindingsOnboardingTour";
 import { cn } from "@/lib/utils";
 import {
@@ -206,6 +213,8 @@ type FindingRowProps = {
     index: number;
     ownershipTab: OwnershipTab;
     onView: (finding: Finding) => void;
+    viewButtonId?: string;
+    highlightView?: boolean;
 };
 
 const FindingTableRow = memo(function FindingTableRow({
@@ -213,6 +222,8 @@ const FindingTableRow = memo(function FindingTableRow({
     index,
     ownershipTab,
     onView,
+    viewButtonId,
+    highlightView,
 }: FindingRowProps) {
     const uiType = toFindingsUiType(finding.type);
     const cfg = TYPE_CONFIG[uiType];
@@ -294,11 +305,16 @@ const FindingTableRow = memo(function FindingTableRow({
             <TableCell className="py-3 pr-4">
                 <div className="flex flex-wrap items-center justify-end gap-2">
                     <Button
+                        id={viewButtonId}
                         variant="outline"
                         size="sm"
                         title="View finding"
                         onClick={() => onView(finding)}
-                        className="h-8 gap-1.5 border-slate-200 text-slate-700 hover:text-[#213847]"
+                        className={cn(
+                            "h-8 gap-1.5 border-slate-200 text-slate-700 hover:text-[#213847]",
+                            highlightView &&
+                                "relative z-[60] ring-[4px] ring-emerald-500/80 ring-offset-2",
+                        )}
                     >
                         <Eye className="w-3.5 h-3.5" />
                         View
@@ -321,12 +337,20 @@ export default function AuditFindings() {
     const auditFindingsTourStepConfig =
         getAuditFindingsTourStepConfig(auditFindingsTourStep);
 
-    const setAuditFindingsTourStep = (step: number) => {
+    const findingsTourPath: FindingsTourPath | null =
+        (searchParams.get("findingsTourPath") === "assigned" ||
+        searchParams.get("findingsTourPath") === "raised"
+            ? (searchParams.get("findingsTourPath") as FindingsTourPath)
+            : null) || loadFindingsTourPath();
+
+    const setAuditFindingsTourStep = (step: number, path?: FindingsTourPath | null) => {
         setSearchParams(
             (prev) => {
                 const next = new URLSearchParams(prev);
                 next.set("auditFindingsTour", "true");
                 next.set("auditFindingsStep", String(step));
+                const p = path ?? findingsTourPath;
+                if (p) next.set("findingsTourPath", p);
                 return next;
             },
             { replace: true },
@@ -334,11 +358,13 @@ export default function AuditFindings() {
     };
 
     const exitAuditFindingsTour = () => {
+        clearFindingsTourPath();
         setSearchParams(
             (prev) => {
                 const next = new URLSearchParams(prev);
                 next.delete("auditFindingsTour");
                 next.delete("auditFindingsStep");
+                next.delete("findingsTourPath");
                 return next;
             },
             { replace: true },
@@ -351,13 +377,21 @@ export default function AuditFindings() {
             : "";
 
     const handleAuditFindingsTourNext = () => {
-        if (auditFindingsTourStep >= AUDIT_FINDINGS_TOUR_TOTAL_STEPS) {
-            exitAuditFindingsTour();
-            navigate("/getting-started");
-            toast.success("Findings tour complete!");
+        if (auditFindingsTourStep === AUDIT_FINDINGS_TOUR_STEP.VIEW) {
+            toast.message("Click View on a finding row to continue the tour.");
             return;
         }
-        setAuditFindingsTourStep(auditFindingsTourStep + 1);
+        if (auditFindingsTourStep >= AUDIT_FINDINGS_TOUR_STEP.COMPLETE) {
+            exitAuditFindingsTour();
+            navigate("/nonconformances?findingsTourHandoff=1");
+            return;
+        }
+        if (auditFindingsTourStep >= AUDIT_FINDINGS_TOUR_STEP.DETAILS) {
+            return;
+        }
+        setAuditFindingsTourStep(
+            getNextFindingsTourStep(auditFindingsTourStep, findingsTourPath),
+        );
     };
 
     const handleAuditFindingsTourBack = () => {
@@ -366,7 +400,9 @@ export default function AuditFindings() {
             navigate("/getting-started");
             return;
         }
-        setAuditFindingsTourStep(auditFindingsTourStep - 1);
+        setAuditFindingsTourStep(
+            getPrevFindingsTourStep(auditFindingsTourStep, findingsTourPath),
+        );
     };
 
     const viewer = useMemo(() => readViewerFromStorage(), []);
@@ -448,6 +484,23 @@ export default function AuditFindings() {
 
     const handleViewFinding = useCallback(
         (finding: Finding) => {
+            const path: FindingsTourPath =
+                ownershipTab === "raised" ? "raised" : "assigned";
+            if (auditFindingsTourActive) {
+                saveFindingsTourPath(path);
+                navigate(
+                    {
+                        pathname: `/audit-findings/${finding.auditId}/${encodeURIComponent(finding.id)}`,
+                        search: `?auditFindingsTour=true&auditFindingsStep=${AUDIT_FINDINGS_TOUR_STEP.DETAILS}&findingsTourPath=${path}`,
+                    },
+                    {
+                        state: {
+                            returnTab: ownershipTab,
+                        },
+                    },
+                );
+                return;
+            }
             navigate(
                 {
                     pathname: `/audit-findings/${finding.auditId}/${encodeURIComponent(finding.id)}`,
@@ -460,7 +513,7 @@ export default function AuditFindings() {
                 },
             );
         },
-        [navigate, ownershipTab],
+        [navigate, ownershipTab, auditFindingsTourActive],
     );
 
     const searchedFindings = useMemo(() => ownershipFindings.filter((f) => {
@@ -718,7 +771,7 @@ export default function AuditFindings() {
                     id="tour-step-findings-summary"
                     className={cn(
                         "grid grid-cols-2 gap-4",
-                        tourFindingsHighlight(2),
+                        tourFindingsHighlight(AUDIT_FINDINGS_TOUR_STEP.SUMMARY),
                     )}
                 >
                     {(["OFI", "NC"] as const).map((type) => {
@@ -744,7 +797,7 @@ export default function AuditFindings() {
                     id="tour-step-findings-filters"
                     className={cn(
                         "flex flex-col sm:flex-row sm:items-center justify-between gap-4",
-                        tourFindingsHighlight(3),
+                        tourFindingsHighlight(AUDIT_FINDINGS_TOUR_STEP.FILTERS),
                     )}
                 >
                     <div className="flex gap-2 flex-wrap">
@@ -794,7 +847,13 @@ export default function AuditFindings() {
                     </div>
                 </div>
 
-                <div className="space-y-3">
+                <div
+                    id="tour-step-findings-list"
+                    className={cn(
+                        "space-y-3",
+                        tourFindingsHighlight(AUDIT_FINDINGS_TOUR_STEP.LIST),
+                    )}
+                >
                     <Tabs
                         value={ownershipTab}
                         onValueChange={handleOwnershipChange}
@@ -823,19 +882,12 @@ export default function AuditFindings() {
                     </Tabs>
 
                 {tableLoading ? (
-                    <div
-                        id="tour-step-findings-list"
-                        className={cn(tourFindingsHighlight(4))}
-                    >
+                    <div>
                         <FindingsTableSkeleton />
                     </div>
                 ) : filtered.length === 0 ? (
                     <div
-                        id="tour-step-findings-list"
-                        className={cn(
-                            "flex flex-col items-center justify-center py-24 text-slate-400 gap-3 min-h-[200px] rounded-xl border border-slate-200 bg-slate-50/50",
-                            tourFindingsHighlight(4),
-                        )}
+                        className="flex flex-col items-center justify-center py-24 text-slate-400 gap-3 min-h-[200px] rounded-xl border border-slate-200 bg-slate-50/50"
                     >
                         <SearchX className="w-12 h-12 opacity-40" />
                         <p className="text-base font-semibold">No findings found</p>
@@ -850,11 +902,7 @@ export default function AuditFindings() {
                 ) : (
                     <>
                         <div
-                            id="tour-step-findings-list"
-                            className={cn(
-                                "rounded-xl border border-slate-200 overflow-hidden shadow-sm",
-                                tourFindingsHighlight(4),
-                            )}
+                            className="rounded-xl border border-slate-200 overflow-hidden shadow-sm"
                         >
                             <Table>
                                 <TableHeader className="bg-[#213847]">
@@ -880,6 +928,17 @@ export default function AuditFindings() {
                                             index={(currentPage - 1) * itemsPerPage + idx + 1}
                                             ownershipTab={ownershipTab}
                                             onView={handleViewFinding}
+                                            viewButtonId={
+                                                idx === 0
+                                                    ? "tour-step-findings-view"
+                                                    : undefined
+                                            }
+                                            highlightView={
+                                                auditFindingsTourActive &&
+                                                auditFindingsTourStep ===
+                                                    AUDIT_FINDINGS_TOUR_STEP.VIEW &&
+                                                idx === 0
+                                            }
                                         />
                                     ))}
                                 </TableBody>
@@ -920,7 +979,9 @@ export default function AuditFindings() {
                 </div>
             </div>
 
-            {auditFindingsTourActive && auditFindingsTourStepConfig && (
+            {auditFindingsTourActive &&
+                auditFindingsTourStep <= AUDIT_FINDINGS_TOUR_STEP.VIEW &&
+                auditFindingsTourStepConfig && (
                 <TourStepPopover
                     key={auditFindingsTourStep}
                     targetId={auditFindingsTourStepConfig.targetId}
@@ -935,6 +996,7 @@ export default function AuditFindings() {
                         exitAuditFindingsTour();
                         navigate("/getting-started");
                     }}
+                    hideNext={auditFindingsTourStep === AUDIT_FINDINGS_TOUR_STEP.VIEW}
                 />
             )}
 

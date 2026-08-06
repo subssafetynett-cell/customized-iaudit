@@ -30,6 +30,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, DropdownMenuCheckboxItem } from "@/components/ui/dropdown-menu";
 import { TourStepPopover } from "@/components/TourStepPopover";
 import {
+    AUDIT_TOUR_STEP,
     AUDIT_TOUR_TOTAL_STEPS,
     getAuditTourStepConfig,
 } from "@/lib/auditOnboardingTour";
@@ -412,6 +413,7 @@ const MONTHS = [
 ];
 
 const YEARS = Array.from({ length: 10 }, (_, i) => (new Date().getFullYear() + i));
+const DURATION_YEARS = Array.from({ length: 10 }, (_, i) => i + 1);
 
 function splitScheduleData(loadData: Record<string, unknown> | null | undefined) {
     const data = loadData ?? {};
@@ -479,6 +481,7 @@ const AuditPrograms = () => {
             },
             { replace: true },
         );
+        setCreatedAuditProgramId(null);
     };
 
     const tourHighlight = (step: number) =>
@@ -497,6 +500,7 @@ const AuditPrograms = () => {
     const scheduleMatrixRef = useRef<HTMLDivElement>(null);
     const [loading, setLoading] = useState(false);
     const [listLoading, setListLoading] = useState(true);
+    const [createdAuditProgramId, setCreatedAuditProgramId] = useState<number | null>(null);
     const [sites, setSites] = useState<any[]>([]);
     const [companies, setCompanies] = useState<any[]>([]);
     const [auditors, setAuditors] = useState<any[]>([]);
@@ -514,17 +518,32 @@ const AuditPrograms = () => {
 
     useEffect(() => {
         if (!auditTourActive) return;
-        if (auditTourStep <= 2) {
+        if (auditTourStep === AUDIT_TOUR_STEP.COMPLETE) {
+            if (view !== "list") setView("list");
+            return;
+        }
+        if (auditTourStep <= AUDIT_TOUR_STEP.CREATE) {
             if (view !== "list") setView("list");
             return;
         }
         if (view !== "create" && view !== "edit") {
             setView("create");
         }
-        if (auditTourStep >= 5) {
+        if (auditTourStep >= AUDIT_TOUR_STEP.TIMELINE) {
             setShowSchedule(true);
         }
-    }, [auditTourActive, auditTourStep]);
+    }, [auditTourActive, auditTourStep, view]);
+
+    useEffect(() => {
+        if (!auditTourActive) return;
+        if (auditTourStep !== AUDIT_TOUR_STEP.COMPLETE) return;
+
+        requestAnimationFrame(() => {
+            document
+                .getElementById("tour-step-created-program")
+                ?.scrollIntoView({ block: "center" });
+        });
+    }, [auditTourActive, auditTourStep, createdAuditProgramId, auditPrograms]);
 
     const isMobile = windowWidth < 768;
 
@@ -579,13 +598,16 @@ const AuditPrograms = () => {
                 const parsed = parsePaginatedResponse<any>(data, currentPage, itemsPerPage);
                 setAuditPrograms(parsed.items);
                 setTotalItems(parsed.total);
+                return parsed.items as any[];
             } else {
                 toast.error("Failed to refresh audit programs");
                 setAuditPrograms([]);
                 setTotalItems(0);
+                return [] as any[];
             }
         } catch (error) {
             console.error("Failed to fetch programs:", error);
+            return [] as any[];
         }
     };
 
@@ -881,11 +903,40 @@ const AuditPrograms = () => {
 
             if (response.ok) {
                 toast.success(view === "edit" ? "Audit Program updated!" : "Audit Program created!");
-                await fetchPrograms();
-                if (auditTourActive && auditTourStep === 7) {
-                    setAuditTourStep(8);
+                let createdId: number | null = currentId;
+                try {
+                    const body = await response.json();
+                    const maybeId =
+                        body?.id ?? body?.auditProgram?.id ?? body?.data?.id ?? body?.result?.id;
+                    if (maybeId !== undefined && maybeId !== null) {
+                        const n = Number(maybeId);
+                        if (Number.isFinite(n)) createdId = n;
+                    }
+                } catch {
+                    // ignore (some endpoints may not return JSON)
+                }
+
+                const refreshed = await fetchPrograms();
+                if (auditTourActive && auditTourStep === AUDIT_TOUR_STEP.SAVE_PROGRAM) {
+                    // Fall back to the newest matching program by name if response id was missing.
+                    if (!createdId) {
+                        const savedName = String(auditName || "").trim();
+                        const match =
+                            refreshed.find((p) => String(p.name || "").trim() === savedName) ??
+                            refreshed[0];
+                        if (match?.id != null) createdId = Number(match.id);
+                    }
+                    if (createdId != null) setCreatedAuditProgramId(createdId);
+                    setSearchQuery("");
+                    setStandardFilter("all");
+                    setSiteFilter("all");
+                    setCurrentPage(1);
+                    setView("list");
+                    setAuditTourStep(AUDIT_TOUR_STEP.COMPLETE);
+                    resetForm();
                     return;
                 }
+
                 setView("list");
                 resetForm();
             } else if (!(await parseTrialLimitApiError(response))) {
@@ -1066,14 +1117,28 @@ const AuditPrograms = () => {
     };
 
     const handleAuditTourNext = () => {
-        if (auditTourStep === 2) {
+        if (auditTourStep === AUDIT_TOUR_STEP.CREATE) {
             if (!guardTrialCreate("auditProgram", auditPrograms.length)) return;
             resetForm();
             setView("create");
-            setAuditTourStep(3);
+            setAuditTourStep(AUDIT_TOUR_STEP.AUDIT_NAME);
             return;
         }
-        if (auditTourStep === 4) {
+        if (auditTourStep === AUDIT_TOUR_STEP.CRITERIA_TYPE) {
+            if (criteriaType === "iso" && selectedStandards.length === 0) {
+                toast.error("Please select at least one ISO standard");
+                return;
+            }
+            if (
+                criteriaType === "module" &&
+                moduleFamily !== "eosh" &&
+                moduleFamily !== "qfs-kore"
+            ) {
+                toast.error("Please select EOSH Audit Checklist or QFS KORE Audit Checklist");
+                return;
+            }
+        }
+        if (auditTourStep === AUDIT_TOUR_STEP.GENERATE_SCHEDULE) {
             if (!auditName || !selectedSite) {
                 toast.error("Please fill in Audit Name and Site");
                 return;
@@ -1095,31 +1160,38 @@ const AuditPrograms = () => {
                       ? "Select EOSH modules below to build the schedule"
                       : "Schedule generated!",
             );
-            setAuditTourStep(5);
+            setAuditTourStep(AUDIT_TOUR_STEP.TIMELINE);
             return;
         }
+        if (auditTourStep === AUDIT_TOUR_STEP.COMPLETE) {
+            exitAuditTour();
+            setView("list");
+            navigate("/getting-started?nextAuditWorkflowStep=audit-plan");
+            return;
+        }
+
         if (auditTourStep >= AUDIT_TOUR_TOTAL_STEPS) {
             exitAuditTour();
             setView("list");
-            toast.success("You completed the first auditing step!");
             navigate("/getting-started");
             return;
         }
+
         setAuditTourStep(auditTourStep + 1);
     };
 
     const handleAuditTourBack = () => {
-        if (auditTourStep <= 1) {
+        if (auditTourStep <= AUDIT_TOUR_STEP.NAV) {
             exitAuditTour();
             navigate("/getting-started");
             return;
         }
-        if (auditTourStep === 3) {
+        if (auditTourStep === AUDIT_TOUR_STEP.AUDIT_NAME) {
             setView("list");
-            setAuditTourStep(2);
+            setAuditTourStep(AUDIT_TOUR_STEP.CREATE);
             return;
         }
-        if (auditTourStep === 5) {
+        if (auditTourStep === AUDIT_TOUR_STEP.TIMELINE) {
             setShowSchedule(false);
         }
         setAuditTourStep(auditTourStep - 1);
@@ -1576,8 +1648,8 @@ const AuditPrograms = () => {
                 </div>
                 {view === "list" && !isAuditeeReadOnly && (
                     <div className="relative">
-                        <div className={cn("relative", (showOnboardingGuide || auditTourActive) && auditTourStep === 2 ? "z-[60]" : "")}>
-                            {(showOnboardingGuide || (auditTourActive && auditTourStep === 2)) && (
+                        <div className={cn("relative", (showOnboardingGuide || auditTourActive) && auditTourStep === AUDIT_TOUR_STEP.CREATE ? "z-[60]" : "")}>
+                            {(showOnboardingGuide || (auditTourActive && auditTourStep === AUDIT_TOUR_STEP.CREATE)) && (
                                 <div className="absolute inset-0 -m-1 rounded-2xl ring-[8px] ring-emerald-500/50 animate-pulse z-[-1]" />
                             )}
                             <Button
@@ -1586,14 +1658,14 @@ const AuditPrograms = () => {
                                     resetForm();
                                     setView("create");
                                     setShowOnboardingGuide(false);
-                                    if (auditTourActive && auditTourStep === 2) {
+                                    if (auditTourActive && auditTourStep === AUDIT_TOUR_STEP.CREATE) {
                                         setAuditTourStep(3);
                                     }
                                 }}
                                 className={cn(
                                     "bg-[#213847] hover:bg-[#213847]/90 text-white gap-2 rounded-xl h-11 px-5 shadow-sm font-semibold transition-all duration-300",
-                                    (showOnboardingGuide || (auditTourActive && auditTourStep === 2)) && "relative z-[60] scale-105 shadow-2xl",
-                                    tourHighlight(2),
+                                    (showOnboardingGuide || (auditTourActive && auditTourStep === AUDIT_TOUR_STEP.CREATE)) && "relative z-[60] scale-105 shadow-2xl",
+                                    tourHighlight(AUDIT_TOUR_STEP.CREATE),
                                 )}
                                 id="tour-step-create-program"
                             >
@@ -1730,8 +1802,23 @@ const AuditPrograms = () => {
                                             </TableCell>
                                         </TableRow>
                                     ) : (
-                                        paginatedPrograms.map((program, idx) => (
-                                            <TableRow key={program.id} className="hover:bg-muted/20 border-muted/30 transition-colors group">
+                                        paginatedPrograms.map((program, idx) => {
+                                            const isCreatedTourTarget =
+                                                auditTourActive &&
+                                                auditTourStep === AUDIT_TOUR_STEP.COMPLETE &&
+                                                ((createdAuditProgramId != null &&
+                                                    String(program.id) === String(createdAuditProgramId)) ||
+                                                    (createdAuditProgramId == null && idx === 0));
+                                            return (
+                                            <TableRow
+                                                key={program.id}
+                                                id={isCreatedTourTarget ? "tour-step-created-program" : undefined}
+                                                className={cn(
+                                                    "hover:bg-muted/20 border-muted/30 transition-colors group",
+                                                    isCreatedTourTarget &&
+                                                        "relative z-[60] ring-[4px] ring-emerald-500/80 ring-offset-2 bg-emerald-50/50",
+                                                )}
+                                            >
                                                 <TableCell className="text-center text-sm font-medium text-muted-foreground/60 pl-6">{(currentPage - 1) * itemsPerPage + idx + 1}</TableCell>
                                                 <TableCell className="font-bold text-foreground group-hover:text-blue-600 transition-colors uppercase">{program.name}</TableCell>
                                                 <TableCell>
@@ -1801,7 +1888,8 @@ const AuditPrograms = () => {
                                                     </DropdownMenu>
                                                 </TableCell>
                                             </TableRow>
-                                        ))
+                                            );
+                                        })
                                     )}
                                 </TableBody>
                             </Table>
@@ -1824,11 +1912,7 @@ const AuditPrograms = () => {
                         </Button>
                     </div>
                     <Card
-                        id="tour-step-audit-program-form"
-                        className={cn(
-                            "border-none shadow-sm animate-in fade-in slide-in-from-top-4 duration-300",
-                            tourHighlight(3),
-                        )}
+                        className="border-none shadow-sm animate-in fade-in slide-in-from-top-4 duration-300"
                     >
                         <CardHeader>
                             <CardTitle className="text-lg font-semibold">
@@ -1836,19 +1920,28 @@ const AuditPrograms = () => {
                             </CardTitle>
                         </CardHeader>
                         <CardContent className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
-                            <div className="space-y-2">
+                            <div id="tour-step-audit-name" className="space-y-2">
                                 <Label htmlFor="audit-name">Audit Name</Label>
                                 <Input
                                     id="audit-name"
                                     placeholder="E.g. Annual Quality Audit"
-                                    className="bg-white border-slate-200"
+                                    className={cn(
+                                        "bg-white border-slate-200",
+                                        tourHighlight(AUDIT_TOUR_STEP.AUDIT_NAME),
+                                    )}
                                     value={auditName}
                                     onChange={(e) => setAuditName(e.target.value)}
                                     disabled={view === "view"}
                                 />
                             </div>
 
-                            <div className="space-y-3 lg:col-span-1">
+                            <div
+                                id="tour-step-audit-criteria-type"
+                                className={cn(
+                                    "space-y-3 lg:col-span-1",
+                                    tourHighlight(AUDIT_TOUR_STEP.CRITERIA_TYPE),
+                                )}
+                            >
                                 <Label>Audit criteria</Label>
                                 <RadioGroup
                                     value={criteriaType}
@@ -1894,8 +1987,11 @@ const AuditPrograms = () => {
                                     </label>
                                 </RadioGroup>
 
-                                {criteriaType === "iso" ? (
-                                    <div className="flex flex-col gap-3 p-4 border border-slate-200 rounded-xl bg-slate-50/50 max-h-64 overflow-y-auto">
+                                {criteriaType === "iso" && (
+                                    <div
+                                        id="tour-step-audit-iso-checklist"
+                                        className="flex flex-col gap-3 p-4 border border-slate-200 rounded-xl bg-slate-50/50 max-h-64 overflow-y-auto"
+                                    >
                                         {ISO_STANDARDS.map((std) => (
                                             <div key={std} className="flex items-start space-x-3">
                                                 <Checkbox
@@ -1925,8 +2021,13 @@ const AuditPrograms = () => {
                                             </div>
                                         ))}
                                     </div>
-                                ) : (
-                                    <div className="space-y-3">
+                                )}
+
+                                {criteriaType === "module" && (
+                                    <div
+                                        id="tour-step-audit-module-checklist"
+                                        className="space-y-3"
+                                    >
                                         <div className="grid grid-cols-1 gap-2">
                                             <button
                                                 type="button"
@@ -1995,10 +2096,19 @@ const AuditPrograms = () => {
                                 )}
                             </div>
 
-                            <div className="space-y-2">
+                            <div
+                                id="tour-step-audit-frequency"
+                                className="space-y-2"
+                            >
                                 <Label>Frequency</Label>
                                 <Select onValueChange={setFrequency} value={frequency} disabled={view === "view"}>
-                                    <SelectTrigger className="bg-white border-slate-200">
+                                    <SelectTrigger
+                                        id="tour-step-audit-frequency-trigger"
+                                        className={cn(
+                                            "bg-white border-slate-200",
+                                            tourHighlight(AUDIT_TOUR_STEP.FREQUENCY),
+                                        )}
+                                    >
                                         <SelectValue placeholder="Select frequency" />
                                     </SelectTrigger>
                                     <SelectContent>
@@ -2012,7 +2122,10 @@ const AuditPrograms = () => {
                             </div>
 
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                <div className="space-y-2">
+                                <div
+                                    id="tour-step-audit-start-month"
+                                    className="space-y-2"
+                                >
                                     <Label>Start Month</Label>
                                     <Select 
                                         onValueChange={(val) => {
@@ -2023,7 +2136,13 @@ const AuditPrograms = () => {
                                         value={MONTHS[programStartDate.getMonth()]} 
                                         disabled={view === "view"}
                                     >
-                                        <SelectTrigger className="bg-white border-slate-200">
+                                        <SelectTrigger
+                                            id="tour-step-audit-start-month-trigger"
+                                            className={cn(
+                                                "bg-white border-slate-200",
+                                                tourHighlight(AUDIT_TOUR_STEP.START_MONTH),
+                                            )}
+                                        >
                                             <SelectValue placeholder="Select month" />
                                         </SelectTrigger>
                                         <SelectContent>
@@ -2033,7 +2152,10 @@ const AuditPrograms = () => {
                                         </SelectContent>
                                     </Select>
                                 </div>
-                                <div className="space-y-2">
+                                <div
+                                    id="tour-step-audit-start-year"
+                                    className="space-y-2"
+                                >
                                     <Label>Start Year</Label>
                                     <Select 
                                         onValueChange={(val) => {
@@ -2044,7 +2166,13 @@ const AuditPrograms = () => {
                                         value={programStartDate.getFullYear().toString()} 
                                         disabled={view === "view"}
                                     >
-                                        <SelectTrigger className="bg-white border-slate-200">
+                                        <SelectTrigger
+                                            id="tour-step-audit-start-year-trigger"
+                                            className={cn(
+                                                "bg-white border-slate-200",
+                                                tourHighlight(AUDIT_TOUR_STEP.START_YEAR),
+                                            )}
+                                        >
                                             <SelectValue placeholder="Select year" />
                                         </SelectTrigger>
                                         <SelectContent>
@@ -2056,19 +2184,39 @@ const AuditPrograms = () => {
                                 </div>
                             </div>
 
-                            <div className="space-y-2">
-                                <Label htmlFor="duration">Duration (Years)</Label>
-                                <Input
-                                    id="duration"
-                                    type="number"
-                                    className="bg-white border-slate-200"
-                                    value={duration}
-                                    onChange={(e) => setDuration(parseInt(e.target.value))}
+                            <div
+                                id="tour-step-audit-duration"
+                                className="space-y-2"
+                            >
+                                <Label htmlFor="tour-step-audit-duration-trigger">Duration (Years)</Label>
+                                <Select
+                                    value={String(Number.isFinite(duration) && duration > 0 ? duration : 3)}
+                                    onValueChange={(val) => setDuration(parseInt(val, 10))}
                                     disabled={view === "view"}
-                                />
+                                >
+                                    <SelectTrigger
+                                        id="tour-step-audit-duration-trigger"
+                                        className={cn(
+                                            "bg-white border-slate-200",
+                                            tourHighlight(AUDIT_TOUR_STEP.DURATION),
+                                        )}
+                                    >
+                                        <SelectValue placeholder="Select duration" />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                        {DURATION_YEARS.map((y) => (
+                                            <SelectItem key={y} value={y.toString()}>
+                                                {y} {y === 1 ? "year" : "years"}
+                                            </SelectItem>
+                                        ))}
+                                    </SelectContent>
+                                </Select>
                             </div>
 
-                            <div className="space-y-2">
+                            <div
+                                id="tour-step-audit-site"
+                                className="space-y-2"
+                            >
                                 <Label>Site</Label>
                                 <Select
                                     onValueChange={(val) => {
@@ -2086,7 +2234,13 @@ const AuditPrograms = () => {
                                     value={selectedSite}
                                     disabled={view === "view"}
                                 >
-                                    <SelectTrigger className="bg-white border-slate-200">
+                                    <SelectTrigger
+                                        id="tour-step-audit-site-trigger"
+                                        className={cn(
+                                            "bg-white border-slate-200",
+                                            tourHighlight(AUDIT_TOUR_STEP.SITE),
+                                        )}
+                                    >
                                         <SelectValue placeholder="Select site" />
                                     </SelectTrigger>
                                     <SelectContent>
@@ -2105,7 +2259,10 @@ const AuditPrograms = () => {
                                 </Select>
                             </div>
 
-                            <div className="space-y-3 md:col-span-2">
+                            <div
+                                id="tour-step-audit-departments"
+                                className={cn("space-y-3 md:col-span-2", tourHighlight(AUDIT_TOUR_STEP.DEPARTMENTS))}
+                            >
                                 <div className="flex flex-wrap items-center justify-between gap-2">
                                     <div>
                                         <Label className="text-slate-800">Departments</Label>
@@ -2268,7 +2425,10 @@ const AuditPrograms = () => {
                                 )}
                             </div>
 
-                            <div className="space-y-3 md:col-span-2">
+                            <div
+                                id="tour-step-audit-auditors"
+                                className={cn("space-y-3 md:col-span-2", tourHighlight(AUDIT_TOUR_STEP.AUDITORS))}
+                            >
                                 <div className="flex flex-wrap items-center justify-between gap-2">
                                     <div>
                                         <Label className="text-slate-800">Auditors</Label>
@@ -2463,20 +2623,20 @@ const AuditPrograms = () => {
                                     id="tour-step-generate-schedule"
                                     className={cn(
                                         "w-full md:w-auto bg-emerald-600 hover:bg-emerald-700 text-white px-8 py-2 h-auto rounded-lg font-semibold transition-all shadow-sm",
-                                        tourHighlight(4),
+                                        tourHighlight(AUDIT_TOUR_STEP.GENERATE_SCHEDULE),
                                     )}
                                     onClick={() => {
                                         handleGenerateSchedule();
                                         if (
                                             auditTourActive &&
-                                            auditTourStep === 4 &&
+                                            auditTourStep === AUDIT_TOUR_STEP.GENERATE_SCHEDULE &&
                                             auditName &&
                                             selectedSite &&
                                             (criteriaType === "iso"
                                                 ? selectedStandards.length > 0
                                                 : moduleFamily === "eosh" || moduleFamily === "qfs-kore")
                                         ) {
-                                            setAuditTourStep(5);
+                                            setAuditTourStep(AUDIT_TOUR_STEP.TIMELINE);
                                         }
                                     }}
                                 >
@@ -2516,7 +2676,7 @@ const AuditPrograms = () => {
                                 id="tour-step-program-timeline"
                                 className={cn(
                                     "border-none shadow-sm overflow-hidden bg-white",
-                                    tourHighlight(5),
+                                    tourHighlight(AUDIT_TOUR_STEP.TIMELINE),
                                 )}
                             >
                                 <CardHeader className="flex flex-row items-center gap-3 sm:gap-4 pb-2 p-4 sm:p-6">
@@ -2617,7 +2777,7 @@ const AuditPrograms = () => {
                                     id="tour-step-schedule-matrix"
                                     className={cn(
                                         "overflow-x-auto scrollbar-thin border rounded-xl bg-white shadow-sm p-1 scroll-mt-6",
-                                        tourHighlight(6),
+                                        tourHighlight(AUDIT_TOUR_STEP.SCHEDULE_MATRIX),
                                     )}
                                 >
                                     <table className="w-full text-left border-collapse min-w-max">
@@ -2943,7 +3103,7 @@ const AuditPrograms = () => {
                                         id="tour-step-save-program"
                                         className={cn(
                                             "bg-slate-900 hover:bg-slate-800 text-white px-10 py-6 h-auto rounded-xl font-bold text-lg gap-3 shadow-lg hover:shadow-xl transition-all active:scale-95",
-                                            tourHighlight(7),
+                                            tourHighlight(AUDIT_TOUR_STEP.SAVE_PROGRAM),
                                         )}
                                         onClick={handleSaveProgram}
                                         disabled={loading || selectedClausesList.length === 0}
@@ -2975,7 +3135,7 @@ const AuditPrograms = () => {
                     position={auditTourStepConfig.position}
                     onNext={handleAuditTourNext}
                     onBack={handleAuditTourBack}
-                    hideNext={auditTourStep === 7}
+                    hideNext={auditTourStep === AUDIT_TOUR_STEP.SAVE_PROGRAM}
                     onClose={() => {
                         exitAuditTour();
                         navigate("/getting-started");
