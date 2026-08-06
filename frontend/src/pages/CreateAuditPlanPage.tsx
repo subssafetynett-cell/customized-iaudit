@@ -610,7 +610,7 @@ const CreateAuditPlanPage = () => {
                     setAuditPlanTourStep(8);
                     return;
                 }
-                setTimeout(() => navigate("/audit"), 1000);
+                setTimeout(() => navigate("/audit?status=planned&saved=1"), 1000);
             } else {
                 const data = await response.json().catch(() => ({}));
                 toast.error(

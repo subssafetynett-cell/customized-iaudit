@@ -1084,7 +1084,20 @@ export function createAuditsRouter({ authenticateToken, checkTrialExpiration }) 
                     itinerary: itinerary || [],
                     userId: planOwnerId,
                     status: AUDIT_LIFECYCLE.PLANNED,
-                }
+                },
+                include: {
+                    leadAuditor: {
+                        select: { id: true, firstName: true, lastName: true },
+                    },
+                    auditProgram: {
+                        select: {
+                            id: true,
+                            name: true,
+                            isoStandard: true,
+                            site: { select: { id: true, name: true } },
+                        },
+                    },
+                },
             });
             res.status(201).json(plan);
         } catch (error) {

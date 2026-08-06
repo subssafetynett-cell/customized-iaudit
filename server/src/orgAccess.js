@@ -1915,11 +1915,17 @@ function buildOrgSubtreeProgramVisibilityOr(subtreeIds) {
     ];
 }
 
-/** Org-wide visibility for audit plans (includes linked programs). */
+/** Org-wide visibility for audit plans (includes linked programs).
+ * Do NOT spread program-visibility clauses — AuditPlan has no top-level `site` relation.
+ */
 function buildOrgSubtreePlanVisibilityOr(subtreeIds) {
     if (!subtreeIds.length) return [{ userId: -1 }];
     return [
-        ...buildOrgSubtreeProgramVisibilityOr(subtreeIds),
+        { userId: { in: subtreeIds } },
+        { leadAuditorId: { in: subtreeIds } },
+        { auditors: { some: { id: { in: subtreeIds } } } },
+        { user: { is: { creatorId: { in: subtreeIds } } } },
+        { user: { is: { id: { in: subtreeIds } } } },
         { auditProgram: { is: { userId: { in: subtreeIds } } } },
         { auditProgram: { is: { leadAuditorId: { in: subtreeIds } } } },
         { auditProgram: { is: { auditors: { some: { id: { in: subtreeIds } } } } } },
