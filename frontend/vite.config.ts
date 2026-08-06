@@ -47,4 +47,12 @@ export default defineConfig(({ mode }) => ({
       "@": path.resolve(__dirname, "./src"),
     },
   },
+  // Coolify builders are often RAM-constrained; skip gzip size reporting (extra heap at end of build).
+  build: {
+    reportCompressedSize: false,
+    chunkSizeWarningLimit: 1000,
+    rollupOptions: {
+      maxParallelFileOps: 2,
+    },
+  },
 }));

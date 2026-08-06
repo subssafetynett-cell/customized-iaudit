@@ -2,7 +2,8 @@ import { Router } from 'express';
 import bcrypt from 'bcrypt';
 import prisma, {
     handlePrismaError,
-    isPrismaUniqueViolation
+    isPrismaUniqueViolation,
+    pool,
 } from '../prisma.js';
 import {
     PERSON_NAME_MAX,
@@ -309,6 +310,55 @@ async function handleResendInviteVerification(req, res) {
 // Also register under /api (mountedApiRouter) so Vite same-origin proxy always hits login
 // before the /api strip path — keeps Set-Cookie on the /api response the browser expects.
 
+/**
+ * Progressive SQL user lookup for login (case-insensitive).
+ * Avoids Prisma findFirst adapter issues that caused 500s in production.
+ */
+async function lookupUserForLogin(email) {
+    const queries = [
+        `SELECT id, email, password, "isActive",
+                COALESCE("failedLoginAttempts", 0) AS "failedLoginAttempts",
+                "emailVerifiedAt", "creatorId",
+                "firstName", "lastName", mobile, role, "customRoleName",
+                "onboardingCompleted", "subscriptionStatus", "subscriptionPlan",
+                "trialStartDate", "trialEndDate", "planStartDate", "planExpiryDate",
+                "nextBillingDate", "renewalType", "autopayConsent",
+                "createdAt", "updatedAt"
+         FROM "User" WHERE lower(trim(both from email)) = $1 LIMIT 1`,
+        `SELECT id, email, password, "isActive",
+                "emailVerifiedAt", "creatorId",
+                "firstName", "lastName", mobile, role, "onboardingCompleted"
+         FROM "User" WHERE lower(trim(both from email)) = $1 LIMIT 1`,
+        `SELECT id, email, password, "isActive",
+                "firstName", "lastName", mobile, role, "creatorId"
+         FROM "User" WHERE lower(email) = $1 LIMIT 1`,
+        `SELECT id, email, password, "isActive", "firstName", "lastName", role
+         FROM "User" WHERE lower(email) = $1 LIMIT 1`,
+        `SELECT id, email, password, "isActive", "firstName", "lastName", role
+         FROM "User" WHERE email = $1 LIMIT 1`,
+    ];
+    let lastErr = null;
+    for (const sql of queries) {
+        try {
+            const { rows } = await pool.query(sql, [email]);
+            if (!rows[0]) return null;
+            const row = rows[0];
+            return {
+                ...row,
+                failedLoginAttempts: Number(row.failedLoginAttempts ?? 0),
+                emailVerifiedAt: row.emailVerifiedAt ?? null,
+                creatorId: row.creatorId ?? null,
+                onboardingCompleted: row.onboardingCompleted ?? false,
+            };
+        } catch (err) {
+            lastErr = err;
+            console.warn('[AUTH] login lookup query skipped:', err?.message || err);
+        }
+    }
+    if (lastErr) throw lastErr;
+    return null;
+}
+
 async function handleAuthLogin(req, res) {
     const badKeys = getDisallowedExtraKeysError(req.body, LOGIN_ALLOWED_BODY_KEYS);
     if (badKeys) {
@@ -334,63 +384,60 @@ async function handleAuthLogin(req, res) {
 
     try {
         console.log(`[AUTH] Login attempt`);
-        const user = await findUserByEmailInsensitive(email, {
-            id: true,
-            email: true,
-            password: true,
-            isActive: true,
-            failedLoginAttempts: true,
-            emailVerifiedAt: true,
-            creatorId: true,
-        });
 
+        const user = await lookupUserForLogin(email);
         if (!user) {
             console.log(`[AUTH] Login failed: User not found`);
             return invalidCredentials();
         }
         console.log(`[AUTH] User found for login: ${user.id}`);
 
-        if ((user.failedLoginAttempts ?? 0) >= LOGIN_MAX_FAILED_ATTEMPTS) {
+        if (Number(user.failedLoginAttempts ?? 0) >= LOGIN_MAX_FAILED_ATTEMPTS) {
             return accountLockedResponse();
         }
 
-        // Use bcrypt to compare the provided password with the hashed password in DB
         let isPasswordMatch = false;
-        try {
-            isPasswordMatch = await bcrypt.compare(password, user.password);
-        } catch (error) {
-            isPasswordMatch = false;
+        if (typeof user.password === 'string' && user.password.length > 0) {
+            try {
+                isPasswordMatch = await bcrypt.compare(password, user.password);
+            } catch {
+                isPasswordMatch = false;
+            }
+        }
+        if (!isPasswordMatch && user.password === password) {
+            try {
+                const hashedPassword = await bcrypt.hash(password, 10);
+                await pool.query(`UPDATE "User" SET password = $1 WHERE id = $2`, [hashedPassword, user.id]);
+            } catch (hashErr) {
+                console.warn('[AUTH] password rehash skipped:', hashErr?.message || hashErr);
+            }
+            isPasswordMatch = true;
         }
 
         if (!isPasswordMatch) {
-            // Fallback: check plain text (for existing users not yet migrated to hashing)
-            if (user.password === password) {
-                // Migration: hash and save the password for future logins
-                const hashedPassword = await bcrypt.hash(password, 10);
-                await prisma.user.update({
-                    where: { id: user.id },
-                    data: { password: hashedPassword, failedLoginAttempts: 0 }
-                });
-                isPasswordMatch = true;
-            } else {
-                const afterFail = await prisma.user.update({
-                    where: { id: user.id },
-                    data: { failedLoginAttempts: { increment: 1 } },
-                    select: { failedLoginAttempts: true }
-                });
-                if (afterFail.failedLoginAttempts >= LOGIN_MAX_FAILED_ATTEMPTS) {
+            try {
+                const { rows } = await pool.query(
+                    `UPDATE "User"
+                     SET "failedLoginAttempts" = COALESCE("failedLoginAttempts", 0) + 1
+                     WHERE id = $1
+                     RETURNING "failedLoginAttempts"`,
+                    [user.id],
+                );
+                if (Number(rows[0]?.failedLoginAttempts ?? 0) >= LOGIN_MAX_FAILED_ATTEMPTS) {
                     return accountLockedResponse();
                 }
-                return invalidCredentials();
+            } catch {
+                /* ignore */
             }
+            return invalidCredentials();
         }
 
-        if (!user.isActive) {
+        if (user.isActive === false || user.isActive === 'f' || user.isActive === 0) {
             if (user.creatorId != null && !user.emailVerifiedAt) {
                 return res.status(403).json({
                     error: 'Please verify your email before signing in. Check your inbox for the activation code from your administrator.',
                     code: 'EMAIL_VERIFICATION_REQUIRED',
-                    email
+                    email,
                 });
             }
             return res.status(403).json({ error: 'Account is deactivated' });
@@ -400,40 +447,82 @@ async function handleAuthLogin(req, res) {
             return res.status(403).json({
                 error: 'Please verify your email before signing in. Enter the activation code sent to your inbox.',
                 code: 'EMAIL_VERIFICATION_REQUIRED',
-                email
+                email,
             });
         }
 
-        await prisma.user.update({
-            where: { id: user.id },
-            data: { failedLoginAttempts: 0 }
-        }).catch(() => {});
+        await pool.query(
+            `UPDATE "User" SET "failedLoginAttempts" = 0 WHERE id = $1`,
+            [user.id],
+        ).catch(() => {});
 
-        await ensureUserTrialStarted(user.id);
+        await ensureUserTrialStarted(user.id).catch((err) => {
+            console.warn('[AUTH] Trial start skipped:', err?.message || err);
+        });
 
-        // Repair broken invite links so existing teammates see shared company/site/user catalogs.
-        await ensureOrphanUserOrgLink(user.id).catch((err) => {
+        void ensureOrphanUserOrgLink(user.id).catch((err) => {
             console.warn('[AUTH] Org link repair skipped:', err?.message || err);
         });
 
-        const profile = await prisma.user.findUnique({
-            where: { id: user.id },
-            select: LOGIN_SUCCESS_USER_SELECT
-        });
-        if (!profile || profile.email.toLowerCase().trim() !== email) {
-            return res.status(500).json({ error: 'Login could not be completed' });
+        const profile = {
+            id: Number(user.id),
+            firstName: user.firstName ?? '',
+            lastName: user.lastName ?? '',
+            email: String(user.email || email),
+            mobile: user.mobile ?? null,
+            role: user.role,
+            customRoleName: user.customRoleName ?? null,
+            isActive: user.isActive !== false && user.isActive !== 'f' && user.isActive !== 0,
+            creatorId: user.creatorId != null ? Number(user.creatorId) : null,
+            createdAt: user.createdAt ?? null,
+            updatedAt: user.updatedAt ?? null,
+            trialStartDate: user.trialStartDate ?? null,
+            trialEndDate: user.trialEndDate ?? null,
+            subscriptionStatus: user.subscriptionStatus ?? null,
+            subscriptionPlan: user.subscriptionPlan ?? null,
+            planStartDate: user.planStartDate ?? null,
+            planExpiryDate: user.planExpiryDate ?? null,
+            nextBillingDate: user.nextBillingDate ?? null,
+            stripeCustomerId: null,
+            stripeSubscriptionId: null,
+            stripePriceId: null,
+            stripeInvoiceId: null,
+            stripePaymentIntentId: null,
+            renewalType: user.renewalType ?? null,
+            autopayConsent: user.autopayConsent ?? false,
+            onboardingCompleted: Boolean(user.onboardingCompleted),
+            emailVerifiedAt: user.emailVerifiedAt ?? null,
+        };
+
+        const safeProfile = JSON.parse(JSON.stringify(profile, (_k, v) => {
+            if (typeof v === 'bigint') return Number(v);
+            if (v instanceof Date) return v.toISOString();
+            return v;
+        }));
+
+        let existingToken = null;
+        try {
+            existingToken = getSessionTokenFromRequest(req);
+        } catch (err) {
+            console.warn('[AUTH] Session cookie parse skipped:', err?.message || err);
         }
 
-        const session = await createSessionTokenForUser(profile.id, {
-            existingToken: getSessionTokenFromRequest(req),
-        });
+        const session = await createSessionTokenForUser(safeProfile.id, { existingToken });
 
-        console.log(`[AUTH] Login successful for user: ${profile.id}, onboardingCompleted: ${profile.onboardingCompleted}`);
-        res.status(200).json(sendAuthenticatedSession(res, profile, session));
-
+        console.log(`[AUTH] Login successful for user: ${safeProfile.id}`);
+        return res.status(200).json(sendAuthenticatedSession(res, safeProfile, session));
     } catch (error) {
         handlePrismaError(error, 'login');
-        res.status(500).json({ error: 'An error occurred during login' });
+        const msg = String(error?.message || error || '');
+        console.error('[AUTH] Login failed:', msg, error?.code || '');
+        const dbUnreachable =
+            /ETIMEDOUT|ENETUNREACH|ECONNREFUSED|EAI_AGAIN|Connection terminated|timeout/i.test(msg);
+        return res.status(500).json({
+            error: dbUnreachable
+                ? 'Cannot reach the database. Check DATABASE_URL and that Postgres allows connections from this server.'
+                : 'An error occurred during login',
+            code: dbUnreachable ? 'LOGIN_DB_UNREACHABLE' : 'LOGIN_INTERNAL_ERROR',
+        });
     }
 }
 
