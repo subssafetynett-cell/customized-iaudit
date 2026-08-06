@@ -52,6 +52,7 @@ import {
     getAuditPlanTemplateSubtitle,
     getLockedPlanTemplatesFromProgram,
     isAuditPlanMultiStandard,
+    resolveAuditPlanStandards,
     serializeAuditPlanTemplateIds,
 } from "@/data/auditTemplates";
 import { TourStepPopover } from "@/components/TourStepPopover";
@@ -202,6 +203,14 @@ const CreateAuditPlanPage = () => {
     const templatesLockedFromProgram = Boolean(lockedPlanTemplates && lockedPlanTemplates.length > 0);
     const lockedTemplatesAreModules = Boolean(
         lockedPlanTemplates?.some((t) => t.module === "EOSH" || t.module === "QFS KORE"),
+    );
+    const programIsoStandards = useMemo(
+        () =>
+            resolveAuditPlanStandards(
+                String(activeProgram?.isoStandard || ""),
+                activeProgram?.isoStandard,
+            ),
+        [activeProgram?.isoStandard],
     );
 
     const collectSeedAuditors = (...sources: any[]) => {
@@ -753,12 +762,12 @@ const CreateAuditPlanPage = () => {
                                                         String(activeProgram?.isoStandard || ""),
                                                         activeProgram?.isoStandard,
                                                     ));
-                                            // Plan UI: one IMS card for multi-ISO; all IDs still saved via selectedTemplateId.
+                                            // Plan UI: one IMS card for multi-ISO; single integrated template id is saved.
                                             const displayTemplates = isMultiIso
                                                 ? [lockedPlanTemplates[0]]
                                                 : lockedPlanTemplates;
                                             const multiSubtitle = isMultiIso
-                                                ? `${lockedPlanTemplates.map((x) => x.standard).filter(Boolean).join(" · ")} · ${lockedPlanTemplates.length} checklists`
+                                                ? `${programIsoStandards.length > 0 ? programIsoStandards.join(" · ") : lockedPlanTemplates.map((x) => x.standard).filter(Boolean).join(" · ")} · Integrated`
                                                 : null;
                                             return displayTemplates.map((t) => (
                                             <div

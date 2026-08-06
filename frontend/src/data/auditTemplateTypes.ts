@@ -1,4 +1,4 @@
-export type AuditStandard = "ISO 9001" | "ISO 14001" | "ISO 45001" | "ISO 22000";
+export type AuditStandard = "ISO 9001" | "ISO 14001" | "ISO 45001" | "ISO 22000" | "IMS";
 export type TemplateType = "section" | "checklist" | "clause-checklist" | "process-audit";
 
 export interface SectionContent {

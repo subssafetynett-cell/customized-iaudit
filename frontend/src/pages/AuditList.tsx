@@ -57,6 +57,7 @@ import {
     findAuditTemplates,
     getAuditPlanTemplateLabel,
     parseAuditPlanTemplateIds,
+    resolveAuditPlanStandards,
     type AuditTemplate,
 } from "@/data/auditTemplates";
 import { resolveAuditModuleDisplayName } from "@/lib/auditFindings";
@@ -82,6 +83,21 @@ function resolveAuditListTypeLabel(plan: {
     if (moduleTemplates.length > 0) {
         const labels = moduleTemplates.map((t) => getAuditPlanTemplateLabel(t));
         return [...new Set(labels)].join("; ");
+    }
+
+    const performModules = getPlanModuleOptions(
+        plan.templateId,
+        plan.auditProgram?.isoStandard,
+    );
+    if (performModules.length === 1 && performModules[0].isTripleMapping) {
+        const stds = resolveAuditPlanStandards(
+            String(plan.auditProgram?.isoStandard || ""),
+            plan.auditProgram?.isoStandard,
+        );
+        return stds.length > 0 ? stds.join(", ") : "IMS Checklist";
+    }
+    if (performModules.length === 1 && performModules[0].standard) {
+        return performModules[0].standard;
     }
 
     const fromIds = parseAuditPlanTemplateIds(plan.templateId)
@@ -360,7 +376,10 @@ const AuditList = () => {
         plan: any,
         downloadFormat?: AuditReportFormat,
     ) => {
-        const modules = getPlanModuleOptions(plan.templateId);
+        const modules = getPlanModuleOptions(
+            plan.templateId,
+            plan.auditProgram?.isoStandard,
+        );
         // List payloads omit auditData — always load the full plan before opening/downloading.
         if (modules.length <= 1) {
             if (mode === "perform") {
@@ -440,7 +459,10 @@ const AuditList = () => {
         status?: string;
         progress?: number;
     }) => {
-        const ids = parseAuditPlanTemplateIds(fullPlan?.templateId);
+        const ids = getPlanModuleOptions(
+            fullPlan?.templateId,
+            fullPlan?.auditProgram?.isoStandard,
+        ).map((m) => m.id);
         if (!fullPlan?.id || ids.length <= 1 || fullPlan.auditData == null) return;
 
         const overall = getPlanOverallChecklistProgress(fullPlan);

@@ -68,6 +68,9 @@ import {
   usesYesNoChecklistFindings,
   usesOkNotOkChecklistFindings,
   normalizeOkNotOkFindingValue,
+  resolvePerformAuditTemplateIds,
+  resolveAuditPlanStandards,
+  resolveImsStandardFlags,
 } from "@/data/auditTemplates";
 import { IsoOkNotOkFindingSelect } from "@/components/IsoOkNotOkFindingSelect";
 import { toast } from "sonner";
@@ -110,6 +113,7 @@ import {
   ensureModuleStorePreservesTopLevel,
   moduleStoreEntryFromTopLevel,
   lookupModuleStoreEntry,
+  lookupPerformAuditModuleEntry,
   mergeModuleStoreEntries,
   moduleStoreEntryHasAnswers,
   countModuleStoreAnswers,
@@ -465,14 +469,18 @@ const AuditExecute = () => {
       ? location.state.focusFindingId
       : undefined;
 
-  // Use the template(s) attached to the plan (resolve legacy/alias ids)
+  // Use the template(s) attached to the plan (resolve legacy/alias ids; multi-ISO → IMS)
   const planTemplateIds = useMemo(
-    () => parseAuditPlanTemplateIds(plan?.templateId),
-    [plan?.templateId],
+    () =>
+      resolvePerformAuditTemplateIds(
+        plan?.templateId,
+        plan?.auditProgram?.isoStandard,
+      ),
+    [plan?.templateId, plan?.auditProgram?.isoStandard],
   );
   const planTemplates = useMemo(
-    () => findAuditTemplates(plan?.templateId),
-    [plan?.templateId],
+    () => planTemplateIds.map((id) => findAuditTemplate(id)).filter(Boolean) as typeof auditTemplates,
+    [planTemplateIds],
   );
   const [activeModuleId, setActiveModuleId] = useState(
     () => lockedModuleId || "",
@@ -746,10 +754,41 @@ const AuditExecute = () => {
     );
   };
 
+  const programIsoStandards = useMemo(
+    () =>
+      resolveAuditPlanStandards(
+        String(plan?.auditProgram?.isoStandard || plan?.criteria || ""),
+        plan?.auditProgram?.isoStandard,
+      ),
+    [plan?.auditProgram?.isoStandard, plan?.criteria],
+  );
+
+  const imsStandardFlags = useMemo(
+    () => resolveImsStandardFlags(programIsoStandards),
+    [programIsoStandards],
+  );
+
   const activeStandards = {
-    iso9001: plan?.criteria?.includes("9001") || plan?.standard?.includes("9001") || plan?.criteria?.toLowerCase().includes("quality") || plan?.criteria?.toLowerCase().includes("9001"),
-    iso14001: plan?.criteria?.includes("14001") || plan?.standard?.includes("14001") || plan?.criteria?.toLowerCase().includes("environment") || plan?.criteria?.toLowerCase().includes("14001"),
-    iso45001: plan?.criteria?.includes("45001") || plan?.standard?.includes("45001") || plan?.criteria?.toLowerCase().includes("health") || plan?.criteria?.toLowerCase().includes("safety") || plan?.criteria?.toLowerCase().includes("ohs") || plan?.criteria?.toLowerCase().includes("45001"),
+    iso9001:
+      imsStandardFlags.iso9001 ||
+      plan?.criteria?.includes("9001") ||
+      plan?.standard?.includes("9001") ||
+      plan?.criteria?.toLowerCase().includes("quality") ||
+      plan?.criteria?.toLowerCase().includes("9001"),
+    iso14001:
+      imsStandardFlags.iso14001 ||
+      plan?.criteria?.includes("14001") ||
+      plan?.standard?.includes("14001") ||
+      plan?.criteria?.toLowerCase().includes("environment") ||
+      plan?.criteria?.toLowerCase().includes("14001"),
+    iso45001:
+      imsStandardFlags.iso45001 ||
+      plan?.criteria?.includes("45001") ||
+      plan?.standard?.includes("45001") ||
+      plan?.criteria?.toLowerCase().includes("health") ||
+      plan?.criteria?.toLowerCase().includes("safety") ||
+      plan?.criteria?.toLowerCase().includes("ohs") ||
+      plan?.criteria?.toLowerCase().includes("45001"),
   };
 
   // If no standards match, and it's triple mapping, show all as fallback
@@ -943,7 +982,11 @@ const AuditExecute = () => {
             })()
           : found.auditData;
       if (!incoming || typeof incoming !== "object") return;
-      const idsProbe = parseAuditPlanTemplateIds(found.templateId);
+      const rawIdsProbe = parseAuditPlanTemplateIds(found.templateId);
+      const idsProbe = resolvePerformAuditTemplateIds(
+        found.templateId,
+        found.auditProgram?.isoStandard,
+      );
       const preferredProbe =
         (lockedModuleId &&
           (idsProbe.includes(lockedModuleId)
@@ -961,9 +1004,11 @@ const AuditExecute = () => {
         incoming as Record<string, unknown>,
         idsProbe,
       );
-      const incomingMod = preferredProbe
-        ? lookupModuleStoreEntry(incomingStore, preferredProbe)
-        : null;
+      const incomingMod =
+        lookupPerformAuditModuleEntry(incomingStore, idsProbe, rawIdsProbe) ??
+        (preferredProbe
+          ? lookupModuleStoreEntry(incomingStore, preferredProbe)
+          : null);
       const currentMod = preferredProbe
         ? lookupModuleStoreEntry(moduleDataByTemplateIdRef.current, preferredProbe)
         : null;
@@ -993,7 +1038,11 @@ const AuditExecute = () => {
           ? (dataRaw as Record<string, unknown>)
           : {},
       );
-      const ids = parseAuditPlanTemplateIds(found.templateId);
+      const rawIds = parseAuditPlanTemplateIds(found.templateId);
+      const ids = resolvePerformAuditTemplateIds(
+        found.templateId,
+        found.auditProgram?.isoStandard,
+      );
       const multiModule = ids.length > 1;
       const lockedResolved =
         resolveAuditTemplateId(lockedModuleId) || lockedModuleId;
@@ -1035,9 +1084,11 @@ const AuditExecute = () => {
       moduleDataByTemplateIdRef.current = store;
       setAutosaveBaseline(data as Record<string, unknown>);
 
-      const mod = preferredActive
-        ? lookupModuleStoreEntry(store, preferredActive)
-        : null;
+      const mod =
+        lookupPerformAuditModuleEntry(store, ids, rawIds) ??
+        (preferredActive
+          ? lookupModuleStoreEntry(store, preferredActive)
+          : null);
 
       // Still fetching and this module looks empty — wait for full plan before
       // locking empty UI (stale cache must not block real answers).
@@ -1268,7 +1319,11 @@ const AuditExecute = () => {
       setAnswersHydrated(true);
     } else {
       setFindingsReportForm(buildFindingsReportDefaults(found));
-      const ids = parseAuditPlanTemplateIds(found.templateId);
+      const rawIds = parseAuditPlanTemplateIds(found.templateId);
+      const ids = resolvePerformAuditTemplateIds(
+        found.templateId,
+        found.auditProgram?.isoStandard,
+      );
       const lockedResolved =
         resolveAuditTemplateId(lockedModuleId) || lockedModuleId;
       const preferred =
@@ -3995,7 +4050,7 @@ const AuditExecute = () => {
           <div className="h-0.5 flex-1 bg-slate-200"></div>
         </div>
 
-        {planTemplates.length > 1 && (
+        {planTemplates.length > 1 && !template?.isTripleMapping && (
           <div className="rounded-xl border border-emerald-200 bg-emerald-50/40 p-3 space-y-2">
             <p className="text-xs font-bold uppercase tracking-wide text-emerald-800">
               {lockToSelectedModule

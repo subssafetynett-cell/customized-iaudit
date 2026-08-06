@@ -4,6 +4,8 @@ import {
     getAuditPlanTemplateLabel,
     parseAuditPlanTemplateIds,
     resolveAuditTemplateId,
+    resolvePerformAuditTemplateIds,
+    resolveAuditPlanStandards,
     type AuditTemplate,
 } from "@/data/auditTemplates";
 import { isQfsKoreSectionHeader } from "@/lib/qfsKoreChecklistUi";
@@ -14,14 +16,32 @@ import {
     pickRichestFindingsReportForm,
 } from "@/lib/findingsReportForm";
 
-/** True when the audit plan has more than one assigned checklist/module. */
-export function planHasMultipleModules(templateId?: string | null): boolean {
-    return parseAuditPlanTemplateIds(templateId).length > 1;
+/** True when the audit plan has more than one assigned checklist/module (after IMS normalization). */
+export function planHasMultipleModules(
+    templateId?: string | null,
+    programIsoStandard?: string | null,
+): boolean {
+    return (
+        resolvePerformAuditTemplateIds(templateId, programIsoStandard).length > 1
+    );
 }
 
-/** Templates assigned to a plan (resolved, de-duplicated). */
-export function getPlanModuleOptions(templateId?: string | null): AuditTemplate[] {
-    return findAuditTemplates(templateId);
+/** Templates used for perform audit / reports (multi-ISO → single IMS checklist). */
+export function getPlanModuleOptions(
+    templateId?: string | null,
+    programIsoStandard?: string | null,
+): AuditTemplate[] {
+    return resolvePerformAuditTemplateIds(templateId, programIsoStandard)
+        .map((id) => findAuditTemplate(id))
+        .filter((t): t is AuditTemplate => Boolean(t));
+}
+
+/** @deprecated Prefer passing program ISO — wraps {@link getPlanModuleOptions}. */
+export function getPlanModuleOptionsFromPlan(plan: {
+    templateId?: string | null;
+    auditProgram?: { isoStandard?: string | null } | null;
+} | null | undefined): AuditTemplate[] {
+    return getPlanModuleOptions(plan?.templateId, plan?.auditProgram?.isoStandard);
 }
 
 /** Evidence key for a checklist row — always namespaced by module when moduleId is known. */
@@ -508,6 +528,32 @@ export function lookupModuleStoreEntry(
     return null;
 }
 
+/**
+ * Find module answers when perform-audit uses normalized ids (e.g. legacy multi-ISO → single IMS).
+ */
+export function lookupPerformAuditModuleEntry(
+    store: Record<string, ModuleStoreEntry> | null | undefined,
+    performTemplateIds: string[],
+    savedTemplateIds: string[],
+): ModuleStoreEntry | null {
+    for (const id of performTemplateIds) {
+        const entry = lookupModuleStoreEntry(store, id);
+        if (entry && moduleStoreEntryHasAnswers(entry)) return entry;
+    }
+    let best: ModuleStoreEntry | null = null;
+    let bestCount = 0;
+    for (const id of savedTemplateIds) {
+        if (performTemplateIds.includes(id)) continue;
+        const entry = lookupModuleStoreEntry(store, id);
+        const count = countModuleStoreAnswers(entry);
+        if (count > bestCount) {
+            best = entry;
+            bestCount = count;
+        }
+    }
+    return best;
+}
+
 /** Prefer non-empty fields when merging two module snapshots (never wipe answers with {}). */
 export function mergeModuleStoreEntries(
     existing: ModuleStoreEntry | null | undefined,
@@ -828,7 +874,11 @@ export function getModuleChecklistProgress(
 export function getPlanModulesProgressMap(
     plan: { templateId?: string | null; auditData?: unknown } | null | undefined,
 ): Record<string, number> {
-    const modules = getPlanModuleOptions(plan?.templateId);
+    const modules = getPlanModuleOptions(
+        plan?.templateId,
+        (plan as { auditProgram?: { isoStandard?: string | null } | null })?.auditProgram
+            ?.isoStandard,
+    );
     const out: Record<string, number> = {};
     for (const mod of modules) {
         out[mod.id] = getModuleChecklistProgress(plan, mod.id).percent;
@@ -843,7 +893,11 @@ export function getPlanModulesProgressMap(
 export function getPlanOverallChecklistProgress(
     plan: { templateId?: string | null; auditData?: unknown } | null | undefined,
 ): { percent: number; completed: number; total: number; byModuleId: Record<string, number> } {
-    const modules = getPlanModuleOptions(plan?.templateId);
+    const modules = getPlanModuleOptions(
+        plan?.templateId,
+        (plan as { auditProgram?: { isoStandard?: string | null } | null })?.auditProgram
+            ?.isoStandard,
+    );
     const byModuleId: Record<string, number> = {};
     let completed = 0;
     let total = 0;
@@ -904,9 +958,14 @@ export function scopePlanToModule(
     plan: Record<string, any>,
     moduleId: string,
 ): Record<string, any> {
-    const ids = parseAuditPlanTemplateIds(plan?.templateId);
+    const rawIds = parseAuditPlanTemplateIds(plan?.templateId);
+    const performIds = resolvePerformAuditTemplateIds(
+        plan?.templateId,
+        plan?.auditProgram?.isoStandard,
+    );
     const resolvedId =
-        ids.find((id) => id === moduleId) ||
+        performIds.find((id) => id === moduleId) ||
+        rawIds.find((id) => id === moduleId) ||
         findAuditTemplate(moduleId)?.id ||
         moduleId;
     const template = findAuditTemplate(resolvedId);
@@ -915,9 +974,10 @@ export function scopePlanToModule(
         : resolvedId;
 
     const auditData = parseAuditDataBlob(plan?.auditData);
-    const multiModule = ids.length > 1;
-    const store = ensureModuleStorePreservesTopLevel(auditData, ids);
+    const multiModule = performIds.length > 1;
+    const store = ensureModuleStorePreservesTopLevel(auditData, performIds);
     const mod =
+        lookupPerformAuditModuleEntry(store, performIds, rawIds) ||
         store[resolvedId] ||
         store[moduleId] ||
         getModuleStoreEntry(
@@ -1003,4 +1063,14 @@ export function scopePlanToModule(
         auditData: scopedAuditData,
         auditName: alreadyTagged ? baseName : `${baseName} — ${label}`,
     };
+}
+
+/** Normalize plan audit data for PDF/Word/Excel (IMS + legacy multi-ISO → single scoped blob). */
+export function normalizePlanForReport(plan: Record<string, any>): Record<string, any> {
+    const modules = getPlanModuleOptions(
+        plan?.templateId,
+        plan?.auditProgram?.isoStandard,
+    );
+    if (modules.length !== 1) return plan;
+    return scopePlanToModule(plan, modules[0].id);
 }
