@@ -50,7 +50,7 @@ import {
     getAuditPlanTemplateLabel,
     getAuditPlanTemplateOptions,
     getAuditPlanTemplateSubtitle,
-    getLockedPlanTemplatesFromExecution,
+    getLockedPlanTemplatesFromProgram,
     isAuditPlanMultiStandard,
     serializeAuditPlanTemplateIds,
 } from "@/data/auditTemplates";
@@ -187,8 +187,9 @@ const CreateAuditPlanPage = () => {
         [activeProgram, companies],
     );
     const lockedPlanTemplates = useMemo(() => {
-        const fromExecution = getLockedPlanTemplatesFromExecution(execution, activeProgram);
-        if (fromExecution && fromExecution.length > 0) return fromExecution;
+        const fromProgram = getLockedPlanTemplatesFromProgram(activeProgram, execution);
+        if (fromProgram && fromProgram.length > 0) return fromProgram;
+        // Edit-mode fallback for module programs when execution clauses are missing
         const iso = String(activeProgram?.isoStandard || "");
         const isModuleProgram =
             activeProgram?.scheduleData?.criteriaType === "module" ||
@@ -199,6 +200,9 @@ const CreateAuditPlanPage = () => {
         return fromPlan.length > 0 ? fromPlan : null;
     }, [execution, activeProgram, plan?.templateId]);
     const templatesLockedFromProgram = Boolean(lockedPlanTemplates && lockedPlanTemplates.length > 0);
+    const lockedTemplatesAreModules = Boolean(
+        lockedPlanTemplates?.some((t) => t.module === "EOSH" || t.module === "QFS KORE"),
+    );
 
     const collectSeedAuditors = (...sources: any[]) => {
         const collected: any[] = [];
@@ -376,7 +380,16 @@ const CreateAuditPlanPage = () => {
 
             setAuditObjective(`To verify compliance with ${currentStandard} and internal procedures, and to identify areas for improvement.`);
             if (lockedPlanTemplates && lockedPlanTemplates.length > 0) {
-                const moduleLabels = lockedPlanTemplates.map((t) => getAuditPlanTemplateLabel(t)).join("; ");
+                const isMultiIso =
+                    !lockedPlanTemplates.some((t) => t.module === "EOSH" || t.module === "QFS KORE") &&
+                    (lockedPlanTemplates.length > 1 ||
+                        isAuditPlanMultiStandard(
+                            String(activeProgram?.isoStandard || currentStandard || ""),
+                            activeProgram?.isoStandard || program?.isoStandard,
+                        ));
+                const moduleLabels = isMultiIso
+                    ? getAuditPlanTemplateLabel(lockedPlanTemplates[0], true)
+                    : lockedPlanTemplates.map((t) => getAuditPlanTemplateLabel(t)).join("; ");
                 setAuditCriteria(`${moduleLabels}, Internal Manual, Local Regulations`);
             } else {
                 setAuditCriteria(`${currentStandard}, Internal Manual, Local Regulations`);
@@ -396,7 +409,7 @@ const CreateAuditPlanPage = () => {
                     setSelectedAuditorId(program.auditorIds[0].toString());
                 }
 
-                // Lock / auto-select templates from audit program modules (EOSH / QFS)
+                // Lock / auto-select templates from the audit program (ISO standards or EOSH / QFS modules)
                 if (lockedPlanTemplates && lockedPlanTemplates.length > 0) {
                     setSelectedTemplateId(
                         serializeAuditPlanTemplateIds(lockedPlanTemplates.map((t) => t.id)),
@@ -715,7 +728,9 @@ const CreateAuditPlanPage = () => {
                                     <Label className="text-xs font-black text-indigo-700 uppercase tracking-wide flex items-center gap-1.5">
                                         <FileText className="w-3.5 h-3.5" />
                                         {templatesLockedFromProgram
-                                            ? "Assigned Audit Modules"
+                                            ? lockedTemplatesAreModules
+                                                ? "Assigned Audit Modules"
+                                                : "Audit Template"
                                             : "Choose Audit Template"}
                                     </Label>
                                     <span className="bg-amber-400 text-amber-900 text-[9px] font-black uppercase px-2 py-0.5 rounded-full tracking-wider">
@@ -726,11 +741,28 @@ const CreateAuditPlanPage = () => {
                                 {templatesLockedFromProgram && lockedPlanTemplates ? (
                                     <div className="space-y-2">
                                         <p className="text-xs text-slate-500">
-                                            These modules were selected in the audit program for this period and cannot be changed here.
+                                            {lockedTemplatesAreModules
+                                                ? "These modules were selected in the audit program for this period and cannot be changed here."
+                                                : "This template is set from the ISO standard(s) on the audit program and cannot be changed here."}
                                         </p>
-                                        {lockedPlanTemplates.map((t) => (
+                                        {(() => {
+                                            const isMultiIso =
+                                                !lockedTemplatesAreModules &&
+                                                (lockedPlanTemplates.length > 1 ||
+                                                    isAuditPlanMultiStandard(
+                                                        String(activeProgram?.isoStandard || ""),
+                                                        activeProgram?.isoStandard,
+                                                    ));
+                                            // Plan UI: one IMS card for multi-ISO; all IDs still saved via selectedTemplateId.
+                                            const displayTemplates = isMultiIso
+                                                ? [lockedPlanTemplates[0]]
+                                                : lockedPlanTemplates;
+                                            const multiSubtitle = isMultiIso
+                                                ? `${lockedPlanTemplates.map((x) => x.standard).filter(Boolean).join(" · ")} · ${lockedPlanTemplates.length} checklists`
+                                                : null;
+                                            return displayTemplates.map((t) => (
                                             <div
-                                                key={t.id}
+                                                key={isMultiIso ? "ims-locked" : t.id}
                                                 className="flex items-center gap-3 p-3 bg-white border border-indigo-100 rounded-xl shadow-sm"
                                             >
                                                 <div className="w-8 h-8 rounded-lg bg-indigo-100 flex items-center justify-center shrink-0">
@@ -738,10 +770,11 @@ const CreateAuditPlanPage = () => {
                                                 </div>
                                                 <div className="min-w-0 flex-1">
                                                     <p className="text-sm font-bold text-slate-800 truncate">
-                                                        {getAuditPlanTemplateLabel(t)}
+                                                        {getAuditPlanTemplateLabel(t, isMultiIso)}
                                                     </p>
                                                     <p className="text-xs text-slate-500">
-                                                        {getAuditPlanTemplateSubtitle(t, false)}
+                                                        {multiSubtitle ??
+                                                            getAuditPlanTemplateSubtitle(t, false)}
                                                     </p>
                                                 </div>
                                                 <Button
@@ -758,7 +791,8 @@ const CreateAuditPlanPage = () => {
                                                     Assigned ✓
                                                 </span>
                                             </div>
-                                        ))}
+                                            ));
+                                        })()}
                                     </div>
                                 ) : (
                                     <>

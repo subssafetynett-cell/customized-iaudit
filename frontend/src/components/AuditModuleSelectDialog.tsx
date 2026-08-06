@@ -119,7 +119,11 @@ export function AuditModuleSelectDialog({
                                             </span>
                                         </div>
                                         <p className="mt-0.5 text-xs text-slate-500">
-                                            {mod.module ? `${mod.module} checklist` : "Checklist"}
+                                            {mod.module
+                                                ? `${mod.module} checklist`
+                                                : mod.standard
+                                                  ? `${mod.standard} checklist`
+                                                  : "Checklist"}
                                             {!progressLoading
                                                 ? percent >= 100
                                                     ? " · Completed"

@@ -131,7 +131,8 @@ export function normalizeOkNotOkFindingValue(
 
 /**
  * When the audit program uses EOSH/QFS modules, lock the plan to the modules
- * scheduled for this execution (month). Returns null for ISO programs (free picker).
+ * scheduled for this execution (month). Returns null for ISO programs (use
+ * {@link getLockedPlanTemplatesFromProgram} for ISO locking).
  */
 export function getLockedPlanTemplatesFromExecution(
     execution?: { clauses?: Array<{ id?: string; standard?: string }> | null } | null,
@@ -163,9 +164,71 @@ export function getLockedPlanTemplatesFromExecution(
     return templates.length > 0 ? templates : null;
 }
 
+function isIsoManagementChecklist(template: AuditTemplate): boolean {
+    return (
+        template.type === "checklist" &&
+        template.module !== "EOSH" &&
+        template.module !== "QFS KORE"
+    );
+}
+
+function templateMatchesIsoStandard(template: AuditTemplate, standard: string): boolean {
+    const tStd = template.standard.toUpperCase();
+    const searchStd = standard.toUpperCase();
+    return tStd.includes(searchStd) || searchStd.includes(tStd);
+}
+
+/**
+ * Lock the audit-plan template picker from the audit program's ISO standard(s)
+ * or scheduled EOSH/QFS modules. Returns null when the user should pick freely
+ * (no program / no resolvable standards).
+ *
+ * - Module program → modules scheduled on this execution
+ * - Single ISO → that standard's management-system checklist (no dropdown)
+ * - Multi ISO → all matching checklists (saved for perform); UI shows IMS label
+ */
+export function getLockedPlanTemplatesFromProgram(
+    program?: {
+        isoStandard?: string | null;
+        scheduleData?: { criteriaType?: string; moduleFamily?: string } | null;
+    } | null,
+    execution?: { clauses?: Array<{ id?: string; standard?: string }> | null } | null,
+): AuditTemplate[] | null {
+    const fromModules = getLockedPlanTemplatesFromExecution(execution, program);
+    if (fromModules && fromModules.length > 0) return fromModules;
+
+    const iso = String(program?.isoStandard || "").trim();
+    if (!iso) return null;
+    if (iso.includes("EOSH Module:") || iso.includes("QFS KORE Module:")) return null;
+    if (program?.scheduleData?.criteriaType === "module") return null;
+
+    const standards = resolveAuditPlanStandards(iso, iso);
+    if (standards.length === 0) return null;
+
+    const matched: AuditTemplate[] = [];
+    const seen = new Set<string>();
+    for (const std of standards) {
+        const template = auditTemplates.find(
+            (t) => isIsoManagementChecklist(t) && templateMatchesIsoStandard(t, std),
+        );
+        if (!template || seen.has(template.id)) continue;
+        seen.add(template.id);
+        matched.push(template);
+    }
+
+    if (matched.length === 0) {
+        // Fallback: same checklist the free picker would prefer for these standards.
+        const options = getAuditPlanTemplateOptions(iso, iso).filter(isIsoManagementChecklist);
+        return options.length > 0 ? [options[0]] : null;
+    }
+
+    // Multi-ISO: return every matched checklist (saved for perform). Plan UI shows one IMS card.
+    return matched;
+}
+
 /** Short label for audit plan template picker. */
 export function getAuditPlanTemplateLabel(
-    template: Pick<AuditTemplate, "type" | "isIntegrated" | "title" | "module">,
+    template: Pick<AuditTemplate, "type" | "isIntegrated" | "title" | "module" | "standard">,
     isMultiStandard = false,
 ): string {
     // Named Excel modules (EOSH / QFS) — show the module name, not a generic IMS label.
@@ -200,13 +263,13 @@ export function getAuditPlanTemplateLabel(
     }
     switch (template.type) {
         case "clause-checklist":
-            return "Clause Template";
+            return template.standard ? `${template.standard} Clause` : "Clause Template";
         case "checklist":
-            return "Checklist Template";
+            return template.standard ? `${template.standard} Checklist` : "Checklist Template";
         case "process-audit":
-            return "Process Template";
+            return template.standard ? `${template.standard} Process` : "Process Template";
         case "section":
-            return "Section Template";
+            return template.standard ? `${template.standard} Section` : "Section Template";
         default:
             return "Audit Template";
     }

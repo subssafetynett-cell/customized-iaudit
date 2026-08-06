@@ -101,6 +101,54 @@ export function isModuleAuditPlan(
     );
 }
 
+/** Facet choices for EOSH / QFS module audits (Audit Details + report). */
+export const MODULE_AUDIT_FACET_OPTIONS = [
+    "Health and Safety",
+    "Environmental",
+    "Quality",
+] as const;
+
+export type ModuleAuditFacet = (typeof MODULE_AUDIT_FACET_OPTIONS)[number];
+
+/** Read facet / category from top-level or active module store. */
+export function resolveModuleAuditFacetCategory(
+    auditData: Record<string, unknown> | null | undefined,
+): { facet: string; category: string } {
+    if (!auditData || typeof auditData !== "object") {
+        return { facet: "", category: "" };
+    }
+    const top =
+        auditData.auditGlobalInfo && typeof auditData.auditGlobalInfo === "object"
+            ? (auditData.auditGlobalInfo as Record<string, string>)
+            : {};
+    let facet = String(top.facet || "").trim();
+    let category = String(top.category || "").trim();
+    if (facet || category) return { facet, category };
+
+    const store =
+        auditData.moduleDataByTemplateId &&
+        typeof auditData.moduleDataByTemplateId === "object"
+            ? (auditData.moduleDataByTemplateId as Record<
+                  string,
+                  { auditGlobalInfo?: Record<string, string> }
+              >)
+            : null;
+    if (!store) return { facet: "", category: "" };
+
+    const active = String(auditData.activeModuleId || "").trim();
+    const order = active
+        ? [active, ...Object.keys(store).filter((k) => k !== active)]
+        : Object.keys(store);
+    for (const key of order) {
+        const info = store[key]?.auditGlobalInfo;
+        if (!info || typeof info !== "object") continue;
+        facet = String(info.facet || "").trim();
+        category = String(info.category || "").trim();
+        if (facet || category) return { facet, category };
+    }
+    return { facet: "", category: "" };
+}
+
 export function resolveReportTemplate(plan: {
     templateId?: string | null;
 }) {

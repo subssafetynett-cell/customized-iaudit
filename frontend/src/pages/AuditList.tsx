@@ -62,7 +62,7 @@ import {
 import { resolveAuditModuleDisplayName } from "@/lib/auditFindings";
 import { AuditModuleSelectDialog } from "@/components/AuditModuleSelectDialog";
 import {
-    MoreVertical, FileText, Trash2, Calendar, Search, Download, Loader2
+    MoreVertical, FileText, Trash2, Calendar, Search, Download, Loader2, ArrowUpDown
 } from "lucide-react";
 /** Subtitle under Audit column: module name(s) or ISO Standards. */
 function resolveAuditListTypeLabel(plan: {
@@ -140,6 +140,8 @@ function isModuleAuditListPlan(plan: Parameters<typeof resolveAuditListTypeLabel
 
 type AuditTypeFilter = "all" | "module" | "iso";
 type AuditStatusTab = "planned" | "in_progress" | "completed";
+type AuditListSortKey = "date" | "type";
+type AuditListSortDir = "asc" | "desc";
 
 const STATUS_TAB_TO_API: Record<AuditStatusTab, string> = {
     planned: "PLANNED",
@@ -153,6 +155,9 @@ const AuditList = () => {
     const [typeFilter, setTypeFilter] = useState<AuditTypeFilter>("all");
     /** Status tab — default Planned; each click fetches that status from the API. */
     const [statusTab, setStatusTab] = useState<AuditStatusTab>("planned");
+    /** Default: latest audit date first. Audit column sorts by module / ISO type label. */
+    const [sortKey, setSortKey] = useState<AuditListSortKey>("date");
+    const [sortDir, setSortDir] = useState<AuditListSortDir>("desc");
     const [selectedSite, setSelectedSite] = useState("all");
     const [loading, setLoading] = useState(true);
     /** True while refetching after filters/page change — keep prior rows visible. */
@@ -231,6 +236,12 @@ const AuditList = () => {
         setCurrentPage(1);
     }, [debouncedSearch, selectedSite, typeFilter, statusTab]);
 
+    useEffect(() => {
+        if (sortKey === "date") setCurrentPage(1);
+    }, [sortKey, sortDir]);
+
+    const dateOrderForApi = sortKey === "date" ? sortDir : "desc";
+
     const fetchPlans = async () => {
         const isInitial = !hasLoadedOnceRef.current;
         try {
@@ -244,6 +255,9 @@ const AuditList = () => {
                 site: selectedSite !== "all" ? selectedSite : undefined,
                 type: typeFilter !== "all" ? typeFilter : undefined,
                 status: STATUS_TAB_TO_API[statusTab],
+                // Server sorts by date for pagination; type sort is applied on the page.
+                sort: "date",
+                order: dateOrderForApi,
             });
             const res = await apiFetch(`/audit-plans${qs}`);
             const data = await res.json();
@@ -264,8 +278,8 @@ const AuditList = () => {
 
     useEffect(() => {
         void fetchPlans();
-        // eslint-disable-next-line react-hooks/exhaustive-deps -- fetch when tab/filters/page change
-    }, [currentPage, debouncedSearch, selectedSite, typeFilter, statusTab]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- fetch when tab/filters/page/date-sort change
+    }, [currentPage, debouncedSearch, selectedSite, typeFilter, statusTab, dateOrderForApi]);
 
     useEffect(() => {
         let cancelled = false;
@@ -548,23 +562,38 @@ const AuditList = () => {
     };
 
     const filteredPlans = auditPlans;
-    const paginatedPlans = auditPlans;
     const uniqueSites = siteOptions;
 
-    const modulePlans = paginatedPlans.filter((p) => isModuleAuditListPlan(p));
-    const isoPlans = paginatedPlans.filter((p) => !isModuleAuditListPlan(p));
-    const listSections =
-        typeFilter === "all"
-            ? [
-                  { id: "module" as const, label: "Modules", plans: modulePlans },
-                  { id: "iso" as const, label: "ISO Standards", plans: isoPlans },
-              ].filter((s) => s.plans.length > 0)
-            : typeFilter === "module"
-              ? [{ id: "module" as const, label: "Modules", plans: paginatedPlans }]
-              : [{ id: "iso" as const, label: "ISO Standards", plans: paginatedPlans }];
+    const toggleListSort = (key: AuditListSortKey) => {
+        if (sortKey === key) {
+            setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+            return;
+        }
+        setSortKey(key);
+        setSortDir(key === "date" ? "desc" : "asc");
+    };
 
-    const tourTargetPlan =
-        paginatedPlans[0] ?? auditPlans[0] ?? null;
+    /** Flat list — no Modules / ISO section headers. Type sort applied on this page. */
+    const displayedPlans = React.useMemo(() => {
+        const plans = [...auditPlans];
+        if (sortKey !== "type") return plans;
+        const mul = sortDir === "asc" ? 1 : -1;
+        plans.sort((a, b) => {
+            const aMod = isModuleAuditListPlan(a) ? 0 : 1;
+            const bMod = isModuleAuditListPlan(b) ? 0 : 1;
+            if (aMod !== bMod) return (aMod - bMod) * mul;
+            return (
+                resolveAuditListTypeLabel(a).localeCompare(
+                    resolveAuditListTypeLabel(b),
+                    undefined,
+                    { sensitivity: "base" },
+                ) * mul
+            );
+        });
+        return plans;
+    }, [auditPlans, sortKey, sortDir]);
+
+    const tourTargetPlan = displayedPlans[0] ?? auditPlans[0] ?? null;
 
     const handleAuditExecuteTourNext = () => {
         if (auditExecuteTourStep === 3) {
@@ -743,9 +772,51 @@ const AuditList = () => {
                             <TableHeader className="bg-[#213847]">
                                 <TableRow className="hover:bg-[#213847] border-none">
                                     <TableHead className="font-medium text-white h-12 py-3">Plan Name</TableHead>
-                                    <TableHead className="font-medium text-white h-12 py-3">Audit</TableHead>
+                                    <TableHead className="font-medium text-white h-12 py-3">
+                                        <button
+                                            type="button"
+                                            onClick={() => toggleListSort("type")}
+                                            className="inline-flex items-center gap-1.5 font-medium text-white hover:text-emerald-200 transition-colors"
+                                            title="Sort by module / ISO standard"
+                                            aria-label="Sort by module or ISO standard"
+                                        >
+                                            Audit
+                                            <ArrowUpDown
+                                                className={cn(
+                                                    "w-3.5 h-3.5 opacity-70",
+                                                    sortKey === "type" && "opacity-100 text-emerald-300",
+                                                )}
+                                            />
+                                            {sortKey === "type" ? (
+                                                <span className="text-[10px] font-bold uppercase tracking-wide text-emerald-200/90">
+                                                    {sortDir === "asc" ? "A–Z" : "Z–A"}
+                                                </span>
+                                            ) : null}
+                                        </button>
+                                    </TableHead>
                                     <TableHead className="font-medium text-white h-12 py-3">Site</TableHead>
-                                    <TableHead className="font-medium text-white h-12 py-3">Date</TableHead>
+                                    <TableHead className="font-medium text-white h-12 py-3">
+                                        <button
+                                            type="button"
+                                            onClick={() => toggleListSort("date")}
+                                            className="inline-flex items-center gap-1.5 font-medium text-white hover:text-emerald-200 transition-colors"
+                                            title="Sort by date"
+                                            aria-label="Sort by date"
+                                        >
+                                            Date
+                                            <ArrowUpDown
+                                                className={cn(
+                                                    "w-3.5 h-3.5 opacity-70",
+                                                    sortKey === "date" && "opacity-100 text-emerald-300",
+                                                )}
+                                            />
+                                            {sortKey === "date" ? (
+                                                <span className="text-[10px] font-bold uppercase tracking-wide text-emerald-200/90">
+                                                    {sortDir === "desc" ? "Newest" : "Oldest"}
+                                                </span>
+                                            ) : null}
+                                        </button>
+                                    </TableHead>
                                     <TableHead className="font-medium text-white h-12 py-3">Lead Auditor</TableHead>
                                     <TableHead className="font-medium text-white h-12 py-3">Status</TableHead>
                                     <TableHead className="text-right font-medium text-white h-12 py-3">Actions</TableHead>
@@ -772,22 +843,7 @@ const AuditList = () => {
                                         </TableCell>
                                     </TableRow>
                                 ) : (
-                                    listSections.flatMap((section) => [
-                                        <TableRow
-                                            key={`section-${section.id}`}
-                                            className="bg-slate-50 hover:bg-slate-50 border-b border-slate-200"
-                                        >
-                                            <TableCell
-                                                colSpan={7}
-                                                className="py-2.5 px-4 text-xs font-bold uppercase tracking-wide text-[#213847]"
-                                            >
-                                                {section.label}
-                                                <span className="ml-2 font-semibold normal-case tracking-normal text-slate-400">
-                                                    ({section.plans.length})
-                                                </span>
-                                            </TableCell>
-                                        </TableRow>,
-                                        ...section.plans.map((plan) => {
+                                    displayedPlans.map((plan) => {
                                         const auditTypeLabel = resolveAuditListTypeLabel(plan);
                                         const isTourTargetRow =
                                             tourTargetPlan?.id === plan.id;
@@ -923,8 +979,7 @@ const AuditList = () => {
                                                 </TableCell>
                                             </TableRow>
                                         );
-                                    }),
-                                    ])
+                                    })
                                 )}
                             </TableBody>
                         </Table>

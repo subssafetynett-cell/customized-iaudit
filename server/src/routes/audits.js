@@ -711,9 +711,16 @@ export function createAuditsRouter({ authenticateToken, checkTrialExpiration }) 
             };
 
             const listStartedAt = performance.now();
+            const sortParam = String(req.query.sort || 'date').trim().toLowerCase();
+            const orderParam = String(req.query.order || 'desc').trim().toLowerCase() === 'asc' ? 'asc' : 'desc';
+            // Default latest audit date first (was createdAt desc). Null dates fall back via createdAt.
+            const orderBy =
+                sortParam === 'createdat' || sortParam === 'created_at'
+                    ? [{ createdAt: orderParam }]
+                    : [{ date: orderParam }, { createdAt: orderParam }];
             const findManyArgs = {
                 where: listWhere,
-                orderBy: { createdAt: 'desc' },
+                orderBy,
                 select: planSelect,
                 skip: pagination.paginate ? pagination.skip : 0,
                 take: pagination.paginate ? pagination.limit : pagination.take,
