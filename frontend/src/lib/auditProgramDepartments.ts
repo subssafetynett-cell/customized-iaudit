@@ -34,6 +34,49 @@ export function departmentsFromCompanies(companies: any[]): DepartmentOption[] {
     );
 }
 
+/** Flatten departments from /sites rows (preferred for invitees when companies nest empty sites). */
+export function departmentsFromSites(sites: any[]): DepartmentOption[] {
+    const list: DepartmentOption[] = [];
+    for (const site of sites ?? []) {
+        const siteId = Number.parseInt(String(site.id), 10);
+        if (!Number.isFinite(siteId)) continue;
+        const companyName = String(site.company?.name ?? site.companyName ?? "");
+        for (const dept of site.departments ?? []) {
+            const id = Number.parseInt(String(dept.id), 10);
+            if (!Number.isFinite(id)) continue;
+            list.push({
+                id: String(id),
+                name: String(dept.name ?? ""),
+                code: dept.code,
+                siteId,
+                siteName: String(site.name ?? ""),
+                companyName,
+            });
+        }
+    }
+    return list.sort((a, b) =>
+        `${a.companyName} ${a.siteName} ${a.name}`.localeCompare(
+            `${b.companyName} ${b.siteName} ${b.name}`,
+        ),
+    );
+}
+
+/** Merge company-nested and site-list departments (dedupe by id). */
+export function mergeDepartmentOptions(
+    fromCompanies: DepartmentOption[],
+    fromSites: DepartmentOption[],
+): DepartmentOption[] {
+    const byId = new Map<string, DepartmentOption>();
+    for (const dept of [...fromCompanies, ...fromSites]) {
+        if (!byId.has(dept.id)) byId.set(dept.id, dept);
+    }
+    return [...byId.values()].sort((a, b) =>
+        `${a.companyName} ${a.siteName} ${a.name}`.localeCompare(
+            `${b.companyName} ${b.siteName} ${b.name}`,
+        ),
+    );
+}
+
 export function getDepartmentIdsFromScheduleData(scheduleData: unknown): string[] {
     if (!scheduleData || typeof scheduleData !== "object") return [];
     const ids = (scheduleData as Record<string, unknown>).departmentIds;

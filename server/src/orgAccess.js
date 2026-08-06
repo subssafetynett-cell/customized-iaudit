@@ -558,6 +558,12 @@ async function actorCanAccessAuditProgram(actorId, program) {
         return true;
     }
 
+    // Any non-auditee org teammate may use programs on sites in their shared company catalog
+    // (User A creates sites; User B invited by A can create plans / audits on those sites).
+    if (program.siteId != null && (await actorCanAssignAuditeeToSite(actorIdNum, program.siteId))) {
+        return true;
+    }
+
     if (await actorHasFullOrgAuditVisibility(actorIdNum)) {
         if (program.userId != null && (await actorCanAccessTargetUser(actorIdNum, program.userId))) {
             return true;
@@ -575,7 +581,13 @@ async function actorCanAccessAuditProgram(actorId, program) {
                     where: { id: Number(site.companyId) },
                     select: { userId: true },
                 });
-                if (company?.userId != null && (await actorInSameOrgAs(actorIdNum, company.userId))) {
+                if (
+                    company?.userId != null
+                    && (
+                        (await actorInSameOrgAs(actorIdNum, company.userId))
+                        || (await actorCanAccessOrgCompanyOwner(actorIdNum, company.userId))
+                    )
+                ) {
                     return true;
                 }
             }
@@ -623,6 +635,15 @@ async function actorCanAccessAuditPlan(actorId, plan) {
         ) {
             return true;
         }
+    }
+
+    // Shared org sites: invitees may open / execute plans for programs on User A's sites.
+    const planSiteId =
+        plan.auditProgram?.siteId
+        ?? plan.siteId
+        ?? null;
+    if (planSiteId != null && (await actorCanAssignAuditeeToSite(actorIdNum, planSiteId))) {
+        return true;
     }
 
     if (await actorHasFullOrgAuditVisibility(actorIdNum)) {
@@ -1147,13 +1168,16 @@ async function companyAuditorUserIdSet(companyId) {
     // Use the org root of the company owner so peer admins / teammates are included,
     // not only the owner's direct invite subtree (which caused intermittent 403 on save).
     const ownerRootId = (await getOrgRootUserId(company.userId)) ?? Number(company.userId);
-    const memberIds = await collectOrgSubtreeUserIds(ownerRootId);
-    if (memberIds.length === 0) {
+    const memberIds = await collectOrgMemberUserIds(ownerRootId);
+    const subtreeIds = memberIds.length > 0
+        ? memberIds
+        : await collectOrgSubtreeUserIds(ownerRootId);
+    if (subtreeIds.length === 0) {
         return new Set();
     }
     const users = await prisma.user.findMany({
         where: {
-            id: { in: memberIds },
+            id: { in: subtreeIds },
             isActive: true,
             role: { not: 'auditee' },
         },
@@ -1219,8 +1243,9 @@ async function validateAuditPlanAuditorAssignments(
     if (!company?.userId) {
         return { ok: false, status: 403, error: 'You do not have access to this company' };
     }
-    // Same-org check (not shallow creator-only) — peer admins must be able to save plans.
-    if (!(await actorInSameOrgAs(actorId, company.userId))) {
+    // Expanded org membership (creator tree + company/program links) — invitees must be
+    // able to save plans on companies/sites owned by their inviter (User A).
+    if (!(await actorCanAccessOrgCompanyOwner(actorId, company.userId))) {
         return { ok: false, status: 403, error: 'You do not have access to this company' };
     }
 
@@ -1676,7 +1701,9 @@ function buildOrgSubtreeProgramVisibilityOr(subtreeIds) {
         { leadAuditorId: { in: subtreeIds } },
         { auditors: { some: { id: { in: subtreeIds } } } },
         { user: { is: { creatorId: { in: subtreeIds } } } },
-        { user: { is: { id: { in: subtreeIds } } } }
+        { user: { is: { id: { in: subtreeIds } } } },
+        // Programs on companies owned by anyone in the org tree (A's sites visible to B).
+        { site: { is: { company: { is: { userId: { in: subtreeIds } } } } } },
     ];
 }
 
@@ -1687,11 +1714,32 @@ function buildOrgSubtreePlanVisibilityOr(subtreeIds) {
         ...buildOrgSubtreeProgramVisibilityOr(subtreeIds),
         { auditProgram: { is: { userId: { in: subtreeIds } } } },
         { auditProgram: { is: { leadAuditorId: { in: subtreeIds } } } },
-        { auditProgram: { is: { auditors: { some: { id: { in: subtreeIds } } } } } }
+        { auditProgram: { is: { auditors: { some: { id: { in: subtreeIds } } } } } },
+        {
+            auditProgram: {
+                is: { site: { is: { company: { is: { userId: { in: subtreeIds } } } } } },
+            },
+        },
     ];
 }
 
-/** Programs visible to a user through direct ownership or auditor assignment only. */
+/** Programs on concrete company ids (shared catalog for invitees). */
+function buildOrgCompanySiteProgramVisibilityOr(companyIds) {
+    const ids = normalizePositiveIntIds(companyIds);
+    if (!ids.length) return [];
+    return [{ site: { is: { companyId: { in: ids } } } }];
+}
+
+/** Plans whose program sits on org-visible companies. */
+function buildOrgCompanySitePlanVisibilityOr(companyIds) {
+    const ids = normalizePositiveIntIds(companyIds);
+    if (!ids.length) return [];
+    return [
+        { auditProgram: { is: { site: { is: { companyId: { in: ids } } } } } },
+    ];
+}
+
+/** Programs visible to a user through ownership, assignment, or shared org sites. */
 function buildAssignedAuditProgramVisibilityOr(actorId) {
     const id = Number(actorId);
     if (!Number.isInteger(id) || id < 1) return [{ userId: -1 }];
@@ -1713,6 +1761,30 @@ function buildAssignedAuditPlanVisibilityOr(actorId) {
         { auditProgram: { is: { userId: id } } },
         { auditProgram: { is: { leadAuditorId: id } } },
         { auditProgram: { is: { auditors: { some: { id } } } } },
+    ];
+}
+
+/**
+ * Teammate (non-admin) catalog: assignments plus every program/plan on org-visible company sites
+ * so User B can work on sites/departments created by User A.
+ */
+async function buildTeammateAuditProgramVisibilityOr(actorId) {
+    const id = Number(actorId);
+    if (!Number.isInteger(id) || id < 1) return [{ userId: -1 }];
+    const companyIds = await resolveOrgVisibleCompanyIds(id);
+    return [
+        ...buildAssignedAuditProgramVisibilityOr(id),
+        ...buildOrgCompanySiteProgramVisibilityOr(companyIds),
+    ];
+}
+
+async function buildTeammateAuditPlanVisibilityOr(actorId) {
+    const id = Number(actorId);
+    if (!Number.isInteger(id) || id < 1) return [{ userId: -1 }];
+    const companyIds = await resolveOrgVisibleCompanyIds(id);
+    return [
+        ...buildAssignedAuditPlanVisibilityOr(id),
+        ...buildOrgCompanySitePlanVisibilityOr(companyIds),
     ];
 }
 
@@ -1887,6 +1959,8 @@ export {
     buildOrgSubtreePlanVisibilityOr,
     buildAssignedAuditProgramVisibilityOr,
     buildAssignedAuditPlanVisibilityOr,
+    buildTeammateAuditProgramVisibilityOr,
+    buildTeammateAuditPlanVisibilityOr,
     actorHasFullOrgAuditVisibility,
     checkTrialExpiration,
     TRIAL_GAP_ANALYSIS_LIMIT,

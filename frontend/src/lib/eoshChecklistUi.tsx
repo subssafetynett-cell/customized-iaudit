@@ -261,7 +261,7 @@ export function EoshCapabilityFormBanner({
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3 px-4 py-3 border-b border-slate-200 bg-slate-50/60">
         <label className="block min-w-0">
           <span className="font-bold uppercase tracking-wide">Auditee:</span>
-          <input
+          <Input
             type="text"
             className={fieldClass}
             value={auditeeName}
@@ -282,7 +282,7 @@ export function EoshCapabilityFormBanner({
         </label>
         <label className="block min-w-0">
           <span className="font-bold uppercase tracking-wide">Audit done by:</span>
-          <input
+          <Input
             type="text"
             className={fieldClass}
             value={auditDoneBy}

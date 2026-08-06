@@ -53,6 +53,8 @@ import {
 } from "@/data/clauseMapping";
 import {
     departmentsFromCompanies,
+    departmentsFromSites,
+    mergeDepartmentOptions,
     formatDepartmentNames,
     getDepartmentIdsFromScheduleData,
     resolveDepartmentsByIds,
@@ -696,7 +698,10 @@ const AuditPrograms = () => {
     };
 
     const periods = calculatePeriods();
-    const allDepartments = departmentsFromCompanies(companies);
+    const allDepartments = mergeDepartmentOptions(
+        departmentsFromCompanies(companies),
+        departmentsFromSites(sites),
+    );
     const siteDepartments = selectedSite
         ? allDepartments.filter((dept) => String(dept.siteId) === String(selectedSite))
         : [];

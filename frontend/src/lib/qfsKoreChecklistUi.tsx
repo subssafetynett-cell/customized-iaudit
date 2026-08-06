@@ -1,4 +1,5 @@
 import type { CSSProperties } from "react";
+import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { QFS_KORE_EXCEL_MODULE_META } from "@/data/qfsKoreExcelModuleTemplates";
 import type { AuditTemplate } from "@/data/auditTemplateTypes";
@@ -217,7 +218,7 @@ export function QfsKoreFormBanner({
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3 px-4 py-3 border-b border-slate-200 bg-slate-50/60">
         <label className="block min-w-0">
           <span className="font-bold uppercase tracking-wide">Auditee name:</span>
-          <input
+          <Input
             type="text"
             className={fieldClass}
             value={auditeeName}
@@ -228,7 +229,7 @@ export function QfsKoreFormBanner({
         </label>
         <label className="block min-w-0">
           <span className="font-bold uppercase tracking-wide">Audit done by:</span>
-          <input
+          <Input
             type="text"
             className={fieldClass}
             value={auditDoneBy}
@@ -239,7 +240,7 @@ export function QfsKoreFormBanner({
         </label>
         <label className="block min-w-0">
           <span className="font-bold uppercase tracking-wide">Auditee dept:</span>
-          <input
+          <Input
             type="text"
             className={fieldClass}
             value={auditeeDept}

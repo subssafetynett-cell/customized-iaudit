@@ -25,6 +25,7 @@ import {
     type AuditTemplate,
 } from "@/data/auditTemplates";
 import { sanitizeAuditEvidenceMediaMap, type AuditEvidenceMedia } from "@/lib/evidenceImageUpload";
+import { CLAUSE_MATRIX } from "@/data/clauseMapping";
 import {
     collectReportEvidenceFileList,
     collectReportEvidenceSources,
@@ -70,6 +71,10 @@ import {
     type ChecklistReportHeaderCell,
     type ReportNonConformance,
 } from "@/lib/auditReportFindings";
+import {
+    buildModuleAuditReportFileName,
+    resolveModuleAuditFacetCategory,
+} from "@/lib/moduleAuditFacet";
 import {
     computeEoshCapabilityScores,
     isEoshScoredCapabilityChecklist,
@@ -117,6 +122,76 @@ const PDF_HEADER_BOTTOM_GAP = 8;
 const PDF_SECTION_BLUE: [number, number, number] = [41, 99, 170];
 const DOCX_SECTION_BLUE = "29599F";
 const MANAGEMENT_LABEL_COL_WIDTH_MM = 52;
+
+function calculatePeriods(frequency: string, duration: number, startDate?: string | Date) {
+    const count =
+        frequency === "Monthly"
+            ? duration * 12
+            : frequency === "Quarterly"
+              ? duration * 4
+              : frequency === "Bi-annually"
+                ? duration * 2
+                : duration;
+    const result: string[] = [];
+    const currentDate = startDate ? new Date(startDate) : new Date();
+    currentDate.setDate(1); // Start from the beginning of the month
+    for (let i = 0; i < count; i++) {
+        const monthLabel = currentDate
+            .toLocaleString("default", { month: "short" })
+            .toUpperCase();
+        const yearLabel = currentDate.getFullYear().toString();
+        result.push(`${monthLabel} ${yearLabel}`);
+        if (frequency === "Monthly") currentDate.setMonth(currentDate.getMonth() + 1);
+        else if (frequency === "Quarterly") currentDate.setMonth(currentDate.getMonth() + 3);
+        else if (frequency === "Bi-annually") currentDate.setMonth(currentDate.getMonth() + 6);
+        else currentDate.setFullYear(currentDate.getFullYear() + 1);
+    }
+    return result;
+}
+
+function resolveIsoClauseSelectionPredicate(plan: Record<string, any>): ((clauseStr: string) => boolean) | undefined {
+    const auditProgram = plan?.auditProgram;
+    const scheduleData = auditProgram?.scheduleData;
+    const executionId = plan?.executionId;
+
+    if (!auditProgram || !scheduleData || !executionId) return undefined;
+    if (typeof scheduleData !== "object") return undefined;
+
+    const executionIdStr = String(executionId);
+    const parts = executionIdStr.split(" - ");
+    const periodLabel = parts.length > 1 ? parts.slice(1).join(" - ") : parts[0];
+
+    const activeScheduleData = scheduleData as Record<string, boolean>;
+    if (!activeScheduleData || Object.keys(activeScheduleData).length === 0) return undefined;
+
+    const loadData = scheduleData as Record<string, unknown>;
+    const programPeriods = calculatePeriods(
+        String(auditProgram.frequency),
+        Number(auditProgram.duration),
+        (loadData.startDate as any) || auditProgram.createdAt,
+    );
+
+    const colIndex = programPeriods.indexOf(periodLabel);
+    if (colIndex === -1) return undefined;
+
+    const explicitlySelectedClauses = [];
+    CLAUSE_MATRIX.forEach((clause, rowIndex) => {
+        if (activeScheduleData[`${rowIndex}-${colIndex}`] === true) {
+            explicitlySelectedClauses.push(clause);
+        }
+    });
+
+    return (clauseStr: string) => {
+        const match = clauseStr.match(/^(\d+(?:\.\d+)*)/);
+        // Custom refs (e.g. CM-1) are not ISO schedule cells — always show.
+        if (!match) return true;
+
+        const cleanId = match[1];
+        return explicitlySelectedClauses.some(
+            (c) => c.id === cleanId || c.id.startsWith(cleanId + ".") || cleanId.startsWith(c.id + "."),
+        );
+    };
+}
 
 type PdfPageLayout = {
     contentStartY: number;
@@ -246,8 +321,12 @@ function docxImageRun(data: Uint8Array | ArrayBuffer, width: number, height: num
     });
 }
 
-export function auditReportBaseName(plan: { auditName?: string; id?: number }) {
-    return `Audit_Findings_Report_${(plan.auditName || "Audit").replace(/[^a-z0-9]/gi, "_") || plan.id}`;
+export function auditReportBaseName(plan: Record<string, unknown>) {
+    const moduleFileName = buildModuleAuditReportFileName(plan);
+    if (moduleFileName) return moduleFileName;
+    const auditName = (plan as { auditName?: string; id?: number }).auditName;
+    const id = (plan as { id?: number }).id;
+    return `Audit_Findings_Report_${(auditName || "Audit").replace(/[^a-z0-9]/gi, "_") || id}`;
 }
 
 interface ReportContext {
@@ -262,7 +341,6 @@ interface ReportContext {
     auditees: string;
     scope: string;
     criteriaAndMethod: string;
-    /** EOSH / QFS module audits — replaces scope / criteria in report body. */
     facet: string;
     category: string;
     executiveSummary: string;
@@ -385,6 +463,10 @@ async function buildReportContext(plan: Record<string, any>): Promise<ReportCont
         ? form.generalComment
         : String(auditData.executiveSummary || "");
 
+    const moduleFacetCategory = isModuleAudit
+        ? resolveModuleAuditFacetCategory(auditData)
+        : { facet: "", category: "" };
+
     const findingsForm = normalizeFindingsReportForm({
         ...form,
         docNumber: form?.docNumber?.trim() || DEFAULT_DOC_NUMBER,
@@ -439,10 +521,12 @@ async function buildReportContext(plan: Record<string, any>): Promise<ReportCont
         auditDate: findingsForm.auditDate,
         auditors: findingsForm.auditors,
         auditees: findingsForm.auditees,
-        scope: findingsForm.auditScope,
-        criteriaAndMethod: findingsForm.auditCriteriaAndMethod,
-        facet: moduleFacet,
-        category: moduleCategory,
+        scope: isModuleAudit ? moduleFacetCategory.facet : findingsForm.auditScope,
+        criteriaAndMethod: isModuleAudit
+            ? moduleFacetCategory.category
+            : findingsForm.auditCriteriaAndMethod,
+        facet: moduleFacetCategory.facet,
+        category: moduleFacetCategory.category,
         executiveSummary,
         nonConformances,
         isModuleAudit,
@@ -1105,20 +1189,8 @@ async function renderSzlReportHeaderAndMetadataAsync(
     }
 
     if (ctx.isModuleAudit) {
-        y = renderBlueTextSectionPdf(
-            doc,
-            "Facet:",
-            ctx.facet || "—",
-            y,
-            pageH,
-        );
-        y = renderBlueTextSectionPdf(
-            doc,
-            "Category:",
-            ctx.category || "—",
-            y,
-            pageH,
-        );
+        y = renderBlueTextSectionPdf(doc, "Facet:", ctx.facet || "—", y, pageH);
+        y = renderBlueTextSectionPdf(doc, "Category:", ctx.category || "—", y, pageH);
         for (const field of getCustomFieldsBySection(ctx.findingsForm, "content")) {
             y = checkPage(doc, y, 20, pageH);
             y = pdfSubHeading(doc, `${field.label}:`, y);
@@ -1494,6 +1566,10 @@ export async function generateAuditReportPdf(plan: Record<string, any>) {
     const logo = await loadSzlLogoBase64();
     const form = ctx.findingsForm;
     const isModule = ctx.isModuleAudit;
+    const isoClausePredicate =
+        !isModule && template?.type === "checklist"
+            ? resolveIsoClauseSelectionPredicate(plan)
+            : undefined;
 
     activePdfPageLayout = {
         contentStartY: computeSzlPdfHeaderContentStartY(form, !!logo),
@@ -1569,9 +1645,35 @@ export async function generateAuditReportPdf(plan: Record<string, any>) {
             genericFilesForReport,
             isModule,
         );
-        if (checklistSection) {
+        if (checklistContent.length > 0) {
+            const { bodyCells, headerCells } = buildChecklistReportTable({
+                content: checklistContent,
+                checklistData: (auditData.checklistData as Record<string, any>) || {},
+                isModule,
+                isEosh: planUsesEoshTotals(plan),
+                qfsScoreMode: resolveQfsScoreModeForPlan(plan),
+                isClauseSelected: isoClausePredicate,
+                collectEvidence: (clauseKey, itemIndex, textEvidence) =>
+                    buildFindingEvidenceText(
+                        textEvidence,
+                        collectFindingAttachmentMedia(
+                            clauseFilesForReport,
+                            genericFilesForReport,
+                            clauseKey,
+                            itemIndex,
+                        ),
+                    ),
+            });
             y = checkPage(doc, y, 20, pageH);
-            y = sectionHeading(checklistSection.title, y);
+            y = sectionHeading("Checklist", y);
+            const extrasBlocks = buildChecklistFindingExtraBlocks({
+                content: checklistContent,
+                checklistData: (auditData.checklistData as Record<string, any>) || {},
+                isModule,
+                isEosh: planUsesEoshTotals(plan),
+                qfsScoreMode: resolveQfsScoreModeForPlan(plan),
+                isClauseSelected: isoClausePredicate,
+            });
             y = renderChecklistPdfWithInlineExtras(doc, {
                 headerCells: checklistSection.headerCells,
                 bodyCells: checklistSection.bodyCells,
@@ -2134,6 +2236,11 @@ export async function generateAuditReportDocx(plan: Record<string, any>) {
     const fileName = auditReportBaseName(plan);
     const ctx = await buildReportContext(plan);
     const template = resolveReportTemplate(plan);
+    const isModule = ctx.isModuleAudit;
+    const isoClausePredicate =
+        !isModule && template?.type === "checklist"
+            ? resolveIsoClauseSelectionPredicate(plan)
+            : undefined;
     const logoBuffer = await loadSzlLogoBuffer();
     const form = ctx.findingsForm;
     const pageHeader = buildSzlDocxPageHeader(form, ctx, logoBuffer);
@@ -2218,12 +2325,38 @@ export async function generateAuditReportDocx(plan: Record<string, any>) {
                 genericFilesForReport,
                 ctx.isModuleAudit,
             );
-            if (checklistSection) {
-                const { headerCells, bodyCells, extrasBlocks, checklistContent, title } =
-                    checklistSection;
+            if (checklistContent.length > 0) {
+                const { headerCells, bodyCells } = buildChecklistReportTable({
+                    content: checklistContent,
+                    checklistData: (auditData.checklistData as Record<string, any>) || {},
+                    isModule: ctx.isModuleAudit,
+                    isEosh: planUsesEoshTotals(plan),
+                    qfsScoreMode: resolveQfsScoreModeForPlan(plan),
+                    isClauseSelected: isoClausePredicate,
+                    collectEvidence: (clauseKey, itemIndex, textEvidence) =>
+                        buildFindingEvidenceText(
+                            textEvidence,
+                            collectFindingAttachmentMedia(
+                                clauseFilesForReport,
+                                genericFilesForReport,
+                                clauseKey,
+                                itemIndex,
+                            ),
+                        ),
+                });
                 const colWidth = Math.max(4, Math.floor(100 / Math.max(headerCells.length, 1)));
-                const extrasByIndex = new Map(extrasBlocks.map((b) => [b.itemIndex, b]));
-                children.push(docxSubHeading(title));
+                const extras = buildChecklistFindingExtraBlocks({
+                    content: checklistContent,
+                    checklistData: (auditData.checklistData as Record<string, any>) || {},
+                    isModule: ctx.isModuleAudit,
+                    isEosh: planUsesEoshTotals(plan),
+                    qfsScoreMode: resolveQfsScoreModeForPlan(plan),
+                    isClauseSelected: isoClausePredicate,
+                });
+                const extrasByIndex = new Map(extras.map((b) => [b.itemIndex, b]));
+                children.push(docxSubHeading("Checklist"));
+                // Header row once, then each question (+ optional NC box) as its own table
+                // so NC details sit directly under the raised question.
                 children.push(
                     new DocxTable({
                         width: { size: 100, type: WidthType.PERCENTAGE },
@@ -2522,6 +2655,11 @@ export async function generateAuditReportExcel(plan: Record<string, any>) {
     const fileName = auditReportBaseName(plan);
     const ctx = await buildReportContext(plan);
     const wb = XLSX.utils.book_new();
+    const isModule = ctx.isModuleAudit;
+    const isoClausePredicate =
+        !isModule && template?.type === "checklist"
+            ? resolveIsoClauseSelectionPredicate(plan)
+            : undefined;
 
     const form = ctx.findingsForm;
     const summaryData: string[][] = [["Field", "Value"]];
@@ -2598,8 +2736,34 @@ export async function generateAuditReportExcel(plan: Record<string, any>) {
             genericFilesForExcel,
             ctx.isModuleAudit,
         );
-        if (checklistSection) {
-            const { bodyCells, headerCells, extrasBlocks } = checklistSection;
+        if (checklistContent.length > 0) {
+            const { bodyCells, headerCells } = buildChecklistReportTable({
+                content: checklistContent,
+                checklistData: (auditData.checklistData as Record<string, any>) || {},
+                isModule: ctx.isModuleAudit,
+                isEosh: planUsesEoshTotals(plan),
+                qfsScoreMode: resolveQfsScoreModeForPlan(plan),
+                isClauseSelected: isoClausePredicate,
+                collectEvidence: (clauseKey, itemIndex, textEvidence) =>
+                    buildFindingEvidenceText(
+                        textEvidence,
+                        collectFindingAttachmentMedia(
+                            clauseFilesForExcel,
+                            genericFilesForExcel,
+                            clauseKey,
+                            itemIndex,
+                        ),
+                    ),
+            });
+            // Excel (community xlsx) has limited cell fills — mark selected QFS score with ●.
+            const extrasBlocks = buildChecklistFindingExtraBlocks({
+                content: checklistContent,
+                checklistData: (auditData.checklistData as Record<string, any>) || {},
+                isModule: ctx.isModuleAudit,
+                isEosh: planUsesEoshTotals(plan),
+                qfsScoreMode: resolveQfsScoreModeForPlan(plan),
+                isClauseSelected: isoClausePredicate,
+            });
             const extrasByIndex = new Map(extrasBlocks.map((b) => [b.itemIndex, b]));
             const colCount = Math.max(headerCells.length, 1);
             const sheetName = template.isTripleMapping ? "IMS Checklist" : "Checklist";

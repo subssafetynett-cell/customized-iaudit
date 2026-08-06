@@ -606,6 +606,11 @@ export function buildChecklistReportTable(options: {
     /** When set, render QFS score columns with colored selected cells. */
     qfsScoreMode?: QfsScoreMode | null;
     collectEvidence: (clauseKey: string, itemIndex: number, textEvidence?: string) => string;
+    /**
+     * Optional visibility gate for ISO clause-matrix exports.
+     * When set, rows are omitted (so downloads match "selected clauses" only).
+     */
+    isClauseSelected?: (clauseStr: string) => boolean;
 }): {
     headers: string[];
     rows: string[][];
@@ -620,6 +625,7 @@ export function buildChecklistReportTable(options: {
         isEosh = false,
         qfsScoreMode = null,
         collectEvidence,
+        isClauseSelected,
     } = options;
     const isQfs = Boolean(qfsScoreMode);
     const showsIntent = content.some((item) => Boolean(item.intent?.trim()));
@@ -650,7 +656,7 @@ export function buildChecklistReportTable(options: {
         qfsFillHex?: string;
     };
 
-    const rowStates: RowState[] = content.map((item, itemIndex) => {
+    const rowStates: (RowState & { visible: boolean })[] = content.map((item, itemIndex) => {
         const raw = (checklistData?.[itemIndex] || {}) as Record<string, unknown>;
         const clauseKey = cellValue(raw.clause) || item.clause || String(itemIndex + 1);
         const evidenceText = collectEvidence(
@@ -693,15 +699,21 @@ export function buildChecklistReportTable(options: {
             }
         }
 
-        return { values, qfsSelectedKey, qfsFillHex };
+        return {
+            values,
+            qfsSelectedKey,
+            qfsFillHex,
+            visible: !isClauseSelected || isClauseSelected(item.clause),
+        };
     });
+    const visibleRowStates = isClauseSelected ? rowStates.filter((r) => r.visible) : rowStates;
 
     const fixedScoreLayout = isEosh || isQfs;
     const optionalPresent = [
         ...(fixedScoreLayout ? [] : scoreColumns),
         ...optionalExtra,
     ].filter((col) =>
-        rowStates.some((row) => Boolean(row.values[col.key]?.trim())),
+        visibleRowStates.some((row) => Boolean(row.values[col.key]?.trim())),
     );
 
     const columns = [
@@ -719,7 +731,7 @@ export function buildChecklistReportTable(options: {
                 : undefined,
     }));
 
-    const bodyCells: ChecklistReportCell[][] = rowStates.map((row) =>
+    const bodyCells: ChecklistReportCell[][] = visibleRowStates.map((row) =>
         columns.map((c) => {
             const isQfsScoreCol = c.key.startsWith("qfs_");
             if (isQfsScoreCol && row.qfsSelectedKey === c.key && row.qfsFillHex) {
@@ -826,6 +838,12 @@ export function buildChecklistFindingExtraBlocks(options: {
     isModule: boolean;
     isEosh?: boolean;
     qfsScoreMode?: QfsScoreMode | null;
+    /**
+     * Optional visibility gate for ISO clause-matrix exports.
+     * When set, NC blocks use the *visible row index* so they align
+     * with the filtered table rows (PDF/Word/Excel).
+     */
+    isClauseSelected?: (clauseStr: string) => boolean;
 }): ChecklistFindingExtraBlock[] {
     const {
         content,
@@ -833,10 +851,18 @@ export function buildChecklistFindingExtraBlocks(options: {
         isModule,
         isEosh = false,
         qfsScoreMode = null,
+        isClauseSelected,
     } = options;
 
     const blocks: ChecklistFindingExtraBlock[] = [];
+
+    let visibleRowIndex = -1;
     content.forEach((item, itemIndex) => {
+        if (isClauseSelected && !isClauseSelected(item.clause)) {
+            return;
+        }
+        visibleRowIndex++;
+
         const raw = (checklistData?.[itemIndex] || {}) as Record<string, unknown>;
         if (
             !checklistRowHasFindingExtras(raw, {
@@ -872,7 +898,7 @@ export function buildChecklistFindingExtraBlocks(options: {
             return;
         }
         blocks.push({
-            itemIndex,
+            itemIndex: visibleRowIndex,
             clause: cellValue(raw.clause) || item.clause || String(itemIndex + 1),
             question: item.question || "",
             finding,

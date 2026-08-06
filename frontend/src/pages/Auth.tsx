@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
-import { apiFetch, parseApiJson, SESSION_EXPIRES_AT_KEY, clearClientSession } from "@/lib/api";
+import { apiFetch, parseApiJson, readApiErrorJson, SESSION_EXPIRES_AT_KEY, clearClientSession } from "@/lib/api";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -64,6 +64,7 @@ export default function Auth() {
     const [forgotResendTimer, setForgotResendTimer] = useState(0);
     const [isForgotResending, setIsForgotResending] = useState(false);
     const [postResetMessage, setPostResetMessage] = useState("");
+    const [forgotCodeSentMessage, setForgotCodeSentMessage] = useState("");
     const [showForgotNewPassword, setShowForgotNewPassword] = useState(false);
     const [showForgotConfirmPassword, setShowForgotConfirmPassword] = useState(false);
 
@@ -192,6 +193,7 @@ export default function Auth() {
         setShowInviteVerify(false);
         setErrorMessage("");
         setPostResetMessage("");
+        setForgotCodeSentMessage("");
         setResetEmail(loginEmail.trim());
         setForgotStep("email");
         setForgotOtp("");
@@ -208,6 +210,7 @@ export default function Auth() {
         setForgotNewPassword("");
         setForgotConfirmPassword("");
         setForgotResendTimer(0);
+        setForgotCodeSentMessage("");
         setErrorMessage("");
     };
 
@@ -229,9 +232,10 @@ export default function Auth() {
                 method: "POST",
                 body: JSON.stringify({ email: em.toLowerCase() }),
             });
-            const data = await response.json().catch(() => ({}));
-            if (response.status === 429 && typeof data.retryAfterSeconds === "number") {
-                setForgotResendTimer(data.retryAfterSeconds);
+            const data = await readApiErrorJson(response);
+            if (response.status === 429 && typeof (data as { retryAfterSeconds?: number }).retryAfterSeconds === "number") {
+                const retryAfterSeconds = (data as { retryAfterSeconds: number }).retryAfterSeconds;
+                setForgotResendTimer(retryAfterSeconds);
                 setErrorMessage(data.error || "Please wait before requesting another code.");
                 return;
             }
@@ -242,8 +246,12 @@ export default function Auth() {
             setForgotStep("code");
             setForgotResendTimer(60);
             setForgotOtp("");
-        } catch (err: any) {
-            setErrorMessage(err.message || "Could not send reset code.");
+            setForgotCodeSentMessage(
+                (data as { message?: string }).message ||
+                    "If an account exists for this email, a reset code has been sent. Check your inbox and spam folder.",
+            );
+        } catch (err: unknown) {
+            setErrorMessage(err instanceof Error ? err.message : "Could not send reset code.");
         } finally {
             setIsSubmitting(false);
         }
@@ -258,9 +266,10 @@ export default function Auth() {
                 method: "POST",
                 body: JSON.stringify({ email: resetEmail.trim().toLowerCase() }),
             });
-            const data = await response.json().catch(() => ({}));
-            if (response.status === 429 && typeof data.retryAfterSeconds === "number") {
-                setForgotResendTimer(data.retryAfterSeconds);
+            const data = await readApiErrorJson(response);
+            if (response.status === 429 && typeof (data as { retryAfterSeconds?: number }).retryAfterSeconds === "number") {
+                const retryAfterSeconds = (data as { retryAfterSeconds: number }).retryAfterSeconds;
+                setForgotResendTimer(retryAfterSeconds);
                 setErrorMessage(data.error || "Please wait before requesting another code.");
                 return;
             }
@@ -269,8 +278,9 @@ export default function Auth() {
             }
             setForgotResendTimer(60);
             setForgotOtp("");
-        } catch (err: any) {
-            setErrorMessage(err.message || "Could not resend code.");
+            setForgotCodeSentMessage("A new reset code has been sent. Check your inbox and spam folder.");
+        } catch (err: unknown) {
+            setErrorMessage(err instanceof Error ? err.message : "Could not resend code.");
         } finally {
             setIsForgotResending(false);
         }
@@ -331,15 +341,16 @@ export default function Auth() {
             setIsSignUp(false);
             setShowForgotPassword(true);
             setForgotStep("email");
-            setResetEmail("");
+            setResetEmail(loginEmail.trim());
             setForgotOtp("");
             setForgotNewPassword("");
             setForgotConfirmPassword("");
             setForgotResendTimer(0);
+            setForgotCodeSentMessage("");
             setErrorMessage("");
             navigate(location.pathname, { replace: true, state: {} });
         }
-    }, [location.state, location.pathname, navigate]);
+    }, [location.state, location.pathname, navigate, loginEmail]);
 
     useEffect(() => {
         const ctx = gsap.context(() => {
@@ -928,6 +939,12 @@ export default function Auth() {
                                                 : `Paste the reset code sent to ${resetEmail} and choose a new password. Codes expire in 5 minutes.`}
                                         </p>
                                     </div>
+
+                                    {forgotCodeSentMessage && forgotStep === "code" && (
+                                        <div className="p-3 bg-emerald-50 border border-emerald-200 text-emerald-800 text-sm rounded-lg">
+                                            {forgotCodeSentMessage}
+                                        </div>
+                                    )}
 
                                     {forgotStep === "email" ? (
                                         <form onSubmit={handleForgotPasswordSendCode} className="space-y-6">
