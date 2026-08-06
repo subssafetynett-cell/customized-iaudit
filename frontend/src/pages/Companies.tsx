@@ -111,7 +111,7 @@ function siteContactDisplay(site: Site): { primary: string; secondary?: string }
   return null;
 }
 
-type EntityStatusFilter = "all" | "active" | "inactive";
+type EntityStatusFilter = "all" | "active" | "inactive" | "maintenance";
 
 function normalizeEntityStatus(status?: string | null): string {
   return String(status || "Active").trim().toLowerCase();
@@ -125,7 +125,19 @@ function matchesEntityStatusFilter(
   const normalized = normalizeEntityStatus(status);
   if (filter === "active") return normalized === "active";
   if (filter === "inactive") return normalized === "inactive";
+  if (filter === "maintenance") return normalized === "maintenance";
   return true;
+}
+
+function entityStatusBadgeClass(status?: string | null): string {
+  const normalized = normalizeEntityStatus(status);
+  if (normalized === "inactive") {
+    return "bg-slate-100 text-slate-600 border border-slate-200 font-bold px-3 py-0.5 text-[10px]";
+  }
+  if (normalized === "maintenance") {
+    return "bg-amber-50 text-amber-700 border border-amber-100 font-bold px-3 py-0.5 text-[10px]";
+  }
+  return "bg-emerald-50 text-emerald-600 border border-emerald-100 font-bold px-3 py-0.5 text-[10px]";
 }
 
 function siteSearchHaystack(site: Site): string {
@@ -714,6 +726,7 @@ const CompaniesPage = () => {
                         <SelectItem value="all">All statuses</SelectItem>
                         <SelectItem value="active">Active</SelectItem>
                         <SelectItem value="inactive">Inactive</SelectItem>
+                        <SelectItem value="maintenance">Maintenance</SelectItem>
                       </SelectContent>
                     </Select>
                   </div>
@@ -797,7 +810,7 @@ const CompaniesPage = () => {
                             )}
                           </TableCell>
                           <TableCell className="py-5">
-                            <Badge className="bg-emerald-50 text-emerald-600 border border-emerald-100 font-bold px-3 py-0.5 text-[10px]">
+                            <Badge className={entityStatusBadgeClass(site.status)}>
                               {site.status || "Active"}
                             </Badge>
                           </TableCell>

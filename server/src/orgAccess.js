@@ -804,6 +804,21 @@ async function actorCanManageOrgUsers(actorId) {
     return false;
 }
 
+/**
+ * Users directory edit rights: org admins plus lead auditors (role or assigned as lead
+ * on a program/plan) may edit every org user on the Users page.
+ */
+async function actorCanEditOrgUsers(actorId) {
+    if (await actorCanManageOrgUsers(actorId)) return true;
+    const actor = await prisma.user.findUnique({
+        where: { id: Number(actorId) },
+        select: { role: true, isActive: true },
+    });
+    if (!actor || actor.isActive === false) return false;
+    if (normalizeUserRole(actor.role) === 'lead_auditor') return true;
+    return actorIsLeadAuditor(actorId);
+}
+
 const PROTECTED_COMPANY_OWNER_MESSAGE =
     'The company owner account cannot be removed or deactivated by other administrators.';
 
@@ -1746,15 +1761,27 @@ async function ensureUserGapAnalysisStore(actorId) {
             data: { userId: actorId, analyses, draft },
         });
     }
-    let analyses = filterGapAnalysesForUser(row.analyses, actorId);
+    const raw = Array.isArray(row.analyses) ? row.analyses : [];
     const draft = gapAnalysisDraftForUser(row.draft, actorId);
-    const storedLen = Array.isArray(row.analyses) ? row.analyses.length : 0;
-    if (analyses.length !== storedLen || draft !== row.draft) {
+    // Keep owned + unowned (legacy). Never permanently drop rows on GET.
+    const keepable = raw.filter((a) => {
+        const owner = gapAnalysisOwnerId(a);
+        return owner === null || owner === actorId;
+    });
+    const needsStamp = keepable.some((a) => gapAnalysisOwnerId(a) === null);
+    const analyses = stampGapAnalysesForUser(keepable, actorId);
+    if (needsStamp) {
+        const foreign = raw.filter((a) => {
+            const owner = gapAnalysisOwnerId(a);
+            return owner !== null && owner !== actorId;
+        });
         row = await prisma.userGapAnalysisStore.update({
             where: { userId: actorId },
-            data: { analyses: stampGapAnalysesForUser(analyses, actorId), draft },
+            data: {
+                analyses: [...analyses, ...foreign],
+                draft,
+            },
         });
-        analyses = filterGapAnalysesForUser(row.analyses, actorId);
     }
     return { userId: actorId, analyses, draft, row };
 }
@@ -1849,18 +1876,27 @@ async function ensureUserSelfAssessmentStore(actorId) {
             data: { userId: actorId, assessments, draft },
         });
     }
-    let assessments = filterSelfAssessmentsForUser(row.assessments, actorId);
+    const raw = Array.isArray(row.assessments) ? row.assessments : [];
     const draft = selfAssessmentDraftForUser(row.draft, actorId);
-    const storedLen = Array.isArray(row.assessments) ? row.assessments.length : 0;
-    if (assessments.length !== storedLen || draft !== row.draft) {
+    // Keep owned + unowned (legacy). Never permanently drop rows on GET.
+    const keepable = raw.filter((a) => {
+        const owner = selfAssessmentOwnerId(a);
+        return owner === null || owner === actorId;
+    });
+    const needsStamp = keepable.some((a) => selfAssessmentOwnerId(a) === null);
+    const assessments = stampSelfAssessmentsForUser(keepable, actorId);
+    if (needsStamp) {
+        const foreign = raw.filter((a) => {
+            const owner = selfAssessmentOwnerId(a);
+            return owner !== null && owner !== actorId;
+        });
         row = await prisma.userSelfAssessmentStore.update({
             where: { userId: actorId },
             data: {
-                assessments: stampSelfAssessmentsForUser(assessments, actorId),
+                assessments: [...assessments, ...foreign],
                 draft,
             },
         });
-        assessments = filterSelfAssessmentsForUser(row.assessments, actorId);
     }
     return { userId: actorId, assessments, draft, row };
 }
@@ -2075,6 +2111,7 @@ export {
     USER_ASSIGNABLE_ROLES,
     normalizeUserRole,
     actorCanManageOrgUsers,
+    actorCanEditOrgUsers,
     PROTECTED_COMPANY_OWNER_MESSAGE,
     isProtectedCompanyOwnerUserId,
     assertActorMayModifyProtectedCompanyOwner,

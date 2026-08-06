@@ -380,7 +380,9 @@ export function createAuditsRouter({ authenticateToken, checkTrialExpiration }) 
                     ? auditorIds
                     : existing.auditors.map((a) => a.id);
             const effectiveScheduleData =
-                scheduleData !== undefined ? scheduleData : existing.scheduleData;
+                scheduleData !== undefined && scheduleData !== null && typeof scheduleData === 'object'
+                    ? scheduleData
+                    : (existing.scheduleData ?? {});
             const assignmentCheck = await validateAuditProgramAssignments(actorId, {
                 siteId: effectiveSiteId,
                 leadAuditorId: effectiveLeadAuditorId,
@@ -391,31 +393,35 @@ export function createAuditsRouter({ authenticateToken, checkTrialExpiration }) 
                 return res.status(assignmentCheck.status).json({ error: assignmentCheck.error });
             }
 
-            // Disconnect all current auditors first before connecting new ones to ensure clean update
-            await prisma.auditProgram.update({
-                where: { id: Number.parseInt(id) },
-                data: {
-                    auditors: {
-                        set: []
-                    }
+            // Partial update — never wipe fields the client omitted or coerce scheduleData to {}.
+            const data = {
+                siteId: assignmentCheck.siteId,
+                leadAuditorId: assignmentCheck.leadAuditorId,
+            };
+            if (name !== undefined) data.name = name;
+            if (isoStandard !== undefined) data.isoStandard = isoStandard;
+            if (frequency !== undefined) data.frequency = frequency;
+            if (duration !== undefined) {
+                const parsedDuration = Number.parseInt(duration, 10);
+                if (Number.isInteger(parsedDuration) && parsedDuration >= 1) {
+                    data.duration = parsedDuration;
                 }
-            });
+            }
+            if (scheduleData !== undefined) {
+                data.scheduleData = effectiveScheduleData;
+            }
+            if (status !== undefined && status !== null && String(status).trim() !== '') {
+                data.status = status;
+            }
+            if (auditorIds !== undefined) {
+                data.auditors = {
+                    set: assignmentCheck.auditorIds.map((aid) => ({ id: aid })),
+                };
+            }
 
             const program = await prisma.auditProgram.update({
                 where: { id: Number.parseInt(id) },
-                data: {
-                    name,
-                    isoStandard,
-                    frequency,
-                    duration: Number.parseInt(duration),
-                    siteId: assignmentCheck.siteId,
-                    auditors: {
-                        connect: assignmentCheck.auditorIds.map((id) => ({ id })),
-                    },
-                    leadAuditorId: assignmentCheck.leadAuditorId,
-                    scheduleData: scheduleData || {},
-                    status: status || 'Draft'
-                },
+                data,
                 include: {
                     site: true,
                     auditors: true,
@@ -1195,7 +1201,31 @@ export function createAuditsRouter({ authenticateToken, checkTrialExpiration }) 
                             : incoming;
                 }
             }
-            if (req.body.findingsData !== undefined) updateData.findingsData = req.body.findingsData;
+            if (req.body.findingsData !== undefined) {
+                const incomingFindings = req.body.findingsData;
+                const existingFindings = existing.findingsData;
+                const incomingEmpty =
+                    incomingFindings == null ||
+                    (typeof incomingFindings === 'object' &&
+                        !Array.isArray(incomingFindings) &&
+                        Object.keys(incomingFindings).length === 0) ||
+                    (Array.isArray(incomingFindings) && incomingFindings.length === 0);
+                const existingHasData =
+                    existingFindings != null &&
+                    ((typeof existingFindings === 'object' &&
+                        !Array.isArray(existingFindings) &&
+                        Object.keys(existingFindings).length > 0) ||
+                        (Array.isArray(existingFindings) && existingFindings.length > 0));
+                if (
+                    incomingEmpty &&
+                    existingHasData &&
+                    req.body.forceReplaceFindingsData !== true
+                ) {
+                    // Keep existing findings — refuse accidental empty overwrite.
+                } else {
+                    updateData.findingsData = incomingFindings;
+                }
+            }
             updateData.updatedAt = new Date();
 
             // Do not echo multi‑MB auditData back to the client — Save Audit only needs ack + progress.

@@ -75,8 +75,23 @@ type UsersAccessResponse = {
     allowed?: boolean;
     canInviteUsers?: boolean;
     canManageUsers?: boolean;
+    canEditUsers?: boolean;
     canInviteAuditee?: boolean;
+    isLeadAuditorEditor?: boolean;
 };
+
+function formatUserActivityTime(value: string | Date | null | undefined): string {
+    if (value == null || String(value).trim() === "") return "Never";
+    const d = new Date(value);
+    if (Number.isNaN(d.getTime())) return "Never";
+    return d.toLocaleString(undefined, {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+    });
+}
 
 export default function Users() {
     return <UsersPage />;
@@ -151,13 +166,14 @@ function UsersPage() {
     const [canInviteAuditee, setCanInviteAuditee] = useState(clientCanInviteUsers);
 
     useEffect(() => {
-        const nextCanManageUsers = canManageOrgUsers(
-            storedUser as { role?: string; creatorId?: number | null } | null,
-        );
+        // Optimistic invite defaults only — directory manage rights come from /users/manage-access
+        // (includes assigned lead auditors whose role may not be "lead_auditor").
         const nextCanInviteUsers = Boolean(storedUser);
-        setCanManageUsers(nextCanManageUsers);
         setCanInviteUsers(nextCanInviteUsers);
         setCanInviteAuditee(nextCanInviteUsers);
+        if (canManageOrgUsers(storedUser as { role?: string; creatorId?: number | null } | null)) {
+            setCanManageUsers(true);
+        }
     }, [storedUser]);
 
     useEffect(() => {
@@ -168,7 +184,9 @@ function UsersPage() {
                 if (cancelled || !res.ok) return;
                 const data = (await res.json()) as UsersAccessResponse;
                 if (!cancelled) {
-                    setCanManageUsers(data.canManageUsers === true);
+                    const manageOk =
+                        data.canManageUsers === true || data.canEditUsers === true;
+                    setCanManageUsers(manageOk);
                     const inviteOk = data.canInviteUsers === true || data.allowed === true;
                     setCanInviteUsers(inviteOk);
                     setCanInviteAuditee(data.canInviteAuditee === true || inviteOk);
@@ -184,7 +202,7 @@ function UsersPage() {
         return () => {
             cancelled = true;
         };
-    }, [clientCanManageUsers, clientCanInviteUsers]);
+    }, [clientCanManageUsers, clientCanInviteUsers, storedUser?.id]);
 
     // Legacy deep-link: open create modal with Auditee preselected.
     useEffect(() => {
@@ -512,7 +530,7 @@ function UsersPage() {
         const mayToggle =
             canManageUsers || (canInviteAuditee && isAuditeeRole(user.role));
         if (!mayToggle) {
-            toast.error("Only administrators can change user status.");
+            toast.error("Only administrators and lead auditors can change user status.");
             return;
         }
         try {
@@ -565,7 +583,7 @@ function UsersPage() {
     const handleDeleteUser = async () => {
         if (!userToDelete || isDeleting) return;
         if (!canManageUsers) {
-            toast.error("Only administrators can delete users.");
+            toast.error("Only administrators and lead auditors can delete users.");
             return;
         }
 
@@ -704,19 +722,20 @@ function UsersPage() {
                                     <TableHead className="text-white">Role</TableHead>
                                     <TableHead className="text-white">Status</TableHead>
                                     <TableHead className="text-white">Created At</TableHead>
+                                    <TableHead className="text-white">Last sign-in</TableHead>
                                     <TableHead className="text-right text-white">Action</TableHead>
                                 </TableRow>
                             </TableHeader>
                             <TableBody>
                                 {isLoading ? (
                                     <TableRow>
-                                        <TableCell colSpan={7} className="h-24 text-center">
+                                        <TableCell colSpan={8} className="h-24 text-center">
                                             Loading users...
                                         </TableCell>
                                     </TableRow>
                                 ) : paginatedUsers.length === 0 ? (
                                     <TableRow>
-                                        <TableCell colSpan={7} className="h-64 text-center">
+                                        <TableCell colSpan={8} className="h-64 text-center">
                                             <div className="flex flex-col items-center justify-center py-10">
                                                 <UsersIcon className="h-10 w-10 text-muted-foreground/40 mb-3" />
                                                 <p className="text-sm text-muted-foreground mb-4">No users found</p>
@@ -770,6 +789,18 @@ function UsersPage() {
                                             </TableCell>
                                             <TableCell className="text-muted-foreground text-sm">
                                                 {new Date(user.createdAt).toLocaleDateString()}
+                                            </TableCell>
+                                            <TableCell className="text-muted-foreground text-sm whitespace-nowrap">
+                                                <div className="flex flex-col gap-0.5">
+                                                    <span className="font-medium text-[#213847]/90">
+                                                        {formatUserActivityTime(user.lastLoginAt)}
+                                                    </span>
+                                                    {user.firstLoginAt && (
+                                                        <span className="text-[11px] text-muted-foreground">
+                                                            First: {formatUserActivityTime(user.firstLoginAt)}
+                                                        </span>
+                                                    )}
+                                                </div>
                                             </TableCell>
                                             <TableCell className="text-right">
                                                 <DropdownMenu>

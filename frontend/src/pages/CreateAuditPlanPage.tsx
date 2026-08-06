@@ -204,6 +204,13 @@ const CreateAuditPlanPage = () => {
     const lockedTemplatesAreModules = Boolean(
         lockedPlanTemplates?.some((t) => t.module === "EOSH" || t.module === "QFS KORE"),
     );
+    const selectedTemplatesAreModules = useMemo(() => {
+        if (lockedTemplatesAreModules) return true;
+        const templates = findAuditTemplates(selectedTemplateId);
+        if (templates.length === 0) return false;
+        return templates.some((t) => t.module === "EOSH" || t.module === "QFS KORE");
+    }, [lockedTemplatesAreModules, selectedTemplateId]);
+    const showModuleCategory = selectedTemplatesAreModules;
     const programIsoStandards = useMemo(
         () =>
             resolveAuditPlanStandards(
@@ -377,17 +384,31 @@ const CreateAuditPlanPage = () => {
 
             // Set ISO Standard defaults
             const currentStandard = program?.isoStandard || "ISO 14001:2015";
+            const isModuleProgramCreate =
+                program?.scheduleData?.criteriaType === "module" ||
+                String(currentStandard).includes("EOSH Module:") ||
+                String(currentStandard).includes("QFS KORE Module:");
 
             if (site) {
                 // Formatting Location: site.name, site.city, site.country
                 const parts = [site.name, site.city, site.country].filter(Boolean);
                 setAuditLocation(parts.join(', '));
-                setAuditScope(`Audit of ${site.name} against ${currentStandard} standards, focusing on key operational areas.`);
-            } else {
+                if (!isModuleProgramCreate) {
+                    setAuditScope(`Audit of ${site.name} against ${currentStandard} standards, focusing on key operational areas.`);
+                } else {
+                    setAuditScope("");
+                }
+            } else if (!isModuleProgramCreate) {
                 setAuditScope(`Audit against ${currentStandard} standards, focusing on key operational areas.`);
+            } else {
+                setAuditScope("");
             }
 
-            setAuditObjective(`To verify compliance with ${currentStandard} and internal procedures, and to identify areas for improvement.`);
+            if (isModuleProgramCreate) {
+                setAuditObjective("");
+            } else {
+                setAuditObjective(`To verify compliance with ${currentStandard} and internal procedures, and to identify areas for improvement.`);
+            }
             if (lockedPlanTemplates && lockedPlanTemplates.length > 0) {
                 const isMultiIso =
                     !lockedPlanTemplates.some((t) => t.module === "EOSH" || t.module === "QFS KORE") &&
@@ -555,7 +576,7 @@ const CreateAuditPlanPage = () => {
                 templateId: selectedTemplateId,
                 date: auditDate,
                 location: auditLocation.trim(),
-                scope: auditScope,
+                scope: showModuleCategory ? "" : auditScope,
                 objective: auditObjective,
                 criteria: auditCriteria,
                 leadAuditorId:
@@ -924,25 +945,45 @@ const CreateAuditPlanPage = () => {
                         </CardContent>
                     </Card>
 
-                    {/* Scope & Objectives Card */}
-                    <Card className="border-slate-200 shadow-sm rounded-2xl overflow-hidden">
-                        <CardHeader className="bg-slate-50/50 border-b border-slate-100 pb-4">
-                            <CardTitle className="flex items-center gap-2 text-base font-bold text-slate-700">
-                                <CheckCircle2 className="w-4 h-4 text-emerald-500" />
-                                Scope & Objectives
-                            </CardTitle>
-                        </CardHeader>
-                        <CardContent className="p-6 space-y-6">
-                            <div className="space-y-2">
-                                <Label className="text-xs font-bold text-slate-500 uppercase">Audit Scope</Label>
-                                <Textarea value={auditScope} onChange={e => setAuditScope(e.target.value)} className="min-h-[80px] font-medium resize-none bg-slate-50 border-slate-200" />
-                            </div>
-                            <div className="space-y-2">
-                                <Label className="text-xs font-bold text-slate-500 uppercase">Audit Objective</Label>
-                                <Textarea value={auditObjective} onChange={e => setAuditObjective(e.target.value)} className="min-h-[80px] font-medium resize-none bg-slate-50 border-slate-200" />
-                            </div>
-                        </CardContent>
-                    </Card>
+                    {/* Scope & Objectives (ISO) or Category (modules) */}
+                    {showModuleCategory ? (
+                        <Card className="border-slate-200 shadow-sm rounded-2xl overflow-hidden">
+                            <CardHeader className="bg-slate-50/50 border-b border-slate-100 pb-4">
+                                <CardTitle className="flex items-center gap-2 text-base font-bold text-slate-700">
+                                    <CheckCircle2 className="w-4 h-4 text-emerald-500" />
+                                    Category
+                                </CardTitle>
+                            </CardHeader>
+                            <CardContent className="p-6 space-y-2">
+                                <Label className="text-xs font-bold text-slate-500 uppercase">Category</Label>
+                                <Input
+                                    value={auditObjective}
+                                    onChange={(e) => setAuditObjective(e.target.value)}
+                                    className="font-semibold bg-slate-50 border-slate-200 h-11"
+                                    placeholder="Enter category"
+                                />
+                            </CardContent>
+                        </Card>
+                    ) : (
+                        <Card className="border-slate-200 shadow-sm rounded-2xl overflow-hidden">
+                            <CardHeader className="bg-slate-50/50 border-b border-slate-100 pb-4">
+                                <CardTitle className="flex items-center gap-2 text-base font-bold text-slate-700">
+                                    <CheckCircle2 className="w-4 h-4 text-emerald-500" />
+                                    Scope & Objectives
+                                </CardTitle>
+                            </CardHeader>
+                            <CardContent className="p-6 space-y-6">
+                                <div className="space-y-2">
+                                    <Label className="text-xs font-bold text-slate-500 uppercase">Audit Scope</Label>
+                                    <Textarea value={auditScope} onChange={e => setAuditScope(e.target.value)} className="min-h-[80px] font-medium resize-none bg-slate-50 border-slate-200" />
+                                </div>
+                                <div className="space-y-2">
+                                    <Label className="text-xs font-bold text-slate-500 uppercase">Audit Objective</Label>
+                                    <Textarea value={auditObjective} onChange={e => setAuditObjective(e.target.value)} className="min-h-[80px] font-medium resize-none bg-slate-50 border-slate-200" />
+                                </div>
+                            </CardContent>
+                        </Card>
+                    )}
 
                     {/* Itinerary Section */}
                     <div id="tour-step-audit-plan-itinerary" className="space-y-4">

@@ -932,7 +932,10 @@ export async function persistSelfAssessmentsList<T>(
 
     const owned = filterSelfAssessmentsForUser(assessments, userId);
 
-    const stamped = stampSelfAssessmentsForUser(owned, userId);
+    const stamped = stampSelfAssessmentsForUser(
+        mergeSelfAssessmentsById(owned as { id: string }[]),
+        userId,
+    ) as T[];
 
     if (userId === actorId) {
 

@@ -546,6 +546,54 @@ export default function UserModal({
                         </div>
                     )}
 
+                    {(isViewMode || isEditMode) && initialData && (
+                        <div className="rounded-lg border border-slate-200 bg-slate-50/80 p-4 space-y-2 text-sm">
+                            <p className="font-semibold text-[#213847]">Activity</p>
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs sm:text-sm">
+                                <div>
+                                    <p className="text-muted-foreground">Last sign-in</p>
+                                    <p className="font-medium text-[#213847]">
+                                        {initialData.lastLoginAt
+                                            ? new Date(initialData.lastLoginAt).toLocaleString(undefined, {
+                                                  year: "numeric",
+                                                  month: "short",
+                                                  day: "numeric",
+                                                  hour: "2-digit",
+                                                  minute: "2-digit",
+                                              })
+                                            : "Never"}
+                                    </p>
+                                </div>
+                                <div>
+                                    <p className="text-muted-foreground">First sign-in</p>
+                                    <p className="font-medium text-[#213847]">
+                                        {initialData.firstLoginAt
+                                            ? new Date(initialData.firstLoginAt).toLocaleString(undefined, {
+                                                  year: "numeric",
+                                                  month: "short",
+                                                  day: "numeric",
+                                                  hour: "2-digit",
+                                                  minute: "2-digit",
+                                              })
+                                            : "Never"}
+                                    </p>
+                                </div>
+                                <div>
+                                    <p className="text-muted-foreground">Account created</p>
+                                    <p className="font-medium text-[#213847]">
+                                        {initialData.createdAt
+                                            ? new Date(initialData.createdAt).toLocaleString(undefined, {
+                                                  year: "numeric",
+                                                  month: "short",
+                                                  day: "numeric",
+                                              })
+                                            : "—"}
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
                     {!isViewMode && mode === "create" && (
                         <div className="flex items-center space-x-2 py-2">
                             <Checkbox
