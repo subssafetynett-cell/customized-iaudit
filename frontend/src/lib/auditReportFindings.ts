@@ -221,10 +221,9 @@ export function buildImsChecklistReportTable(options: {
         programIsoStandard,
     );
     const flags = resolveImsStandardFlags(standards);
-    const anyMatched = flags.iso9001 || flags.iso14001 || flags.iso45001;
-    const showISO9001 = flags.iso9001 || !anyMatched;
-    const showISO14001 = flags.iso14001 || !anyMatched;
-    const showISO45001 = flags.iso45001 || !anyMatched;
+    const showISO9001 = flags.iso9001;
+    const showISO14001 = flags.iso14001;
+    const showISO45001 = flags.iso45001;
 
     const headerCells: ChecklistReportHeaderCell[] = [];
     if (showISO45001) {

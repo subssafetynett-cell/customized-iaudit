@@ -1,4 +1,4 @@
-import { CLAUSE_MATRIX } from "./clauseMapping";
+import { CLAUSE_MATRIX, type ClauseMatrixRow } from "./clauseMapping";
 import type { AuditTemplate, ChecklistContent } from "./auditTemplateTypes";
 
 export const IMS_INTEGRATED_CHECKLIST_ID = "ims-integrated-checklist";
@@ -57,20 +57,28 @@ export function isMultiIsoImsEligible(standards: string[]): boolean {
     });
 }
 
-/** Which ISO columns to show in the IMS triple-mapping table. */
+/** Which ISO columns to show in the IMS triple-mapping table (only selected standards). */
 export function resolveImsStandardFlags(standards: string[]): {
     iso9001: boolean;
     iso14001: boolean;
     iso45001: boolean;
 } {
     const upper = standards.map((s) => s.toUpperCase());
-    const iso9001 = upper.some((s) => s.includes("9001"));
-    const iso14001 = upper.some((s) => s.includes("14001"));
-    const iso45001 = upper.some((s) => s.includes("45001"));
-    const any = iso9001 || iso14001 || iso45001;
     return {
-        iso9001: iso9001 || !any,
-        iso14001: iso14001 || !any,
-        iso45001: iso45001 || !any,
+        iso9001: upper.some((s) => s.includes("9001")),
+        iso14001: upper.some((s) => s.includes("14001")),
+        iso45001: upper.some((s) => s.includes("45001")),
     };
+}
+
+/** Clause question text for one matrix row, limited to selected ISO columns. */
+export function imsClauseTextForRow(
+    row: Pick<ClauseMatrixRow, "iso9001" | "iso14001" | "iso45001">,
+    flags: ReturnType<typeof resolveImsStandardFlags>,
+): string {
+    const parts: string[] = [];
+    if (flags.iso45001 && clauseTextExists(row.iso45001)) parts.push(row.iso45001);
+    if (flags.iso14001 && clauseTextExists(row.iso14001)) parts.push(row.iso14001);
+    if (flags.iso9001 && clauseTextExists(row.iso9001)) parts.push(row.iso9001);
+    return parts.join("\n\n");
 }

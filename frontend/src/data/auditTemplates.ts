@@ -308,22 +308,30 @@ export function getAuditPlanTemplateSubtitle(
 
 const AUDIT_PLAN_KNOWN_STANDARDS = ["ISO 9001", "ISO 14001", "ISO 45001", "ISO 22000"] as const;
 
-/** Resolve ISO standards from audit criteria / program for template filtering. */
+/** Resolve ISO standards from audit program (authoritative) or audit criteria text. */
 export function resolveAuditPlanStandards(
     auditCriteria: string,
     programIsoStandard?: string,
 ): string[] {
-    const criteriaUpper = auditCriteria.toUpperCase();
-    const fromCriteria = AUDIT_PLAN_KNOWN_STANDARDS.filter((std) => criteriaUpper.includes(std));
-    if (fromCriteria.length > 0) return [...fromCriteria];
-
-    if (programIsoStandard) {
+    if (programIsoStandard?.trim()) {
         const progUpper = programIsoStandard.toUpperCase();
-        const fromProgram = AUDIT_PLAN_KNOWN_STANDARDS.filter((std) => progUpper.includes(std));
+        const fromProgram = AUDIT_PLAN_KNOWN_STANDARDS.filter((std) =>
+            progUpper.includes(std),
+        );
         if (fromProgram.length > 0) return [...fromProgram];
         if (progUpper.includes("22000")) return ["ISO 22000"];
-        return programIsoStandard.split(",").map((s) => s.trim()).filter(Boolean);
+        const split = programIsoStandard
+            .split(",")
+            .map((s) => s.trim())
+            .filter(Boolean);
+        if (split.length > 0) return split;
     }
+
+    const criteriaUpper = auditCriteria.toUpperCase();
+    const fromCriteria = AUDIT_PLAN_KNOWN_STANDARDS.filter((std) =>
+        criteriaUpper.includes(std),
+    );
+    if (fromCriteria.length > 0) return [...fromCriteria];
 
     return [];
 }
@@ -414,6 +422,7 @@ export {
     IMS_INTEGRATED_CHECKLIST_ID,
     isMultiIsoImsEligible,
     resolveImsStandardFlags,
+    imsClauseTextForRow,
 } from "./imsIntegratedChecklist";
 
 /** Section divider / heading copy on the audit execution page — varies by template type. */

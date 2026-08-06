@@ -962,6 +962,7 @@ export function createAuditsRouter({ authenticateToken, checkTrialExpiration }) 
                         select: {
                             id: true,
                             name: true,
+                            isoStandard: true,
                             frequency: true,
                             duration: true,
                             createdAt: true,

@@ -71,6 +71,7 @@ import {
   resolvePerformAuditTemplateIds,
   resolveAuditPlanStandards,
   resolveImsStandardFlags,
+  imsClauseTextForRow,
 } from "@/data/auditTemplates";
 import { IsoOkNotOkFindingSelect } from "@/components/IsoOkNotOkFindingSelect";
 import { toast } from "sonner";
@@ -754,48 +755,56 @@ const AuditExecute = () => {
     );
   };
 
-  const programIsoStandards = useMemo(
-    () =>
-      resolveAuditPlanStandards(
-        String(plan?.auditProgram?.isoStandard || plan?.criteria || ""),
-        plan?.auditProgram?.isoStandard,
-      ),
-    [plan?.auditProgram?.isoStandard, plan?.criteria],
-  );
+  const programIsoStandards = useMemo(() => {
+    const fromProgram = resolveAuditPlanStandards(
+      "",
+      plan?.auditProgram?.isoStandard,
+    );
+    if (fromProgram.length > 0) return fromProgram;
+    // Fallback when program iso is missing: parse explicit ISO mentions from plan text.
+    return resolveAuditPlanStandards(
+      [plan?.scope, plan?.objective, plan?.criteria].filter(Boolean).join(" "),
+      undefined,
+    );
+  }, [
+    plan?.auditProgram?.isoStandard,
+    plan?.scope,
+    plan?.objective,
+    plan?.criteria,
+  ]);
 
   const imsStandardFlags = useMemo(
     () => resolveImsStandardFlags(programIsoStandards),
     [programIsoStandards],
   );
 
-  const activeStandards = {
-    iso9001:
-      imsStandardFlags.iso9001 ||
-      plan?.criteria?.includes("9001") ||
-      plan?.standard?.includes("9001") ||
-      plan?.criteria?.toLowerCase().includes("quality") ||
-      plan?.criteria?.toLowerCase().includes("9001"),
-    iso14001:
-      imsStandardFlags.iso14001 ||
-      plan?.criteria?.includes("14001") ||
-      plan?.standard?.includes("14001") ||
-      plan?.criteria?.toLowerCase().includes("environment") ||
-      plan?.criteria?.toLowerCase().includes("14001"),
-    iso45001:
-      imsStandardFlags.iso45001 ||
-      plan?.criteria?.includes("45001") ||
-      plan?.standard?.includes("45001") ||
-      plan?.criteria?.toLowerCase().includes("health") ||
-      plan?.criteria?.toLowerCase().includes("safety") ||
-      plan?.criteria?.toLowerCase().includes("ohs") ||
-      plan?.criteria?.toLowerCase().includes("45001"),
-  };
-
-  // If no standards match, and it's triple mapping, show all as fallback
-  const anyStandardMatched = activeStandards.iso9001 || activeStandards.iso14001 || activeStandards.iso45001;
-  const showISO9001 = activeStandards.iso9001 || !anyStandardMatched;
-  const showISO14001 = activeStandards.iso14001 || !anyStandardMatched;
-  const showISO45001 = activeStandards.iso45001 || !anyStandardMatched;
+  const showISO9001 = template?.isTripleMapping
+    ? imsStandardFlags.iso9001
+    : programIsoStandards.length > 0
+      ? imsStandardFlags.iso9001
+      : Boolean(
+          plan?.criteria?.includes("9001") ||
+            plan?.standard?.includes("9001") ||
+            plan?.criteria?.toLowerCase().includes("9001"),
+        );
+  const showISO14001 = template?.isTripleMapping
+    ? imsStandardFlags.iso14001
+    : programIsoStandards.length > 0
+      ? imsStandardFlags.iso14001
+      : Boolean(
+          plan?.criteria?.includes("14001") ||
+            plan?.standard?.includes("14001") ||
+            plan?.criteria?.toLowerCase().includes("14001"),
+        );
+  const showISO45001 = template?.isTripleMapping
+    ? imsStandardFlags.iso45001
+    : programIsoStandards.length > 0
+      ? imsStandardFlags.iso45001
+      : Boolean(
+          plan?.criteria?.includes("45001") ||
+            plan?.standard?.includes("45001") ||
+            plan?.criteria?.toLowerCase().includes("45001"),
+        );
 
   const activeCount = [showISO9001, showISO14001, showISO45001].filter(Boolean).length;
 
@@ -5384,7 +5393,7 @@ const AuditExecute = () => {
                                   />
                                 ) : (
                                   <>
-                                    {item.question}
+                                    {imsClauseTextForRow(row, imsStandardFlags) || item.question}
                                   </>
                                 )}
                               </div>
