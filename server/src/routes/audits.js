@@ -298,21 +298,17 @@ export function createAuditsRouter({ authenticateToken, checkTrialExpiration }) 
         }
     });
 
-    router.post('/audit-programs', authenticateToken, checkTrialExpiration, async (req, res) => {
-        const { name, isoStandard, frequency, duration, siteId, auditorIds, leadAuditorId, scheduleData, userId } = req.body;
+            router.post('/audit-programs', authenticateToken, checkTrialExpiration, async (req, res) => {
+        const { name, isoStandard, frequency, duration, siteId, auditorIds, leadAuditorId, scheduleData } = req.body;
         try {
             const actorId = req.user.id;
             if (await rejectIfAuditee(actorId, res, 'Auditees cannot create audit programs')) {
                 return;
             }
             await ensureOrphanUserOrgLink(actorId).catch(() => {});
-            const ownerId = userId != null ? Number.parseInt(String(userId), 10) : actorId;
-            if (Number.isNaN(ownerId)) {
-                return res.status(400).json({ error: 'Invalid userId' });
-            }
-            if (!(await actorCanAccessTargetUser(actorId, ownerId))) {
-                return res.status(403).json({ error: 'Forbidden' });
-            }
+            // Programs are always owned by the signed-in user (invitees create under their own id
+            // while using User A's sites/departments via org site access).
+            const ownerId = Number(actorId);
 
             const programCount = await countOrgAuditPrograms(actorId);
             const trialRejected = await rejectIfTrialLimitExceeded(
