@@ -1,6 +1,9 @@
 /**
- * Build node-pg Pool options. node-postgres does not apply `sslmode` from the URL
- * the way libpq does — RDS/managed Postgres often needs explicit `ssl`.
+ * Build node-pg Pool options.
+ *
+ * Important: a bare `new Client({ connectionString })` must behave the same as this Pool.
+ * If DATABASE_URL already has `sslmode=...`, do NOT also set `ssl:` — double SSL config
+ * has caused RDS connect failures while a plain Client (URL-only) succeeded.
  */
 export function shouldUsePgSsl(databaseUrl = process.env.DATABASE_URL) {
     if (!databaseUrl) return false;
@@ -14,7 +17,7 @@ export function shouldUsePgSsl(databaseUrl = process.env.DATABASE_URL) {
         return true;
     }
 
-    // Managed Postgres hosts (RDS, Azure, etc.) typically require SSL.
+    // Managed Postgres hosts (RDS, Azure, etc.) typically require SSL when URL omits sslmode.
     if (/\.rds\.amazonaws\.com/i.test(databaseUrl)) return true;
     if (/\.postgres\.database\.azure\.com/i.test(databaseUrl)) return true;
     if (/\.neon\.tech/i.test(databaseUrl)) return true;
@@ -25,27 +28,27 @@ export function shouldUsePgSsl(databaseUrl = process.env.DATABASE_URL) {
 
 export function buildPgPoolConfig() {
     const connectionString = process.env.DATABASE_URL;
+    const urlAlreadyHasSslMode = /(?:[?&]|^\s*)sslmode=/i.test(connectionString || "");
+
     const config = {
         connectionString,
-        // Fail fast under pressure so /health and requests don't hang → proxy 504.
-        // Prefer failing a single request (~3s) over queuing until Coolify's gateway timeout.
+        // Match bare Client default (0 = no artificial deadline). Set PG_CONNECTION_TIMEOUT_MS to cap.
         connectionTimeoutMillis: Number.parseInt(
-            process.env.PG_CONNECTION_TIMEOUT_MS || "3000",
+            process.env.PG_CONNECTION_TIMEOUT_MS || "0",
             10,
         ),
-        // Default raised from 10 — per-request session auth + list queries starved easily under Coolify concurrency.
-        // Override down via PG_POOL_MAX if Postgres max_connections is tight.
         max: Number.parseInt(process.env.PG_POOL_MAX || "25", 10),
         idleTimeoutMillis: Number.parseInt(process.env.PG_IDLE_TIMEOUT_MS || "20000", 10),
         allowExitOnIdle: false,
     };
 
-    if (shouldUsePgSsl(connectionString)) {
+    // Only inject ssl when the URL does not already specify sslmode (same path as working Client test).
+    if (!urlAlreadyHasSslMode && shouldUsePgSsl(connectionString)) {
         const strictSsl =
-            /sslmode=(verify-full|verify-ca)/i.test(connectionString || "") ||
-            (process.env.DATABASE_SSL || "").toLowerCase() === "verify";
+            (process.env.DATABASE_SSL || "").toLowerCase() === "verify" ||
+            process.env.DATABASE_SSL_REJECT_UNAUTHORIZED === "true";
         config.ssl = {
-            rejectUnauthorized: strictSsl && process.env.DATABASE_SSL_REJECT_UNAUTHORIZED !== "false",
+            rejectUnauthorized: strictSsl,
         };
     }
 

@@ -1009,8 +1009,41 @@ async function ensureDatabaseSchemaPatches() {
             'ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "firstLoginAt" TIMESTAMP(3)'
         );
         await pool.query(
+            'ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "failedLoginAttempts" INTEGER NOT NULL DEFAULT 0'
+        );
+        await pool.query(
             'UPDATE "User" SET "firstLoginAt" = "lastLoginAt" WHERE "firstLoginAt" IS NULL AND "lastLoginAt" IS NOT NULL'
         );
+        // Session table is required for login; create if migrate lagged behind traffic.
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS "Session" (
+                "token" TEXT NOT NULL,
+                "userId" INTEGER NOT NULL,
+                "expiresAt" TIMESTAMP(3) NOT NULL,
+                "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                CONSTRAINT "Session_pkey" PRIMARY KEY ("token")
+            )
+        `);
+        await pool.query(
+            `CREATE INDEX IF NOT EXISTS "Session_userId_idx" ON "Session"("userId")`
+        );
+        await pool.query(
+            `CREATE INDEX IF NOT EXISTS "Session_expiresAt_idx" ON "Session"("expiresAt")`
+        );
+        await pool.query(
+            `CREATE INDEX IF NOT EXISTS "Session_userId_expiresAt_idx" ON "Session"("userId", "expiresAt")`
+        );
+        // Best-effort FK (ignore if User table / constraint already exists under another name).
+        await pool.query(`
+            DO $$ BEGIN
+                ALTER TABLE "Session"
+                    ADD CONSTRAINT "Session_userId_fkey"
+                    FOREIGN KEY ("userId") REFERENCES "User"("id")
+                    ON DELETE CASCADE ON UPDATE CASCADE;
+            EXCEPTION
+                WHEN duplicate_object THEN NULL;
+            END $$
+        `).catch(() => {});
         // Findings inbox email indexes (also in prisma migration; IF NOT EXISTS for race-safe bootstrap).
         await pool.query(
             `ALTER TABLE "AuditPlan" ADD COLUMN IF NOT EXISTS "assigneeEmails" TEXT[] DEFAULT ARRAY[]::TEXT[]`
@@ -1025,7 +1058,7 @@ async function ensureDatabaseSchemaPatches() {
             `CREATE INDEX IF NOT EXISTS "AuditPlan_raisedByEmails_gin" ON "AuditPlan" USING GIN ("raisedByEmails")`
         );
     } catch (err) {
-        console.error('[bootstrap] Schema patch (login timestamps / finding emails) failed:', err.message);
+        console.error('[bootstrap] Schema patch (login timestamps / session / finding emails) failed:', err.message);
     }
 }
 
@@ -1099,12 +1132,10 @@ async function runMigrations() {
         return;
     }
     if (/P3005/.test(result.output)) {
-        console.warn('[bootstrap] Database needs baselining (P3005) — attempting…');
-        const { baselineExistingDatabase } = await import(
-            '../scripts/baseline-migrations.js'
+        // Never call spawnSync baseline here — it freezes the event loop → Traefik 504.
+        console.error(
+            '[bootstrap] Database needs baselining (P3005). Skipping auto-baseline to keep HTTP alive. Run: npm run db:baseline',
         );
-        baselineExistingDatabase(process.env.DATABASE_URL);
-        console.log('[bootstrap] ✔ Baseline applied');
         return;
     }
     console.error(`[bootstrap] Migration exited with code ${result.status}`);
@@ -1124,19 +1155,21 @@ async function runBootstrap() {
             }),
             ensureLegacySiteUserIdsCleared(),
         ]);
-        try {
-            const repaired = await repairOrgCreatorLinks();
-            if (repaired > 0) {
-                console.log(`[bootstrap] ✔ Re-linked ${repaired} org member(s) with missing creatorId`);
-            }
-        } catch (err) {
-            console.warn('[bootstrap] Org creatorId repair skipped:', err.message);
-        }
-        // After columns exist — bounded backfill (do not block readiness on this).
-        void backfillAuditPlanFindingEmails();
+        // Mark ready BEFORE heavy backfills so Coolify/Traefik health checks pass quickly.
         setBootstrapComplete(true);
-        console.log(`[bootstrap] ✔ All startup tasks complete in ${Date.now() - t0}ms`);
-        console.log('[bootstrap] ✔ Container ready for traffic');
+        console.log(`[bootstrap] ✔ Ready for traffic in ${Date.now() - t0}ms`);
+
+        // Heavy org repair + email backfill must not delay readiness (public 504 risk).
+        void repairOrgCreatorLinks()
+            .then((repaired) => {
+                if (repaired > 0) {
+                    console.log(`[bootstrap] ✔ Re-linked ${repaired} org member(s) with missing creatorId`);
+                }
+            })
+            .catch((err) => {
+                console.warn('[bootstrap] Org creatorId repair skipped:', err?.message || err);
+            });
+        void backfillAuditPlanFindingEmails();
     } catch (err) {
         console.error('[bootstrap] Startup bootstrap failed:', err);
         // Don't crash — /health stays 503 until DB recovers; /live stays 200.
@@ -1158,6 +1191,12 @@ const server = app.listen(PORT, '0.0.0.0', () => {
 server.keepAliveTimeout = 130000;
 server.headersTimeout = 131000;
 server.requestTimeout = 0;
+
+// Warm login schema ASAP so the first POST /auth/login does not race migrate.
+import('./session.js')
+    .then(({ ensureLoginSchemaReady }) => ensureLoginSchemaReady())
+    .then(() => console.log('[start] ✔ Login schema ready'))
+    .catch((err) => console.warn('[start] Login schema warm-up deferred:', err?.message || err));
 
 // 2. Migrations / seeds in background without freezing HTTP.
 runBootstrap();

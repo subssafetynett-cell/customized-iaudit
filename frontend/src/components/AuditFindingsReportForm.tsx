@@ -32,6 +32,8 @@ interface AuditFindingsReportFormProps {
   onChange: (next: FindingsReportForm) => void;
   section?: "header" | "footer" | "all";
   nonConformances?: { id?: string; statement?: string }[];
+  /** EOSH / QFS — Facet / Category live in Audit Details; hide scope & criteria here. */
+  hideScopeAndCriteria?: boolean;
 }
 
 export function AuditFindingsReportForm({
@@ -39,6 +41,7 @@ export function AuditFindingsReportForm({
   onChange,
   section = "all",
   nonConformances = [],
+  hideScopeAndCriteria = false,
 }: AuditFindingsReportFormProps) {
   const patch = (partial: Partial<FindingsReportForm>) =>
     onChange({ ...value, ...partial });
@@ -411,7 +414,8 @@ export function AuditFindingsReportForm({
     </section>
   );
 
-  const auditScopeSection = isFieldVisible(value, "auditScope") ? (
+  const auditScopeSection =
+    !hideScopeAndCriteria && isFieldVisible(value, "auditScope") ? (
     <section className="space-y-2">
       <div className="flex items-center gap-2">
         <Input
@@ -448,7 +452,8 @@ export function AuditFindingsReportForm({
     </section>
   ) : null;
 
-  const auditCriteriaSection = isFieldVisible(value, "auditCriteriaAndMethod") ? (
+  const auditCriteriaSection =
+    !hideScopeAndCriteria && isFieldVisible(value, "auditCriteriaAndMethod") ? (
     <section className="space-y-2">
       <div className="flex items-center gap-2">
         <Input

@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import prisma from './prisma.js';
+import prisma, { pool, poolQueryWithRetry } from './prisma.js';
 
 /** Server-side session lifetime (opaque token stored in DB; delivered via httpOnly cookie). */
 const SESSION_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -7,6 +7,67 @@ const SESSION_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const SESSION_RENEW_WHEN_REMAINING_MS = SESSION_MAX_AGE_MS / 2;
 const SESSION_EXPIRES_HEADER = 'X-Session-Expires-At';
 const SESSION_COOKIE_NAME = 'iaudit_session';
+
+/** Ensures Session table + login columns exist even if bootstrap/migrate lagged. */
+let loginSchemaReadyPromise = null;
+
+async function ensureLoginSchemaReady() {
+    if (!loginSchemaReadyPromise) {
+        loginSchemaReadyPromise = (async () => {
+            // Each statement is independent — never fail the whole warm-up on one error.
+            const stmts = [
+                'ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "failedLoginAttempts" INTEGER NOT NULL DEFAULT 0',
+                'ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "lastLoginAt" TIMESTAMP(3)',
+                'ALTER TABLE "User" ADD COLUMN IF NOT EXISTS "firstLoginAt" TIMESTAMP(3)',
+                `CREATE TABLE IF NOT EXISTS "Session" (
+                    "token" TEXT NOT NULL,
+                    "userId" INTEGER NOT NULL,
+                    "expiresAt" TIMESTAMP(3) NOT NULL,
+                    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT "Session_pkey" PRIMARY KEY ("token")
+                )`,
+                `CREATE INDEX IF NOT EXISTS "Session_userId_idx" ON "Session"("userId")`,
+                `CREATE INDEX IF NOT EXISTS "Session_expiresAt_idx" ON "Session"("expiresAt")`,
+            ];
+            for (const sql of stmts) {
+                try {
+                    await pool.query(sql);
+                } catch (err) {
+                    console.warn('[session] schema stmt skipped:', err?.message || err);
+                }
+            }
+            try {
+                await pool.query(`
+                    DO $$ BEGIN
+                        ALTER TABLE "Session"
+                            ADD CONSTRAINT "Session_userId_fkey"
+                            FOREIGN KEY ("userId") REFERENCES "User"("id")
+                            ON DELETE CASCADE ON UPDATE CASCADE;
+                    EXCEPTION
+                        WHEN duplicate_object THEN NULL;
+                    END $$
+                `);
+            } catch {
+                /* ignore */
+            }
+            return true;
+        })().catch((err) => {
+            loginSchemaReadyPromise = null;
+            console.warn('[session] ensureLoginSchemaReady failed:', err?.message || err);
+            return false;
+        });
+    }
+    return loginSchemaReadyPromise;
+}
+
+function safeDecodeCookieValue(value) {
+    try {
+        return decodeURIComponent(value);
+    } catch {
+        // Malformed % sequences in any Cookie must not crash auth (login/session).
+        return value;
+    }
+}
 
 function parseRequestCookies(req) {
     const header = req.headers.cookie;
@@ -16,7 +77,7 @@ function parseRequestCookies(req) {
         if (idx < 1) return acc;
         const key = part.slice(0, idx).trim();
         const value = part.slice(idx + 1).trim();
-        if (key) acc[key] = decodeURIComponent(value);
+        if (key) acc[key] = safeDecodeCookieValue(value);
         return acc;
     }, {});
 }
@@ -42,22 +103,47 @@ function serializeSessionCookie(token, maxAgeMs) {
 }
 
 function appendSessionCookie(res, token, sessionExpiresAtIso) {
-    const ms = Date.parse(String(sessionExpiresAtIso)) - Date.now();
-    if (!Number.isFinite(ms) || ms <= 0) return;
-    res.append('Set-Cookie', serializeSessionCookie(token, ms));
+    try {
+        const ms = Date.parse(String(sessionExpiresAtIso)) - Date.now();
+        if (!Number.isFinite(ms) || ms <= 0) return;
+        const cookie = serializeSessionCookie(token, ms);
+        // Prefer setHeader over append — safer across Express versions / proxies.
+        const prev = res.getHeader('Set-Cookie');
+        if (!prev) {
+            res.setHeader('Set-Cookie', cookie);
+        } else if (Array.isArray(prev)) {
+            res.setHeader('Set-Cookie', [...prev, cookie]);
+        } else {
+            res.setHeader('Set-Cookie', [String(prev), cookie]);
+        }
+    } catch (err) {
+        console.warn('[session] Set-Cookie skipped:', err?.message || err);
+    }
 }
 
 function clearSessionCookie(res) {
-    const secure = sessionCookieSecure();
-    const parts = [
-        `${SESSION_COOKIE_NAME}=`,
-        'Path=/',
-        'Max-Age=0',
-        'HttpOnly',
-        'SameSite=Lax',
-    ];
-    if (secure) parts.push('Secure');
-    res.append('Set-Cookie', parts.join('; '));
+    try {
+        const secure = sessionCookieSecure();
+        const parts = [
+            `${SESSION_COOKIE_NAME}=`,
+            'Path=/',
+            'Max-Age=0',
+            'HttpOnly',
+            'SameSite=Lax',
+        ];
+        if (secure) parts.push('Secure');
+        const cookie = parts.join('; ');
+        const prev = res.getHeader('Set-Cookie');
+        if (!prev) {
+            res.setHeader('Set-Cookie', cookie);
+        } else if (Array.isArray(prev)) {
+            res.setHeader('Set-Cookie', [...prev, cookie]);
+        } else {
+            res.setHeader('Set-Cookie', [String(prev), cookie]);
+        }
+    } catch (err) {
+        console.warn('[session] Clear-Cookie skipped:', err?.message || err);
+    }
 }
 
 function getSessionTokenFromRequest(req) {
@@ -257,72 +343,98 @@ function resetPasswordVerifyRateLimit(req, res, next) {
  * @param {{ existingToken?: string | null }} [opts]
  * @returns {Promise<{ token: string, sessionExpiresAt: string }>}
  */
+/**
+ * Create a new opaque session for this login (SQL-first — avoids Prisma Session delegate races).
+ * Multiple devices may stay signed in at once (one Session row per device/browser).
+ * @param {number} userId
+ * @param {{ existingToken?: string | null }} [opts]
+ * @returns {Promise<{ token: string, sessionExpiresAt: string }>}
+ */
 async function createSessionTokenForUser(userId, opts = {}) {
     const uid = Number(userId);
     if (!Number.isInteger(uid) || uid < 1) {
         throw new Error('Invalid user id for session');
     }
+    await ensureLoginSchemaReady();
+
     const existingToken =
         typeof opts.existingToken === 'string' && opts.existingToken.trim()
             ? opts.existingToken.trim()
             : null;
     const now = new Date();
 
-    // Opportunistic cleanup of *this user's* expired sessions only (avoid global table scan on every login).
-    await prisma.session.deleteMany({
-        where: { userId: uid, expiresAt: { lt: now } },
-    }).catch(() => {});
+    await poolQueryWithRetry(
+        `DELETE FROM "Session" WHERE "userId" = $1 AND "expiresAt" < $2`,
+        [uid, now],
+    ).catch(() => {});
 
-    const sessionPayload = await prisma.$transaction(async (tx) => {
-        await tx.session.deleteMany({
-            where: { userId: uid, expiresAt: { lt: now } },
-        });
-
-        // Same browser/device already signed in — renew that session; leave other devices alone.
-        if (existingToken) {
-            const existing = await tx.session.findFirst({
-                where: {
-                    token: existingToken,
-                    userId: uid,
-                    expiresAt: { gt: now },
-                },
-                select: { token: true },
-            });
-            if (existing) {
-                const expiresAt = new Date(Date.now() + SESSION_MAX_AGE_MS);
-                await tx.session.update({
-                    where: { token: existing.token },
-                    data: { expiresAt },
-                });
-                return {
-                    token: existing.token,
-                    sessionExpiresAt: expiresAt.toISOString(),
-                };
-            }
+    if (existingToken) {
+        const { rows } = await poolQueryWithRetry(
+            `SELECT "token" FROM "Session"
+             WHERE "token" = $1 AND "userId" = $2 AND "expiresAt" > $3
+             LIMIT 1`,
+            [existingToken, uid, now],
+        );
+        if (rows[0]?.token) {
+            const expiresAt = new Date(Date.now() + SESSION_MAX_AGE_MS);
+            await poolQueryWithRetry(
+                `UPDATE "Session" SET "expiresAt" = $1 WHERE "token" = $2`,
+                [expiresAt, rows[0].token],
+            );
+            await stampUserLoginTimes(uid);
+            return {
+                token: rows[0].token,
+                sessionExpiresAt: expiresAt.toISOString(),
+            };
         }
+    }
 
-        // New device/browser — create an additional session without revoking others.
-        const token = crypto.randomBytes(48).toString('base64url');
-        const expiresAt = new Date(Date.now() + SESSION_MAX_AGE_MS);
-        await tx.session.create({
-            data: { token, userId: uid, expiresAt },
-        });
-        return { token, sessionExpiresAt: expiresAt.toISOString() };
-    });
+    const token = crypto.randomBytes(48).toString('base64url');
+    const expiresAt = new Date(Date.now() + SESSION_MAX_AGE_MS);
+    try {
+        await poolQueryWithRetry(
+            `INSERT INTO "Session" ("token", "userId", "expiresAt", "createdAt")
+             VALUES ($1, $2, $3, NOW())`,
+            [token, uid, expiresAt],
+        );
+    } catch (err) {
+        // Last resort: try without relying on prior CREATE (table may already exist).
+        const msg = String(err?.message || err);
+        if (/relation .*Session.* does not exist|42P01/i.test(msg)) {
+            await pool.query(`
+                CREATE TABLE IF NOT EXISTS "Session" (
+                    "token" TEXT NOT NULL,
+                    "userId" INTEGER NOT NULL,
+                    "expiresAt" TIMESTAMP(3) NOT NULL,
+                    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT "Session_pkey" PRIMARY KEY ("token")
+                )
+            `);
+            await poolQueryWithRetry(
+                `INSERT INTO "Session" ("token", "userId", "expiresAt", "createdAt")
+                 VALUES ($1, $2, $3, NOW())`,
+                [token, uid, expiresAt],
+            );
+        } else {
+            throw err;
+        }
+    }
+    await stampUserLoginTimes(uid);
+    return { token, sessionExpiresAt: expiresAt.toISOString() };
+}
 
-    const loginStamp = await prisma.user.findUnique({
-        where: { id: uid },
-        select: { firstLoginAt: true },
-    }).catch(() => null);
-    await prisma.user.update({
-        where: { id: uid },
-        data: {
-            lastLoginAt: new Date(),
-            ...(loginStamp?.firstLoginAt == null ? { firstLoginAt: new Date() } : {}),
-        },
-    }).catch(() => {});
-
-    return sessionPayload;
+async function stampUserLoginTimes(uid) {
+    try {
+        await pool.query(
+            `UPDATE "User"
+             SET "lastLoginAt" = NOW(),
+                 "firstLoginAt" = COALESCE("firstLoginAt", NOW())
+             WHERE id = $1`,
+            [uid],
+        );
+    } catch {
+        /* columns may be missing — non-fatal */
+    }
 }
 
 /**
@@ -451,6 +563,7 @@ export {
     loginIpBuckets,
     loginIpRateLimit,
     createSessionTokenForUser,
+    ensureLoginSchemaReady,
     invalidateAllUserSessions,
     maybeRenewSessionExpiry,
     LOGIN_INVALID_CREDENTIALS_MESSAGE,

@@ -3,6 +3,12 @@ import { QFS_KORE_EXCEL_MODULE_TEMPLATES } from "./qfsKoreExcelModuleTemplates";
 import { ISO_14001_MANAGEMENT_SYSTEM_CHECKLIST } from "./iso14001ManagementSystemChecklist";
 import { ISO_9001_MANAGEMENT_SYSTEM_CHECKLIST } from "./iso9001ManagementSystemChecklist";
 import { ISO_22000_FSSC_MANAGEMENT_SYSTEM_CHECKLIST } from "./iso22000FsscManagementSystemChecklist";
+import {
+    IMS_INTEGRATED_CHECKLIST,
+    IMS_INTEGRATED_CHECKLIST_ID,
+    isMultiIsoImsEligible,
+    resolveImsStandardFlags,
+} from "./imsIntegratedChecklist";
 
 export type {
     AuditStandard,
@@ -131,7 +137,8 @@ export function normalizeOkNotOkFindingValue(
 
 /**
  * When the audit program uses EOSH/QFS modules, lock the plan to the modules
- * scheduled for this execution (month). Returns null for ISO programs (free picker).
+ * scheduled for this execution (month). Returns null for ISO programs (use
+ * {@link getLockedPlanTemplatesFromProgram} for ISO locking).
  */
 export function getLockedPlanTemplatesFromExecution(
     execution?: { clauses?: Array<{ id?: string; standard?: string }> | null } | null,
@@ -163,9 +170,75 @@ export function getLockedPlanTemplatesFromExecution(
     return templates.length > 0 ? templates : null;
 }
 
+function isIsoManagementChecklist(template: AuditTemplate): boolean {
+    return (
+        template.type === "checklist" &&
+        template.module !== "EOSH" &&
+        template.module !== "QFS KORE"
+    );
+}
+
+function templateMatchesIsoStandard(template: AuditTemplate, standard: string): boolean {
+    const tStd = template.standard.toUpperCase();
+    const searchStd = standard.toUpperCase();
+    return tStd.includes(searchStd) || searchStd.includes(tStd);
+}
+
+/**
+ * Lock the audit-plan template picker from the audit program's ISO standard(s)
+ * or scheduled EOSH/QFS modules. Returns null when the user should pick freely
+ * (no program / no resolvable standards).
+ *
+ * - Module program → modules scheduled on this execution
+ * - Single ISO → that standard's management-system checklist (no dropdown)
+ * - Multi ISO → IMS integrated checklist (one combined checklist for plan & perform)
+ */
+export function getLockedPlanTemplatesFromProgram(
+    program?: {
+        isoStandard?: string | null;
+        scheduleData?: { criteriaType?: string; moduleFamily?: string } | null;
+    } | null,
+    execution?: { clauses?: Array<{ id?: string; standard?: string }> | null } | null,
+): AuditTemplate[] | null {
+    const fromModules = getLockedPlanTemplatesFromExecution(execution, program);
+    if (fromModules && fromModules.length > 0) return fromModules;
+
+    const iso = String(program?.isoStandard || "").trim();
+    if (!iso) return null;
+    if (iso.includes("EOSH Module:") || iso.includes("QFS KORE Module:")) return null;
+    if (program?.scheduleData?.criteriaType === "module") return null;
+
+    const standards = resolveAuditPlanStandards(iso, iso);
+    if (standards.length === 0) return null;
+
+    const matched: AuditTemplate[] = [];
+    const seen = new Set<string>();
+    for (const std of standards) {
+        const template = auditTemplates.find(
+            (t) => isIsoManagementChecklist(t) && templateMatchesIsoStandard(t, std),
+        );
+        if (!template || seen.has(template.id)) continue;
+        seen.add(template.id);
+        matched.push(template);
+    }
+
+    if (matched.length === 0) {
+        // Fallback: same checklist the free picker would prefer for these standards.
+        const options = getAuditPlanTemplateOptions(iso, iso).filter(isIsoManagementChecklist);
+        return options.length > 0 ? [options[0]] : null;
+    }
+
+    // Multi-ISO (9001 + 14001 + 45001): one IMS integrated checklist for plan & perform.
+    if (matched.length > 1 && isMultiIsoImsEligible(standards)) {
+        return [IMS_INTEGRATED_CHECKLIST];
+    }
+
+    return matched;
+}
+
 /** Short label for audit plan template picker. */
 export function getAuditPlanTemplateLabel(
-    template: Pick<AuditTemplate, "type" | "isIntegrated" | "title" | "module">,
+    template: Pick<AuditTemplate, "type" | "isIntegrated" | "title" | "module" | "standard">,
     isMultiStandard = false,
 ): string {
     // Named Excel modules (EOSH / QFS) — show the module name, not a generic IMS label.
@@ -200,13 +273,13 @@ export function getAuditPlanTemplateLabel(
     }
     switch (template.type) {
         case "clause-checklist":
-            return "Clause Template";
+            return template.standard ? `${template.standard} Clause` : "Clause Template";
         case "checklist":
-            return "Checklist Template";
+            return template.standard ? `${template.standard} Checklist` : "Checklist Template";
         case "process-audit":
-            return "Process Template";
+            return template.standard ? `${template.standard} Process` : "Process Template";
         case "section":
-            return "Section Template";
+            return template.standard ? `${template.standard} Section` : "Section Template";
         default:
             return "Audit Template";
     }
@@ -235,22 +308,30 @@ export function getAuditPlanTemplateSubtitle(
 
 const AUDIT_PLAN_KNOWN_STANDARDS = ["ISO 9001", "ISO 14001", "ISO 45001", "ISO 22000"] as const;
 
-/** Resolve ISO standards from audit criteria / program for template filtering. */
+/** Resolve ISO standards from audit program (authoritative) or audit criteria text. */
 export function resolveAuditPlanStandards(
     auditCriteria: string,
     programIsoStandard?: string,
 ): string[] {
-    const criteriaUpper = auditCriteria.toUpperCase();
-    const fromCriteria = AUDIT_PLAN_KNOWN_STANDARDS.filter((std) => criteriaUpper.includes(std));
-    if (fromCriteria.length > 0) return [...fromCriteria];
-
-    if (programIsoStandard) {
+    if (programIsoStandard?.trim()) {
         const progUpper = programIsoStandard.toUpperCase();
-        const fromProgram = AUDIT_PLAN_KNOWN_STANDARDS.filter((std) => progUpper.includes(std));
+        const fromProgram = AUDIT_PLAN_KNOWN_STANDARDS.filter((std) =>
+            progUpper.includes(std),
+        );
         if (fromProgram.length > 0) return [...fromProgram];
         if (progUpper.includes("22000")) return ["ISO 22000"];
-        return programIsoStandard.split(",").map((s) => s.trim()).filter(Boolean);
+        const split = programIsoStandard
+            .split(",")
+            .map((s) => s.trim())
+            .filter(Boolean);
+        if (split.length > 0) return split;
     }
+
+    const criteriaUpper = auditCriteria.toUpperCase();
+    const fromCriteria = AUDIT_PLAN_KNOWN_STANDARDS.filter((std) =>
+        criteriaUpper.includes(std),
+    );
+    if (fromCriteria.length > 0) return [...fromCriteria];
 
     return [];
 }
@@ -278,7 +359,7 @@ export function getAuditPlanTemplateOptions(
     });
 
     if (isMultiStandard) {
-        const integratedChecklist = filtered.find((t) => t.isIntegrated);
+        const integratedChecklist = filtered.find((t) => t.isIntegrated || t.id === IMS_INTEGRATED_CHECKLIST_ID);
         const uniqueTypes = new Set<TemplateType>();
         return filtered.filter((t) => {
             if (t.alwaysAvailableInPlan) return true;
@@ -296,6 +377,53 @@ export function getAuditPlanTemplateOptions(
 
     return filtered;
 }
+
+/**
+ * Template ids used during perform audit. Multi-ISO (9001/14001/45001) → single IMS checklist.
+ */
+export function resolvePerformAuditTemplateIds(
+    templateId?: string | null,
+    programIsoStandard?: string | null,
+): string[] {
+    const ids = parseAuditPlanTemplateIds(templateId);
+    const standards = resolveAuditPlanStandards(
+        String(programIsoStandard || ""),
+        programIsoStandard || undefined,
+    );
+    if (isMultiIsoImsEligible(standards)) {
+        return [IMS_INTEGRATED_CHECKLIST_ID];
+    }
+    if (ids.length > 1) {
+        const templates = findAuditTemplates(templateId);
+        const allIsoMgmt =
+            templates.length > 0 &&
+            templates.every(
+                (t) =>
+                    t.module !== "EOSH" &&
+                    t.module !== "QFS KORE" &&
+                    t.type === "checklist",
+            );
+        const stdsFromTemplates = templates
+            .map((t) => t.standard)
+            .filter(Boolean) as string[];
+        if (
+            allIsoMgmt &&
+            isMultiIsoImsEligible(
+                standards.length > 1 ? standards : stdsFromTemplates,
+            )
+        ) {
+            return [IMS_INTEGRATED_CHECKLIST_ID];
+        }
+    }
+    return ids;
+}
+
+export {
+    IMS_INTEGRATED_CHECKLIST_ID,
+    isMultiIsoImsEligible,
+    resolveImsStandardFlags,
+    imsClauseTextForRow,
+} from "./imsIntegratedChecklist";
 
 /** Section divider / heading copy on the audit execution page — varies by template type. */
 export function getAuditExecuteSectionLabels(
@@ -322,6 +450,7 @@ export function getAuditExecuteSectionLabels(
 }
 
 export const auditTemplates: AuditTemplate[] = [
+    IMS_INTEGRATED_CHECKLIST,
     ISO_9001_MANAGEMENT_SYSTEM_CHECKLIST,
     ISO_14001_MANAGEMENT_SYSTEM_CHECKLIST,
     ISO_22000_FSSC_MANAGEMENT_SYSTEM_CHECKLIST,
