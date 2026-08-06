@@ -36,4 +36,8 @@ ENV NODE_ENV=production
 ENV RUNNING_IN_DOCKER=1
 EXPOSE 3001
 
+# Liveness only (/live) — never gate on DB/migrate readiness.
+HEALTHCHECK --interval=5s --timeout=3s --start-period=30s --retries=12 \
+  CMD node -e "fetch('http://127.0.0.1:3001/live').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+
 CMD ["./docker-entrypoint.sh"]
