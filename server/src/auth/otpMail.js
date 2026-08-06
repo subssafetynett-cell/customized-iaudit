@@ -530,11 +530,10 @@ async function sendOtpToEmailAddressUnderLock(normalizedEmail, purpose, options 
             `;
         }
 
-    const smtpFrom = String(process.env.SMTP_USER).trim();
     const mailOptions = {
         from: {
             name: 'iAudit Global',
-            address: smtpFrom
+            address: getSmtpFromAddress()
         },
         to: normalizedEmail,
         subject,
