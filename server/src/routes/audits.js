@@ -1015,7 +1015,7 @@ export function createAuditsRouter({ authenticateToken, checkTrialExpiration }) 
         const {
             auditProgramId, executionId, auditType, auditName, templateId, date, location,
             scope, objective, criteria,
-            leadAuditorId, auditorIds, itinerary, userId
+            leadAuditorId, auditorIds, itinerary
         } = req.body;
 
         if (!auditProgramId) {
@@ -1039,16 +1039,21 @@ export function createAuditsRouter({ authenticateToken, checkTrialExpiration }) 
             }
 
             const actorId = Number(req.user.id);
-            const planOwnerId = userId != null ? Number.parseInt(String(userId), 10) : actorId;
-            if (!Number.isInteger(planOwnerId) || planOwnerId < 1 || !(await actorCanAccessTargetUser(actorId, planOwnerId))) {
-                return res.status(403).json({ error: 'You do not have permission to create an audit plan for this user' });
-            }
+            // Plans are always owned by the signed-in user (invitees create under their own id
+            // while using programs/sites from their org admin).
+            const planOwnerId = actorId;
 
             const programCompanyId = await resolveAuditProgramCompanyId(program);
+            // Pre-filled lead/team auditors from the parent program must remain selectable on create.
+            const grandfatherIds = [
+                program.leadAuditorId,
+                ...(Array.isArray(program.auditors) ? program.auditors.map((a) => a.id) : []),
+            ];
             const auditorCheck = await validateAuditPlanAuditorAssignments(actorId, {
                 companyId: programCompanyId,
                 leadAuditorId,
                 auditorIds,
+                grandfatherIds,
             });
             if (!auditorCheck.ok) {
                 return res.status(auditorCheck.status).json({ error: auditorCheck.error });
@@ -1104,12 +1109,13 @@ export function createAuditsRouter({ authenticateToken, checkTrialExpiration }) 
                         include: {
                             auditors: true,
                             leadAuditor: true,
-                            site: { select: { companyId: true } },
+                            site: { select: { id: true, companyId: true } },
                         },
                     },
                 },
             });
             if (!existing) return res.status(404).json({ error: 'Audit plan not found' });
+            await ensureOrphanUserOrgLink(req.user.id).catch(() => {});
             if (!(await actorCanAccessAuditPlan(req.user.id, existing))) {
                 return res.status(403).json({ error: 'You do not have permission to update this audit plan' });
             }
@@ -1129,11 +1135,14 @@ export function createAuditsRouter({ authenticateToken, checkTrialExpiration }) 
                     auditorIds !== undefined
                         ? auditorIds
                         : existing.auditors.map((a) => a.id);
-                // Keep currently assigned auditors allowed even if they became inactive,
-                // so saving an existing plan does not randomly return 403.
+                // Keep currently assigned + parent-program auditors allowed on save.
                 const grandfatherIds = [
                     existing.leadAuditorId,
                     ...existing.auditors.map((a) => a.id),
+                    existing.auditProgram?.leadAuditorId,
+                    ...(Array.isArray(existing.auditProgram?.auditors)
+                        ? existing.auditProgram.auditors.map((a) => a.id)
+                        : []),
                 ];
                 validatedAuditors = await validateAuditPlanAuditorAssignments(actorId, {
                     companyId: programCompanyId,
