@@ -68,6 +68,10 @@ import {
     type ReportNonConformance,
 } from "@/lib/auditReportFindings";
 import {
+    buildModuleAuditReportFileName,
+    resolveModuleAuditFacetCategory,
+} from "@/lib/moduleAuditFacet";
+import {
     computeEoshCapabilityScores,
     isEoshScoredCapabilityChecklist,
 } from "@/lib/eoshChecklistUi";
@@ -237,8 +241,12 @@ function docxImageRun(data: Uint8Array | ArrayBuffer, width: number, height: num
     });
 }
 
-export function auditReportBaseName(plan: { auditName?: string; id?: number }) {
-    return `Audit_Findings_Report_${(plan.auditName || "Audit").replace(/[^a-z0-9]/gi, "_") || plan.id}`;
+export function auditReportBaseName(plan: Record<string, unknown>) {
+    const moduleFileName = buildModuleAuditReportFileName(plan);
+    if (moduleFileName) return moduleFileName;
+    const auditName = (plan as { auditName?: string; id?: number }).auditName;
+    const id = (plan as { id?: number }).id;
+    return `Audit_Findings_Report_${(auditName || "Audit").replace(/[^a-z0-9]/gi, "_") || id}`;
 }
 
 interface ReportContext {
@@ -253,6 +261,8 @@ interface ReportContext {
     auditees: string;
     scope: string;
     criteriaAndMethod: string;
+    facet: string;
+    category: string;
     executiveSummary: string;
     nonConformances: ReportNonConformance[];
     isModuleAudit: boolean;
@@ -370,6 +380,10 @@ async function buildReportContext(plan: Record<string, any>): Promise<ReportCont
         ? form.generalComment
         : String(auditData.executiveSummary || "");
 
+    const moduleFacetCategory = isModuleAudit
+        ? resolveModuleAuditFacetCategory(auditData)
+        : { facet: "", category: "" };
+
     const findingsForm = normalizeFindingsReportForm({
         ...form,
         docNumber: form?.docNumber?.trim() || DEFAULT_DOC_NUMBER,
@@ -423,8 +437,12 @@ async function buildReportContext(plan: Record<string, any>): Promise<ReportCont
         auditDate: findingsForm.auditDate,
         auditors: findingsForm.auditors,
         auditees: findingsForm.auditees,
-        scope: findingsForm.auditScope,
-        criteriaAndMethod: findingsForm.auditCriteriaAndMethod,
+        scope: isModuleAudit ? moduleFacetCategory.facet : findingsForm.auditScope,
+        criteriaAndMethod: isModuleAudit
+            ? moduleFacetCategory.category
+            : findingsForm.auditCriteriaAndMethod,
+        facet: moduleFacetCategory.facet,
+        category: moduleFacetCategory.category,
         executiveSummary,
         nonConformances,
         isModuleAudit,
@@ -1086,29 +1104,39 @@ async function renderSzlReportHeaderAndMetadataAsync(
         );
     }
 
-    if (isFieldVisible(ctx.findingsForm, "auditScope")) {
-        y = renderBlueTextSectionPdf(
-            doc,
-            `${getSectionLabel(ctx.findingsForm, "auditScope")}:`,
-            ctx.scope,
-            y,
-            pageH,
-        );
+    if (ctx.isModuleAudit) {
+        y = renderBlueTextSectionPdf(doc, "Facet:", ctx.facet || "—", y, pageH);
+        y = renderBlueTextSectionPdf(doc, "Category:", ctx.category || "—", y, pageH);
         for (const field of getCustomFieldsBySection(ctx.findingsForm, "content")) {
             y = checkPage(doc, y, 20, pageH);
             y = pdfSubHeading(doc, `${field.label}:`, y);
             y = pdfBorderedContentBox(doc, field.value, y, pageH);
         }
-    }
+    } else {
+        if (isFieldVisible(ctx.findingsForm, "auditScope")) {
+            y = renderBlueTextSectionPdf(
+                doc,
+                `${getSectionLabel(ctx.findingsForm, "auditScope")}:`,
+                ctx.scope,
+                y,
+                pageH,
+            );
+            for (const field of getCustomFieldsBySection(ctx.findingsForm, "content")) {
+                y = checkPage(doc, y, 20, pageH);
+                y = pdfSubHeading(doc, `${field.label}:`, y);
+                y = pdfBorderedContentBox(doc, field.value, y, pageH);
+            }
+        }
 
-    if (isFieldVisible(ctx.findingsForm, "auditCriteriaAndMethod")) {
-        y = renderBlueTextSectionPdf(
-            doc,
-            `${getSectionLabel(ctx.findingsForm, "auditCriteria")}:`,
-            ctx.criteriaAndMethod,
-            y,
-            pageH,
-        );
+        if (isFieldVisible(ctx.findingsForm, "auditCriteriaAndMethod")) {
+            y = renderBlueTextSectionPdf(
+                doc,
+                `${getSectionLabel(ctx.findingsForm, "auditCriteria")}:`,
+                ctx.criteriaAndMethod,
+                y,
+                pageH,
+            );
+        }
     }
 
     y = renderPreviousFindingsSectionPdf(doc, auditData, y, pageH);
@@ -2140,21 +2168,30 @@ export async function generateAuditReportDocx(plan: Record<string, any>) {
 
     children.push(...buildManagementSystemSectionDocx(form, ctx.managementRows));
 
-    if (isFieldVisible(form, "auditScope")) {
-        children.push(...buildBlueTextSectionDocx(`${getSectionLabel(form, "auditScope")}:`, ctx.scope));
+    if (ctx.isModuleAudit) {
+        children.push(...buildBlueTextSectionDocx("Facet:", ctx.facet || "—"));
+        children.push(...buildBlueTextSectionDocx("Category:", ctx.category || "—"));
         getCustomFieldsBySection(form, "content").forEach((field) => {
             children.push(docxSubHeading(`${field.label}:`));
             children.push(docxBorderedContentTable(field.value));
         });
-    }
+    } else {
+        if (isFieldVisible(form, "auditScope")) {
+            children.push(...buildBlueTextSectionDocx(`${getSectionLabel(form, "auditScope")}:`, ctx.scope));
+            getCustomFieldsBySection(form, "content").forEach((field) => {
+                children.push(docxSubHeading(`${field.label}:`));
+                children.push(docxBorderedContentTable(field.value));
+            });
+        }
 
-    if (isFieldVisible(form, "auditCriteriaAndMethod")) {
-        children.push(
-            ...buildBlueTextSectionDocx(
-                `${getSectionLabel(form, "auditCriteria")}:`,
-                ctx.criteriaAndMethod,
-            ),
-        );
+        if (isFieldVisible(form, "auditCriteriaAndMethod")) {
+            children.push(
+                ...buildBlueTextSectionDocx(
+                    `${getSectionLabel(form, "auditCriteria")}:`,
+                    ctx.criteriaAndMethod,
+                ),
+            );
+        }
     }
 
     children.push(...buildPreviousFindingsSectionDocx(auditData));
@@ -2551,11 +2588,19 @@ export async function generateAuditReportExcel(plan: Record<string, any>) {
         summaryData.push([row.label, row.value]);
     }
 
-    pushSummaryRow("auditScope", ctx.scope);
-    getCustomFieldsBySection(form, "content").forEach((field) => {
-        summaryData.push([field.label || "Field", field.value || "—"]);
-    });
-    pushSummaryRow("auditCriteriaAndMethod", ctx.criteriaAndMethod);
+    if (ctx.isModuleAudit) {
+        summaryData.push(["Facet", ctx.facet || "—"]);
+        summaryData.push(["Category", ctx.category || "—"]);
+        getCustomFieldsBySection(form, "content").forEach((field) => {
+            summaryData.push([field.label || "Field", field.value || "—"]);
+        });
+    } else {
+        pushSummaryRow("auditScope", ctx.scope);
+        getCustomFieldsBySection(form, "content").forEach((field) => {
+            summaryData.push([field.label || "Field", field.value || "—"]);
+        });
+        pushSummaryRow("auditCriteriaAndMethod", ctx.criteriaAndMethod);
+    }
 
     summaryData.push(["Template", template?.title || plan.templateId || "N/A"]);
     summaryData.push(["Status", plan.status || "N/A"]);

@@ -39,6 +39,13 @@ import { AutoResizeTextarea } from "@/components/ui/auto-resize-textarea";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
   Table,
   TableBody,
   TableCell,
@@ -116,6 +123,8 @@ import {
   syncOpportunitiesFromSources,
 } from "@/lib/syncAuditFindingsSummary";
 import { AuditFindingsReportForm } from "@/components/AuditFindingsReportForm";
+import { isModuleAuditPlan } from "@/lib/auditReportFindings";
+import { MODULE_AUDIT_FACET_OPTIONS } from "@/lib/moduleAuditFacet";
 import {
   buildFindingsReportDefaults,
   defaultFindingsReportForm,
@@ -486,6 +495,8 @@ const AuditExecute = () => {
           auditDoneBy: string;
           auditeeDept: string;
           auditDate: string;
+          facet?: string;
+          category?: string;
         };
       }
     >
@@ -499,6 +510,8 @@ const AuditExecute = () => {
     auditDoneBy: "",
     auditeeDept: "",
     auditDate: "",
+    facet: "",
+    category: "",
   });
 
   const [checklistData, setChecklistData] = useState<
@@ -678,6 +691,7 @@ const AuditExecute = () => {
     resolveAuditTemplateId(activeModuleId || planTemplateIds[0]) ??
     (activeModuleId || planTemplateIds[0] || plan?.templateId);
   const template = findAuditTemplate(templateId);
+  const isModuleCriteriaAudit = Boolean(template && isModuleAuditPlan(templateId, template));
   const templateSectionLabels = template
     ? getAuditExecuteSectionLabels(template)
     : { divider: "Audit Execution", detailsTitle: null as string | null };
@@ -2713,6 +2727,17 @@ const AuditExecute = () => {
     }
     setShowExceptionFollowUpErrors(false);
 
+    if (isModuleCriteriaAudit) {
+      if (!String(auditGlobalInfo.facet || "").trim()) {
+        toast.error("Select a Facet (Health and Safety, Environmental, or Quality).");
+        return;
+      }
+      if (!String(auditGlobalInfo.category || "").trim()) {
+        toast.error("Enter a Category for this audit.");
+        return;
+      }
+    }
+
     const toastId = toast.loading("Saving audit…");
     try {
       const auditData = buildAuditDataPayload();
@@ -2839,6 +2864,16 @@ const AuditExecute = () => {
 
     const exportToPDF = async () => {
         try {
+            if (isModuleCriteriaAudit) {
+                if (!String(auditGlobalInfo.facet || "").trim()) {
+                    toast.error("Select a Facet before downloading the report.");
+                    return;
+                }
+                if (!String(auditGlobalInfo.category || "").trim()) {
+                    toast.error("Enter a Category before downloading the report.");
+                    return;
+                }
+            }
             toast.loading("Generating PDF report…", { id: "audit-export" });
             const moduleId = activeModuleId || planTemplateIds[0];
             const payload = { ...plan, auditData: buildAuditDataPayload() };
@@ -2860,6 +2895,16 @@ const AuditExecute = () => {
 
     const exportToExcel = async () => {
         try {
+            if (isModuleCriteriaAudit) {
+                if (!String(auditGlobalInfo.facet || "").trim()) {
+                    toast.error("Select a Facet before downloading the report.");
+                    return;
+                }
+                if (!String(auditGlobalInfo.category || "").trim()) {
+                    toast.error("Enter a Category before downloading the report.");
+                    return;
+                }
+            }
             toast.loading("Generating Excel report…", { id: "audit-export" });
             const moduleId = activeModuleId || planTemplateIds[0];
             const payload = { ...plan, auditData: buildAuditDataPayload() };
@@ -2880,6 +2925,16 @@ const AuditExecute = () => {
 
     const exportToWord = async () => {
         try {
+            if (isModuleCriteriaAudit) {
+                if (!String(auditGlobalInfo.facet || "").trim()) {
+                    toast.error("Select a Facet before downloading the report.");
+                    return;
+                }
+                if (!String(auditGlobalInfo.category || "").trim()) {
+                    toast.error("Enter a Category before downloading the report.");
+                    return;
+                }
+            }
             toast.loading("Generating Word report…", { id: "audit-export" });
             const moduleId = activeModuleId || planTemplateIds[0];
             const payload = { ...plan, auditData: buildAuditDataPayload() };
@@ -3073,30 +3128,74 @@ const AuditExecute = () => {
               </div>
 
               <div className="space-y-4">
-                <div>
-                  <span className="block text-xs font-semibold text-slate-500 mb-1.5">
-                    Objective
-                  </span>
-                  <p className="text-sm text-slate-800">
-                    {plan.objective || "N/A"}
-                  </p>
-                </div>
-                <div>
-                  <span className="block text-xs font-semibold text-slate-500 mb-1.5">
-                    Scope
-                  </span>
-                  <p className="text-sm text-slate-800">
-                    {plan.scope || "N/A"}
-                  </p>
-                </div>
-                <div>
-                  <span className="block text-xs font-semibold text-slate-500 mb-1.5">
-                    Audit Criteria
-                  </span>
-                  <p className="text-sm text-slate-800">
-                    {plan.criteria || "N/A"}
-                  </p>
-                </div>
+                {isModuleCriteriaAudit ? (
+                  <>
+                    <div>
+                      <Label className="block text-xs font-semibold text-slate-500 mb-1.5 uppercase tracking-wider">
+                        Facet
+                      </Label>
+                      <Select
+                        value={auditGlobalInfo.facet || ""}
+                        onValueChange={(value) =>
+                          setAuditGlobalInfo({ ...auditGlobalInfo, facet: value })
+                        }
+                        disabled={isAuditeeReadOnly}
+                      >
+                        <SelectTrigger className="h-11 bg-[#F9FAFB] border-[#E5E7EB] rounded-xl text-sm">
+                          <SelectValue placeholder="Select facet…" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {MODULE_AUDIT_FACET_OPTIONS.map((opt) => (
+                            <SelectItem key={opt.value} value={opt.value}>
+                              {opt.label}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div>
+                      <Label className="block text-xs font-semibold text-slate-500 mb-1.5 uppercase tracking-wider">
+                        Category
+                      </Label>
+                      <Input
+                        placeholder="Enter category"
+                        value={auditGlobalInfo.category || ""}
+                        onChange={(e) =>
+                          setAuditGlobalInfo({ ...auditGlobalInfo, category: e.target.value })
+                        }
+                        disabled={isAuditeeReadOnly}
+                        className="h-11 bg-[#F9FAFB] border-[#E5E7EB] rounded-xl text-sm"
+                      />
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div>
+                      <span className="block text-xs font-semibold text-slate-500 mb-1.5">
+                        Objective
+                      </span>
+                      <p className="text-sm text-slate-800">
+                        {plan.objective || "N/A"}
+                      </p>
+                    </div>
+                    <div>
+                      <span className="block text-xs font-semibold text-slate-500 mb-1.5">
+                        Scope
+                      </span>
+                      <p className="text-sm text-slate-800">
+                        {plan.scope || "N/A"}
+                      </p>
+                    </div>
+                    <div>
+                      <span className="block text-xs font-semibold text-slate-500 mb-1.5">
+                        Audit Criteria
+                      </span>
+                      <p className="text-sm text-slate-800">
+                        {plan.criteria || "N/A"}
+                      </p>
+                    </div>
+                  </>
+                )}
               </div>
             </Card>
           </div>

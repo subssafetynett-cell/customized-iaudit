@@ -2,10 +2,20 @@ import * as React from "react";
 
 import { DatePickerInput } from "@/components/DatePickerInput";
 import { parseFlexibleDateValue } from "@/lib/dateInput";
+import {
+  mergeTitleCaseBlurHandler,
+  mergeTitleCaseChangeHandler,
+  shouldApplyTitleCaseToField,
+} from "@/lib/titleCaseInput";
 import { cn } from "@/lib/utils";
 
-const Input = React.forwardRef<HTMLInputElement, React.ComponentProps<"input">>(
-  ({ className, type, value, onChange, ...props }, ref) => {
+export type InputProps = React.ComponentProps<"input"> & {
+  /** Set to false to disable automatic Title Case formatting. */
+  titleCase?: boolean;
+};
+
+const Input = React.forwardRef<HTMLInputElement, InputProps>(
+  ({ className, type, value, onChange, onBlur, titleCase, ...props }, ref) => {
     if (type === "date") {
       const minDate =
         props.min != null && String(props.min).trim() !== ""
@@ -37,6 +47,22 @@ const Input = React.forwardRef<HTMLInputElement, React.ComponentProps<"input">>(
       );
     }
 
+    const applyTitleCase = shouldApplyTitleCaseToField({
+      type,
+      inputMode: props.inputMode,
+      autoComplete: props.autoComplete,
+      readOnly: props.readOnly,
+      disabled: props.disabled,
+      titleCase,
+      className,
+      name: props.name,
+      id: props.id,
+      maxLength: props.maxLength,
+    });
+
+    const handleChange = mergeTitleCaseChangeHandler(onChange, applyTitleCase, false);
+    const handleBlur = mergeTitleCaseBlurHandler(onBlur, onChange, applyTitleCase, false);
+
     return (
       <input
         type={type}
@@ -46,7 +72,8 @@ const Input = React.forwardRef<HTMLInputElement, React.ComponentProps<"input">>(
         )}
         ref={ref}
         value={value}
-        onChange={onChange}
+        onChange={handleChange}
+        onBlur={handleBlur}
         {...props}
       />
     );
