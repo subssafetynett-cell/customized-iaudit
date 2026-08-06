@@ -244,6 +244,8 @@ async function actorCanAccessOrgCompanyOwner(actorId, companyOwnerUserId) {
     if (!actor) return false;
     if (normalizeUserRole(actor.role) === 'superadmin') return true;
     if (normalizeUserRole(actor.role) === 'auditee') return false;
+    // Same creatorId org tree (User A owns company; User B invited by A).
+    if (await actorInSameOrgAs(a, owner)) return true;
     const ownerIds = await resolveOrgCompanyOwnerUserIds(a);
     return ownerIds.includes(owner);
 }
@@ -951,11 +953,54 @@ async function siteIdsInActorOrg(actorId) {
     return new Set(sites.map((s) => s.id));
 }
 
+/**
+ * True when actor may use a site for audits / programs / plans / auditee assignment.
+ * Invitees (User B created by User A) must pass when the site's company is owned by
+ * anyone in their shared creatorId org tree — not only when the bulk company catalog hits.
+ */
 async function actorCanAssignAuditeeToSite(actorId, siteId) {
     const parsed = Number.parseInt(String(siteId), 10);
     if (Number.isNaN(parsed) || parsed < 1) return false;
-    const allowed = await siteIdsInActorOrg(actorId);
-    return allowed.has(parsed);
+    const a = Number(actorId);
+    if (!Number.isInteger(a) || a < 1) return false;
+
+    const site = await prisma.site.findUnique({
+        where: { id: parsed },
+        select: {
+            id: true,
+            companyId: true,
+            company: { select: { id: true, userId: true } },
+        },
+    });
+    if (!site) return false;
+
+    const actor = await prisma.user.findUnique({
+        where: { id: a },
+        select: { role: true },
+    });
+    if (!actor) return false;
+    const role = normalizeUserRole(actor.role);
+    if (role === 'superadmin') return true;
+    if (role === 'auditee') {
+        return auditeeCanAccessSiteId(a, parsed);
+    }
+
+    const ownerId = site.company?.userId != null ? Number(site.company.userId) : null;
+    if (Number.isInteger(ownerId) && ownerId > 0) {
+        if (ownerId === a) return true;
+        // Primary rule for A→B: same organization tree via creatorId.
+        if (await actorInSameOrgAs(a, ownerId)) return true;
+        // Expanded membership (company / program collaboration links).
+        if (await actorCanAccessOrgCompanyOwner(a, ownerId)) return true;
+    }
+
+    const allowed = await siteIdsInActorOrg(a);
+    if (allowed.has(parsed)) return true;
+    if (site.companyId != null && Number.isInteger(Number(site.companyId))) {
+        const companyIds = await resolveOrgVisibleCompanyIds(a);
+        if (companyIds.includes(Number(site.companyId))) return true;
+    }
+    return false;
 }
 
 /** Batch site-assignment check (one org lookup instead of N). */
@@ -964,8 +1009,11 @@ async function actorCanAssignAuditeeToAllSites(actorId, siteIds) {
         .map((id) => Number.parseInt(String(id), 10))
         .filter((n) => Number.isInteger(n) && n >= 1);
     if (ids.length === 0) return false;
-    const allowed = await siteIdsInActorOrg(actorId);
-    return ids.every((id) => allowed.has(id));
+    // Per-site checks (same-org company owner) — avoid false negatives from catalog-only Sets.
+    for (const id of ids) {
+        if (!(await actorCanAssignAuditeeToSite(actorId, id))) return false;
+    }
+    return true;
 }
 
 /** PSZL-010: site must exist and belong to the actor's organization before mutate. */
@@ -1093,7 +1141,11 @@ async function assertOrgSiteDepartments(actorId, siteId, scheduleData) {
         return { ok: false, status: 400, error: 'Invalid site ID' };
     }
     if (!(await actorCanAssignAuditeeToSite(actorId, parsedSiteId))) {
-        return { ok: false, status: 403, error: 'Forbidden' };
+        return {
+            ok: false,
+            status: 403,
+            error: 'You do not have access to the selected site or its departments',
+        };
     }
     const deptIds = parsePositiveIntIds(rawIds);
     if (deptIds.length === 0) {
@@ -1121,34 +1173,79 @@ async function validateAuditProgramAssignments(actorId, { siteId, leadAuditorId,
     if (!Number.isInteger(parsedSiteId) || parsedSiteId < 1) {
         return { ok: false, status: 400, error: 'Invalid site ID' };
     }
+
+    await ensureOrphanUserOrgLink(actorId).catch(() => {});
+
     if (!(await actorCanAssignAuditeeToSite(actorId, parsedSiteId))) {
-        return { ok: false, status: 403, error: 'You do not have access to the selected site' };
+        return {
+            ok: false,
+            status: 403,
+            error: 'You do not have access to the selected site. Use a site from your organization (sites created by your admin or teammates).',
+        };
     }
-    if (leadAuditorId != null && leadAuditorId !== '') {
-        const leadCheck = await assertOrgAuditorUserIds(actorId, [leadAuditorId], { allowEmpty: false });
-        if (!leadCheck.ok) {
-            return {
-                ok: false,
-                status: leadCheck.status || 400,
-                error: leadCheck.error === 'Auditor user id is required'
-                    ? 'Lead auditor is required'
-                    : (leadCheck.error || 'Invalid lead auditor'),
-            };
+
+    const site = await prisma.site.findUnique({
+        where: { id: parsedSiteId },
+        select: { companyId: true },
+    });
+    const companyId = site?.companyId != null ? Number(site.companyId) : null;
+
+    // Prefer the site's company org for auditor allow-lists (User A owns company; User B saves on A's site).
+    let resolvedLead = null;
+    let resolvedAuditors = [];
+    if (Number.isInteger(companyId) && companyId > 0) {
+        if (leadAuditorId != null && leadAuditorId !== '') {
+            const leadCheck = await assertCompanyAuditorUserIds(companyId, [leadAuditorId], {
+                allowEmpty: false,
+            });
+            if (!leadCheck.ok) {
+                return {
+                    ok: false,
+                    status: leadCheck.status || 403,
+                    error: leadCheck.error === 'Auditor user id is required'
+                        ? 'Lead auditor is required'
+                        : (leadCheck.error || 'Invalid lead auditor'),
+                };
+            }
+            resolvedLead = leadCheck.ids[0] ?? null;
         }
+        const auditorCheck = await assertCompanyAuditorUserIds(companyId, auditorIds ?? [], {
+            allowEmpty: true,
+        });
+        if (!auditorCheck.ok) return auditorCheck;
+        resolvedAuditors = auditorCheck.ids;
+    } else {
+        if (leadAuditorId != null && leadAuditorId !== '') {
+            const leadCheck = await assertOrgAuditorUserIds(actorId, [leadAuditorId], { allowEmpty: false });
+            if (!leadCheck.ok) {
+                return {
+                    ok: false,
+                    status: leadCheck.status || 400,
+                    error: leadCheck.error === 'Auditor user id is required'
+                        ? 'Lead auditor is required'
+                        : (leadCheck.error || 'Invalid lead auditor'),
+                };
+            }
+            resolvedLead = leadCheck.ids[0] ?? null;
+        }
+        const auditorCheck = await assertOrgAuditorUserIds(actorId, auditorIds ?? [], { allowEmpty: true });
+        if (!auditorCheck.ok) return auditorCheck;
+        resolvedAuditors = auditorCheck.ids;
     }
-    const auditorCheck = await assertOrgAuditorUserIds(actorId, auditorIds ?? [], { allowEmpty: true });
-    if (!auditorCheck.ok) return auditorCheck;
+
     const deptCheck = await assertOrgSiteDepartments(actorId, parsedSiteId, scheduleData);
     if (!deptCheck.ok) return deptCheck;
-    const parsedLead =
-        leadAuditorId != null && leadAuditorId !== ''
-            ? Number.parseInt(String(leadAuditorId), 10)
-            : null;
+
+    if (resolvedLead == null && leadAuditorId != null && leadAuditorId !== '') {
+        const parsedLead = Number.parseInt(String(leadAuditorId), 10);
+        resolvedLead = Number.isInteger(parsedLead) && parsedLead > 0 ? parsedLead : null;
+    }
+
     return {
         ok: true,
         siteId: parsedSiteId,
-        leadAuditorId: Number.isInteger(parsedLead) && parsedLead > 0 ? parsedLead : null,
-        auditorIds: auditorCheck.ids,
+        leadAuditorId: resolvedLead,
+        auditorIds: resolvedAuditors,
     };
 }
 

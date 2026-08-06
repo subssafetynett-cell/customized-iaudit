@@ -880,6 +880,8 @@ export function createUsersRouter({ authenticateToken, checkTrialExpiration }) {
 
         try {
             const hashedPassword = await bcrypt.hash(password, 10);
+            const auditeeCreatorFk =
+                (await getOrgRootUserId(creatorId)) ?? (Number.isInteger(creatorId) ? creatorId : null);
             const user = await prisma.$transaction(async (tx) => {
                 const sites = await tx.site.findMany({
                     where: { id: { in: parsedSiteIds } },
@@ -915,7 +917,7 @@ export function createUsersRouter({ authenticateToken, checkTrialExpiration }) {
                         isActive: false,
                         emailVerifiedAt: null,
                         password: hashedPassword,
-                        creatorId: Number.isInteger(creatorId) ? creatorId : null,
+                        creatorId: auditeeCreatorFk,
                     },
                 });
 
@@ -1104,12 +1106,12 @@ export function createUsersRouter({ authenticateToken, checkTrialExpiration }) {
             }
 
             const creatorIdNum = Number(creatorId);
-            // Always attach invitees under the inviter (keeps A→B→C tree for shared catalogs).
-            const creatorFk =
-                Number.isInteger(creatorIdNum) && creatorIdNum > 0 ? creatorIdNum : null;
-            if (!creatorFk) {
+            if (!Number.isInteger(creatorIdNum) || creatorIdNum < 1) {
                 return res.status(401).json({ error: 'Invalid session. Please log in again.' });
             }
+            // Attach under the inviter's org root so A→B→C always share one company/site catalog.
+            const orgRoot = await getOrgRootUserId(creatorIdNum);
+            const creatorFk = (Number.isInteger(orgRoot) && orgRoot > 0) ? orgRoot : creatorIdNum;
 
             const user = await prisma.$transaction(async (tx) => {
                 if (roleNorm === 'auditee' && parsedSiteIds) {
