@@ -25,7 +25,7 @@ function resizeTextarea(
  * scrolling inside the field (used for Evidence / Comments on Perform Audit).
  */
 const AutoResizeTextarea = React.forwardRef<HTMLTextAreaElement, AutoResizeTextareaProps>(
-    ({ className, value, onChange, minHeight = 72, maxHeight, style, ...props }, ref) => {
+    ({ className, value, onChange, minHeight = 72, maxHeight, style, titleCase = false, ...props }, ref) => {
         const innerRef = React.useRef<HTMLTextAreaElement | null>(null);
 
         const setRefs = React.useCallback(
@@ -49,8 +49,13 @@ const AutoResizeTextarea = React.forwardRef<HTMLTextAreaElement, AutoResizeTexta
                 ref={setRefs}
                 value={value}
                 rows={1}
+                // Evidence / comments must stay free-form; title-case also breaks resize
+                // when it synthesizes a non-DOM event target.
+                titleCase={titleCase}
                 onChange={(e) => {
-                    resizeTextarea(e.currentTarget, minHeight, maxHeight);
+                    if (innerRef.current) {
+                        resizeTextarea(innerRef.current, minHeight, maxHeight);
+                    }
                     onChange?.(e);
                 }}
                 className={cn("resize-none overflow-hidden", className)}

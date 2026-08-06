@@ -2398,6 +2398,7 @@ const AuditExecute = () => {
     field: string,
     value: string,
   ) => {
+    userEditedRef.current = true;
     setChecklistData((prev) => {
       const current = prev[index] || {};
       const creatorStamp = stampFindingCreator(field, value, current);
@@ -2754,6 +2755,7 @@ const AuditExecute = () => {
     field: keyof ClauseChecklistContent,
     value: any,
   ) => {
+    userEditedRef.current = true;
     setClauseData((prev) => {
       const current = prev[clauseId] || {};
       const creatorStamp = stampFindingCreator(field, value, current);
@@ -4384,6 +4386,8 @@ const AuditExecute = () => {
                               e.target.value,
                             )
                           }
+                          readOnly={isAuditeeReadOnly}
+                          titleCase={false}
                         />
                       </div>
                     )}
@@ -5494,12 +5498,14 @@ const AuditExecute = () => {
                                   <div className="flex flex-col gap-1">
                                     {(usesOkNotOkChecklistFindings(template)
                                       ? type !== "NC"
-                                      : !["OFI", "Min", "Maj"].includes(type)) && (
+                                      : true) && (
                                       <AutoResizeTextarea
                                         className="min-h-[80px] text-[11px] border-slate-200 bg-slate-50/50 focus:bg-white shadow-none p-2"
                                         placeholder="Evidence..."
                                         value={checklistData[dataIndex]?.evidence || ""}
                                         onChange={(e) => handleChecklistChange(dataIndex, "evidence", e.target.value)}
+                                        readOnly={isAuditeeReadOnly}
+                                        titleCase={false}
                                       />
                                     )}
                                     <QuestionEvidenceUpload
@@ -5879,6 +5885,7 @@ const AuditExecute = () => {
                                 value={checklistData[index]?.ofi || ""}
                                 onChange={(e) => handleChecklistChange(index, "ofi", e.target.value)}
                                 readOnly={isAuditeeReadOnly}
+                                titleCase={false}
                               />
                             </TableCell>
                             <TableCell className="border border-slate-300 align-top p-2 min-w-[180px]">
@@ -5889,6 +5896,7 @@ const AuditExecute = () => {
                                   value={checklistData[index]?.evidence || ""}
                                   onChange={(e) => handleChecklistChange(index, "evidence", e.target.value)}
                                   readOnly={isAuditeeReadOnly}
+                                  titleCase={false}
                                 />
                                 <QuestionEvidenceUpload
                                   compact
@@ -5972,6 +5980,7 @@ const AuditExecute = () => {
                                   value={checklistData[index]?.evidence || ""}
                                   onChange={(e) => handleChecklistChange(index, "evidence", e.target.value)}
                                   readOnly={isAuditeeReadOnly}
+                                  titleCase={false}
                                 />
                                 <QuestionEvidenceUpload
                                   compact
@@ -5994,6 +6003,7 @@ const AuditExecute = () => {
                                 value={checklistData[index]?.ofi || ""}
                                 onChange={(e) => handleChecklistChange(index, "ofi", e.target.value)}
                                 readOnly={isAuditeeReadOnly}
+                                titleCase={false}
                               />
                             </TableCell>
                           </TableRow>
@@ -6173,12 +6183,10 @@ const AuditExecute = () => {
                                   )}
                                 </TableCell>
 
-                                {/* Evidence / Comments */}
+                                {/* Evidence / Comments — always editable for ISO rows (OFI/Min/Maj keep this plus the follow-up form). */}
                                 <TableCell className="p-3 align-top">
                                   <div className="flex flex-col h-full gap-1">
-                                    {(okNotOkFindings
-                                      ? type !== "NC"
-                                      : yesNoFindings || !["OFI", "Min", "Maj"].includes(type)) && (
+                                    {(okNotOkFindings ? type !== "NC" : true) && (
                                       <AutoResizeTextarea
                                         className="min-h-[100px] text-sm border-slate-200 bg-slate-50/50 focus:bg-white shadow-sm transition-colors placeholder:text-slate-400 p-3"
                                         placeholder={
@@ -6194,6 +6202,8 @@ const AuditExecute = () => {
                                             e.target.value,
                                           )
                                         }
+                                        readOnly={isAuditeeReadOnly}
+                                        titleCase={false}
                                       />
                                     )}
                                     <QuestionEvidenceUpload

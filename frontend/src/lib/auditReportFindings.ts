@@ -6,6 +6,8 @@ import {
     resolvePerformAuditTemplateIds,
     resolveImsStandardFlags,
     isMultiIsoImsEligible,
+    usesOkNotOkChecklistFindings,
+    usesYesNoChecklistFindings,
 } from "@/data/auditTemplates";
 import { CLAUSE_MATRIX } from "@/data/clauseMapping";
 import type { AuditEvidenceMedia } from "@/lib/evidenceImageUpload";
@@ -17,6 +19,7 @@ import {
 import {
     getQfsScoreMode,
     isQfsKoreScoredChecklist,
+    isQfsKoreSectionHeader,
     needsQfsExceptionFollowUp,
     qfsScoreFromFindings,
     qfsScoreOptions,
@@ -93,6 +96,62 @@ export function resolveChecklistContent(
     const editable = auditData.editableChecklist as ChecklistContent[] | undefined;
     if (editable?.length) return editable;
     return templateContent || [];
+}
+
+/**
+ * Flatten editable checklist + per-clause extra questions into one content list
+ * and a parallel checklistData map so downloads match the on-screen checklist.
+ */
+export function resolveChecklistContentWithAnswers(
+    auditData: Record<string, unknown>,
+    templateContent: ChecklistContent[] | undefined,
+): {
+    content: ChecklistContent[];
+    checklistData: Record<number, Record<string, unknown>>;
+} {
+    const base = resolveChecklistContent(auditData, templateContent);
+    const baseData =
+        (auditData.checklistData as Record<number | string, Record<string, unknown>>) || {};
+    const extras =
+        (auditData.extraChecklistItems as Record<string, Array<Record<string, unknown>>>) ||
+        {};
+
+    const content: ChecklistContent[] = [];
+    const checklistData: Record<number, Record<string, unknown>> = {};
+
+    for (let i = 0; i < base.length; i++) {
+        const item = base[i];
+        const outIndex = content.length;
+        content.push(item);
+        checklistData[outIndex] = {
+            ...(baseData[i] || baseData[String(i)] || {}),
+        };
+
+        const clause = String(item.clause || "").trim();
+        const nextClause = String(base[i + 1]?.clause || "").trim();
+        const isLastInGroup = clause !== nextClause;
+        if (!isLastInGroup || !clause) continue;
+
+        const clauseExtras = Array.isArray(extras[clause]) ? extras[clause] : [];
+        for (const eq of clauseExtras) {
+            if (!eq || typeof eq !== "object") continue;
+            const eqIndex = content.length;
+            content.push({
+                clause,
+                question: String(eq.question || "").trim() || "Additional question",
+                intent: String(eq.intent || ""),
+            });
+            checklistData[eqIndex] = {
+                ...eq,
+                clause,
+                findings: String(eq.findings || ""),
+                evidence: String(eq.evidence || ""),
+                ofi: String(eq.ofi || ""),
+            };
+        }
+    }
+
+    return { content, checklistData };
 }
 
 export function isModuleAuditPlan(
@@ -331,7 +390,10 @@ export function buildImsChecklistReportTable(options: {
                     text: imsClauseTextExists(row.iso9001) ? row.iso9001 : "",
                 });
             }
-            cells.push({ text: formatChecklistFindingLabel(findingRaw) || findingRaw, align: "center" });
+            cells.push({
+                text: formatChecklistFindingLabel(findingRaw, { okNotOk: true }) || findingRaw,
+                align: "center",
+            });
             cells.push({ text: evidenceText });
 
             bodyCells.push(cells);
@@ -458,19 +520,28 @@ function cellValue(value: unknown): string {
     return value == null ? "" : String(value).trim();
 }
 
-/** Format EOSH/QFS score codes for a single finding column (non-EOSH modules). */
-export function formatChecklistFindingLabel(findings?: string | null): string {
+/** Format finding codes for report cells — matches Perform Audit labels. */
+export function formatChecklistFindingLabel(
+    findings?: string | null,
+    options?: { okNotOk?: boolean },
+): string {
     const raw = String(findings || "").trim();
     if (!raw) return "";
-    if (raw === "OK") return "OK";
-    if (raw === "Not OK" || raw === "NotOK") return "Not OK (NC)";
-    if (raw === "2" || raw === "C") return "2 — Compliance";
-    if (raw === "1" || raw === "OFI") return "1 — Exceptions / OFI";
-    if (raw === "0" || raw === "NC" || raw === "Min" || raw === "Maj" || raw === "Minor" || raw === "Major") {
-        if (raw === "Maj" || raw === "Major") return "0 — Major";
-        if (raw === "Min" || raw === "Minor") return "0 — Minor";
-        return "0 — Non-Compliance (NC)";
+    if (options?.okNotOk) {
+        if (raw === "OK") return "OK";
+        if (raw === "NC" || raw === "Not OK" || raw === "NotOK") return "Not OK";
+        return raw;
     }
+    if (raw === "OK") return "OK";
+    if (raw === "Not OK" || raw === "NotOK") return "Not OK";
+    if (raw === "Yes" || raw === "No") return raw;
+    if (raw === "C") return "C — Compliant";
+    if (raw === "OFI") return "OFI";
+    if (raw === "Min" || raw === "Minor") return "Minor N/C";
+    if (raw === "Maj" || raw === "Major") return "Major N/C";
+    if (raw === "2") return "2 — Compliance";
+    if (raw === "1") return "1 — Exceptions / OFI";
+    if (raw === "0" || raw === "NC") return "0 — Non-Compliance (NC)";
     return raw;
 }
 
@@ -605,6 +676,8 @@ export function buildChecklistReportTable(options: {
     isEosh?: boolean;
     /** When set, render QFS score columns with colored selected cells. */
     qfsScoreMode?: QfsScoreMode | null;
+    /** Template id — used to match Perform Audit finding/comment labels. */
+    templateId?: string | null;
     collectEvidence: (clauseKey: string, itemIndex: number, textEvidence?: string) => string;
     /**
      * Optional visibility gate for ISO clause-matrix exports.
@@ -624,11 +697,16 @@ export function buildChecklistReportTable(options: {
         isModule,
         isEosh = false,
         qfsScoreMode = null,
+        templateId = null,
         collectEvidence,
         isClauseSelected,
     } = options;
     const isQfs = Boolean(qfsScoreMode);
     const showsIntent = content.some((item) => Boolean(item.intent?.trim()));
+    const okNotOk = usesOkNotOkChecklistFindings(templateId);
+    const yesNo = usesYesNoChecklistFindings(templateId);
+    const evidenceHeader = yesNo || okNotOk ? "Comments" : "Evidence";
+    const commentHeader = isQfs ? "Finding" : "Comment";
 
     const baseAlways: ChecklistReportColumn[] = [
         { key: "clause", header: "Clause" },
@@ -646,19 +724,21 @@ export function buildChecklistReportTable(options: {
           : [{ key: "finding", header: isModule ? "Score / Finding" : "Finding" }];
 
     const optionalExtra: ChecklistReportColumn[] = [
-        { key: "evidence", header: "Evidence" },
-        { key: "comment", header: "Comment" },
+        { key: "evidence", header: evidenceHeader },
+        { key: "comment", header: commentHeader },
     ];
 
     type RowState = {
         values: ChecklistRowValues;
         qfsSelectedKey?: string;
         qfsFillHex?: string;
+        isSectionHeader?: boolean;
     };
 
     const rowStates: (RowState & { visible: boolean })[] = content.map((item, itemIndex) => {
         const raw = (checklistData?.[itemIndex] || {}) as Record<string, unknown>;
         const clauseKey = cellValue(raw.clause) || item.clause || String(itemIndex + 1);
+        const sectionHeader = isQfs && isQfsKoreSectionHeader(item.clause);
         const evidenceText = collectEvidence(
             clauseKey,
             itemIndex,
@@ -668,25 +748,24 @@ export function buildChecklistReportTable(options: {
         const eoshScores = isEosh ? eoshScoreColumnValues(findingRaw) : null;
 
         const values: ChecklistRowValues = {
-            clause: clauseKey,
+            clause: sectionHeader ? "" : clauseKey,
             question: item.question || "",
-            intent: item.intent || "",
-            finding:
-                isEosh || isQfs
-                    ? ""
-                    : isModule
-                      ? formatChecklistFindingLabel(findingRaw) || findingRaw
-                      : findingRaw,
-            score2: eoshScores?.score2 || "",
-            score1: eoshScores?.score1 || "",
-            score0: eoshScores?.score0 || "",
-            evidence: evidenceText,
-            comment: cellValue(raw.ofi),
+            intent: sectionHeader ? "" : item.intent || "",
+            finding: sectionHeader
+                ? ""
+                : isEosh || isQfs
+                  ? ""
+                  : formatChecklistFindingLabel(findingRaw, { okNotOk }) || findingRaw,
+            score2: sectionHeader ? "" : eoshScores?.score2 || "",
+            score1: sectionHeader ? "" : eoshScores?.score1 || "",
+            score0: sectionHeader ? "" : eoshScores?.score0 || "",
+            evidence: sectionHeader ? "" : evidenceText,
+            comment: sectionHeader ? "" : cellValue(raw.ofi),
         };
 
         let qfsSelectedKey: string | undefined;
         let qfsFillHex: string | undefined;
-        if (isQfs && qfsScoreMode) {
+        if (!sectionHeader && isQfs && qfsScoreMode) {
             const score = qfsScoreFromFindings(findingRaw, qfsScoreMode);
             for (const opt of qfsScoreOptions(qfsScoreMode)) {
                 const key = `qfs_${opt.val}`;
@@ -703,10 +782,13 @@ export function buildChecklistReportTable(options: {
             values,
             qfsSelectedKey,
             qfsFillHex,
-            visible: !isClauseSelected || isClauseSelected(item.clause),
+            isSectionHeader: sectionHeader,
+            visible: sectionHeader || !isClauseSelected || isClauseSelected(item.clause),
         };
     });
-    const visibleRowStates = isClauseSelected ? rowStates.filter((r) => r.visible) : rowStates;
+    const visibleRowStates = isClauseSelected
+        ? rowStates.filter((r) => r.visible)
+        : rowStates;
 
     const fixedScoreLayout = isEosh || isQfs;
     const optionalPresent = [
@@ -733,6 +815,14 @@ export function buildChecklistReportTable(options: {
 
     const bodyCells: ChecklistReportCell[][] = visibleRowStates.map((row) =>
         columns.map((c) => {
+            if (row.isSectionHeader) {
+                return {
+                    text: c.key === "question" ? row.values.question || "" : "",
+                    fillHex: QFS_KORE_CHECKLIST_COLORS.subheading,
+                    textHex: "#111827",
+                    align: "left" as const,
+                };
+            }
             const isQfsScoreCol = c.key.startsWith("qfs_");
             if (isQfsScoreCol && row.qfsSelectedKey === c.key && row.qfsFillHex) {
                 return {
@@ -886,7 +976,7 @@ export function buildChecklistFindingExtraBlocks(options: {
             return;
         }
         const finding = isModule
-            ? formatChecklistFindingLabel(findingRaw) ||
+            ? formatChecklistFindingLabel(findingRaw, { okNotOk: true }) ||
               cellValue(raw.findingType) ||
               findingRaw
             : cellValue(raw.findingType) || findingRaw;

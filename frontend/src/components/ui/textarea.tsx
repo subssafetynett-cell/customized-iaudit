@@ -13,7 +13,9 @@ export type TextareaProps = React.TextareaHTMLAttributes<HTMLTextAreaElement> & 
 };
 
 const Textarea = React.forwardRef<HTMLTextAreaElement, TextareaProps>(
-  ({ className, onChange, onBlur, titleCase, ...props }, ref) => {
+  // Free-form audit notes (comments / evidence / findings) must not auto Title Case —
+  // that reformatting broke typing in Perform Audit. Opt in with titleCase={true}.
+  ({ className, onChange, onBlur, titleCase = false, ...props }, ref) => {
     const applyTitleCase = shouldApplyTitleCaseToField({
       type: "text",
       readOnly: props.readOnly,
@@ -35,9 +37,9 @@ const Textarea = React.forwardRef<HTMLTextAreaElement, TextareaProps>(
           className,
         )}
         ref={ref}
+        {...props}
         onChange={handleChange}
         onBlur={handleBlur}
-        {...props}
       />
     );
   },

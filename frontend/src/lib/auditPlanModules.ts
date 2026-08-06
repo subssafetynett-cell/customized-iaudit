@@ -285,6 +285,7 @@ export function countModuleStoreAnswers(
             if (typeof r.details === "string" && r.details.trim()) n += 1;
             for (const k of [
                 "ofi",
+                "evidence",
                 "description",
                 "correction",
                 "rootCause",
@@ -1071,6 +1072,29 @@ export function normalizePlanForReport(plan: Record<string, any>): Record<string
         plan?.templateId,
         plan?.auditProgram?.isoStandard,
     );
-    if (modules.length !== 1) return plan;
-    return scopePlanToModule(plan, modules[0].id);
+    if (modules.length === 1) return scopePlanToModule(plan, modules[0].id);
+    if (modules.length > 1) {
+        const auditData =
+            typeof plan?.auditData === "string"
+                ? (() => {
+                      try {
+                          return JSON.parse(plan.auditData);
+                      } catch {
+                          return null;
+                      }
+                  })()
+                : plan?.auditData;
+        const active = String(auditData?.activeModuleId || "").trim();
+        if (active) {
+            const match =
+                modules.find((m) => m.id === active) ||
+                modules.find(
+                    (m) =>
+                        (resolveAuditTemplateId(m.id) || m.id) ===
+                        (resolveAuditTemplateId(active) || active),
+                );
+            if (match) return scopePlanToModule(plan, match.id);
+        }
+    }
+    return plan;
 }

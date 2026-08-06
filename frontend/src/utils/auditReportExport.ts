@@ -62,6 +62,7 @@ import {
     isModuleAuditPlan,
     normalizeReportNonConformances,
     resolveChecklistContent,
+    resolveChecklistContentWithAnswers,
     resolveModuleAuditFacetCategory,
     resolveQfsScoreModeForPlan,
     resolveReportManagementSystemLabel,
@@ -232,12 +233,14 @@ function buildReportChecklistSection(
     clauseFiles: Record<string, AuditEvidenceMedia[]>,
     genericFiles: Record<string, AuditEvidenceMedia[]>,
     isModule: boolean,
+    isClauseSelected?: (clauseStr: string) => boolean,
 ): ReportChecklistSection | null {
     if (!template?.content) return null;
-    const checklistContent = resolveChecklistContent(
-        auditData,
-        template.content as ChecklistContent[],
-    );
+    const { content: checklistContent, checklistData } =
+        resolveChecklistContentWithAnswers(
+            auditData,
+            template.content as ChecklistContent[],
+        );
     if (checklistContent.length === 0) return null;
 
     const collectEvidence = (clauseKey: string, itemIndex: number, textEvidence?: string) =>
@@ -249,14 +252,14 @@ function buildReportChecklistSection(
     if (template.isTripleMapping) {
         const { headerCells, bodyCells, rowMeta } = buildImsChecklistReportTable({
             content: checklistContent,
-            checklistData: (auditData.checklistData as Record<string, any>) || {},
+            checklistData,
             programIsoStandard: plan.auditProgram?.isoStandard,
             criteria: plan.criteria,
             collectEvidence,
         });
         const extrasBlocks = buildImsChecklistFindingExtraBlocks({
             content: checklistContent,
-            checklistData: (auditData.checklistData as Record<string, any>) || {},
+            checklistData,
             rowMeta,
         });
         return {
@@ -270,18 +273,21 @@ function buildReportChecklistSection(
 
     const { bodyCells, headerCells } = buildChecklistReportTable({
         content: checklistContent,
-        checklistData: (auditData.checklistData as Record<string, any>) || {},
+        checklistData,
         isModule,
         isEosh: planUsesEoshTotals(plan),
         qfsScoreMode: resolveQfsScoreModeForPlan(plan),
+        templateId: template.id || plan.templateId,
         collectEvidence,
+        isClauseSelected,
     });
     const extrasBlocks = buildChecklistFindingExtraBlocks({
         content: checklistContent,
-        checklistData: (auditData.checklistData as Record<string, any>) || {},
+        checklistData,
         isModule,
         isEosh: planUsesEoshTotals(plan),
         qfsScoreMode: resolveQfsScoreModeForPlan(plan),
+        isClauseSelected,
     });
     return {
         title: "Checklist",
@@ -1670,6 +1676,7 @@ export async function generateAuditReportPdf(plan: Record<string, any>) {
             clauseFilesForReport,
             genericFilesForReport,
             isModule,
+            isoClausePredicate,
         );
         if (checklistSection && checklistSection.checklistContent.length > 0) {
             y = checkPage(doc, y, 20, pageH);
@@ -2325,6 +2332,7 @@ export async function generateAuditReportDocx(plan: Record<string, any>) {
                 clauseFilesForReport,
                 genericFilesForReport,
                 ctx.isModuleAudit,
+                isoClausePredicate,
             );
             if (checklistSection && checklistSection.checklistContent.length > 0) {
                 const { headerCells, bodyCells, extrasBlocks } = checklistSection;
@@ -2711,6 +2719,7 @@ export async function generateAuditReportExcel(plan: Record<string, any>) {
             clauseFilesForExcel,
             genericFilesForExcel,
             ctx.isModuleAudit,
+            isoClausePredicate,
         );
         if (checklistSection && checklistSection.checklistContent.length > 0) {
             const { headerCells, bodyCells, extrasBlocks } = checklistSection;
