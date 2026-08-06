@@ -48,6 +48,13 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import CompanyModal from "@/components/CompanyModal";
 import SiteModal from "@/components/SiteModal";
 import DepartmentModal from "@/components/DepartmentModal";
@@ -104,6 +111,60 @@ function siteContactDisplay(site: Site): { primary: string; secondary?: string }
   return null;
 }
 
+type EntityStatusFilter = "all" | "active" | "inactive";
+
+function normalizeEntityStatus(status?: string | null): string {
+  return String(status || "Active").trim().toLowerCase();
+}
+
+function matchesEntityStatusFilter(
+  status: string | undefined | null,
+  filter: EntityStatusFilter,
+): boolean {
+  if (filter === "all") return true;
+  const normalized = normalizeEntityStatus(status);
+  if (filter === "active") return normalized === "active";
+  if (filter === "inactive") return normalized === "inactive";
+  return true;
+}
+
+function siteSearchHaystack(site: Site): string {
+  const contact = siteContactDisplay(site);
+  return [
+    site.name,
+    site.description,
+    site.siteType,
+    site.address,
+    site.city,
+    site.state,
+    site.country,
+    site.contactName,
+    site.contactPosition,
+    site.contactNumber,
+    site.email,
+    contact?.primary,
+    contact?.secondary,
+    site.status,
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+}
+
+function departmentSearchHaystack(dept: Department & { siteName?: string }): string {
+  return [
+    dept.name,
+    dept.description,
+    dept.manager,
+    dept.code,
+    dept.siteName,
+    dept.status,
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+}
+
 const CompaniesPage = () => {
   const {
     companies, addCompany, addSite, addDepartment, deleteSite,
@@ -119,6 +180,12 @@ const CompaniesPage = () => {
   const [showOnboardingGuide, setShowOnboardingGuide] = useState(false);
   const [onboardingStep, setOnboardingStep] = useState<number | null>(null);
   const [activeTab, setActiveTab] = useState("sites");
+  /** Departments tab — filter table by site id, or "all". */
+  const [departmentSiteFilter, setDepartmentSiteFilter] = useState<string>("all");
+  const [siteSearchQuery, setSiteSearchQuery] = useState("");
+  const [siteStatusFilter, setSiteStatusFilter] = useState<EntityStatusFilter>("all");
+  const [departmentSearchQuery, setDepartmentSearchQuery] = useState("");
+  const [departmentStatusFilter, setDepartmentStatusFilter] = useState<EntityStatusFilter>("all");
 
   /** Keep onboarding step in the URL so Next/Back survives re-renders and matches UI state. */
   const setTourStep = (step: number) => {
@@ -389,6 +456,71 @@ const CompaniesPage = () => {
     (s.departments ?? []).map((d) => ({ ...d, siteName: s.name, siteId: s.id }))
   ) ?? [];
 
+  const filteredDepartments = useMemo(() => {
+    let list =
+      departmentSiteFilter === "all"
+        ? allDepartments
+        : allDepartments.filter((d) => String(d.siteId) === String(departmentSiteFilter));
+
+    if (departmentStatusFilter !== "all") {
+      list = list.filter((d) => matchesEntityStatusFilter(d.status, departmentStatusFilter));
+    }
+
+    const q = departmentSearchQuery.trim().toLowerCase();
+    if (q) {
+      list = list.filter((d) => departmentSearchHaystack(d).includes(q));
+    }
+
+    return list;
+  }, [
+    allDepartments,
+    departmentSiteFilter,
+    departmentStatusFilter,
+    departmentSearchQuery,
+  ]);
+
+  const companySites = selectedCompany?.sites ?? [];
+
+  const filteredSites = useMemo(() => {
+    let list = companySites.filter((site) =>
+      matchesEntityStatusFilter(site.status, siteStatusFilter),
+    );
+
+    const q = siteSearchQuery.trim().toLowerCase();
+    if (q) {
+      list = list.filter((site) => siteSearchHaystack(site).includes(q));
+    }
+
+    return list;
+  }, [companySites, siteStatusFilter, siteSearchQuery]);
+
+  const hasSiteFilters =
+    siteSearchQuery.trim().length > 0 || siteStatusFilter !== "all";
+
+  const hasDepartmentFilters =
+    departmentSiteFilter !== "all" ||
+    departmentSearchQuery.trim().length > 0 ||
+    departmentStatusFilter !== "all";
+
+  const clearSiteFilters = () => {
+    setSiteSearchQuery("");
+    setSiteStatusFilter("all");
+  };
+
+  const clearDepartmentFilters = () => {
+    setDepartmentSiteFilter("all");
+    setDepartmentSearchQuery("");
+    setDepartmentStatusFilter("all");
+  };
+
+  useEffect(() => {
+    setDepartmentSiteFilter("all");
+    setSiteSearchQuery("");
+    setSiteStatusFilter("all");
+    setDepartmentSearchQuery("");
+    setDepartmentStatusFilter("all");
+  }, [selectedCompanyId]);
+
   const handleBackToList = () => {
     setSelectedCompanyId(null);
   };
@@ -520,43 +652,70 @@ const CompaniesPage = () => {
 
             <TabsContent value="sites">
               <Card id="tour-step-sites-card" className="border border-slate-100 shadow-md rounded-2xl overflow-hidden bg-white">
-                <div className="relative p-6 flex flex-col gap-4 sm:flex-row sm:justify-between sm:items-center border-b border-slate-100 text-foreground">
-                  <h2 className="text-xl font-bold shrink-0">Sites</h2>
-                  <div className={`relative shrink-0 ${showOnboardingGuide && onboardingStep === 3 ? "z-[60]" : ""}`}>
-                    {showOnboardingGuide && onboardingStep === 3 && (
-                      <div className="absolute inset-0 -m-2 rounded-2xl ring-[8px] ring-blue-500/50 animate-pulse z-[-1]" />
-                    )}
-                    <Button
-                      id="tour-step-add-site"
-                      onClick={() => {
-                        setShowAddSite(true);
-                        if (showOnboardingGuide) goToTourStep(tourCompanyHasSites ? 5 : 4);
-                      }}
-                      className={`w-full sm:w-auto bg-[#213847] hover:bg-[#213847]/90 text-white gap-2 px-6 rounded-lg font-bold transition-all ${showOnboardingGuide && onboardingStep === 3 ? "relative z-[60] scale-105 shadow-2xl" : ""}`}
-                    >
-                      <Plus className="h-4 w-4" /> Add Site
-                    </Button>
-                    {showOnboardingGuide && onboardingStep === 3 && (
-                      <TourStepPopover
-                        targetId="tour-step-add-site"
-                        step={3}
-                        totalSteps={ONBOARDING_TOTAL_STEPS}
-                        title="Create Sites"
-                        description={
-                          tourCompanyHasSites
-                            ? "You already have a site for this company. Press Next to continue the tour."
-                            : "Use Add Site to create locations for your company, then continue with Next."
-                        }
-                        onNext={() => goToTourStep(tourCompanyHasSites ? 5 : 4)}
-                        onBack={() => {
-                          setShowOnboardingGuide(false);
-                          navigate("/?restartOnboarding=true&step=2");
+                <div className="relative p-6 flex flex-col gap-4 border-b border-slate-100 text-foreground">
+                  <div className="flex flex-col gap-4 sm:flex-row sm:justify-between sm:items-center">
+                    <h2 className="text-xl font-bold shrink-0">Sites</h2>
+                    <div className={`relative shrink-0 ${showOnboardingGuide && onboardingStep === 3 ? "z-[60]" : ""}`}>
+                      {showOnboardingGuide && onboardingStep === 3 && (
+                        <div className="absolute inset-0 -m-2 rounded-2xl ring-[8px] ring-blue-500/50 animate-pulse z-[-1]" />
+                      )}
+                      <Button
+                        id="tour-step-add-site"
+                        onClick={() => {
+                          setShowAddSite(true);
+                          if (showOnboardingGuide) goToTourStep(tourCompanyHasSites ? 5 : 4);
                         }}
-                        onClose={exitOnboardingTour}
-                        position="left"
-                        disableShadow={false}
+                        className={`w-full sm:w-auto bg-[#213847] hover:bg-[#213847]/90 text-white gap-2 px-6 rounded-lg font-bold transition-all ${showOnboardingGuide && onboardingStep === 3 ? "relative z-[60] scale-105 shadow-2xl" : ""}`}
+                      >
+                        <Plus className="h-4 w-4" /> Add Site
+                      </Button>
+                      {showOnboardingGuide && onboardingStep === 3 && (
+                        <TourStepPopover
+                          targetId="tour-step-add-site"
+                          step={3}
+                          totalSteps={ONBOARDING_TOTAL_STEPS}
+                          title="Create Sites"
+                          description={
+                            tourCompanyHasSites
+                              ? "You already have a site for this company. Press Next to continue the tour."
+                              : "Use Add Site to create locations for your company, then continue with Next."
+                          }
+                          onNext={() => goToTourStep(tourCompanyHasSites ? 5 : 4)}
+                          onBack={() => {
+                            setShowOnboardingGuide(false);
+                            navigate("/?restartOnboarding=true&step=2");
+                          }}
+                          onClose={exitOnboardingTour}
+                          position="left"
+                          disableShadow={false}
+                        />
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex flex-col sm:flex-row gap-3 sm:items-center">
+                    <div className="relative flex-1 min-w-0">
+                      <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400 pointer-events-none" />
+                      <Input
+                        value={siteSearchQuery}
+                        onChange={(e) => setSiteSearchQuery(e.target.value)}
+                        placeholder="Search sites by name, location, contact…"
+                        className="pl-9 h-10 bg-slate-50 border-slate-200"
+                        titleCase={false}
                       />
-                    )}
+                    </div>
+                    <Select
+                      value={siteStatusFilter}
+                      onValueChange={(v) => setSiteStatusFilter(v as EntityStatusFilter)}
+                    >
+                      <SelectTrigger className="w-full sm:w-[160px] h-10 bg-slate-50 border-slate-200 text-sm font-medium">
+                        <SelectValue placeholder="Status" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="all">All statuses</SelectItem>
+                        <SelectItem value="active">Active</SelectItem>
+                        <SelectItem value="inactive">Inactive</SelectItem>
+                      </SelectContent>
+                    </Select>
                   </div>
                 </div>
                 <div className="overflow-x-auto">
@@ -572,7 +731,7 @@ const CompaniesPage = () => {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {selectedCompany.sites.length === 0 ? (
+                    {companySites.length === 0 ? (
                       <TableRow>
                         <TableCell colSpan={6} className="h-48 text-center text-slate-400">
                           <div className="flex flex-col items-center gap-2">
@@ -581,8 +740,27 @@ const CompaniesPage = () => {
                           </div>
                         </TableCell>
                       </TableRow>
+                    ) : filteredSites.length === 0 ? (
+                      <TableRow>
+                        <TableCell colSpan={6} className="h-48 text-center text-slate-400">
+                          <div className="flex flex-col items-center gap-2">
+                            <Search className="h-10 w-10 text-slate-100" />
+                            <p className="text-sm font-medium">No sites match your search or filters.</p>
+                            {hasSiteFilters ? (
+                              <Button
+                                type="button"
+                                variant="outline"
+                                className="mt-4"
+                                onClick={clearSiteFilters}
+                              >
+                                Clear filters
+                              </Button>
+                            ) : null}
+                          </div>
+                        </TableCell>
+                      </TableRow>
                     ) : (
-                      selectedCompany.sites.map((site) => {
+                      filteredSites.map((site) => {
                         const contact = siteContactDisplay(site);
                         return (
                         <TableRow key={site.id} className="hover:bg-slate-50/30 transition-colors border-slate-50">
@@ -646,9 +824,10 @@ const CompaniesPage = () => {
 
             <TabsContent value="departments">
               <Card id="tour-step-departments-card" className="border border-slate-100 shadow-md rounded-2xl overflow-hidden bg-white">
-                <div className="relative p-6 flex flex-col gap-4 sm:flex-row sm:justify-between sm:items-center border-b border-slate-100 text-foreground">
-                  <h2 className="text-xl font-bold shrink-0">Departments</h2>
-                  <div className={`relative shrink-0 ${showOnboardingGuide && onboardingStep === 6 ? "z-[60]" : ""}`}>
+                <div className="relative p-6 flex flex-col gap-4 border-b border-slate-100 text-foreground">
+                  <div className="flex flex-col gap-4 sm:flex-row sm:justify-between sm:items-center">
+                    <h2 className="text-xl font-bold shrink-0">Departments</h2>
+                    <div className={`relative shrink-0 ${showOnboardingGuide && onboardingStep === 6 ? "z-[60]" : ""}`}>
                       {showOnboardingGuide && onboardingStep === 6 && (
                         <div className="absolute inset-0 -m-2 rounded-2xl ring-[8px] ring-blue-500/50 animate-pulse z-[-1]" />
                       )}
@@ -675,6 +854,48 @@ const CompaniesPage = () => {
                         />
                       )}
                     </div>
+                  </div>
+                  <div className="flex flex-col lg:flex-row gap-3 lg:items-center">
+                    <div className="relative flex-1 min-w-0">
+                      <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400 pointer-events-none" />
+                      <Input
+                        value={departmentSearchQuery}
+                        onChange={(e) => setDepartmentSearchQuery(e.target.value)}
+                        placeholder="Search departments by name, manager, site…"
+                        className="pl-9 h-10 bg-slate-50 border-slate-200"
+                        titleCase={false}
+                      />
+                    </div>
+                    <Select
+                      value={departmentSiteFilter}
+                      onValueChange={setDepartmentSiteFilter}
+                    >
+                      <SelectTrigger className="w-full lg:w-[200px] h-10 bg-slate-50 border-slate-200 text-sm font-medium">
+                        <SelectValue placeholder="Filter by site" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="all">All sites</SelectItem>
+                        {(selectedCompany?.sites ?? []).map((site) => (
+                          <SelectItem key={site.id} value={String(site.id)}>
+                            {site.name}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <Select
+                      value={departmentStatusFilter}
+                      onValueChange={(v) => setDepartmentStatusFilter(v as EntityStatusFilter)}
+                    >
+                      <SelectTrigger className="w-full lg:w-[160px] h-10 bg-slate-50 border-slate-200 text-sm font-medium">
+                        <SelectValue placeholder="Status" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="all">All statuses</SelectItem>
+                        <SelectItem value="active">Active</SelectItem>
+                        <SelectItem value="inactive">Inactive</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
                 </div>
                 <div className="overflow-x-auto">
                 <Table className="w-full table-fixed min-w-[640px]">
@@ -688,12 +909,17 @@ const CompaniesPage = () => {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {allDepartments.length === 0 ? (
+                    {filteredDepartments.length === 0 ? (
                       <TableRow>
                         <TableCell colSpan={5} className="h-48 text-center text-slate-400">
                           <div className="flex flex-col items-center gap-2">
                             <Users className="h-10 w-10 text-slate-100" />
-                            <p className="text-sm font-medium">No departments defined in any site.</p>
+                            <p className="text-sm font-medium">
+                              {allDepartments.length === 0
+                                ? "No departments defined in any site."
+                                : "No departments match your search or filters."}
+                            </p>
+                            {allDepartments.length === 0 ? (
                             <Button
                               type="button"
                               className="mt-4 bg-[#213847] hover:bg-[#213847]/90 text-white gap-2"
@@ -701,11 +927,21 @@ const CompaniesPage = () => {
                             >
                               <Plus className="h-4 w-4" /> Add Department
                             </Button>
+                            ) : hasDepartmentFilters ? (
+                              <Button
+                                type="button"
+                                variant="outline"
+                                className="mt-4"
+                                onClick={clearDepartmentFilters}
+                              >
+                                Clear filters
+                              </Button>
+                            ) : null}
                           </div>
                         </TableCell>
                       </TableRow>
                     ) : (
-                      allDepartments.map((dept: any) => (
+                      filteredDepartments.map((dept: any) => (
                         <TableRow key={dept.id} className="hover:bg-slate-50/30 transition-colors border-slate-50">
                           <TableCell className="py-5 px-6 max-w-0 w-[28%]">
                             <div className="font-bold text-slate-900 break-all line-clamp-2" title={dept.name}>
