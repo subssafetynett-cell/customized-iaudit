@@ -876,14 +876,20 @@ function pushDetailField(
     if (value) list.push({ label, value });
 }
 
-function moduleExtrasFieldsFromDetails(details: ChecklistRowValues): {
+function moduleExtrasFieldsFromDetails(
+    details: ChecklistRowValues,
+    options?: { omitRaisedBy?: boolean },
+): {
     fields: ChecklistFindingExtraField[];
     escalationFields: ChecklistFindingExtraField[];
 } {
     const fields: ChecklistFindingExtraField[] = [];
     const escalationFields: ChecklistFindingExtraField[] = [];
     // Same order as the in-app exception follow-up panel.
-    pushDetailField(fields, details, "raisedBy", "Raised by");
+    // QFS reports omit Raised by — score is already in the checklist row.
+    if (!options?.omitRaisedBy) {
+        pushDetailField(fields, details, "raisedBy", "Raised by");
+    }
     pushDetailField(fields, details, "assignTo", "Assign to");
     pushDetailField(fields, details, "targetDate", "Target date");
     pushDetailField(fields, details, "details", "Details");
@@ -964,6 +970,7 @@ export function buildChecklistFindingExtraBlocks(options: {
             return;
         }
         const findingRaw = cellValue(raw.findings);
+        const isQfs = Boolean(qfsScoreMode);
         const isIsoNc =
             !isModule &&
             (["NC", "Not OK", "NotOK"].includes(findingRaw) ||
@@ -975,14 +982,17 @@ export function buildChecklistFindingExtraBlocks(options: {
         if (!detailFieldsHaveValues(details) && !findingRaw && !cellValue(raw.findingType)) {
             return;
         }
-        const finding = isModule
-            ? formatChecklistFindingLabel(findingRaw, { okNotOk: true }) ||
-              cellValue(raw.findingType) ||
-              findingRaw
-            : cellValue(raw.findingType) || findingRaw;
+        // QFS already shows the score in the checklist row — don't repeat Finding.
+        const finding = isQfs
+            ? ""
+            : isModule
+              ? formatChecklistFindingLabel(findingRaw, { okNotOk: true }) ||
+                cellValue(raw.findingType) ||
+                findingRaw
+              : cellValue(raw.findingType) || findingRaw;
         const { fields, escalationFields } =
             isModule || isIsoNc
-                ? moduleExtrasFieldsFromDetails(details)
+                ? moduleExtrasFieldsFromDetails(details, { omitRaisedBy: isQfs })
                 : { fields: isoExtrasFieldsFromDetails(details), escalationFields: [] };
         if (fields.length === 0 && escalationFields.length === 0 && !finding) {
             return;
