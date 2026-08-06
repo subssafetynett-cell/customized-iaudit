@@ -51,6 +51,8 @@ import {
     buildChecklistFindingExtraBlocks,
     buildChecklistReportTable,
     buildFindingEvidenceText,
+    buildImsChecklistFindingExtraBlocks,
+    buildImsChecklistReportTable,
     collectFindingAttachmentMedia,
     extractFindingDetailFields,
     findingDetailCells,
@@ -60,7 +62,9 @@ import {
     isModuleAuditPlan,
     normalizeReportNonConformances,
     resolveChecklistContent,
+    resolveModuleAuditFacetCategory,
     resolveQfsScoreModeForPlan,
+    resolveReportManagementSystemLabel,
     resolveReportTemplate,
     type ChecklistFindingExtraBlock,
     type ChecklistReportCell,
@@ -86,6 +90,7 @@ import {
     normalizeFindingsReportForm,
 } from "@/lib/findingsReportForm";
 import { apiFetch } from "@/lib/api";
+import { normalizePlanForReport } from "@/lib/auditPlanModules";
 import {
     formatDepartmentNames,
     resolveDepartmentsFromProgram,
@@ -210,6 +215,81 @@ export function getAuditData(plan: { auditData?: unknown }) {
         console.warn("[auditReportExport] Failed to parse auditData", err);
     }
     return {};
+}
+
+type ReportChecklistSection = {
+    title: string;
+    headerCells: ChecklistReportHeaderCell[];
+    bodyCells: ChecklistReportCell[][];
+    extrasBlocks: ChecklistFindingExtraBlock[];
+    checklistContent: ChecklistContent[];
+};
+
+function buildReportChecklistSection(
+    plan: Record<string, any>,
+    template: AuditTemplate,
+    auditData: Record<string, unknown>,
+    clauseFiles: Record<string, AuditEvidenceMedia[]>,
+    genericFiles: Record<string, AuditEvidenceMedia[]>,
+    isModule: boolean,
+): ReportChecklistSection | null {
+    if (!template?.content) return null;
+    const checklistContent = resolveChecklistContent(
+        auditData,
+        template.content as ChecklistContent[],
+    );
+    if (checklistContent.length === 0) return null;
+
+    const collectEvidence = (clauseKey: string, itemIndex: number, textEvidence?: string) =>
+        buildFindingEvidenceText(
+            textEvidence,
+            collectFindingAttachmentMedia(clauseFiles, genericFiles, clauseKey, itemIndex),
+        );
+
+    if (template.isTripleMapping) {
+        const { headerCells, bodyCells, rowMeta } = buildImsChecklistReportTable({
+            content: checklistContent,
+            checklistData: (auditData.checklistData as Record<string, any>) || {},
+            programIsoStandard: plan.auditProgram?.isoStandard,
+            criteria: plan.criteria,
+            collectEvidence,
+        });
+        const extrasBlocks = buildImsChecklistFindingExtraBlocks({
+            content: checklistContent,
+            checklistData: (auditData.checklistData as Record<string, any>) || {},
+            rowMeta,
+        });
+        return {
+            title: "Integrated Audit Checklist",
+            headerCells,
+            bodyCells,
+            extrasBlocks,
+            checklistContent,
+        };
+    }
+
+    const { bodyCells, headerCells } = buildChecklistReportTable({
+        content: checklistContent,
+        checklistData: (auditData.checklistData as Record<string, any>) || {},
+        isModule,
+        isEosh: planUsesEoshTotals(plan),
+        qfsScoreMode: resolveQfsScoreModeForPlan(plan),
+        collectEvidence,
+    });
+    const extrasBlocks = buildChecklistFindingExtraBlocks({
+        content: checklistContent,
+        checklistData: (auditData.checklistData as Record<string, any>) || {},
+        isModule,
+        isEosh: planUsesEoshTotals(plan),
+        qfsScoreMode: resolveQfsScoreModeForPlan(plan),
+    });
+    return {
+        title: "Checklist",
+        headerCells,
+        bodyCells,
+        extrasBlocks,
+        checklistContent,
+    };
 }
 
 function safeFormatDate(value: unknown, pattern: string, fallback = "—"): string {
@@ -370,6 +450,9 @@ async function buildReportContext(plan: Record<string, any>): Promise<ReportCont
 
     const nonConformances = normalizeReportNonConformances(auditData.nonConformances);
 
+    const { facet: moduleFacet, category: moduleCategory } =
+        resolveModuleAuditFacetCategory(auditData);
+
     const criteriaParts = [plan.criteria, plan.objective].filter(Boolean);
     const defaultCriteriaAndMethod =
         criteriaParts.length > 0
@@ -392,6 +475,7 @@ async function buildReportContext(plan: Record<string, any>): Promise<ReportCont
         managementSystem:
             form?.managementSystem ||
             globalInfo.clauseNo ||
+            resolveReportManagementSystemLabel(plan) ||
             plan.criteria ||
             template?.standard ||
             plan.standard ||
@@ -1471,6 +1555,7 @@ function renderChecklistPdfWithInlineExtras(
 
 /** Full audit execution report as PDF */
 export async function generateAuditReportPdf(plan: Record<string, any>) {
+    plan = normalizePlanForReport(plan);
     const doc = new jsPDF();
     const pageW = doc.internal.pageSize.getWidth();
     const pageH = doc.internal.pageSize.getHeight();
@@ -1552,9 +1637,13 @@ export async function generateAuditReportPdf(plan: Record<string, any>) {
     );
 
     if (template?.content && (template.type === "checklist" || auditData.checklistData)) {
-        const checklistContent = resolveChecklistContent(
+        const checklistSection = buildReportChecklistSection(
+            plan,
+            template,
             auditData,
-            template.content as ChecklistContent[],
+            clauseFilesForReport,
+            genericFilesForReport,
+            isModule,
         );
         if (checklistContent.length > 0) {
             const { bodyCells, headerCells } = buildChecklistReportTable({
@@ -1586,9 +1675,9 @@ export async function generateAuditReportPdf(plan: Record<string, any>) {
                 isClauseSelected: isoClausePredicate,
             });
             y = renderChecklistPdfWithInlineExtras(doc, {
-                headerCells,
-                bodyCells,
-                extrasBlocks,
+                headerCells: checklistSection.headerCells,
+                bodyCells: checklistSection.bodyCells,
+                extrasBlocks: checklistSection.extrasBlocks,
                 startY: y,
                 pageH,
             });
@@ -1597,7 +1686,7 @@ export async function generateAuditReportPdf(plan: Record<string, any>) {
                 y = renderEoshTotalsPdf(
                     doc,
                     (auditData.checklistData as Record<string, { findings?: string }>) || {},
-                    checklistContent.length,
+                    checklistSection.checklistContent.length,
                     y,
                     pageH,
                     sectionHeading,
@@ -2142,6 +2231,7 @@ function buildSzlDocxPageHeader(
 
 /** Full audit execution report as Word */
 export async function generateAuditReportDocx(plan: Record<string, any>) {
+    plan = normalizePlanForReport(plan);
     const auditData = getAuditData(plan);
     const fileName = auditReportBaseName(plan);
     const ctx = await buildReportContext(plan);
@@ -2227,9 +2317,13 @@ export async function generateAuditReportDocx(plan: Record<string, any>) {
 
         // Checklist / Clause Checklist Table / Process Audit Record Table
         if ((template?.type === "checklist" || auditData.checklistData) && template?.content) {
-            const checklistContent = resolveChecklistContent(
+            const checklistSection = buildReportChecklistSection(
+                plan,
+                template,
                 auditData,
-                template.content as ChecklistContent[],
+                clauseFilesForReport,
+                genericFilesForReport,
+                ctx.isModuleAudit,
             );
             if (checklistContent.length > 0) {
                 const { headerCells, bodyCells } = buildChecklistReportTable({
@@ -2308,6 +2402,9 @@ export async function generateAuditReportDocx(plan: Record<string, any>) {
                                                                 cell.text ||
                                                                 (cell.fillHex ? " " : ""),
                                                             size: 16,
+                                                            color: cell.textHex
+                                                                ? cell.textHex.replace("#", "")
+                                                                : undefined,
                                                         }),
                                                     ],
                                                 }),
@@ -2552,6 +2649,7 @@ export async function generateAuditReportDocx(plan: Record<string, any>) {
 
 /** Full audit execution report as Excel */
 export async function generateAuditReportExcel(plan: Record<string, any>) {
+    plan = normalizePlanForReport(plan);
     const template = resolveReportTemplate(plan);
     const auditData = getAuditData(plan);
     const fileName = auditReportBaseName(plan);
@@ -2630,9 +2728,13 @@ export async function generateAuditReportExcel(plan: Record<string, any>) {
     );
 
     if (template?.content && (template.type === "checklist" || auditData.checklistData)) {
-        const checklistContent = resolveChecklistContent(
+        const checklistSection = buildReportChecklistSection(
+            plan,
+            template,
             auditData,
-            template.content as ChecklistContent[],
+            clauseFilesForExcel,
+            genericFilesForExcel,
+            ctx.isModuleAudit,
         );
         if (checklistContent.length > 0) {
             const { bodyCells, headerCells } = buildChecklistReportTable({
@@ -2664,6 +2766,7 @@ export async function generateAuditReportExcel(plan: Record<string, any>) {
             });
             const extrasByIndex = new Map(extrasBlocks.map((b) => [b.itemIndex, b]));
             const colCount = Math.max(headerCells.length, 1);
+            const sheetName = template.isTripleMapping ? "IMS Checklist" : "Checklist";
             const cData: string[][] = [headerCells.map((h) => h.text)];
             bodyCells.forEach((row, rowIndex) => {
                 cData.push(
@@ -2672,6 +2775,7 @@ export async function generateAuditReportExcel(plan: Record<string, any>) {
                             if (cell.fillHex === "#92D050") return "● GREEN";
                             if (cell.fillHex === "#FF0000") return "● RED";
                             if (cell.fillHex === "#FFC000") return "● AMBER";
+                            if (cell.fillHex === "#213847") return cell.text;
                             return "●";
                         }
                         return cell.text;
@@ -2684,12 +2788,12 @@ export async function generateAuditReportExcel(plan: Record<string, any>) {
                     cData.push(ncRow);
                 }
             });
-            XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(cData), "Checklist");
+            XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(cData), sheetName);
 
             if (planUsesEoshTotals(plan)) {
                 const scores = computeEoshCapabilityScores(
                     (auditData.checklistData as Record<string, { findings?: string }>) || {},
-                    checklistContent.length,
+                    checklistSection.checklistContent.length,
                 );
                 XLSX.utils.book_append_sheet(
                     wb,

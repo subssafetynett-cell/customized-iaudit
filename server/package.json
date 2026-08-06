@@ -11,7 +11,8 @@
     "start": "node src/index.js",
     "db:migrate": "node scripts/run-migrate.js",
     "db:baseline": "node scripts/baseline-migrations.js",
-    "migrate:deploy": "node scripts/run-migrate.js"
+    "migrate:deploy": "node scripts/run-migrate.js",
+    "diagnose:net": "node scripts/diagnose-network.js"
   },
   "keywords": [],
   "author": "",

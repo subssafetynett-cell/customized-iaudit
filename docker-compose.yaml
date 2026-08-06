@@ -18,23 +18,22 @@ services:
     expose:
       - "3001"
     healthcheck:
-      # Ready only when DB is up AND bootstrap (migrate/seed) finished.
-      # Bounded /health probe prevents hung checks under pool pressure.
+      # Liveness only — Node is accepting connections. Do NOT require migrate/bootstrap
+      # here: that kept the API "unhealthy" during startup and Coolify/Traefik returned
+      # public Gateway Timeout (504) when the edge check was mis-pointed at the API.
+      # Deep readiness remains GET /health and /api/health (bootstrapComplete + DB).
       test:
         - CMD
         - node
         - -e
         - >-
-          fetch('http://127.0.0.1:3001/health')
-          .then(async (r) => {
-            const b = await r.json().catch(() => ({}));
-            process.exit(r.ok && b.database === 'connected' && b.bootstrapComplete ? 0 : 1);
-          })
+          fetch('http://127.0.0.1:3001/live')
+          .then((r) => process.exit(r.ok ? 0 : 1))
           .catch(() => process.exit(1))
       interval: 5s
       timeout: 3s
-      retries: 36
-      start_period: 20s
+      retries: 12
+      start_period: 15s
     networks:
       - app
 

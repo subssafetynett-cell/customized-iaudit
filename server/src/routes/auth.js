@@ -4,6 +4,8 @@ import prisma, {
     handlePrismaError,
     isPrismaUniqueViolation,
     pool,
+    poolQueryWithRetry,
+    formatErrorDetail,
 } from '../prisma.js';
 import {
     PERSON_NAME_MAX,
@@ -28,7 +30,8 @@ import {
     RESET_PASSWORD_ALLOWED_BODY_KEYS,
     getDisallowedExtraKeysError,
     LOGIN_SUCCESS_USER_SELECT,
-    ensureUserTrialStarted
+    ensureUserTrialStarted,
+    ensureLoginSchemaReady,
 } from '../session.js';
 import {
     sendOtpIpRateLimit,
@@ -127,18 +130,29 @@ async function handleVerifyOtpAndSignup(req, res) {
         // Clean up OTP from database
         await prisma.otp.delete({ where: { email } });
 
-        await ensureUserTrialStarted(user.id);
+        try {
+            await ensureUserTrialStarted(user.id);
+        } catch (err) {
+            console.warn('[AUTH] Trial/access grant skipped on signup:', err?.message || err);
+        }
 
         const profile = await prisma.user.findUnique({
             where: { id: user.id },
             select: LOGIN_SUCCESS_USER_SELECT
         });
-        if (!profile || profile.email.toLowerCase().trim() !== email) {
+        if (!profile || String(profile.email || '').toLowerCase().trim() !== email) {
             return res.status(500).json({ error: 'Account creation could not be completed' });
         }
 
+        let existingToken = null;
+        try {
+            existingToken = getSessionTokenFromRequest(req);
+        } catch (err) {
+            console.warn('[AUTH] Session cookie parse skipped on signup:', err?.message || err);
+        }
+
         const session = await createSessionTokenForUser(profile.id, {
-            existingToken: getSessionTokenFromRequest(req),
+            existingToken,
         });
 
         res.status(201).json(sendAuthenticatedSession(res, profile, session));
@@ -312,7 +326,7 @@ async function handleResendInviteVerification(req, res) {
 
 /**
  * Progressive SQL user lookup for login (case-insensitive).
- * Avoids Prisma findFirst adapter issues that caused 500s in production.
+ * Never uses Prisma — adapter findFirst was 500ing in production.
  */
 async function lookupUserForLogin(email) {
     const queries = [
@@ -340,7 +354,7 @@ async function lookupUserForLogin(email) {
     let lastErr = null;
     for (const sql of queries) {
         try {
-            const { rows } = await pool.query(sql, [email]);
+            const { rows } = await poolQueryWithRetry(sql, [email]);
             if (!rows[0]) return null;
             const row = rows[0];
             return {
@@ -383,6 +397,7 @@ async function handleAuthLogin(req, res) {
         });
 
     try {
+        await ensureLoginSchemaReady().catch(() => false);
         console.log(`[AUTH] Login attempt`);
 
         const user = await lookupUserForLogin(email);
@@ -456,9 +471,19 @@ async function handleAuthLogin(req, res) {
             [user.id],
         ).catch(() => {});
 
-        await ensureUserTrialStarted(user.id).catch((err) => {
-            console.warn('[AUTH] Trial start skipped:', err?.message || err);
-        });
+        // Grant access without Prisma (avoid adapter findUnique/findFirst during login).
+        if (user.role !== 'superadmin' && user.subscriptionStatus !== 'active') {
+            await pool.query(
+                `UPDATE "User"
+                 SET "subscriptionStatus" = 'active',
+                     "trialStartDate" = NULL,
+                     "trialEndDate" = NULL
+                 WHERE id = $1`,
+                [user.id],
+            ).catch((err) => {
+                console.warn('[AUTH] Trial/access grant skipped:', err?.message || err);
+            });
+        }
 
         void ensureOrphanUserOrgLink(user.id).catch((err) => {
             console.warn('[AUTH] Org link repair skipped:', err?.message || err);
@@ -478,7 +503,7 @@ async function handleAuthLogin(req, res) {
             updatedAt: user.updatedAt ?? null,
             trialStartDate: user.trialStartDate ?? null,
             trialEndDate: user.trialEndDate ?? null,
-            subscriptionStatus: user.subscriptionStatus ?? null,
+            subscriptionStatus: user.subscriptionStatus === 'active' ? 'active' : (user.subscriptionStatus ?? 'active'),
             subscriptionPlan: user.subscriptionPlan ?? null,
             planStartDate: user.planStartDate ?? null,
             planExpiryDate: user.planExpiryDate ?? null,
@@ -513,15 +538,16 @@ async function handleAuthLogin(req, res) {
         return res.status(200).json(sendAuthenticatedSession(res, safeProfile, session));
     } catch (error) {
         handlePrismaError(error, 'login');
-        const msg = String(error?.message || error || '');
-        console.error('[AUTH] Login failed:', msg, error?.code || '');
+        const msg = formatErrorDetail(error);
+        console.error('[AUTH] Login failed:', msg, error?.code || '', error?.meta || '');
         const dbUnreachable =
             /ETIMEDOUT|ENETUNREACH|ECONNREFUSED|EAI_AGAIN|Connection terminated|timeout/i.test(msg);
         return res.status(500).json({
             error: dbUnreachable
-                ? 'Cannot reach the database. Check DATABASE_URL and that Postgres allows connections from this server.'
+                ? 'Cannot reach the database. Check DATABASE_URL and that Postgres allows connections from this server (firewall / security group / port 5432).'
                 : 'An error occurred during login',
             code: dbUnreachable ? 'LOGIN_DB_UNREACHABLE' : 'LOGIN_INTERNAL_ERROR',
+            detail: msg,
         });
     }
 }

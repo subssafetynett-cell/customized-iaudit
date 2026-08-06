@@ -461,7 +461,10 @@ const Index = () => {
         const plan = await res.json();
         queryClient.setQueryData(auditPlanQueryKey(plan.id), plan);
 
-        const modules = getPlanModuleOptions(plan.templateId);
+        const modules = getPlanModuleOptions(
+            plan.templateId,
+            plan.auditProgram?.isoStandard,
+        );
         if (modules.length > 1) {
           const progress = getPlanModulesProgressMap(plan);
           const best =
