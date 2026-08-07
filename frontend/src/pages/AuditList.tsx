@@ -192,6 +192,7 @@ const AuditList = () => {
             (fromCtx && !Number.isFinite(id) ? fromCtx : null);
         return seed ? [seed] : [];
     });
+    const [highlightedPlan, setHighlightedPlan] = useState<any>(null);
     const [searchQuery, setSearchQuery] = useState("");
     const [typeFilter, setTypeFilter] = useState<AuditTypeFilter>("all");
     /** Default: latest audit date first. Audit column sorts by module / ISO type label. */
@@ -258,6 +259,14 @@ const AuditList = () => {
 
     const [searchParams, setSearchParams] = useSearchParams();
     const auditExecuteTourActive = searchParams.get("auditExecuteTour") === "true";
+    const auditPlanTourActive = searchParams.get("auditPlanTour") === "true";
+    const auditPlanTourStep = Math.min(
+        AUDIT_PLAN_TOUR_TOTAL_STEPS,
+        Math.max(1, parseInt(searchParams.get("auditPlanStep") || "1", 10)),
+    );
+    const auditPlanTourStepConfig = getAuditPlanTourStepConfig(auditPlanTourStep);
+    const highlightPlanIdParam = searchParams.get("highlightPlanId");
+    const highlightPlanId = highlightPlanIdParam ? parseInt(highlightPlanIdParam, 10) : NaN;
     const auditExecuteTourStep = Math.min(
         AUDIT_EXECUTE_TOUR_TOTAL_STEPS,
         Math.max(1, parseInt(searchParams.get("auditExecuteStep") || "1", 10)),
@@ -645,6 +654,7 @@ const AuditList = () => {
         auditData?: unknown;
         status?: string;
         progress?: number;
+        auditProgram?: { isoStandard?: string };
     }) => {
         const ids = getPlanModuleOptions(
             fullPlan?.templateId,
