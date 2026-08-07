@@ -389,23 +389,25 @@ export const TourStepPopover: React.FC<TourStepPopoverProps> = ({
           body.tour-active [data-sidebar="sidebar"],
           body.tour-active .fixed.z-10 {
             z-index: 45 !important;
-            pointer-events: none !important;
           }
 
-          /* Checklist / dialogs must sit above tour spotlight + popover */
-          body.tour-active [data-radix-dialog-overlay],
+          /* Hide dialog backdrop during tours to prevent shadow */
+          body.tour-active [data-radix-dialog-overlay] {
+            display: none !important;
+          }
+
           body.tour-active [data-radix-dialog-content],
           body.tour-active [role="dialog"] {
             z-index: 30000 !important;
           }
 
-          body.tour-active:has([data-state="open"][role="dialog"]) #${targetId} {
+          body.tour-active:has([data-state="open"][role="dialog"]) #${targetId}:not([role="dialog"]) {
             z-index: 1 !important;
           }
 
           body.tour-active [data-radix-popper-content-wrapper],
           body.tour-active [data-radix-select-content] {
-            z-index: 13000 !important;
+            z-index: 40000 !important;
           }
         `}} />
       )}

@@ -35,6 +35,8 @@ interface AuditFindingsReportFormProps {
   nonConformances?: { id?: string; statement?: string }[];
   /** EOSH / QFS — Facet / Category live in Audit Details; hide scope & criteria here. */
   hideScopeAndCriteria?: boolean;
+  headerClassName?: string;
+  footerClassName?: string;
 }
 
 export function AuditFindingsReportForm({
@@ -43,6 +45,8 @@ export function AuditFindingsReportForm({
   section = "all",
   nonConformances = [],
   hideScopeAndCriteria = false,
+  headerClassName,
+  footerClassName,
 }: AuditFindingsReportFormProps) {
   const patch = (partial: Partial<FindingsReportForm>) =>
     onChange({ ...value, ...partial });

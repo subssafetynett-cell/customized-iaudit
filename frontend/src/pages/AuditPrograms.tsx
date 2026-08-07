@@ -679,7 +679,7 @@ const AuditPrograms = () => {
                 setCompanies(companiesList);
                 setAuditors(usersEligibleAsAuditors(Array.isArray(usersData) ? usersData : []));
 
-                if (!sitesRes.ok || !usersRes.ok) {
+                if (!usersRes.ok) {
                     toast.error("Some form data failed to load from server");
                 }
             } catch (error) {
@@ -802,15 +802,15 @@ const AuditPrograms = () => {
     }, [showSchedule, scrollToScheduleOnShow]);
 
     const handleGenerateSchedule = () => {
-        if (!auditName || !selectedSite) {
+        if (!auditTourActive && (!auditName || !selectedSite)) {
             toast.error("Please fill in Audit Name and Site");
             return;
         }
-        if (criteriaType === "iso" && selectedStandards.length === 0) {
+        if (!auditTourActive && criteriaType === "iso" && selectedStandards.length === 0) {
             toast.error("Please fill in Audit Name, ISO Standard(s) and Site");
             return;
         }
-        if (criteriaType === "module") {
+        if (!auditTourActive && criteriaType === "module") {
             if (moduleFamily !== "eosh" && moduleFamily !== "qfs-kore") {
                 toast.error("Please select EOSH Audit Checklist or QFS KORE Audit Checklist");
                 return;
@@ -1199,33 +1199,8 @@ const AuditPrograms = () => {
             setAuditTourStep(AUDIT_TOUR_STEP.AUDIT_NAME);
             return;
         }
-        if (auditTourStep === AUDIT_TOUR_STEP.CRITERIA_TYPE) {
-            if (criteriaType === "iso" && selectedStandards.length === 0) {
-                toast.error("Please select at least one ISO standard");
-                return;
-            }
-            if (
-                criteriaType === "module" &&
-                moduleFamily !== "eosh" &&
-                moduleFamily !== "qfs-kore"
-            ) {
-                toast.error("Please select EOSH Audit Checklist or QFS KORE Audit Checklist");
-                return;
-            }
-        }
+        // Validation is bypassed during the tour so users can freely explore.
         if (auditTourStep === AUDIT_TOUR_STEP.GENERATE_SCHEDULE) {
-            if (!auditName || !selectedSite) {
-                toast.error("Please fill in Audit Name and Site");
-                return;
-            }
-            if (criteriaType === "iso" && selectedStandards.length === 0) {
-                toast.error("Please fill in Audit Name, ISO Standard(s) and Site");
-                return;
-            }
-            if (criteriaType === "module" && moduleFamily !== "eosh" && moduleFamily !== "qfs-kore") {
-                toast.error("Please select EOSH Audit Checklist or QFS KORE Audit Checklist");
-                return;
-            }
             setScrollToScheduleOnShow(true);
             setShowSchedule(true);
             toast.success(
@@ -2739,12 +2714,7 @@ const AuditPrograms = () => {
                                         handleGenerateSchedule();
                                         if (
                                             auditTourActive &&
-                                            auditTourStep === AUDIT_TOUR_STEP.GENERATE_SCHEDULE &&
-                                            auditName &&
-                                            selectedSite &&
-                                            (criteriaType === "iso"
-                                                ? selectedStandards.length > 0
-                                                : moduleFamily === "eosh" || moduleFamily === "qfs-kore")
+                                            auditTourStep === AUDIT_TOUR_STEP.GENERATE_SCHEDULE
                                         ) {
                                             setAuditTourStep(AUDIT_TOUR_STEP.TIMELINE);
                                         }

@@ -14,7 +14,6 @@ import {
     ChevronDown,
     AlertTriangle,
     FileText,
-    Sparkles,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -62,7 +61,7 @@ const AUDIT_STEP_ICONS = [
 
 function OnboardingStepBadge({ step }: { step: number }) {
     return (
-        <span className="inline-flex items-center justify-center rounded-full bg-[#ecfdf5] text-[#166534] text-xs font-bold px-2.5 py-0.5 mb-2">
+        <span className="inline-flex items-center justify-center rounded-full bg-[#f1f5f9] text-[#334155] text-xs font-bold px-2.5 py-0.5 mb-2">
             Step {step}
         </span>
     );
@@ -246,23 +245,15 @@ export default function GettingStarted() {
 
     return (
         <div className="min-h-full bg-slate-50/80 pb-12">
-            <div className="max-w-3xl mx-auto px-6 lg:px-8 py-8 space-y-8">
-                <div className="flex items-start gap-4">
-                    <div
-                        className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-[#ecfdf5] to-emerald-100 shadow-sm ring-1 ring-emerald-100"
-                        aria-hidden
-                    >
-                        <Sparkles className="h-7 w-7 text-[#1e855e]" />
-                    </div>
-                    <div className="min-w-0 pt-0.5">
-                        <h1 className="text-2xl md:text-3xl font-bold tracking-tight text-[#111827]">
-                            Welcome {userName}
-                        </h1>
-                        <p className="text-sm text-slate-500 mt-2 max-w-xl">
-                            Follow these two steps to get started with iAudit—set up your
-                            organization, then begin auditing.
-                        </p>
-                    </div>
+            <div className="w-full px-6 lg:px-8 py-8 space-y-6">
+                <div>
+                    <h1 className="text-2xl md:text-3xl font-bold tracking-tight text-[#111827]">
+                        Welcome {userName}
+                    </h1>
+                    <p className="text-sm text-slate-500 mt-2 max-w-xl">
+                        Follow these two steps to get started with iAudit—set up your
+                        organization, then begin auditing.
+                    </p>
                 </div>
 
                 {/* Step 1 — Set up your organization */}
@@ -286,7 +277,7 @@ export default function GettingStarted() {
                                         <div className="mt-4 flex items-center gap-3">
                                             <Progress
                                                 value={progressPercent}
-                                                className="h-2 flex-1 bg-slate-100 [&>div]:bg-[#1e855e]"
+                                                className="h-2 flex-1 bg-slate-100 [&>div]:bg-[#213847]"
                                             />
                                             <span className="text-xs font-semibold text-slate-500 shrink-0">
                                                 {completedCount}/
@@ -308,7 +299,7 @@ export default function GettingStarted() {
                                                 ? "Hide setup steps"
                                                 : "View all 6 setup steps"}
                                             {allFoundationComplete && (
-                                                <span className="ml-2 text-xs font-medium text-[#1e855e]">
+                                                <span className="ml-2 text-xs font-medium text-[#213847]">
                                                     (all complete)
                                                 </span>
                                             )}
@@ -337,7 +328,7 @@ export default function GettingStarted() {
                                                     <div
                                                         className={`mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-full border-2 ${
                                                             done
-                                                                ? "border-[#1e855e] bg-[#1e855e] text-white"
+                                                                ? "border-[#213847] bg-[#213847] text-white"
                                                                 : "border-slate-200 bg-white text-slate-400"
                                                         }`}
                                                     >
@@ -366,7 +357,7 @@ export default function GettingStarted() {
                                                                     {step.description}
                                                                 </p>
                                                             </div>
-                                                            <div className="hidden sm:flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#ecfdf5] text-[#1e855e]">
+                                                            <div className="hidden sm:flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#f1f5f9] text-[#213847]">
                                                                 <Icon className="h-4 w-4" />
                                                             </div>
                                                         </div>
@@ -374,7 +365,7 @@ export default function GettingStarted() {
                                                             <Button
                                                                 type="button"
                                                                 variant="link"
-                                                                className="h-auto p-0 mt-2 text-[#1e855e] font-semibold text-sm hover:text-[#166534]"
+                                                                className="h-auto p-0 mt-2 text-[#213847] font-semibold text-sm hover:text-[#334155]"
                                                                 onClick={() =>
                                                                     beginFoundationStep(
                                                                         navigate,
@@ -424,7 +415,7 @@ export default function GettingStarted() {
                                         <div className="mt-4 flex items-center gap-3">
                                             <Progress
                                                 value={auditProgressPercent}
-                                                className="h-2 flex-1 bg-slate-100 [&>div]:bg-[#1e855e]"
+                                                className="h-2 flex-1 bg-slate-100 [&>div]:bg-[#213847]"
                                             />
                                             <span className="text-xs font-semibold text-slate-500 shrink-0">
                                                 {auditCompletedCount}/
@@ -449,7 +440,7 @@ export default function GettingStarted() {
                                                 ? "Hide auditing workflow"
                                                 : "View auditing workflow"}
                                             {allAuditComplete && (
-                                                <span className="ml-2 text-xs font-medium text-[#1e855e]">
+                                                <span className="ml-2 text-xs font-medium text-[#213847]">
                                                     (all complete)
                                                 </span>
                                             )}
@@ -493,7 +484,7 @@ export default function GettingStarted() {
                                                     <div
                                                         className={`mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-full border-2 ${
                                                             done
-                                                                ? "border-[#1e855e] bg-[#1e855e] text-white"
+                                                                ? "border-[#213847] bg-[#213847] text-white"
                                                                 : "border-slate-200 bg-white text-slate-400"
                                                         }`}
                                                     >
@@ -524,7 +515,7 @@ export default function GettingStarted() {
                                                                 <Button
                                                                     type="button"
                                                                     variant="link"
-                                                                    className="h-auto p-0 mt-2 text-[#1e855e] font-semibold text-sm hover:text-[#166534]"
+                                                                    className="h-auto p-0 mt-2 text-[#213847] font-semibold text-sm hover:text-[#334155]"
                                                                     onClick={() => {
                                                                         if (
                                                                             step.id ===
@@ -572,7 +563,7 @@ export default function GettingStarted() {
                                                                     <ArrowRight className="ml-1 h-3.5 w-3.5" />
                                                                 </Button>
                                                             </div>
-                                                            <div className="hidden sm:flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#ecfdf5] text-[#1e855e]">
+                                                            <div className="hidden sm:flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#f1f5f9] text-[#213847]">
                                                                 <Icon className="h-4 w-4" />
                                                             </div>
                                                         </div>
