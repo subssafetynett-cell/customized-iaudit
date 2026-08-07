@@ -26,6 +26,7 @@ import {
 import { SignatureInput } from "./SignatureInput";
 import { DatePickerInput } from "./DatePickerInput";
 import { EditableFindingsField } from "./EditableFindingsField";
+import { cn } from "@/lib/utils";
 
 interface AuditFindingsReportFormProps {
   value: FindingsReportForm;
@@ -34,6 +35,8 @@ interface AuditFindingsReportFormProps {
   nonConformances?: { id?: string; statement?: string }[];
   /** EOSH / QFS — Facet / Category live in Audit Details; hide scope & criteria here. */
   hideScopeAndCriteria?: boolean;
+  headerClassName?: string;
+  footerClassName?: string;
 }
 
 export function AuditFindingsReportForm({
@@ -42,6 +45,8 @@ export function AuditFindingsReportForm({
   section = "all",
   nonConformances = [],
   hideScopeAndCriteria = false,
+  headerClassName,
+  footerClassName,
 }: AuditFindingsReportFormProps) {
   const patch = (partial: Partial<FindingsReportForm>) =>
     onChange({ ...value, ...partial });
@@ -246,7 +251,7 @@ export function AuditFindingsReportForm({
   ) : null;
 
   const nonConformitiesSummarySection = (
-    <section className="space-y-3">
+    <section id="tour-step-summary-nc" className="space-y-3">
       <div className="flex items-center gap-2">
         <Input
           value={getSectionLabel(value, "nonConformitiesSummary")}
@@ -289,7 +294,7 @@ export function AuditFindingsReportForm({
   );
 
   const keyPersonnelSection = (
-    <section className="space-y-3">
+    <section id="tour-step-key-personnel" className="space-y-3">
       <div className="flex items-center gap-2">
         <Input
           value={getSectionLabel(value, "keyPersonnel")}
@@ -365,7 +370,7 @@ export function AuditFindingsReportForm({
   );
 
   const acknowledgementSection = (
-    <section className="space-y-4">
+    <section id="tour-step-acknowledgement" className="space-y-4">
       <div className="flex items-center gap-2">
         <Input
           value={getSectionLabel(value, "acknowledgement")}
@@ -481,7 +486,7 @@ export function AuditFindingsReportForm({
   ) : null;
 
   const generalCommentSection = isFieldVisible(value, "generalComment") ? (
-    <section className="space-y-2">
+    <section id="tour-step-general-comment" className="space-y-2">
       <div className="flex items-center gap-2">
         <Input
           value={getSectionLabel(value, "generalComment")}
@@ -509,7 +514,7 @@ export function AuditFindingsReportForm({
 
   if (section === "header") {
     return (
-      <Card className="border border-slate-200 shadow-md mb-8">
+      <Card id="tour-step-audit-findings-report" className={cn("border border-slate-200 shadow-md mb-8", headerClassName)}>
         <CardHeader className="bg-slate-50 border-b border-slate-200">
           <CardTitle className="text-lg font-bold text-slate-900">
             Audit Findings Report
@@ -531,7 +536,7 @@ export function AuditFindingsReportForm({
 
   if (section === "footer") {
     return (
-      <Card className="border border-slate-200 shadow-md mb-8">
+      <Card id="tour-step-report-summary" className={cn("border border-slate-200 shadow-md mb-8", footerClassName)}>
         <CardHeader className="bg-slate-50 border-b border-slate-200">
           <CardTitle className="text-lg font-bold text-slate-900">
             Report Summary &amp; Sign-off
@@ -541,7 +546,7 @@ export function AuditFindingsReportForm({
           </p>
         </CardHeader>
         <CardContent className="p-6 space-y-8">
-          <div className="rounded-md bg-blue-50 border border-blue-200 px-4 py-2">
+          <div id="tour-step-audit-summary" className="rounded-md bg-blue-50 border border-blue-200 px-4 py-2">
             <Input
               value={getSectionLabel(value, "auditSummary")}
               onChange={(e) => setSectionLabel("auditSummary", e.target.value)}

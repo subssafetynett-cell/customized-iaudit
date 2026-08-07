@@ -46,6 +46,8 @@ type Props = {
         nonconformance?: NonconformanceSummary;
     }) => void;
     onCancel?: () => void;
+    highlightSaveDraft?: boolean;
+    highlightSend?: boolean;
 };
 
 function SectionTitle({ children }: { children: ReactNode }) {
@@ -248,6 +250,8 @@ export function FindingAssigneeResponseForm({
     isEditing = false,
     onSubmitted,
     onCancel,
+    highlightSaveDraft = false,
+    highlightSend = false,
 }: Props) {
     const seedNc = [
         finding.description?.trim(),
@@ -1117,11 +1121,16 @@ export function FindingAssigneeResponseForm({
                 </div>
                 <div className="flex flex-col-reverse sm:flex-row gap-2">
                     <Button
+                        id="tour-step-capa-save-draft"
                         type="button"
                         variant="outline"
                         disabled={submitting}
                         onClick={() => void handleSaveDraft()}
-                        className="gap-1.5 border-slate-300"
+                        className={cn(
+                            "gap-1.5 border-slate-300",
+                            highlightSaveDraft &&
+                                "relative z-[60] ring-[4px] ring-emerald-500/80 ring-offset-2",
+                        )}
                     >
                         {submitting && actionRef.current === "draft" ? (
                             <>
@@ -1136,10 +1145,15 @@ export function FindingAssigneeResponseForm({
                         )}
                     </Button>
                     <Button
+                        id="tour-step-capa-send"
                         type="button"
                         disabled={!canSend}
                         onClick={() => void handleSendToReporter()}
-                        className="bg-[#213847] hover:bg-[#213847]/90 text-white gap-1.5"
+                        className={cn(
+                            "bg-[#213847] hover:bg-[#213847]/90 text-white gap-1.5",
+                            highlightSend &&
+                                "relative z-[60] ring-[4px] ring-emerald-500/80 ring-offset-2",
+                        )}
                     >
                         {submitting && actionRef.current === "send" ? (
                             <>

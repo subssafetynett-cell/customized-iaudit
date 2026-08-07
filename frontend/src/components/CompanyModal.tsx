@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
+import { useSearchParams } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -76,6 +77,86 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
       }
     };
   }, []);
+
+  const [searchParams] = useSearchParams();
+  const companyTour = searchParams.get("companyTour") === "true";
+  const companyStep = parseInt(searchParams.get("companyStep") || "0", 10);
+
+  // Auto-fill simulation for tour step 4
+  useEffect(() => {
+    if (open && companyTour && companyStep === 4) {
+      let isCancelled = false;
+      
+      const simulateTyping = async () => {
+        const delay = (ms: number) => new Promise(res => setTimeout(res, ms));
+        
+        await delay(500);
+        if (isCancelled) return;
+        
+        // Type Name
+        const nameTarget = "Schweppes Zimbabwe Limited";
+        for (let i = 1; i <= nameTarget.length; i++) {
+          if (isCancelled) return;
+          setName(nameTarget.slice(0, i));
+          await delay(30);
+        }
+        
+        await delay(300);
+        
+        // Type Description
+        const descTarget = "Globally recognized non-alcoholic carbonated mixer and soft drink brand.";
+        for (let i = 1; i <= descTarget.length; i++) {
+          if (isCancelled) return;
+          setDescription(descTarget.slice(0, i));
+          await delay(15);
+        }
+        
+        await delay(300);
+        
+        // Pick Industry
+        if (isCancelled) return;
+        setIndustry("Manufacturing");
+        
+        await delay(300);
+        
+        // Fill Contact Number
+        const contactTarget = "263242620231";
+        for (let i = 1; i <= contactTarget.length; i++) {
+          if (isCancelled) return;
+          setContactNumber(contactTarget.slice(0, i));
+          await delay(30);
+        }
+        
+        await delay(300);
+        
+        // Fill Address
+        const addrTarget = "Woolwich Road, Willowvale";
+        for (let i = 1; i <= addrTarget.length; i++) {
+          if (isCancelled) return;
+          setStreetAddress(addrTarget.slice(0, i));
+          await delay(20);
+        }
+        
+        await delay(300);
+        
+        // Fill Location Details
+        if (isCancelled) return;
+        setCountryIso("ZW");
+        await delay(200);
+        setCity("Harare");
+        setState("Harare Province");
+        setPostalCode("0000");
+
+        await delay(300);
+        if (isCancelled) return;
+        // Mock logo upload with a dummy data URL to represent the SZL logo
+        setLogo("data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxMDAiIGhlaWdodD0iMTAwIj48cmVjdCB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgZmlsbD0iI2ZmY2MwMCIvPjx0ZXh0IHg9IjUwIiB5PSI1NSIgZm9udC1zaXplPSIyNCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzAwMCI+U1pMPC90ZXh0Pjwvc3ZnPg==");
+      };
+
+      simulateTyping();
+      return () => { isCancelled = true; };
+    }
+  }, [open, companyTour, companyStep]);
 
   useEffect(() => {
     if (open) {
@@ -239,6 +320,25 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
     }
 
     try {
+      if (companyTour) {
+        // Prevent real submit, just pretend it succeeded
+        onSubmit({
+          name: trimmedName,
+          logo,
+          industry,
+          contactNumber: contactDigits,
+          description: description.trim(),
+          streetAddress: trimmedAddress,
+          city: city.trim(),
+          state: stateName,
+          country: countryName,
+          postalCode: postalCode.trim(),
+          standards: initialData?.isoStandards || [],
+        });
+        onClose();
+        return;
+      }
+
       await Promise.resolve(
         onSubmit({
           name: trimmedName,
@@ -263,11 +363,13 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
 
   return (
     <Dialog open={open} onOpenChange={onClose}>
-      <DialogContent className="sm:max-w-3xl max-h-[90vh] flex flex-col p-0 overflow-hidden"
-      onPointerDownOutside={hideCancel ? (e) => e.preventDefault() : undefined}
-      onEscapeKeyDown={hideCancel ? (e) => e.preventDefault() : undefined}
-    >
-      <DialogHeader className="p-6 pb-2">
+      <DialogContent 
+        id="tour-step-company-form"
+        className="sm:max-w-3xl max-h-[90vh] flex flex-col p-0 overflow-hidden"
+        onPointerDownOutside={hideCancel || companyTour ? (e) => e.preventDefault() : undefined}
+        onEscapeKeyDown={hideCancel || companyTour ? (e) => e.preventDefault() : undefined}
+      >
+        <DialogHeader className="p-6 pb-2">
         <DialogTitle className="flex items-center gap-2 text-xl">
           {mode === "create" ? (
             <>
@@ -349,6 +451,7 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
                 maxLength={COMPANY_NAME_MAX}
                 className={`h-11 bg-[#F9FAFB] border-[#E5E7EB] rounded-lg text-sm text-[#111827] placeholder:text-[#9CA3AF] focus:ring-1 focus:ring-[#00875B] ${fieldErrors.name ? "border-red-500 focus:ring-red-500" : ""}`}
                 value={name}
+                disabled={companyTour && companyStep === 4}
                 onChange={(e) => {
                   setName(capitalizeFirstLetter(e.target.value));
                   if (fieldErrors.name) setFieldErrors(prev => ({ ...prev, name: "" }));
@@ -362,7 +465,7 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
             </div>
             <div className="space-y-2">
               <Label htmlFor="company-industry" className="text-sm">Industry *</Label>
-              <Select value={industry} onValueChange={(val) => {
+              <Select value={industry} disabled={companyTour && companyStep === 4} onValueChange={(val) => {
                 setIndustry(val);
                 if (fieldErrors.industry) setFieldErrors(prev => ({ ...prev, industry: "" }));
                 setError("");
@@ -394,6 +497,7 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
                   placeholder={getPhonePlaceholder(countryIso)}
                       className={`pl-14 ${fieldErrors.contactNumber ? "border-red-500 focus:ring-red-500" : ""}`}
                   value={contactNumber}
+                  disabled={companyTour && companyStep === 4}
                   onChange={(e) => {
                         const value = String(e.target.value || "").replace(/\D/g, "");
                     setContactNumber(value);
@@ -413,6 +517,7 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
               placeholder="Brief description of the company"
               maxLength={COMPANY_DESCRIPTION_MAX}
               value={description}
+              disabled={companyTour && companyStep === 4}
               onChange={(e) => {
                 setDescription(capitalizeFirstLetter(e.target.value));
                 if (fieldErrors.description) setFieldErrors(prev => ({ ...prev, description: "" }));
@@ -444,6 +549,7 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
               maxLength={STREET_ADDRESS_MAX}
               className={`${fieldErrors.streetAddress ? "border-red-500 focus:ring-red-500" : ""}`}
               value={streetAddress}
+              disabled={companyTour && companyStep === 4}
               onChange={(e) => {
                 setStreetAddress(capitalizeFirstLetter(e.target.value));
                 if (fieldErrors.streetAddress) setFieldErrors(prev => ({ ...prev, streetAddress: "" }));
@@ -462,6 +568,7 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
               <CountrySelect
                 id="country"
                 value={countryIso}
+                disabled={companyTour && companyStep === 4}
                 onValueChange={(val) => {
                   setCountryIso(val);
                   setStateIso("");
@@ -522,6 +629,7 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
                 placeholder="City"
                 className={`${fieldErrors.city ? "border-red-500 focus:ring-red-500" : ""}`}
                 value={city}
+                disabled={companyTour && companyStep === 4}
                 onChange={(e) => {
                   setCity(capitalizeFirstLetter(e.target.value));
                   if (fieldErrors.city) setFieldErrors(prev => ({ ...prev, city: "" }));
@@ -537,6 +645,7 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
                 placeholder="Postal/Zip code"
                 className={`${fieldErrors.postalCode ? "border-red-500 focus:ring-red-500" : ""}`}
                 value={postalCode}
+                disabled={companyTour && companyStep === 4}
                 onChange={(e) => {
                   setPostalCode(e.target.value);
                   if (fieldErrors.postalCode) setFieldErrors(prev => ({ ...prev, postalCode: "" }));
@@ -561,7 +670,7 @@ export default function CompanyModal({ open, onClose, onSubmit, initialData, mod
               Cancel
             </Button>
           )}
-          <Button onClick={handleSubmit} className="px-8 shadow-sm bg-[#213847] hover:bg-[#213847]/90 text-white">
+          <Button id="tour-step-company-submit" onClick={handleSubmit} className="px-8 shadow-sm bg-[#213847] hover:bg-[#213847]/90 text-white">
             {mode === "create" ? "Create Company" : "Save Changes"}
           </Button>
         </DialogFooter >

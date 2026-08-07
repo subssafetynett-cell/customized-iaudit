@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { apiFetch } from "@/lib/api";
 import { auditPlanQueryKey } from "@/lib/auditPlanExecute";
@@ -36,9 +36,17 @@ import ReusablePagination from "@/components/ReusablePagination";
 import { buildPageQuery, parsePaginatedResponse } from "@/lib/pagination";
 import { TourStepPopover } from "@/components/TourStepPopover";
 import {
+    AUDIT_EXECUTE_TOUR_STEP,
     AUDIT_EXECUTE_TOUR_TOTAL_STEPS,
     getAuditExecuteTourStepConfig,
 } from "@/lib/auditExecuteOnboardingTour";
+import {
+    AUDIT_PLAN_TOUR_STEP,
+    AUDIT_PLAN_TOUR_TOTAL_STEPS,
+    clearAuditPlanTourContext,
+    getAuditPlanTourStepConfig,
+    loadAuditPlanTourContext,
+} from "@/lib/auditPlanOnboardingTour";
 import { cn } from "@/lib/utils";
 import {
     getPlanModuleOptions,
@@ -166,17 +174,56 @@ const STATUS_TAB_TO_API: Record<AuditStatusTab, string> = {
 };
 
 const AuditList = () => {
-    const [auditPlans, setAuditPlans] = useState<any[]>([]);
+    const [auditPlans, setAuditPlans] = useState<any[]>(() => {
+        const idParam =
+            typeof window !== "undefined"
+                ? new URLSearchParams(window.location.search).get("highlightPlanId")
+                : null;
+        const id = idParam ? Number.parseInt(idParam, 10) : NaN;
+        const navPlan = (typeof window !== "undefined"
+            ? (window.history.state?.usr as { savedPlan?: any } | null)?.savedPlan
+            : null) ?? null;
+        // React Router may not expose history.state.usr the same in all builds — also try session.
+        const ctx = loadAuditPlanTourContext();
+        const fromCtx = ctx?.plan;
+        const seed =
+            (navPlan && (!Number.isFinite(id) || Number(navPlan.id) === id) ? navPlan : null) ||
+            (fromCtx && Number.isFinite(id) && Number(fromCtx.id) === id ? fromCtx : null) ||
+            (fromCtx && !Number.isFinite(id) ? fromCtx : null);
+        return seed ? [seed] : [];
+    });
+    const [highlightedPlan, setHighlightedPlan] = useState<any>(null);
     const [searchQuery, setSearchQuery] = useState("");
     const [typeFilter, setTypeFilter] = useState<AuditTypeFilter>("all");
     /** Default: latest audit date first. Audit column sorts by module / ISO type label. */
     const [sortKey, setSortKey] = useState<AuditListSortKey>("date");
     const [sortDir, setSortDir] = useState<AuditListSortDir>("desc");
     const [selectedSite, setSelectedSite] = useState("all");
-    const [loading, setLoading] = useState(true);
+    const seededOnMount = React.useRef(false);
+    // Will set properly after we know if we had seed — use lazy init for loading
+    const [loading, setLoading] = useState(() => {
+        // Mirror seed logic lightly: if tour highlight + context plan, skip skeleton
+        try {
+            const idParam = new URLSearchParams(window.location.search).get("highlightPlanId");
+            const id = idParam ? Number.parseInt(idParam, 10) : NaN;
+            const ctx = loadAuditPlanTourContext();
+            if (ctx?.plan && Number.isFinite(id) && Number(ctx.plan.id) === id) {
+                seededOnMount.current = true;
+                return false;
+            }
+            if (ctx?.plan && window.location.search.includes("auditPlanTour=true")) {
+                seededOnMount.current = true;
+                return false;
+            }
+        } catch {
+            // ignore
+        }
+        return true;
+    });
     /** True while refetching after filters/page change — keep prior rows visible. */
     const [refreshing, setRefreshing] = useState(false);
-    const hasLoadedOnceRef = React.useRef(false);
+    const hasLoadedOnceRef = React.useRef(seededOnMount.current);
+    const auditPlanTourToastShownRef = React.useRef(false);
     /** e.g. "42-pdf" while generating a report for plan 42 */
     const [downloadingKey, setDownloadingKey] = useState<string | null>(null);
     const [modulePicker, setModulePicker] = useState<{
@@ -189,10 +236,37 @@ const AuditList = () => {
         progressLoading: boolean;
     } | null>(null);
     const navigate = useNavigate();
+    const location = useLocation();
     const queryClient = useQueryClient();
     const isAuditeeReadOnly = useAuditeeReadOnly();
+
+    // Prefer React Router location.state for instant list after save/update.
+    useEffect(() => {
+        const navState = location.state as
+            | { savedPlan?: any; auditPlanTourJustSaved?: boolean; savedMessage?: string }
+            | null;
+        const savedPlan = navState?.savedPlan;
+        if (savedPlan?.id != null) {
+            setAuditPlans((prev) => {
+                if (prev.some((p) => Number(p.id) === Number(savedPlan.id))) return prev;
+                return [savedPlan, ...prev];
+            });
+            setHighlightedPlan(savedPlan);
+            setLoading(false);
+            hasLoadedOnceRef.current = true;
+        }
+    }, [location.state]);
+
     const [searchParams, setSearchParams] = useSearchParams();
     const auditExecuteTourActive = searchParams.get("auditExecuteTour") === "true";
+    const auditPlanTourActive = searchParams.get("auditPlanTour") === "true";
+    const auditPlanTourStep = Math.min(
+        AUDIT_PLAN_TOUR_TOTAL_STEPS,
+        Math.max(1, parseInt(searchParams.get("auditPlanStep") || "1", 10)),
+    );
+    const auditPlanTourStepConfig = getAuditPlanTourStepConfig(auditPlanTourStep);
+    const highlightPlanIdParam = searchParams.get("highlightPlanId");
+    const highlightPlanId = highlightPlanIdParam ? parseInt(highlightPlanIdParam, 10) : NaN;
     const auditExecuteTourStep = Math.min(
         AUDIT_EXECUTE_TOUR_TOTAL_STEPS,
         Math.max(1, parseInt(searchParams.get("auditExecuteStep") || "1", 10)),
@@ -234,10 +308,80 @@ const AuditList = () => {
         );
     };
 
+    const exitAuditPlanTour = () => {
+        setSearchParams(
+            (prev) => {
+                const next = new URLSearchParams(prev);
+                next.delete("auditPlanTour");
+                next.delete("auditPlanStep");
+                next.delete("highlightPlanId");
+                return next;
+            },
+            { replace: true },
+        );
+    };
+
     const tourExecuteHighlight = (step: number) =>
         auditExecuteTourActive && auditExecuteTourStep === step
             ? "relative z-[60] ring-[4px] ring-emerald-500/80 ring-offset-2 rounded-xl"
             : "";
+
+    useEffect(() => {
+        if (!auditPlanTourActive || auditPlanTourStep !== AUDIT_PLAN_TOUR_STEP.COMPLETE) {
+            return;
+        }
+        setStatusTab("planned");
+
+        const navState = location.state as
+            | { auditPlanTourJustSaved?: boolean; savedMessage?: string }
+            | null;
+        if (navState?.auditPlanTourJustSaved && !auditPlanTourToastShownRef.current) {
+            auditPlanTourToastShownRef.current = true;
+            toast.success(navState.savedMessage || "Audit Plan saved successfully!");
+            window.history.replaceState({}, document.title);
+        }
+
+        requestAnimationFrame(() => {
+            document
+                .getElementById("tour-step-created-audit-plan")
+                ?.scrollIntoView({ block: "center" });
+        });
+    }, [auditPlanTourActive, auditPlanTourStep, auditPlans, highlightPlanId, location.state]);
+
+    useEffect(() => {
+        if (
+            !auditPlanTourActive ||
+            auditPlanTourStep !== AUDIT_PLAN_TOUR_STEP.COMPLETE ||
+            !Number.isFinite(highlightPlanId)
+        ) {
+            return;
+        }
+        const inList = auditPlans.some((p) => Number(p.id) === highlightPlanId);
+        if (inList) {
+            setHighlightedPlan(null);
+            return;
+        }
+        let cancelled = false;
+        (async () => {
+            try {
+                const res = await apiFetch(`/audit-plans/${highlightPlanId}`);
+                if (!res.ok || cancelled) return;
+                const plan = await res.json();
+                if (!cancelled && plan?.id != null) {
+                    setHighlightedPlan(plan);
+                    setAuditPlans((prev) => {
+                        if (prev.some((p) => Number(p.id) === Number(plan.id))) return prev;
+                        return [plan, ...prev];
+                    });
+                }
+            } catch {
+                // list fetch may still surface the plan
+            }
+        })();
+        return () => {
+            cancelled = true;
+        };
+    }, [auditPlanTourActive, auditPlanTourStep, highlightPlanId, auditPlans]);
 
     // Deletion State
     const [planToDelete, setPlanToDelete] = useState<any>(null);
@@ -316,14 +460,28 @@ const AuditList = () => {
             }
             const data = await res.json();
             const parsed = parsePaginatedResponse<any>(data, currentPage, itemsPerPage);
-            setAuditPlans(parsed.items);
+            setAuditPlans((prev) => {
+                // Keep a just-saved plan visible if the filtered page does not include it yet.
+                if (
+                    Number.isFinite(highlightPlanId) &&
+                    !parsed.items.some((p) => Number(p.id) === highlightPlanId)
+                ) {
+                    const keep =
+                        prev.find((p) => Number(p.id) === highlightPlanId) ||
+                        highlightedPlan;
+                    if (keep) return [keep, ...parsed.items];
+                }
+                return parsed.items;
+            });
             setTotalItems(parsed.total);
             hasLoadedOnceRef.current = true;
         } catch (error) {
             console.error("Failed to fetch audit plans:", error);
             toast.error("Failed to load audit plans");
-            setAuditPlans([]);
-            setTotalItems(0);
+            if (!hasLoadedOnceRef.current) {
+                setAuditPlans([]);
+                setTotalItems(0);
+            }
         } finally {
             setLoading(false);
             setRefreshing(false);
@@ -496,6 +654,7 @@ const AuditList = () => {
         auditData?: unknown;
         status?: string;
         progress?: number;
+        auditProgram?: { isoStandard?: string };
     }) => {
         const ids = getPlanModuleOptions(
             fullPlan?.templateId,
@@ -655,8 +814,33 @@ const AuditList = () => {
 
     const tourTargetPlan = displayedPlans[0] ?? auditPlans[0] ?? null;
 
+    const createdPlanTourTarget = Number.isFinite(highlightPlanId)
+        ? auditPlans.find((p) => Number(p.id) === highlightPlanId) ??
+          (highlightedPlan && Number(highlightedPlan.id) === highlightPlanId
+              ? highlightedPlan
+              : null)
+        : null;
+
+    const auditPlanCompleteTargetId = createdPlanTourTarget
+        ? "tour-step-created-audit-plan"
+        : "viewport";
+
+    const handleAuditPlanTourNext = () => {
+        exitAuditPlanTour();
+        clearAuditPlanTourContext();
+        navigate("/getting-started?nextAuditWorkflowStep=audits");
+    };
+
+    const handleAuditPlanTourBack = () => {
+        const restored = loadAuditPlanTourContext();
+        navigate(
+            `/audit-program/create-plan?auditPlanTour=true&auditPlanStep=${AUDIT_PLAN_TOUR_STEP.SAVE}`,
+            restored ? { state: restored } : undefined,
+        );
+    };
+
     const handleAuditExecuteTourNext = () => {
-        if (auditExecuteTourStep === 3) {
+        if (auditExecuteTourStep === AUDIT_EXECUTE_TOUR_STEP.START) {
             if (!tourTargetPlan?.id) {
                 toast.error(
                     "No audit plans found. Create an audit plan first, then return to run the audit.",
@@ -664,21 +848,37 @@ const AuditList = () => {
                 return;
             }
             navigate(
-                `/audit/execute/${tourTargetPlan.id}?auditExecuteTour=true&auditExecuteStep=4`,
+                `/audit/execute/${tourTargetPlan.id}?auditExecuteTour=true&auditExecuteStep=${AUDIT_EXECUTE_TOUR_STEP.OVERVIEW}`,
                 { state: { plan: tourTargetPlan } },
             );
             return;
         }
+        if (auditExecuteTourStep === AUDIT_EXECUTE_TOUR_STEP.COMPLETE_LIST) {
+            exitAuditExecuteTour();
+            navigate("/getting-started?nextAuditWorkflowStep=findings");
+            return;
+        }
         if (auditExecuteTourStep >= AUDIT_EXECUTE_TOUR_TOTAL_STEPS) {
             exitAuditExecuteTour();
-            navigate("/getting-started");
-            toast.success("Audits tour complete!");
+            navigate("/getting-started?nextAuditWorkflowStep=findings");
             return;
         }
         setAuditExecuteTourStep(auditExecuteTourStep + 1);
     };
 
     const handleAuditExecuteTourBack = () => {
+        if (auditExecuteTourStep === AUDIT_EXECUTE_TOUR_STEP.COMPLETE_LIST) {
+            if (tourTargetPlan?.id) {
+                navigate(
+                    `/audit/execute/${tourTargetPlan.id}?auditExecuteTour=true&auditExecuteStep=${AUDIT_EXECUTE_TOUR_STEP.SAVE}`,
+                    { state: { plan: tourTargetPlan } },
+                );
+                return;
+            }
+            exitAuditExecuteTour();
+            navigate("/getting-started");
+            return;
+        }
         if (auditExecuteTourStep <= 1) {
             exitAuditExecuteTour();
             navigate("/getting-started");
@@ -769,7 +969,15 @@ const AuditList = () => {
                     </div>
                 </div>
 
-                {/* 3. Colored status tabs */}
+                {/* 3–4. Status tabs + audit list (Audits tour Step 2 targets this whole block) */}
+                <div
+                    id="tour-step-audit-plans-list"
+                    className={cn(
+                        "w-full relative z-10 space-y-4 rounded-xl",
+                        tourExecuteHighlight(AUDIT_EXECUTE_TOUR_STEP.LIST) ||
+                            tourExecuteHighlight(AUDIT_EXECUTE_TOUR_STEP.COMPLETE_LIST),
+                    )}
+                >
                 <div
                     className="inline-flex h-12 items-center gap-1 rounded-xl border border-slate-200 bg-white p-1 shadow-sm relative z-10"
                     role="tablist"
@@ -819,14 +1027,9 @@ const AuditList = () => {
                     ))}
                 </div>
 
-                {/* 4. Audits for the selected status */}
                 <div className="w-full relative z-10 space-y-6">
                     <div
-                        id="tour-step-audit-plans-list"
-                        className={cn(
-                            "bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm relative z-10 w-full",
-                            tourExecuteHighlight(2),
-                        )}
+                        className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm relative z-10 w-full"
                     >
                         <Table>
                             <TableHeader className="bg-[#213847]">
@@ -883,7 +1086,7 @@ const AuditList = () => {
                                 </TableRow>
                             </TableHeader>
                             <TableBody>
-                                {loading ? (
+                                {loading && auditPlans.length === 0 ? (
                                     Array.from({ length: itemsPerPage }).map((_, i) => (
                                         <TableRow key={`skel-${i}`} className="border-b border-slate-100">
                                             {Array.from({ length: 7 }).map((__, j) => (
@@ -907,15 +1110,22 @@ const AuditList = () => {
                                         const auditTypeLabel = resolveAuditListTypeLabel(plan);
                                         const isTourTargetRow =
                                             tourTargetPlan?.id === plan.id;
+                                        const isCreatedPlanTourRow =
+                                            auditPlanTourActive &&
+                                            auditPlanTourStep === AUDIT_PLAN_TOUR_STEP.COMPLETE &&
+                                            createdPlanTourTarget?.id === plan.id;
                                         return (
                                             <TableRow
                                                 key={plan.id}
+                                                id={
+                                                    isCreatedPlanTourRow
+                                                        ? "tour-step-created-audit-plan"
+                                                        : undefined
+                                                }
                                                 className={cn(
                                                     "cursor-pointer hover:bg-slate-50/80 transition-colors border-b border-slate-100 last:border-0 group",
                                                     refreshing && "opacity-60",
-                                                    auditExecuteTourActive &&
-                                                        auditExecuteTourStep === 2 &&
-                                                        isTourTargetRow &&
+                                                    isCreatedPlanTourRow &&
                                                         "relative z-[60] ring-[4px] ring-emerald-500/80 ring-offset-2",
                                                 )}
                                             >
@@ -977,7 +1187,7 @@ const AuditList = () => {
                                                             className={cn(
                                                                 "h-8 px-3 text-emerald-700 border-emerald-200 bg-emerald-50 hover:bg-emerald-100 hover:text-emerald-800 rounded-md font-semibold",
                                                                 isTourTargetRow &&
-                                                                    tourExecuteHighlight(3),
+                                                                    tourExecuteHighlight(AUDIT_EXECUTE_TOUR_STEP.START),
                                                             )}
                                                             title={isAuditeeReadOnly ? "View audit" : "Perform Audit"}
                                                             onClick={() => handlePerformAuditClick(plan)}
@@ -1053,6 +1263,7 @@ const AuditList = () => {
                         className="mt-6"
                     />
                 </div>
+                </div>
             </div>
             {/* Delete Confirmation Dialog */}
             <AlertDialog open={isDeleteDialogOpen} onOpenChange={setIsDeleteDialogOpen}>
@@ -1109,8 +1320,30 @@ const AuditList = () => {
                 onConfirm={confirmModulePicker}
             />
 
+            {auditPlanTourActive &&
+                auditPlanTourStep === AUDIT_PLAN_TOUR_STEP.COMPLETE &&
+                auditPlanTourStepConfig && (
+                    <TourStepPopover
+                        key={`audit-plan-${auditPlanTourStep}-${auditPlanCompleteTargetId}`}
+                        targetId={auditPlanCompleteTargetId}
+                        step={auditPlanTourStep}
+                        totalSteps={AUDIT_PLAN_TOUR_TOTAL_STEPS}
+                        title={auditPlanTourStepConfig.title}
+                        description={auditPlanTourStepConfig.description}
+                        position={createdPlanTourTarget ? "bottom" : "center"}
+                        onNext={handleAuditPlanTourNext}
+                        onBack={handleAuditPlanTourBack}
+                        onClose={() => {
+                            exitAuditPlanTour();
+                            clearAuditPlanTourContext();
+                            navigate("/getting-started");
+                        }}
+                    />
+                )}
+
             {auditExecuteTourActive &&
-                auditExecuteTourStep <= 3 &&
+                (auditExecuteTourStep <= AUDIT_EXECUTE_TOUR_STEP.START ||
+                    auditExecuteTourStep === AUDIT_EXECUTE_TOUR_STEP.COMPLETE_LIST) &&
                 auditExecuteTourStepConfig && (
                     <TourStepPopover
                         key={auditExecuteTourStep}

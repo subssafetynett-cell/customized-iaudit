@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import ReactDOM from 'react-dom';
-import { ArrowLeft, ArrowRight, X } from "lucide-react";
+import { ArrowLeft, ArrowRight, X, GripVertical } from "lucide-react";
 
 interface TourStepPopoverProps {
   targetId: string;
@@ -86,8 +86,8 @@ function boxFitsViewport(box: { top: number; left: number; width: number; height
 }
 
 function clampPopoverBox(box: { top: number; left: number; width: number; height: number }) {
-  const maxLeft = window.innerWidth - VIEWPORT_MARGIN - box.width;
-  const maxTop = window.innerHeight - VIEWPORT_MARGIN - box.height;
+  const maxLeft = Math.max(VIEWPORT_MARGIN, window.innerWidth - VIEWPORT_MARGIN - box.width);
+  const maxTop = Math.max(VIEWPORT_MARGIN, window.innerHeight - VIEWPORT_MARGIN - box.height);
   return {
     ...box,
     left: Math.min(Math.max(box.left, VIEWPORT_MARGIN), maxLeft),
@@ -109,6 +109,26 @@ function boxToAnchorCoords(box: { top: number; left: number; width: number; heig
   }
 }
 
+function anchorToBoxTopLeft(
+  anchorTop: number,
+  anchorLeft: number,
+  pos: PopoverPosition,
+): { top: number; left: number } {
+  switch (pos) {
+    case 'top':
+      return { top: anchorTop - POPOVER_HEIGHT_EST, left: anchorLeft - POPOVER_WIDTH / 2 };
+    case 'bottom':
+      return { top: anchorTop, left: anchorLeft - POPOVER_WIDTH / 2 };
+    case 'left':
+      return { top: anchorTop - POPOVER_HEIGHT_EST / 2, left: anchorLeft - POPOVER_WIDTH };
+    case 'right':
+      return { top: anchorTop - POPOVER_HEIGHT_EST / 2, left: anchorLeft };
+    case 'center':
+    default:
+      return { top: anchorTop - POPOVER_HEIGHT_EST / 2, left: anchorLeft };
+  }
+}
+
 export const TourStepPopover: React.FC<TourStepPopoverProps> = ({
   targetId,
   step,
@@ -125,28 +145,37 @@ export const TourStepPopover: React.FC<TourStepPopoverProps> = ({
   offsetY = 0,
 }) => {
   const [coords, setCoords] = useState<{ top: number; left: number } | null>(null);
+  const [manualCoords, setManualCoords] = useState<{ top: number; left: number } | null>(null);
+  const [userPositioned, setUserPositioned] = useState(false);
+  const dragStartRef = useRef<{
+    startX: number;
+    startY: number;
+    startTop: number;
+    startLeft: number;
+  } | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
   const [targetRect, setTargetRect] = useState<DOMRect | null>(null);
   const [resolvedPosition, setResolvedPosition] = useState<PopoverPosition>(
     position === 'center' ? 'center' : position
   );
-  // True when the target element was not found and we're using a fixed fallback position
   const [isFallback, setIsFallback] = useState(false);
 
   useEffect(() => {
     let intervalId: NodeJS.Timeout;
     let attempts = 0;
-    const MAX_ATTEMPTS = 40; // ~4 seconds at 100ms
+    const MAX_ATTEMPTS = 40;
+    let hasScrolledToTarget = false;
 
     const updatePosition = () => {
-      if (targetId === 'viewport' || position === 'center') {
+      if (userPositioned) return;
+
+      if (targetId === 'viewport' && position === 'center') {
         setIsFallback(true);
         setTargetRect(null);
-        if (position === 'center') setResolvedPosition('center');
+        setResolvedPosition('center');
         setCoords({
-          top: window.innerHeight / 2 + (position === 'center' ? offsetY : 0),
-          left:
-            window.innerWidth / 2 +
-            (position === 'center' ? 80 + offsetX : 0),
+          top: window.innerHeight / 2 + offsetY,
+          left: window.innerWidth / 2 + 80 + offsetX,
         });
         return;
       }
@@ -160,43 +189,62 @@ export const TourStepPopover: React.FC<TourStepPopoverProps> = ({
         const rect = element.getBoundingClientRect();
         if (rect.width === 0 && rect.height === 0) return;
 
-        element.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
+        // Scroll once per target — repeated scrollIntoView causes popover jump.
+        if (!hasScrolledToTarget) {
+          element.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
+          hasScrolledToTarget = true;
+        }
         const visibleRect = element.getBoundingClientRect();
 
         setTargetRect(visibleRect);
         setIsFallback(false);
 
-        // `center` is handled above (early return); remaining positions are edge anchors.
         const preferred: Exclude<PopoverPosition, 'center'> =
           position === 'top' || position === 'bottom' || position === 'left' || position === 'right'
             ? position
             : 'right';
-        const candidates: Exclude<PopoverPosition, 'center'>[] = [
-          preferred,
-          'bottom',
-          'left',
-          'top',
-          'right',
-        ];
+
+        // Prefer staying on the configured side (especially left/right for dropdowns)
+        // so open select menus are not covered by a flipped bottom popover.
+        const candidates: Exclude<PopoverPosition, 'center'>[] =
+          preferred === 'left' || preferred === 'right'
+            ? [preferred, preferred === 'left' ? 'right' : 'left', 'top', 'bottom']
+            : [preferred, 'left', 'right', 'top', 'bottom'];
+
         const tryOrder = candidates.filter((p, i) => candidates.indexOf(p) === i);
 
         let chosen = preferred;
-        let anchor = getAnchorCoords(rect, preferred);
+        let anchor = getAnchorCoords(visibleRect, preferred);
         let box = getPopoverBox(anchor.top, anchor.left, preferred);
 
-        for (const candidate of tryOrder) {
-          const candidateAnchor = getAnchorCoords(rect, candidate);
-          const candidateBox = getPopoverBox(candidateAnchor.top, candidateAnchor.left, candidate);
-          if (boxFitsViewport(candidateBox)) {
-            chosen = candidate;
-            anchor = candidateAnchor;
-            box = candidateBox;
-            break;
+        // Prefer preferred side with clamping when possible, so dropdowns stay clear.
+        const preferredClamped = clampPopoverBox(box);
+        const preferredStillBeside =
+          preferred === 'left'
+            ? preferredClamped.left + preferredClamped.width <= visibleRect.left + 8
+            : preferred === 'right'
+              ? preferredClamped.left >= visibleRect.right - 8
+              : true;
+
+        if (preferredStillBeside || preferred === 'top' || preferred === 'bottom') {
+          chosen = preferred;
+          box = preferredClamped;
+          anchor = boxToAnchorCoords(box, preferred);
+        } else {
+          for (const candidate of tryOrder) {
+            const candidateAnchor = getAnchorCoords(visibleRect, candidate);
+            const candidateBox = getPopoverBox(candidateAnchor.top, candidateAnchor.left, candidate);
+            if (boxFitsViewport(candidateBox)) {
+              chosen = candidate;
+              anchor = candidateAnchor;
+              box = candidateBox;
+              break;
+            }
           }
+          box = clampPopoverBox(box);
+          anchor = boxToAnchorCoords(box, chosen);
         }
 
-        const clamped = clampPopoverBox(box);
-        anchor = boxToAnchorCoords(clamped, chosen);
         anchor = {
           top: anchor.top + offsetY,
           left: anchor.left + offsetX,
@@ -204,9 +252,13 @@ export const TourStepPopover: React.FC<TourStepPopoverProps> = ({
 
         setResolvedPosition(chosen);
         setCoords(anchor);
-        if (intervalId) clearInterval(intervalId);
+        attempts = 0;
+        // Keep updating briefly so skeleton→content size changes re-anchor cleanly.
+        if (!intervalId) return;
       } else {
         attempts++;
+        // Keep popover hidden until the real target exists — avoids center→target jump.
+        // Only fall back after many attempts (e.g. missing DOM id).
         if (attempts >= MAX_ATTEMPTS) {
           setIsFallback(true);
           setTargetRect(null);
@@ -219,17 +271,62 @@ export const TourStepPopover: React.FC<TourStepPopoverProps> = ({
       }
     };
 
-    intervalId = setInterval(updatePosition, 100);
+    intervalId = setInterval(updatePosition, 50);
     updatePosition();
+
+    // Stop polling after the target has been stable for a while.
+    const stopTimer = window.setTimeout(() => {
+      clearInterval(intervalId);
+    }, 2500);
 
     window.addEventListener('scroll', updatePosition, true);
     window.addEventListener('resize', updatePosition);
     return () => {
       clearInterval(intervalId);
+      window.clearTimeout(stopTimer);
       window.removeEventListener('scroll', updatePosition, true);
       window.removeEventListener('resize', updatePosition);
     };
-  }, [targetId, position, offsetX, offsetY]);
+  }, [targetId, position, offsetX, offsetY, userPositioned]);
+
+  useEffect(() => {
+    setUserPositioned(false);
+    setManualCoords(null);
+    setIsDragging(false);
+    dragStartRef.current = null;
+  }, [targetId, step]);
+
+  useEffect(() => {
+    if (!isDragging) return;
+
+    const onPointerMove = (e: PointerEvent) => {
+      const start = dragStartRef.current;
+      if (!start) return;
+
+      const dx = e.clientX - start.startX;
+      const dy = e.clientY - start.startY;
+
+      const maxLeft = Math.max(VIEWPORT_MARGIN, window.innerWidth - VIEWPORT_MARGIN - POPOVER_WIDTH);
+      const maxTop = Math.max(VIEWPORT_MARGIN, window.innerHeight - VIEWPORT_MARGIN - POPOVER_HEIGHT_EST);
+
+      const nextLeft = Math.min(Math.max(start.startLeft + dx, VIEWPORT_MARGIN), maxLeft);
+      const nextTop = Math.min(Math.max(start.startTop + dy, VIEWPORT_MARGIN), maxTop);
+
+      setManualCoords({ top: nextTop, left: nextLeft });
+    };
+
+    const onPointerUp = () => {
+      setIsDragging(false);
+      dragStartRef.current = null;
+    };
+
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+    return () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+    };
+  }, [isDragging]);
 
   useEffect(() => {
     document.body.classList.add('tour-active');
@@ -240,8 +337,8 @@ export const TourStepPopover: React.FC<TourStepPopoverProps> = ({
 
   const PADDING = 6;
 
-  // Resolve transform based on position or fallback (center = vertical-center only)
   const resolveTransform = () => {
+    if (userPositioned) return 'none';
     if (isFallback || resolvedPosition === 'center') return 'translateY(-50%)';
     switch (resolvedPosition) {
       case 'right':  return 'translateY(-50%)';
@@ -252,13 +349,31 @@ export const TourStepPopover: React.FC<TourStepPopoverProps> = ({
     }
   };
 
+  const beginDrag = (e: React.PointerEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!coords) return;
+
+    const currentAbsolute = manualCoords
+      ?? clampPopoverBox({
+          ...anchorToBoxTopLeft(coords.top, coords.left, resolvedPosition),
+          width: POPOVER_WIDTH,
+          height: POPOVER_HEIGHT_EST,
+        });
+
+    setUserPositioned(true);
+    setManualCoords({ top: currentAbsolute.top, left: currentAbsolute.left });
+    dragStartRef.current = {
+      startX: e.clientX,
+      startY: e.clientY,
+      startTop: currentAbsolute.top,
+      startLeft: currentAbsolute.left,
+    };
+    setIsDragging(true);
+  };
+
   const content = (
     <>
-      {/* 
-        Boost z-index for the target element AND for common modal/dialog
-        elements (Radix UI Dialog, shadcn Sheet, etc.) so they appear above
-        the tour overlay when disableShadow=false on other steps.
-      */}
       {targetId !== 'viewport' && (
         <style dangerouslySetInnerHTML={{ __html: `
           #${targetId} {
@@ -270,69 +385,100 @@ export const TourStepPopover: React.FC<TourStepPopoverProps> = ({
             position: relative !important;
           }
 
-          /* Keep sidebar visible but below dialog overlays (z-50) so it gets dimmed */
           body.tour-active aside,
           body.tour-active [data-sidebar="sidebar"],
           body.tour-active .fixed.z-10 {
             z-index: 45 !important;
-            pointer-events: none !important;
           }
 
-          /*
-            During step 4 & 5 (disableShadow=true) we need the modal and its backdrop
-            to be fully visible above everything. Radix/shadcn portals render dialogs
-            with z-index ~50; raise them above the tour overlay (z-90) but below
-            the popover itself (z-110).
-          */
-          body.tour-active [data-radix-dialog-overlay],
+          /* Hide dialog backdrop during tours to prevent shadow */
+          body.tour-active [data-radix-dialog-overlay] {
+            display: none !important;
+          }
+
+          body.tour-active [data-radix-dialog-content],
           body.tour-active [role="dialog"] {
-            z-index: 9999 !important;
+            z-index: 30000 !important;
           }
 
-          /* Select / popper dropdowns must sit above the dialog so they're clickable */
-          body.tour-active [data-radix-popper-content-wrapper] {
-            z-index: 10000 !important;
+          body.tour-active:has([data-state="open"][role="dialog"]) #${targetId}:not([role="dialog"]) {
+            z-index: 1 !important;
+          }
+
+          body.tour-active [data-radix-popper-content-wrapper],
+          body.tour-active [data-radix-select-content] {
+            z-index: 40000 !important;
           }
         `}} />
       )}
 
-      {/*
-        Only render the dark overlay + spotlight when disableShadow=false.
-        When disableShadow=true (step 4 with the Add Site modal open) we skip
-        both so the modal content is fully visible.
-      */}
-      {!disableShadow && targetRect && (
-        <>
-          {/* Full overlay — invisible click blocker */}
-          <div className="fixed inset-0 z-[90] pointer-events-auto" aria-hidden="true" />
+      {!disableShadow && targetRect && (() => {
+        // Clamp the hole to the intersection of the padded target and the viewport.
+        // Using full element height with a floored top overshoots when the target is tall/scrolled.
+        const paddedTop = targetRect.top - PADDING;
+        const paddedLeft = targetRect.left - PADDING;
+        const paddedBottom = targetRect.bottom + PADDING;
+        const paddedRight = targetRect.right + PADDING;
+        const holeTop = Math.max(0, paddedTop);
+        const holeLeft = Math.max(0, paddedLeft);
+        const holeBottom = Math.min(window.innerHeight, paddedBottom);
+        const holeRight = Math.min(window.innerWidth, paddedRight);
+        const holeWidth = Math.max(0, holeRight - holeLeft);
+        const holeHeight = Math.max(0, holeBottom - holeTop);
+        const dim = "rgba(0,0,0,0.65)";
 
-          {/* Spotlight cutout — transparent hole over target using box-shadow */}
-          <div
-            className="fixed pointer-events-none z-[96]"
-            style={{
-              top: targetRect.top - PADDING,
-              left: targetRect.left - PADDING,
-              width: targetRect.width + PADDING * 2,
-              height: targetRect.height + PADDING * 2,
-              borderRadius: 10,
-              boxShadow: '0 0 0 9999px rgba(0,0,0,0.65), 0 0 0 2px #10b981, 0 4px 24px rgba(16,185,129,0.3)',
-            }}
-          />
-        </>
-      )}
+        if (holeWidth <= 0 || holeHeight <= 0) return null;
 
-      {/* Popover — always rendered above the modal (z-[10001]) */}
+        return (
+          <>
+            {/* Four click-blocking panels around the spotlight so the target stays clickable */}
+            <div
+              className="fixed z-[90] pointer-events-auto"
+              style={{ top: 0, left: 0, right: 0, height: holeTop, background: dim }}
+              aria-hidden="true"
+            />
+            <div
+              className="fixed z-[90] pointer-events-auto"
+              style={{ top: holeBottom, left: 0, right: 0, bottom: 0, background: dim }}
+              aria-hidden="true"
+            />
+            <div
+              className="fixed z-[90] pointer-events-auto"
+              style={{ top: holeTop, left: 0, width: holeLeft, height: holeHeight, background: dim }}
+              aria-hidden="true"
+            />
+            <div
+              className="fixed z-[90] pointer-events-auto"
+              style={{ top: holeTop, left: holeRight, right: 0, height: holeHeight, background: dim }}
+              aria-hidden="true"
+            />
+            {/* Visual green ring only — does not capture clicks */}
+            <div
+              className="fixed pointer-events-none z-[96]"
+              style={{
+                top: holeTop,
+                left: holeLeft,
+                width: holeWidth,
+                height: holeHeight,
+                borderRadius: 10,
+                boxShadow: "0 0 0 2px #10b981, 0 4px 24px rgba(16,185,129,0.3)",
+              }}
+            />
+          </>
+        );
+      })()}
+
       <div
-        className="fixed animate-in fade-in zoom-in duration-200 pointer-events-auto"
+        className="fixed pointer-events-auto"
         style={{
           zIndex: 11000,
-          top: `${coords.top}px`,
-          left: `${coords.left}px`,
+          top: `${(manualCoords?.top ?? coords.top)}px`,
+          left: `${(manualCoords?.left ?? coords.left)}px`,
           transform: resolveTransform(),
+          cursor: isDragging ? 'grabbing' : undefined,
         }}
       >
-        {/* Directional arrow — only shown when anchored to a real element */}
-        {!isFallback && resolvedPosition !== 'center' && (
+        {!isFallback && !userPositioned && resolvedPosition !== 'center' && (
           <>
             {resolvedPosition === 'right'  && <div className="absolute left-[-6px] top-1/2 -translate-y-1/2 w-3 h-3 bg-white rotate-45 border-l border-b border-slate-200" />}
             {resolvedPosition === 'left'   && <div className="absolute right-[-6px] top-1/2 -translate-y-1/2 w-3 h-3 bg-white rotate-45 border-r border-t border-slate-200" />}
@@ -342,11 +488,22 @@ export const TourStepPopover: React.FC<TourStepPopoverProps> = ({
         )}
 
         <div className="w-[300px] bg-white rounded-2xl shadow-[0_8px_32px_rgba(0,0,0,0.2)] border border-slate-200 overflow-hidden">
-          <div className="p-4 space-y-3">
+          <div
+            className="flex items-center justify-center gap-1.5 px-3 py-1.5 bg-slate-50 border-b border-slate-100 cursor-grab active:cursor-grabbing select-none"
+            onPointerDown={beginDrag}
+            title="Drag to move"
+          >
+            <GripVertical className="w-3.5 h-3.5 text-slate-400" />
+            <span className="text-[10px] font-semibold text-slate-400 tracking-wide uppercase">
+              Drag to move
+            </span>
+          </div>
 
-            {/* Step label + close */}
+          <div className="p-4 space-y-3">
             <div className="flex items-center justify-between">
-              <span className="text-emerald-500 text-[11px] font-bold tracking-wide">Step {step} of {totalSteps}</span>
+              <span className="text-emerald-500 text-[11px] font-bold tracking-wide">
+                Step {step} of {totalSteps}
+              </span>
               <button
                 onClick={onClose}
                 className="text-slate-400 hover:text-slate-600 transition-colors p-1 hover:bg-slate-50 rounded-md"
@@ -355,7 +512,6 @@ export const TourStepPopover: React.FC<TourStepPopoverProps> = ({
               </button>
             </div>
 
-            {/* Title & description */}
             <div className="space-y-1">
               <h3 className="text-slate-900 font-black text-sm leading-snug tracking-tight">
                 Step {step} — {title}
@@ -365,7 +521,6 @@ export const TourStepPopover: React.FC<TourStepPopoverProps> = ({
               </p>
             </div>
 
-            {/* Buttons */}
             <div className="flex items-center gap-2 pt-1">
               <button
                 type="button"
@@ -394,7 +549,6 @@ export const TourStepPopover: React.FC<TourStepPopoverProps> = ({
                 </button>
               )}
             </div>
-
           </div>
         </div>
       </div>

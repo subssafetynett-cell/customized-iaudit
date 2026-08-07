@@ -15,7 +15,7 @@ export const FOUNDATION_SETUP_STEPS: FoundationSetupStep[] = [
         id: "company",
         title: "Set up your company",
         description: "Open Companies to add or review your organization profile when needed.",
-        path: "/companies",
+        path: "/companies?companyTour=true&companyStep=1",
     },
     {
         id: "sites",

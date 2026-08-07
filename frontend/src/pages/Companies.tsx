@@ -66,6 +66,12 @@ import { useSearchParams } from "react-router-dom";
 import { TourStepPopover } from "@/components/TourStepPopover";
 import { ONBOARDING_TOTAL_STEPS } from "@/lib/onboardingTour";
 import { toast } from "sonner";
+import {
+  COMPANY_TOUR_TOTAL_STEPS,
+  COMPANY_TOUR_STEP,
+  getCompanyTourStepConfig,
+} from "@/lib/companyOnboardingTour";
+
 
 function countDepartments(sites: Site[] | undefined): number {
   return (sites ?? []).reduce((acc, site) => acc + (site.departments?.length ?? 0), 0);
@@ -191,6 +197,32 @@ const CompaniesPage = () => {
   const [searchParams, setSearchParams] = useSearchParams();
   const [showOnboardingGuide, setShowOnboardingGuide] = useState(false);
   const [onboardingStep, setOnboardingStep] = useState<number | null>(null);
+  const companyTourActive = searchParams.get("companyTour") === "true";
+  const companyTourStep = parseInt(searchParams.get("companyStep") || "1", 10);
+  
+  const advanceCompanyTour = () => {
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.set("companyStep", String(companyTourStep + 1));
+        return next;
+      },
+      { replace: true }
+    );
+  };
+
+  const exitCompanyTour = () => {
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.delete("companyTour");
+        next.delete("companyStep");
+        return next;
+      },
+      { replace: true }
+    );
+  };
+
   const [activeTab, setActiveTab] = useState("sites");
   /** Departments tab — filter table by site id, or "all". */
   const [departmentSiteFilter, setDepartmentSiteFilter] = useState<string>("all");
@@ -230,6 +262,34 @@ const CompaniesPage = () => {
   // Pagination state
   const [currentPage, setCurrentPage] = useState(1);
   const [pagedCompanies, setPagedCompanies] = useState<Company[]>([]);
+
+  const displayCompanies = useMemo(() => {
+    if (companyTourActive && companyTourStep >= COMPANY_TOUR_STEP.LIST) {
+      const demoCompany: Company = {
+        id: "demo-company-id",
+        name: "Schweppes Zimbabwe Limited",
+        description: "Globally recognized non-alcoholic carbonated mixer and soft drink brand.",
+        industry: "Manufacturing",
+        contactNumber: "263242620231",
+        streetAddress: "Woolwich Road, Willowvale",
+        city: "Harare",
+        state: "Harare Province",
+        country: "ZW",
+        postalCode: "0000",
+        isoStandards: [],
+        status: "active",
+        logo: "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxMDAiIGhlaWdodD0iMTAwIj48cmVjdCB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgZmlsbD0iI2ZmY2MwMCIvPjx0ZXh0IHg9IjUwIiB5PSI1NSIgZm9udC1zaXplPSIyNCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzAwMCI+U1pMPC90ZXh0Pjwvc3ZnPg==",
+        sites: [],
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      
+      const filtered = pagedCompanies.filter(c => c.id !== "demo-company-id");
+      return [demoCompany, ...filtered];
+    }
+    return pagedCompanies;
+  }, [companyTourActive, companyTourStep, pagedCompanies]);
+
   const [totalItems, setTotalItems] = useState(0);
   const [listLoading, setListLoading] = useState(true);
   const itemsPerPage = 8;
@@ -345,6 +405,16 @@ const CompaniesPage = () => {
 
   // Modal states
   const [showCreateCompany, setShowCreateCompany] = useState(false);
+
+  useEffect(() => {
+    if (companyTourActive) {
+      if (companyTourStep >= COMPANY_TOUR_STEP.MODAL && companyTourStep <= COMPANY_TOUR_STEP.SUBMIT) {
+        setShowCreateCompany(true);
+      } else if (companyTourStep > COMPANY_TOUR_STEP.SUBMIT) {
+        setShowCreateCompany(false);
+      }
+    }
+  }, [companyTourActive, companyTourStep]);
   const [showEditCompany, setShowEditCompany] = useState<Company | null>(null);
   const [showAddSite, setShowAddSite] = useState(false);
   const [editSite, setEditSite] = useState<Site | null>(null);
@@ -371,7 +441,6 @@ const CompaniesPage = () => {
 
     const firstSiteId = tourCompany?.sites?.[0]?.id;
 
-    // Step 4 is only for adding a first site; skip if the company already has sites
     let effectiveStep = step;
     if (step === 4 && tourCompanyHasSites) {
       effectiveStep = 5;
@@ -379,14 +448,17 @@ const CompaniesPage = () => {
         setTourStep(5);
       }
     }
+    if (step === 7 && !tourCompanyHasSites) {
+      effectiveStep = 8;
+      if (searchParams.get("step") !== "8") {
+        setTourStep(8);
+      }
+    }
 
     setOnboardingStep(effectiveStep);
 
     // Step 4: open Add Site only when the company has no sites yet
-    setShowAddSite(
-      (effectiveStep === 4 && !tourCompanyHasSites) ||
-        (effectiveStep === 7 && !firstSiteId),
-    );
+    setShowAddSite(effectiveStep === 4 && !tourCompanyHasSites);
 
     if (effectiveStep >= 6 && effectiveStep <= 9) {
       setActiveTab("departments");
@@ -458,11 +530,12 @@ const CompaniesPage = () => {
     if (siteId) {
       setAddDeptSiteId(siteId);
       setShowAddSite(false);
+      goToTourStep(7);
     } else {
       setAddDeptSiteId(null);
-      setShowAddSite(true);
+      setShowAddSite(false);
+      goToTourStep(8);
     }
-    goToTourStep(7);
   };
   const allDepartments = selectedCompany?.sites.flatMap((s) =>
     (s.departments ?? []).map((d) => ({ ...d, siteName: s.name, siteId: s.id }))
@@ -563,7 +636,12 @@ const CompaniesPage = () => {
               <p className="text-sm text-muted-foreground mt-1">Manage your company profile, sites, and departments</p>
             </div>
             {!isLoading && totalItems === 0 && !selectedCompanyId && (
-              <Button onClick={() => setShowCreateCompany(true)} className="gap-2 shadow-sm font-semibold bg-[#213847] hover:bg-[#213847]/90 text-white rounded-xl px-5 h-11">
+              <Button onClick={() => {
+              if (companyTourActive) {
+                advanceCompanyTour();
+              }
+              setShowCreateCompany(true);
+            }} className="gap-2 shadow-sm font-semibold bg-[#213847] hover:bg-[#213847]/90 text-white rounded-xl px-5 h-11">
                 <Plus className="h-4 w-4" /> Create Company
               </Button>
             )}
@@ -1045,7 +1123,7 @@ const CompaniesPage = () => {
                   : "This is where your departments will appear once created. You can manage them using the edit and delete buttons in the Actions column."
               }
               onNext={() => goToTourStep(9)}
-              onBack={() => goToTourStep(7)}
+              onBack={() => goToTourStep(selectedCompanyHasSites ? 7 : 6)}
               onClose={exitOnboardingTour}
               position="top"
               disableShadow={false}
@@ -1059,12 +1137,6 @@ const CompaniesPage = () => {
           {/* ------------------------------------------------------------------ */}
           <SiteModal
             open={showAddSite}
-            hideOverlay={
-              showOnboardingGuide && (onboardingStep === 4 || onboardingStep === 7)
-            }
-            hideCancel={
-              showOnboardingGuide && (onboardingStep === 4 || onboardingStep === 7)
-            }
             onClose={() => {
               if (showOnboardingGuide && (onboardingStep === 4 || onboardingStep === 7)) {
                 return;
@@ -1103,29 +1175,11 @@ const CompaniesPage = () => {
               onClose={exitOnboardingTour}
               position="right"
               disableShadow={true}
-              hideNext={true}
+              hideNext={false}
             />
           )}
 
-          {showOnboardingGuide && onboardingStep === 7 && showAddSite && !addDeptSiteId && (
-            <TourStepPopover
-              targetId="tour-step-site-modal"
-              step={7}
-              totalSteps={ONBOARDING_TOTAL_STEPS}
-              title="Add a Site First"
-              description={
-                selectedCompanyHasSites
-                  ? "Create another site if needed, then continue. The department form opens after you save a site."
-                  : "Create a site for this company, then the department form will open. The next step appears after your site is saved."
-              }
-              onNext={() => goToTourStep(8)}
-              onBack={() => goToTourStep(6)}
-              onClose={exitOnboardingTour}
-              position="right"
-              disableShadow={true}
-              hideNext={!selectedCompanyHasSites}
-            />
-          )}
+
 
           {(() => {
             const deptModalSite = selectedCompany.sites.find((s) => s.id === addDeptSiteId);
@@ -1297,7 +1351,7 @@ const CompaniesPage = () => {
             <h1 className="text-2xl font-bold tracking-tight text-foreground">Company Details</h1>
             <p className="text-sm text-muted-foreground mt-1">Manage your company profile, sites, and departments</p>
           </div>
-          {!listLoading && totalItems === 0 && !selectedCompanyId && (
+          {!listLoading && displayCompanies.length === 0 && !selectedCompanyId && (
             <Button onClick={() => setShowCreateCompany(true)} className="gap-2 shadow-sm font-semibold bg-[#213847] hover:bg-[#213847]/90 text-white rounded-xl px-5 h-11">
               <Plus className="h-4 w-4" /> Create Company
             </Button>
@@ -1310,7 +1364,7 @@ const CompaniesPage = () => {
             <div className="w-12 h-12 border-4 border-emerald-100 border-t-emerald-600 rounded-full animate-spin" />
             <p className="text-slate-500 font-medium">Loading companies...</p>
           </div>
-        ) : totalItems === 0 && !debouncedSearch && !selectedCompanyId ? (
+        ) : displayCompanies.length === 0 && !debouncedSearch && !selectedCompanyId ? (
           <div className="bg-white/40 rounded-[2rem] border-2 border-dashed border-slate-200 p-20 flex flex-col items-center justify-center text-center space-y-6">
             <div className="w-24 h-24 bg-slate-100 rounded-[2rem] flex items-center justify-center text-slate-400">
               <Building2 className="w-12 h-12" />
@@ -1322,7 +1376,13 @@ const CompaniesPage = () => {
               </p>
             </div>
             <Button
-              onClick={() => setShowCreateCompany(true)}
+              id={companyTourActive ? "tour-step-create-company-btn" : undefined}
+              onClick={() => {
+                if (companyTourActive) {
+                  advanceCompanyTour();
+                }
+                setShowCreateCompany(true);
+              }}
               className="bg-[#213847] hover:bg-[#213847]/90 text-white font-bold rounded-[2rem] h-14 px-10 shadow-lg shadow-blue-100 transition-all hover:scale-105 active:scale-95 gap-2"
             >
               <Plus className="w-5 h-5 font-bold" /> Create Company
@@ -1342,7 +1402,7 @@ const CompaniesPage = () => {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {pagedCompanies.length === 0 ? (
+                {displayCompanies.length === 0 ? (
                   <TableRow>
                     <TableCell colSpan={6} className="h-48 text-center text-muted-foreground">
                       <div className="flex flex-col items-center gap-2">
@@ -1353,8 +1413,8 @@ const CompaniesPage = () => {
                     </TableCell>
                   </TableRow>
                 ) : (
-                  pagedCompanies.map((company, index) => (
-                    <TableRow key={company.id} className="group cursor-pointer hover:bg-muted/20 border-muted/30" onClick={() => setSelectedCompanyId(company.id)}>
+                  displayCompanies.map((company, index) => (
+                    <TableRow key={company.id} id={company.id === "demo-company-id" ? "tour-step-company-list-item" : undefined} className="group cursor-pointer hover:bg-muted/20 border-muted/30" onClick={() => setSelectedCompanyId(company.id)}>
                       <TableCell className="font-medium text-muted-foreground/60 pl-6">{(currentPage - 1) * itemsPerPage + index + 1}</TableCell>
                       <TableCell>
                         <div className="flex flex-col">
@@ -1396,10 +1456,20 @@ const CompaniesPage = () => {
                             <DropdownMenuItem className="gap-2 cursor-pointer" onClick={() => setSelectedCompanyId(company.id)}>
                               <Eye className="h-4 w-4" /> View Details
                             </DropdownMenuItem>
-                            <DropdownMenuItem className="gap-2 cursor-pointer" onClick={() => setShowEditCompany(company)}>
+                            <DropdownMenuItem className="gap-2 cursor-pointer" id={company.id === "demo-company-id" ? "tour-step-edit-company" : undefined} onClick={() => {
+                                if (companyTourActive && companyTourStep === COMPANY_TOUR_STEP.EDIT) {
+                                  advanceCompanyTour();
+                                }
+                                setShowEditCompany(company);
+                              }}>
                               <Pencil className="h-4 w-4" /> Edit
                             </DropdownMenuItem>
-                            <DropdownMenuItem className="gap-2 cursor-pointer text-destructive focus:text-destructive" onClick={() => setCompanyToDelete(company)}>
+                            <DropdownMenuItem className="gap-2 cursor-pointer text-destructive focus:text-destructive" id={company.id === "demo-company-id" ? "tour-step-delete-company" : undefined} onClick={() => {
+                                if (companyTourActive && companyTourStep === COMPANY_TOUR_STEP.DELETE) {
+                                  advanceCompanyTour();
+                                }
+                                setCompanyToDelete(company);
+                              }}>
                               <Trash2 className="h-4 w-4" /> Delete
                             </DropdownMenuItem>
                           </DropdownMenuContent>
@@ -1422,6 +1492,32 @@ const CompaniesPage = () => {
           </div>
         )}
       </div>
+
+      
+      {/* Company Tour Popover */}
+      {companyTourActive && (
+        <TourStepPopover
+          targetId={getCompanyTourStepConfig(companyTourStep)?.targetId || ""}
+          step={companyTourStep}
+          totalSteps={COMPANY_TOUR_TOTAL_STEPS}
+          title={getCompanyTourStepConfig(companyTourStep)?.title || ""}
+          description={getCompanyTourStepConfig(companyTourStep)?.description || ""}
+          onNext={() => {
+            if (companyTourStep === COMPANY_TOUR_STEP.COMPLETE) {
+              exitCompanyTour();
+            } else if (companyTourStep === COMPANY_TOUR_STEP.LIST) {
+              advanceCompanyTour();
+            } else {
+              advanceCompanyTour();
+            }
+          }}
+          onBack={() => {}}
+          onClose={exitCompanyTour}
+          position={getCompanyTourStepConfig(companyTourStep)?.position || "right"}
+          disableShadow={true}
+          hideNavigation={companyTourStep === COMPANY_TOUR_STEP.AUTOFILL}
+        />
+      )}
 
       {/* Main List Modals */}
       <CompanyModal

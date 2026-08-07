@@ -14,7 +14,7 @@ services:
       pull: false
     restart: unless-stopped
     # Coolify: public traffic hits frontend only — do not gate the stack on API DB readiness.
-    exclude_from_hc: true
+    # exclude_from_hc: true
     # Coolify injects env via the UI; .env is optional for local runs.
     env_file:
       - path: .env

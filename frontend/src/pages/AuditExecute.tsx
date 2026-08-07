@@ -86,6 +86,7 @@ import { format } from "date-fns";
 import * as XLSX from "xlsx";
 import { TourStepPopover } from "@/components/TourStepPopover";
 import {
+  AUDIT_EXECUTE_TOUR_STEP,
   AUDIT_EXECUTE_TOUR_TOTAL_STEPS,
   getAuditExecuteTourStepConfig,
 } from "@/lib/auditExecuteOnboardingTour";
@@ -358,6 +359,35 @@ const AuditExecute = () => {
     auditExecuteTourActive && auditExecuteTourStep === step
       ? "relative z-[60] ring-[4px] ring-emerald-500/80 ring-offset-2 rounded-xl"
       : "";
+
+  const findAdjacentAuditExecuteTourStep = (
+    from: number,
+    direction: 1 | -1,
+  ): number => {
+    let step = from + direction;
+    const min = AUDIT_EXECUTE_TOUR_STEP.OVERVIEW;
+    const max = AUDIT_EXECUTE_TOUR_STEP.SAVE;
+    while (step >= min && step <= max) {
+      if (step === AUDIT_EXECUTE_TOUR_STEP.SAVE) return step;
+      const cfg = getAuditExecuteTourStepConfig(step);
+      if (!cfg?.targetId || cfg.targetId === "viewport") return step;
+      if (document.getElementById(cfg.targetId)) return step;
+      step += direction;
+    }
+    return Math.min(max, Math.max(min, from + direction));
+  };
+
+  useEffect(() => {
+    if (!auditExecuteTourActive) return;
+    const targetId = getAuditExecuteTourStepConfig(auditExecuteTourStep)?.targetId;
+    if (!targetId || targetId === "viewport") return;
+    const t = window.setTimeout(() => {
+      document
+        .getElementById(targetId)
+        ?.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
+    }, 80);
+    return () => window.clearTimeout(t);
+  }, [auditExecuteTourActive, auditExecuteTourStep]);
 
   // State for the loaded plan — seed from navigation so Perform Audit paints instantly
   const navPlan = (location.state as { plan?: any; activeModuleId?: string; lockModule?: boolean } | null)?.plan;
@@ -2900,8 +2930,13 @@ const AuditExecute = () => {
         } else {
           toast.success("Audit saved successfully.", { id: toastId });
         }
-        if (auditExecuteTourActive && auditExecuteTourStep === 5) {
-          setAuditExecuteTourStep(6);
+        if (
+          auditExecuteTourActive &&
+          auditExecuteTourStep === AUDIT_EXECUTE_TOUR_STEP.SAVE
+        ) {
+          navigate(
+            `/audit?auditExecuteTour=true&auditExecuteStep=${AUDIT_EXECUTE_TOUR_STEP.COMPLETE_LIST}`,
+          );
           return;
         }
         navigate("/audit");
@@ -2932,26 +2967,27 @@ const AuditExecute = () => {
   };
 
   const handleAuditExecuteTourNext = () => {
-    if (auditExecuteTourStep === 5) {
+    if (auditExecuteTourStep === AUDIT_EXECUTE_TOUR_STEP.SAVE) {
       void handleSubmit();
       return;
     }
-    if (auditExecuteTourStep >= AUDIT_EXECUTE_TOUR_TOTAL_STEPS) {
-      exitAuditExecuteTour();
-      navigate("/getting-started");
-      toast.success("Audits tour complete!");
+    if (auditExecuteTourStep >= AUDIT_EXECUTE_TOUR_STEP.SAVE) {
       return;
     }
-    setAuditExecuteTourStep(auditExecuteTourStep + 1);
+    setAuditExecuteTourStep(
+      findAdjacentAuditExecuteTourStep(auditExecuteTourStep, 1),
+    );
   };
 
   const handleAuditExecuteTourBack = () => {
-    if (auditExecuteTourStep === 4) {
+    if (auditExecuteTourStep === AUDIT_EXECUTE_TOUR_STEP.OVERVIEW) {
       navigate("/audit?auditExecuteTour=true&auditExecuteStep=3");
       return;
     }
-    if (auditExecuteTourStep > 4) {
-      setAuditExecuteTourStep(auditExecuteTourStep - 1);
+    if (auditExecuteTourStep > AUDIT_EXECUTE_TOUR_STEP.OVERVIEW) {
+      setAuditExecuteTourStep(
+        findAdjacentAuditExecuteTourStep(auditExecuteTourStep, -1),
+      );
     }
   };
 
@@ -3110,7 +3146,7 @@ const AuditExecute = () => {
               id="tour-step-audit-execute-overview"
               className={cn(
                 "shadow-sm border-slate-100 p-6 flex flex-col pt-5 h-fit",
-                tourExecuteHighlight(4),
+                tourExecuteHighlight(AUDIT_EXECUTE_TOUR_STEP.OVERVIEW),
               )}
             >
               <div className="flex justify-between items-center bg-white mb-5">
@@ -3193,7 +3229,13 @@ const AuditExecute = () => {
             </Card>
 
             {/* Audit Details Card */}
-            <Card className="shadow-sm border-slate-100 p-6 flex flex-col gap-5 bg-white">
+            <Card
+              id="tour-step-audit-details"
+              className={cn(
+                "shadow-sm border-slate-100 p-6 flex flex-col gap-5 bg-white",
+                tourExecuteHighlight(AUDIT_EXECUTE_TOUR_STEP.AUDIT_DETAILS),
+              )}
+            >
               <div className="flex items-center gap-2">
                 <div className="bg-slate-500 p-1.5 rounded-md">
                   <svg
@@ -3296,7 +3338,13 @@ const AuditExecute = () => {
           {/* Right Column: Progress & Downloads */}
           <div className="col-span-1 flex flex-col gap-6 h-fit">
             {/* Progress Card */}
-            <Card className="shadow-sm border-slate-100 p-6 flex flex-col gap-6">
+            <Card
+              id="tour-step-audit-progress"
+              className={cn(
+                "shadow-sm border-slate-100 p-6 flex flex-col gap-6",
+                tourExecuteHighlight(AUDIT_EXECUTE_TOUR_STEP.PROGRESS),
+              )}
+            >
               <h2 className="text-lg font-bold text-slate-900 bg-white">
                 Progress
               </h2>
@@ -3460,7 +3508,13 @@ const AuditExecute = () => {
               </div>
 
               {isSectionVisible(auditExecuteLayout, "previousFindings") && (
-              <div className="space-y-4">
+              <div
+                id="tour-step-previous-findings"
+                className={cn(
+                  "space-y-4",
+                  tourExecuteHighlight(AUDIT_EXECUTE_TOUR_STEP.PREVIOUS_FINDINGS),
+                )}
+              >
                 <div className="flex items-center gap-2 border-b border-slate-100 pb-2">
                   <Input
                     value={getSectionLabel(auditExecuteLayout, "previousFindings")}
@@ -3498,7 +3552,13 @@ const AuditExecute = () => {
               )}
 
               {isSectionVisible(auditExecuteLayout, "detailsOfChanges") && (
-              <div className="space-y-4">
+              <div
+                id="tour-step-details-of-changes"
+                className={cn(
+                  "space-y-4",
+                  tourExecuteHighlight(AUDIT_EXECUTE_TOUR_STEP.DETAILS_OF_CHANGES),
+                )}
+              >
                 <div className="flex items-center gap-2 border-b border-slate-100 pb-2">
                   <Input
                     value={getSectionLabel(auditExecuteLayout, "detailsOfChanges")}
@@ -3600,6 +3660,13 @@ const AuditExecute = () => {
 
               {isSectionVisible(auditExecuteLayout, "nationalFindingsLog") && (
               <div className="space-y-6 pt-6 border-t border-slate-100 mt-8">
+                <div
+                  id="tour-step-national-findings-log"
+                  className={cn(
+                    "space-y-6",
+                    tourExecuteHighlight(AUDIT_EXECUTE_TOUR_STEP.NATIONAL_FINDINGS),
+                  )}
+                >
                 <div className="flex items-center gap-2 mb-6">
                   <CheckCircle2 className="w-5 h-5 text-emerald-500 shrink-0" />
                   <Input
@@ -3619,7 +3686,7 @@ const AuditExecute = () => {
                 </div>
 
                   {isSectionVisible(auditExecuteLayout, "positiveAspects") && (
-                  <div className="space-y-3 mb-8">
+                  <div className="space-y-3 mb-0">
                     <div className="flex items-center gap-2">
                       <Input
                         value={getSectionLabel(auditExecuteLayout, "positiveAspects")}
@@ -3725,9 +3792,16 @@ const AuditExecute = () => {
                     </div>
                   </div>
                   )}
+                </div>
 
                   {isSectionVisible(auditExecuteLayout, "opportunities") && (
-                  <div className="space-y-3 mb-8">
+                  <div
+                    id="tour-step-opportunities"
+                    className={cn(
+                      "space-y-3 mb-8",
+                      tourExecuteHighlight(AUDIT_EXECUTE_TOUR_STEP.OFI),
+                    )}
+                  >
                     <div className="flex items-start gap-2">
                       <div className="flex-1 space-y-1">
                         <Input
@@ -3844,7 +3918,13 @@ const AuditExecute = () => {
                   )}
 
                   {isSectionVisible(auditExecuteLayout, "nonConformances") && (
-                  <div className="space-y-3">
+                  <div
+                    id="tour-step-nonconformances"
+                    className={cn(
+                      "space-y-3",
+                      tourExecuteHighlight(AUDIT_EXECUTE_TOUR_STEP.NCR),
+                    )}
+                  >
                     <div className="flex items-start gap-2">
                       <div className="flex-1 space-y-1">
                         <Input
@@ -4156,7 +4236,13 @@ const AuditExecute = () => {
 
         {/* --- TEMPLATE DYNAMIC CONTENT --- */}
         {template.type === "clause-checklist" ? (
-          <div className="space-y-6">
+          <div
+            id="tour-step-checklist-questions"
+            className={cn(
+              "space-y-6",
+              tourExecuteHighlight(AUDIT_EXECUTE_TOUR_STEP.CHECKLIST),
+            )}
+          >
             <div className="flex justify-between items-center bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
               <h3 className="text-lg font-bold text-slate-800 uppercase tracking-wider flex items-center gap-2">
                 <FileText className="w-5 h-5 text-slate-400" />
@@ -5296,7 +5382,13 @@ const AuditExecute = () => {
             </Button>
           </div>
         ) : template.isTripleMapping ? (
-          <Card className="overflow-hidden border border-slate-200 shadow-sm bg-white rounded-xl">
+          <Card
+            id="tour-step-checklist-questions"
+            className={cn(
+              "overflow-hidden border border-slate-200 shadow-sm bg-white rounded-xl",
+              tourExecuteHighlight(AUDIT_EXECUTE_TOUR_STEP.CHECKLIST),
+            )}
+          >
             <div className="overflow-x-auto">
               <Table>
                 <TableHeader>
@@ -5679,45 +5771,59 @@ const AuditExecute = () => {
         ) : (
           <>
           <Card className="overflow-hidden border border-slate-200 shadow-sm bg-white rounded-xl">
-            {usesEoshScoredChecklistLayout(template) && !isEditMode && (
-              <div className="p-4 border-b border-slate-200">
-                <EoshCapabilityFormBanner
-                  {...getEoshCapabilityBannerCopy(templateId)}
-                  auditeeName={auditGlobalInfo.auditeeName}
-                  auditDate={auditGlobalInfo.auditDate}
-                  auditDoneBy={auditGlobalInfo.auditDoneBy}
-                  onAuditeeNameChange={(value) =>
-                    setAuditGlobalInfo({ ...auditGlobalInfo, auditeeName: value })
-                  }
-                  onAuditDateChange={(value) =>
-                    setAuditGlobalInfo({ ...auditGlobalInfo, auditDate: value })
-                  }
-                  onAuditDoneByChange={(value) =>
-                    setAuditGlobalInfo({ ...auditGlobalInfo, auditDoneBy: value })
-                  }
-                />
+            {(usesEoshScoredChecklistLayout(template) ||
+              usesQfsKoreScoredChecklistLayout(template)) &&
+              !isEditMode && (
+              <div
+                id="tour-step-auditee-fields"
+                className={cn(
+                  "p-4 border-b border-slate-200 space-y-4",
+                  tourExecuteHighlight(AUDIT_EXECUTE_TOUR_STEP.AUDITEE_FIELDS),
+                )}
+              >
+                {usesEoshScoredChecklistLayout(template) && (
+                  <EoshCapabilityFormBanner
+                    {...getEoshCapabilityBannerCopy(templateId)}
+                    auditeeName={auditGlobalInfo.auditeeName}
+                    auditDate={auditGlobalInfo.auditDate}
+                    auditDoneBy={auditGlobalInfo.auditDoneBy}
+                    onAuditeeNameChange={(value) =>
+                      setAuditGlobalInfo({ ...auditGlobalInfo, auditeeName: value })
+                    }
+                    onAuditDateChange={(value) =>
+                      setAuditGlobalInfo({ ...auditGlobalInfo, auditDate: value })
+                    }
+                    onAuditDoneByChange={(value) =>
+                      setAuditGlobalInfo({ ...auditGlobalInfo, auditDoneBy: value })
+                    }
+                  />
+                )}
+                {usesQfsKoreScoredChecklistLayout(template) && (
+                  <QfsKoreFormBanner
+                    {...getQfsKoreBannerCopy(templateId)}
+                    auditeeName={auditGlobalInfo.auditeeName}
+                    auditDoneBy={auditGlobalInfo.auditDoneBy}
+                    auditeeDept={auditGlobalInfo.auditeeDept}
+                    onAuditeeNameChange={(value) =>
+                      setAuditGlobalInfo({ ...auditGlobalInfo, auditeeName: value })
+                    }
+                    onAuditDoneByChange={(value) =>
+                      setAuditGlobalInfo({ ...auditGlobalInfo, auditDoneBy: value })
+                    }
+                    onAuditeeDeptChange={(value) =>
+                      setAuditGlobalInfo({ ...auditGlobalInfo, auditeeDept: value })
+                    }
+                  />
+                )}
               </div>
             )}
-            {usesQfsKoreScoredChecklistLayout(template) && !isEditMode && (
-              <div className="p-4 border-b border-slate-200">
-                <QfsKoreFormBanner
-                  {...getQfsKoreBannerCopy(templateId)}
-                  auditeeName={auditGlobalInfo.auditeeName}
-                  auditDoneBy={auditGlobalInfo.auditDoneBy}
-                  auditeeDept={auditGlobalInfo.auditeeDept}
-                  onAuditeeNameChange={(value) =>
-                    setAuditGlobalInfo({ ...auditGlobalInfo, auditeeName: value })
-                  }
-                  onAuditDoneByChange={(value) =>
-                    setAuditGlobalInfo({ ...auditGlobalInfo, auditDoneBy: value })
-                  }
-                  onAuditeeDeptChange={(value) =>
-                    setAuditGlobalInfo({ ...auditGlobalInfo, auditeeDept: value })
-                  }
-                />
-              </div>
-            )}
-            <div className="overflow-x-auto">
+            <div
+              id="tour-step-checklist-questions"
+              className={cn(
+                "overflow-x-auto",
+                tourExecuteHighlight(AUDIT_EXECUTE_TOUR_STEP.CHECKLIST),
+              )}
+            >
               <Table>
                 <TableHeader>
                   {usesQfsKoreScoredChecklistLayout(template) && !isEditMode ? (
@@ -6650,6 +6756,7 @@ const AuditExecute = () => {
               onChange={handleFindingsReportFormChange}
               section="footer"
               nonConformances={nonConformances}
+              footerClassName={tourExecuteHighlight(AUDIT_EXECUTE_TOUR_STEP.REPORT_SUMMARY)}
             />
           </div>
         )}
@@ -6688,7 +6795,7 @@ const AuditExecute = () => {
               size="lg"
               className={cn(
                 "bg-emerald-600 hover:bg-emerald-700 text-white gap-2 px-8 shadow-sm",
-                tourExecuteHighlight(5),
+                tourExecuteHighlight(AUDIT_EXECUTE_TOUR_STEP.SAVE),
               )}
               onClick={handleSubmit}
             >
@@ -6700,7 +6807,8 @@ const AuditExecute = () => {
       </div>
 
       {auditExecuteTourActive &&
-        auditExecuteTourStep >= 4 &&
+        auditExecuteTourStep >= AUDIT_EXECUTE_TOUR_STEP.OVERVIEW &&
+        auditExecuteTourStep <= AUDIT_EXECUTE_TOUR_STEP.SAVE &&
         auditExecuteTourStepConfig && (
           <TourStepPopover
             key={auditExecuteTourStep}
@@ -6716,8 +6824,8 @@ const AuditExecute = () => {
               exitAuditExecuteTour();
               navigate("/getting-started");
             }}
-            hideNext={auditExecuteTourStep === 5}
-            disableShadow={auditExecuteTourStep === 5}
+            hideNext={auditExecuteTourStep === AUDIT_EXECUTE_TOUR_STEP.SAVE}
+            disableShadow={auditExecuteTourStep === AUDIT_EXECUTE_TOUR_STEP.SAVE}
           />
         )}
     </div>
