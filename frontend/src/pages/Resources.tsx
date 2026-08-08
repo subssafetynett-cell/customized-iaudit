@@ -20,17 +20,17 @@ const VIDEOS = [
   {
     id: "audit-program",
     title: "Audit Program Overview",
-    url: "/videos/iaudit_audit_prgrm_module_final.mp4",
+    url: "https://res.cloudinary.com/dntdqpato/video/upload/v1786200664/iAudit_audit_prgrm_module_final_1_eptcni.mp4",
   },
   {
     id: "audit-program-final",
     title: "Audit Program Detail",
-    url: "/videos/iaudit_audit_program_final.mp4",
+    url: "https://res.cloudinary.com/dntdqpato/video/upload/v1786202466/iAudit_audit_program_Final_Compressed_hnbeed.mp4",
   },
   {
     id: "audit-plan",
     title: "Audit Plan",
-    url: "/videos/iaudit_audit_plan.mp4",
+    url: "https://res.cloudinary.com/dntdqpato/video/upload/v1786201160/iAudit_audit_plan_1_jardpy.mp4",
   },
   {
     id: "audit-templates",
@@ -40,7 +40,7 @@ const VIDEOS = [
   {
     id: "audit-final",
     title: "Audit Execution",
-    url: "/videos/iaudit_audit_final.mp4",
+    url: "https://res.cloudinary.com/dntdqpato/video/upload/v1786201773/iAudit_Audit_Final_Compressed_jmrcdm.mp4",
   },
   {
     id: "findings",
