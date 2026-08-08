@@ -5,52 +5,52 @@ const VIDEOS = [
   {
     id: "getting-started",
     title: "User Management",
-    filename: "iaudit_user_1.mp4",
+    url: "https://res.cloudinary.com/dntdqpato/video/upload/v1786170103/iAudit_User_1_b5hnyl.mp4",
   },
   {
     id: "self-assessment",
     title: "Self Assessment",
-    filename: "iaudit_self_assessment.mp4",
+    url: "https://res.cloudinary.com/dntdqpato/video/upload/v1786170151/iAudit_Self_assessment_gkxcps.mp4",
   },
   {
     id: "gap-analysis",
     title: "Gap Analysis",
-    filename: "iaudit_gap_analysis.mp4",
+    url: "https://res.cloudinary.com/dntdqpato/video/upload/v1786170144/iAudit_Gap_analysis_ppyawc.mp4",
   },
   {
     id: "audit-program",
     title: "Audit Program Overview",
-    filename: "iaudit_audit_prgrm_module_final.mp4",
+    url: "/videos/iaudit_audit_prgrm_module_final.mp4",
   },
   {
     id: "audit-program-final",
     title: "Audit Program Detail",
-    filename: "iaudit_audit_program_final.mp4",
+    url: "/videos/iaudit_audit_program_final.mp4",
   },
   {
     id: "audit-plan",
     title: "Audit Plan",
-    filename: "iaudit_audit_plan.mp4",
+    url: "/videos/iaudit_audit_plan.mp4",
   },
   {
     id: "audit-templates",
     title: "Audit Templates",
-    filename: "iaudit_audit_templates.mp4",
+    url: "https://res.cloudinary.com/dntdqpato/video/upload/v1786170131/iAudit_Audit_templates_irmzfs.mp4",
   },
   {
     id: "audit-final",
     title: "Audit Execution",
-    filename: "iaudit_audit_final.mp4",
+    url: "/videos/iaudit_audit_final.mp4",
   },
   {
     id: "findings",
     title: "Audit Findings",
-    filename: "iaudit_findings_f.mp4",
+    url: "https://res.cloudinary.com/dntdqpato/video/upload/v1786170176/iAudit_Findings_F_bi2fnz.mp4",
   },
   {
     id: "findings-dashboard",
     title: "Findings Dashboard",
-    filename: "iaudit_findings_dashboard.mp4",
+    url: "https://res.cloudinary.com/dntdqpato/video/upload/v1786170133/iAudit_Findings_Dashboard_rbuoqo.mp4",
   },
 ];
 
@@ -81,7 +81,7 @@ export default function Resources() {
                   controls
                   preload="metadata"
                 >
-                  <source src={`/videos/${video.filename}`} type="video/mp4" />
+                  <source src={video.url} type="video/mp4" />
                   Your browser does not support the video tag.
                 </video>
               </div>
