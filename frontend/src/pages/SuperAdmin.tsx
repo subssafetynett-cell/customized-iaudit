@@ -202,6 +202,26 @@ export default function SuperAdmin() {
         }
     };
 
+    const handleMakeCompanyAdmin = async (user: any) => {
+        try {
+            const response = await apiFetch(`/users/${user.id}`, {
+                method: "PUT",
+                body: JSON.stringify({ ...user, role: "company_admin" }),
+            });
+
+            if (response.ok) {
+                const updatedUser = await response.json();
+                void fetchUsers();
+                toast.success(`User ${updatedUser.firstName} is now a Company Admin`);
+            } else {
+                toast.error("Failed to update role");
+            }
+        } catch (error) {
+            console.error("Error updating role:", error);
+            toast.error("An error occurred");
+        }
+    };
+
     const handleAddUser = async (userData: any) => {
         try {
             const endpoint = modalMode === "create" ? `/users` : `/users/${selectedUser.id}`;
@@ -475,6 +495,14 @@ export default function SuperAdmin() {
                                                                 </>
                                                             )}
                                                         </DropdownMenuItem>
+                                                        {String(user.role).toLowerCase() !== "company_admin" && (
+                                                            <DropdownMenuItem
+                                                                onClick={() => handleMakeCompanyAdmin(user)}
+                                                                className="cursor-pointer gap-2 rounded-lg m-1 font-medium text-indigo-600 hover:text-indigo-700"
+                                                            >
+                                                                <Building2 className="h-4 w-4" /> Make Company Admin
+                                                            </DropdownMenuItem>
+                                                        )}
                                                         <DropdownMenuSeparator />
                                                         <DropdownMenuItem
                                                             onClick={() => {
