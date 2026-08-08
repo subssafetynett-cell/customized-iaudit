@@ -1,5 +1,5 @@
 import { type ComponentType } from "react";
-import { Building2, LayoutDashboard, FileText, ClipboardCheck, FileCheck, CreditCard, Users, ClipboardList, AlertTriangle, ShieldCheck, MessageSquare, Rocket } from "lucide-react";
+import { Building2, LayoutDashboard, FileText, ClipboardCheck, FileCheck, CreditCard, Users, ClipboardList, AlertTriangle, ShieldCheck, MessageSquare, Rocket, Video } from "lucide-react";
 import { useLocation } from "react-router-dom";
 import { NavLink } from "@/components/NavLink";
 import { cn } from "@/lib/utils";
@@ -22,6 +22,7 @@ import {
 const dashboardNav = [
   { title: "Dashboard", url: "/", icon: LayoutDashboard },
   { title: "Start Onboarding", url: "/getting-started", icon: Rocket },
+  { title: "Resources", url: "/resources", icon: Video },
 ];
 
 const managementNav = [
