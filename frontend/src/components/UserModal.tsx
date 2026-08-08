@@ -18,6 +18,9 @@ import {
     AuditeeSiteSelectionSummary,
 } from "@/components/AuditeeSiteMultiSelect";
 import type { AuditeeSiteOption } from "@/lib/orgSites";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { useStoredUser } from "@/hooks/useStoredUser";
+import { UserActivityTab } from "./UserActivityTab";
 
 interface Props {
     open: boolean;
@@ -37,6 +40,8 @@ interface Props {
     disabledAuditeeSiteIds?: ReadonlySet<string>;
     /** Pre-select role when opening create mode (e.g. auditee invite flow). */
     defaultCreateRole?: string;
+    /** Whether the modal is being opened from the Super Admin side. */
+    isSuperAdmin?: boolean;
 }
 
 export default function UserModal({
@@ -52,6 +57,7 @@ export default function UserModal({
     auditeeSites = [],
     disabledAuditeeSiteIds,
     defaultCreateRole,
+    isSuperAdmin = false,
 }: Props) {
     const [firstName, setFirstName] = useState("");
     const [lastName, setLastName] = useState("");
@@ -74,6 +80,8 @@ export default function UserModal({
     const [otpSentToEmail, setOtpSentToEmail] = useState<string | null>(null);
     const [resendTimer, setResendTimer] = useState(0);
     const [otpSending, setOtpSending] = useState(false);
+    
+    const { user: loggedInUser } = useStoredUser();
 
     const isViewMode = mode === "view";
     const isEditMode = mode === "edit";
@@ -131,16 +139,20 @@ export default function UserModal({
     }, [open, mode, initialData, isEditMode, isViewMode, defaultCreateRole]);
 
     const roleOptions = useMemo(() => {
+        const baseOptions = isSuperAdmin 
+            ? [...USERS_PAGE_ROLE_OPTIONS, { value: "company_admin", label: "Company Admin" }]
+            : [...USERS_PAGE_ROLE_OPTIONS];
+
         // Invite (create): any inviter may pick any role.
         if (mode === "create") {
-            return [...USERS_PAGE_ROLE_OPTIONS];
+            return baseOptions;
         }
         // Edit: role changes stay available when the actor may manage roles.
-        if (canManageRoles) {
-            return [...USERS_PAGE_ROLE_OPTIONS];
+        if (canManageRoles || isSuperAdmin) {
+            return baseOptions;
         }
         return [];
-    }, [canManageRoles, mode]);
+    }, [canManageRoles, mode, isSuperAdmin]);
 
     const canSelectRole = roleOptions.length > 0 && !isViewMode;
     const showAuditeeSites = isAuditeeRole(role);
@@ -328,31 +340,12 @@ export default function UserModal({
         return "Invite User";
     };
 
-    return (
-        <Dialog open={open} onOpenChange={(isOpen) => { if (!isOpen) onClose(); }}>
-            <DialogContent
-                id="tour-step-user-modal"
-                hideOverlay={hideOverlay}
-                className="sm:max-w-xl max-h-[90vh] flex flex-col p-0 overflow-hidden"
-                onPointerDownOutside={hideCancel ? (e) => e.preventDefault() : undefined}
-                onEscapeKeyDown={hideCancel ? (e) => e.preventDefault() : undefined}
-            >
-                <DialogHeader className="p-6 pb-2">
-                    <DialogTitle className="flex items-center gap-2 text-xl">
-                        {getIcon()}
-                        {getTitle()}
-                    </DialogTitle>
-                    <DialogDescription className="sr-only">
-                        {isViewMode
-                            ? "View user profile and account details."
-                            : isEditMode
-                              ? "Update this user’s profile and access settings."
-                              : "Invite a new user to your organization."}
-                    </DialogDescription>
-                </DialogHeader>
+    const targetUserId = initialData?.id ?? initialData?._id;
+    const showActivityTab = isViewMode && loggedInUser?.role === "company_admin" && targetUserId;
 
-                <div className="flex-1 overflow-y-auto p-6 py-4 space-y-6">
-                    {(isEditMode || isViewMode) && canManageRoles && (
+    const renderFormContent = () => (
+        <div className={showActivityTab ? "p-6 py-4 space-y-6" : "flex-1 overflow-y-auto p-6 py-4 space-y-6"}>
+            {(isEditMode || isViewMode) && canManageRoles && (
                         <div className="flex items-center justify-between p-3 rounded-lg bg-muted/50 border">
                             <div className="space-y-0.5">
                                 <Label className="text-sm font-medium">User Status</Label>
@@ -678,6 +671,59 @@ export default function UserModal({
                         </div>
                     )}
                 </div>
+    );
+
+    return (
+        <Dialog open={open} onOpenChange={(isOpen) => { if (!isOpen) onClose(); }}>
+            <DialogContent
+                id="tour-step-user-modal"
+                hideOverlay={hideOverlay}
+                className="sm:max-w-xl max-h-[90vh] flex flex-col p-0 overflow-hidden"
+                onPointerDownOutside={hideCancel ? (e) => e.preventDefault() : undefined}
+                onEscapeKeyDown={hideCancel ? (e) => e.preventDefault() : undefined}
+            >
+                <DialogHeader className="p-6 pb-2">
+                    <DialogTitle className="flex items-center gap-2 text-xl">
+                        {getIcon()}
+                        {getTitle()}
+                    </DialogTitle>
+                    <DialogDescription className="sr-only">
+                        {isViewMode
+                            ? "View user profile and account details."
+                            : isEditMode
+                              ? "Update this user’s profile and access settings."
+                              : "Invite a new user to your organization."}
+                    </DialogDescription>
+                </DialogHeader>
+
+                {showActivityTab ? (
+                    <Tabs defaultValue="details" className="flex flex-col min-h-0 flex-1">
+                        <div className="px-6 pt-2 border-b border-slate-200">
+                            <TabsList className="bg-transparent h-10 w-full justify-start gap-6 rounded-none p-0">
+                                <TabsTrigger 
+                                    value="details" 
+                                    className="data-[state=active]:bg-transparent data-[state=active]:shadow-none data-[state=active]:border-b-2 data-[state=active]:border-primary rounded-none h-10 px-2"
+                                >
+                                    User Details
+                                </TabsTrigger>
+                                <TabsTrigger 
+                                    value="activity"
+                                    className="data-[state=active]:bg-transparent data-[state=active]:shadow-none data-[state=active]:border-b-2 data-[state=active]:border-primary rounded-none h-10 px-2"
+                                >
+                                    Activity & Audits
+                                </TabsTrigger>
+                            </TabsList>
+                        </div>
+                        <TabsContent value="details" className="flex-1 overflow-y-auto min-h-0 m-0">
+                            {renderFormContent()}
+                        </TabsContent>
+                        <TabsContent value="activity" className="flex-1 overflow-y-auto min-h-0 m-0 p-6">
+                            <UserActivityTab userId={targetUserId} />
+                        </TabsContent>
+                    </Tabs>
+                ) : (
+                    renderFormContent()
+                )}
 
                 <DialogFooter className="p-6 pt-4 border-t bg-muted/20">
                     {!hideCancel && (

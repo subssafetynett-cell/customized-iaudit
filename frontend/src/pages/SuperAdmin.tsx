@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { apiFetch } from "@/lib/api";
 import { buildPageQuery, parsePaginatedResponse } from "@/lib/pagination";
 import { hasValidSuperAdminSession, logoutSuperAdmin } from "@/lib/superAdminAuth";
+import { formatUserRoleLabel } from "@/lib/userRoles";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -400,7 +401,7 @@ export default function SuperAdmin() {
                                             <TableCell>
                                                 <Badge variant="secondary" className="font-medium capitalize py-0 px-2 h-6 flex w-fit items-center gap-1 border-slate-200">
                                                     <Shield className="h-3 w-3 text-slate-500" />
-                                                    {user.role === "other" ? user.customRoleName : user.role}
+                                                    {formatUserRoleLabel(user.role, user.customRoleName)}
                                                 </Badge>
                                             </TableCell>
                                             <TableCell>
@@ -516,6 +517,7 @@ export default function SuperAdmin() {
                 onSubmit={handleAddUser}
                 mode={modalMode}
                 initialData={selectedUser}
+                isSuperAdmin={true}
             />
 
             <AlertDialog open={showDeleteDialog} onOpenChange={setShowDeleteDialog}>

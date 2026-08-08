@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import compression from 'compression';
+import { runEscalationCheck } from './jobs/escalationJob.js';
 import { loadServerEnv } from './loadEnv.js';
 import prisma, { pool } from './prisma.js';
 import Stripe from 'stripe';
@@ -1170,6 +1171,11 @@ async function runBootstrap() {
                 console.warn('[bootstrap] Org creatorId repair skipped:', err?.message || err);
             });
         void backfillAuditPlanFindingEmails();
+        
+        // Start background escalation check (runs every hour, and once immediately)
+        void runEscalationCheck();
+        setInterval(() => { void runEscalationCheck(); }, 1000 * 60 * 60);
+
     } catch (err) {
         console.error('[bootstrap] Startup bootstrap failed:', err);
         // Don't crash — /health stays 503 until DB recovers; /live stays 200.

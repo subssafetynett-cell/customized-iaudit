@@ -257,6 +257,7 @@ export default function FindingDetail() {
         Boolean(finding) &&
         isAssignee &&
         isRespondableType &&
+        canRespond &&
         !showResponseForm;
 
     // If ?respond=1 was set but the user cannot respond, fall back to the CTA banner.
@@ -528,6 +529,17 @@ export default function FindingDetail() {
                         ) : null}
                     </div>
                 </div>
+
+                {String(nc?.status ?? "").trim().toUpperCase() === "ESCALATED" ? (
+                    <div className="rounded-xl border border-red-200 bg-red-50/70 px-4 py-3">
+                        <p className="text-sm font-semibold text-red-800">
+                            Nonconformance Escalated
+                        </p>
+                        <p className="text-sm text-red-700 mt-1 whitespace-pre-wrap">
+                            This nonconformance was escalated because it passed the escalation date without a response. Responses are locked.
+                        </p>
+                    </div>
+                ) : null}
 
                 <Card className="border-slate-200 shadow-sm">
                     <CardHeader className="pb-3">

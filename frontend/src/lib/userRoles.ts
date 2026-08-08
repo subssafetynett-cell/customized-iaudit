@@ -6,7 +6,7 @@ export function canManageOrgUsers(
     const role = String(user.role ?? "")
         .trim()
         .toLowerCase();
-    if (role === "superadmin" || role === "admin") return true;
+    if (role === "superadmin" || role === "admin" || role === "company_admin") return true;
     // Lead auditors may edit the org user directory (confirmed by /users/manage-access).
     if (role === "lead_auditor") return true;
     // Organization root accounts (no creator) manage users in their org; auditees never may.
@@ -20,7 +20,7 @@ export function canManageOrgUsers(
 export function isCompanyAdminUser(
     user: { role?: string; creatorId?: number | null } | null | undefined,
 ): boolean {
-    return canManageOrgUsers(user);
+    return canManageOrgUsers(user) || String(user?.role ?? "").trim().toLowerCase() === "company_admin";
 }
 
 export function isAuditeeRole(role: string | undefined | null): boolean {
@@ -36,6 +36,11 @@ export const USERS_PAGE_ROLE_OPTIONS = [
     { value: "other", label: "Other" },
 ] as const;
 
+export const SUPER_ADMIN_ROLE_OPTIONS = [
+    ...USERS_PAGE_ROLE_OPTIONS,
+    { value: "company_admin", label: "Company Admin" }
+] as const;
+
 export function formatUserRoleLabel(
     role: string | undefined | null,
     customRoleName?: string | null,
@@ -43,7 +48,7 @@ export function formatUserRoleLabel(
     if (String(role ?? "").toLowerCase() === "other") {
         return customRoleName?.trim() || "Other";
     }
-    const match = USERS_PAGE_ROLE_OPTIONS.find(
+    const match = SUPER_ADMIN_ROLE_OPTIONS.find(
         (option) => option.value === String(role ?? "").trim().toLowerCase(),
     );
     if (match) return match.label;

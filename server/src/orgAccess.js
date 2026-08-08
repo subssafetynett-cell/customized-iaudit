@@ -784,7 +784,7 @@ async function actorCanReadOrgAssessmentStore(actorId, orgRootUserId) {
     return actorIsInOrgSubtree(actorId, orgRootUserId);
 }
 
-const USER_ASSIGNABLE_ROLES = new Set(['admin', 'auditor', 'lead_auditor', 'other', 'auditee']);
+const USER_ASSIGNABLE_ROLES = new Set(['admin', 'auditor', 'lead_auditor', 'other', 'auditee', 'company_admin']);
 
 function normalizeUserRole(role) {
     return String(role ?? '').trim().toLowerCase();
@@ -798,7 +798,7 @@ async function actorCanManageOrgUsers(actorId) {
     });
     if (!actor) return false;
     const r = normalizeUserRole(actor.role);
-    if (r === 'superadmin' || r === 'admin') return true;
+    if (r === 'superadmin' || r === 'admin' || r === 'company_admin') return true;
     // Organization root (no creator) may manage users in their org; auditees never may.
     if (actor.creatorId == null && r !== 'auditee') return true;
     return false;
@@ -866,7 +866,7 @@ async function assertActorMayModifyProtectedCompanyOwner(actorId, targetId) {
 function userRowHasOrgAdminPrivileges(user) {
     if (!user) return false;
     const r = normalizeUserRole(user.role);
-    if (r === 'superadmin' || r === 'admin') return true;
+    if (r === 'superadmin' || r === 'admin' || r === 'company_admin') return true;
     if (user.creatorId == null && r !== 'auditee') return true;
     return false;
 }

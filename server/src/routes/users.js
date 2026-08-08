@@ -1678,6 +1678,87 @@ export function createUsersRouter({ authenticateToken, checkTrialExpiration }) {
 
     // Audit Program routes
 
+    // User Activity for Company Admin
+    router.get('/users/:id/activity', authenticateToken, async (req, res) => {
+        const { id } = req.params;
+        const targetId = Number.parseInt(id, 10);
+        if (Number.isNaN(targetId)) {
+            return res.status(400).json({ error: 'Invalid user id' });
+        }
+
+        try {
+            const actorId = req.user.id;
+            const actor = await prisma.user.findUnique({
+                where: { id: actorId },
+                select: { role: true }
+            });
+
+            if (!actor) {
+                return res.status(401).json({ error: 'Unauthorized' });
+            }
+
+            const actorRole = normalizeUserRole(actor.role);
+            
+            // Only company_admin or superadmin can view this
+            if (actorRole !== 'company_admin' && actorRole !== 'superadmin') {
+                return res.status(403).json({ error: 'Forbidden. Only Company Admin can view user activity.' });
+            }
+
+            if (actorRole !== 'superadmin') {
+                if (!(await actorCanAccessTargetUser(actorId, targetId))) {
+                    return res.status(403).json({ error: 'Forbidden' });
+                }
+            }
+
+            // Fetch Audit Programs
+            const auditPrograms = await prisma.auditProgram.findMany({
+                where: {
+                    OR: [
+                        { leadAuditorId: targetId },
+                        { userId: targetId },
+                        { auditors: { some: { id: targetId } } }
+                    ]
+                },
+                include: { site: true },
+                orderBy: { createdAt: 'desc' }
+            });
+
+            // Fetch Audit Plans
+            const auditPlans = await prisma.auditPlan.findMany({
+                where: {
+                    OR: [
+                        { leadAuditorId: targetId },
+                        { userId: targetId },
+                        { auditors: { some: { id: targetId } } }
+                    ]
+                },
+                include: { auditProgram: true },
+                orderBy: { createdAt: 'desc' }
+            });
+
+            // Fetch Findings (Nonconformances)
+            const findings = await prisma.nonconformance.findMany({
+                where: {
+                    OR: [
+                        { assigneeId: targetId },
+                        { reviewerId: targetId },
+                        { createdById: targetId }
+                    ]
+                },
+                include: { auditPlan: true },
+                orderBy: { createdAt: 'desc' }
+            });
+
+            res.json({
+                auditPrograms,
+                auditPlans,
+                findings
+            });
+        } catch (error) {
+            console.error('Failed to fetch user activity:', error);
+            res.status(500).json({ error: 'Failed to fetch user activity' });
+        }
+    });
 
     return router;
 }
