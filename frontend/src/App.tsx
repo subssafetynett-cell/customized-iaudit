@@ -36,6 +36,7 @@ const ProfileSettings = lazy(() => import("./pages/ProfileSettings"));
 const AccountSettings = lazy(() => import("./pages/AccountSettings"));
 const SuperAdmin = lazy(() => import("./pages/SuperAdmin"));
 const GettingStarted = lazy(() => import("./pages/GettingStarted"));
+const Resources = lazy(() => import("./pages/Resources"));
 
 const queryClient = new QueryClient();
 
@@ -67,6 +68,7 @@ const App = () => (
             {/* Protected User Routes */}
             <Route element={<ProtectedRoute><AppLayout /></ProtectedRoute>}>
               <Route path="/" element={<Index />} />
+              <Route path="/resources" element={<Resources />} />
               <Route path="/getting-started" element={<GettingStarted />} />
               <Route path="/companies" element={<Companies />} />
               <Route path="/company/:id" element={<CompanyDetail />} />

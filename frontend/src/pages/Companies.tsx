@@ -277,11 +277,9 @@ const CompaniesPage = () => {
         country: "ZW",
         postalCode: "0000",
         isoStandards: [],
-        status: "active",
         logo: "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxMDAiIGhlaWdodD0iMTAwIj48cmVjdCB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgZmlsbD0iI2ZmY2MwMCIvPjx0ZXh0IHg9IjUwIiB5PSI1NSIgZm9udC1zaXplPSIyNCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iIzAwMCI+U1pMPC90ZXh0Pjwvc3ZnPg==",
         sites: [],
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
+        createdAt: new Date(),
       };
       
       const filtered = pagedCompanies.filter(c => c.id !== "demo-company-id");

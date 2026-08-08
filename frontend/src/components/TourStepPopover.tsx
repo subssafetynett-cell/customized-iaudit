@@ -13,6 +13,7 @@ interface TourStepPopoverProps {
   onClose: () => void;
   position?: 'top' | 'bottom' | 'left' | 'right' | 'center';
   hideNext?: boolean;
+  hideNavigation?: boolean;
   disableShadow?: boolean;
   /** Extra horizontal nudge in px (negative = move left). Applied after viewport clamping. */
   offsetX?: number;
@@ -140,6 +141,7 @@ export const TourStepPopover: React.FC<TourStepPopoverProps> = ({
   onClose,
   position = 'right',
   hideNext = false,
+  hideNavigation = false,
   disableShadow = false,
   offsetX = 0,
   offsetY = 0,
@@ -521,34 +523,36 @@ export const TourStepPopover: React.FC<TourStepPopoverProps> = ({
               </p>
             </div>
 
-            <div className="flex items-center gap-2 pt-1">
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  onBack();
-                }}
-                className="flex-1 h-8 rounded-lg border border-emerald-600 text-emerald-700 text-xs font-bold hover:bg-emerald-50 bg-white flex items-center justify-center gap-1.5 transition-colors"
-              >
-                <ArrowLeft className="w-3.5 h-3.5" />
-                Back
-              </button>
-              {!hideNext && (
+            {!hideNavigation && (
+              <div className="flex items-center gap-2 pt-1">
                 <button
                   type="button"
                   onClick={(e) => {
                     e.preventDefault();
                     e.stopPropagation();
-                    onNext();
+                    onBack();
                   }}
-                  className="flex-1 h-8 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold flex items-center justify-center gap-1.5 transition-colors shadow-md shadow-emerald-100"
+                  className="flex-1 h-8 rounded-lg border border-emerald-600 text-emerald-700 text-xs font-bold hover:bg-emerald-50 bg-white flex items-center justify-center gap-1.5 transition-colors"
                 >
-                  Next
-                  <ArrowRight className="w-3.5 h-3.5" />
+                  <ArrowLeft className="w-3.5 h-3.5" />
+                  Back
                 </button>
-              )}
-            </div>
+                {!hideNext && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      onNext();
+                    }}
+                    className="flex-1 h-8 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold flex items-center justify-center gap-1.5 transition-colors shadow-md shadow-emerald-100"
+                  >
+                    Next
+                    <ArrowRight className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         </div>
       </div>
